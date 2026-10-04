@@ -30,6 +30,7 @@
 | §4 HTTP 只用于测试 | `createHostConfig({ allowInsecureHttp })` | 未显式声明时 `http:` 被拒（计划文档收尾原话的可执行形式） |
 | §5 发行清单 | `product/update/release.mjs` | 20 条拒绝用例：绝对地址、穿越、`%` 编码、反斜杠、跨 origin |
 | §9 发布流程离线部分 | `scripts/update/publish.mjs` | 写出去之后**回读再算摘要**，不一致就抛 |
+| §4 line 76 ZIP 含"产品文件闭包"与"目标产品版本清单" | `desktop/scripts/update-payload.mjs` | 载荷根 = `<stage>/resources/legion`（与打包后的 `installRoot` 同源）；清单版本必须与发行一致 |
 | §9 公开回读验证字节与签名 | `scripts/update/verify-host.mjs` | 走**客户端同一套**代码；端到端用例见 `scripts/update/publish.test.mjs` |
 | §5 发布密钥工具 | `scripts/update/keygen.mjs` | `new` / `trust` / `rotate` 三个子命令 |
 
@@ -51,6 +52,7 @@
 | §6 闭包的载体与可信来源 | `product/update/closure.mjs` | 包内 `closure.json`，摘要在签过名的发行清单里（逐文件闭包放不进 256 KiB） |
 | §6 落盘字节的确定性 | `product/update/zip.mjs` | 同输入 → 逐字节相同的包（内部排序、时间戳钉死） |
 | §8 第 8 步"服务健康验证" | `product/update/health.mjs` | 声明式回环 HTTP 检查；**只允许回环**；身份断言（`expectJson`） |
+| §8 健康检查用**实际**端口 | `desktop-bridge.mjs` 透出 `port` → `readLauncherPorts` | 拿不到读数就不写规格（fail-closed），**不**拿默认值凑 |
 | §6 重启后复用前重新校验 | `cache.verifyReady` | 篡改缓存文件的用例证明它真的重算摘要 |
 | §6 取消不影响当前程序 | `cache.discard` | 只删 `.part`；取消不进失败退避 |
 | §7 有界操作表 | `desktop/update-service.mjs` + `update-preload.cjs` | 17 条 IPC 面用例：路径/URL/多余字段一律拒 |
@@ -155,16 +157,46 @@ sha256 没有不动点），所以 `closure.json` 必须**跳过**成员判定�
 - **helper 的打包闭包已接线，`unpack` 已用真实实现**（`extract.mjs`：
   越界路径/软链接/重复目标/解压炸弹/未知可执行五条判据，解压前后各核一次
   闭包；闭包来自包内 `closure.json`，摘要在签过名的发行清单里）。
-  `publish.mjs --package-root` 能产出这种形状的包，`zip.test.mjs` /
-  `publish.test.mjs` / `install.test.mjs` 把"发布端产出 → 回读 → 解压 →
-  切换 → 提交"这条链在本机跑通了。
-  仍未验证的是**在真实 Windows 机器上**跑一遍：打包闭包与桌面 `stage.mjs`
-  产出的实际文件树对齐（`desktop-release.json` 与桌面安装包布局）。
+  `desktop/scripts/update-payload.mjs` 从一次已暂存的桌面构建产出这种形状的
+  包（载荷根 = `<stage>/resources/legion`，与打包后的 `installRoot` 同源），
+  `publish.mjs --package-root` 也能现打。
+  **发布出去的包里的文件树与桌面实际装出来的文件树现在有判据对齐了**
+  （`update-payload.test.mjs` 逐文件比对 stage 与解压结果）。
+  仍未验证的是**跑一次真实的 electron-builder**：`stage.mjs` 与
+  `update-payload.mjs` 都已就位，但把两者串起来需要 `desktop/node_modules`
+  里的 Electron 与 `@electron/asar`（本环境未安装）。
 - **健康探针已接线且是声明式的**（`health.mjs`）：规格从
-  `process-manifest.mjs` 派生、只允许回环、带身份断言。仍未验证的是
-  **在真实进程树**上跑一遍——真实端口读数目前取自 `DEFAULT_PORTS`，
-  而 `buildDesktopInstaller` 的 `ports` 参数必须由调用方给出 Launcher
-  真正用的那一组（给错时身份断言会拦住，即 fail-closed，但那是"拦住"而不是"接对"）。
+  `process-manifest.mjs` 派生、只允许回环、带身份断言；端口取**实际读数**
+  （`desktop-bridge.mjs` 透出 `launcher.status()` 的 `port`，经
+  `readLauncherPorts` 进规格），拿不到就不写规格（fail-closed）。
+  仍未验证的是**在真实进程树**上跑一遍：真实端口读数这条链
+  （Launcher `status()` → bridge `publicStatus` → `readLauncherPorts`）
+  目前只有单元级证据，没有一次"真起来四个服务然后验它们健康"的实测。
+
+## 6.1 一次发布的完整顺序（现在都有落点）
+
+```bash
+# 1. 打包桌面端（需要 desktop/node_modules 里的 Electron）
+pnpm --dir desktop stage          # 产出 .desktop-build/stage-<ts>/{shell,resources}
+# 2. 从暂存产物产出升级包（含包内 closure.json）
+node desktop/scripts/update-payload.mjs \
+  --stage-file .desktop-build/current-stage.json --out dist/update --product-version 1.1.0
+# 3. 签名发行清单 + 通道 envelope（不可变文件与通道清单分开）
+node scripts/update/publish.mjs --package-zip dist/update/legion-win-x64.zip \
+  --product-manifest .desktop-build/stage-<ts>/resources/legion/product/release/runtime-manifest.json \
+  --product-version 1.1.0 --from-version 1.0.0 --channel stable --release-id rel-1.1.0 \
+  --installer <setup.exe> --notes <notes.txt> \
+  --key-id <keyId> --private-key <key.pem> \
+  --migration-plan-digest <sha256> --sequence 43 \
+  --issued-at <iso> --expires-at <iso> --out dist/update
+# 4. 按 upload-plan.txt 上传：先全部不可变文件，回读通过之后才替换通道清单
+node scripts/update/verify-host.mjs --origin <生产 origin> --prefix /legion \
+  --channel stable --trust product/release/update-trust.json
+```
+
+第 2 步与第 3 步的分工是刻意的：第 2 步决定**包里是什么**（并从
+`stage.mjs` 的实际产物出发，所以它不会与装出来的树分叉），第 3 步决定
+**怎么签名与怎么上传**（并强制"先不可变、后通道"这个顺序）。
 - **`desktop/main.mjs` 的单实例互斥未与 helper 协调**。一次升级期间如果
   用户手动再开一次 Legion，第二次启动会被 Launcher 的维护闸门挡住（那是
   对的），但界面只会显示维护状态，不会提示"正在升级，请稍候"。

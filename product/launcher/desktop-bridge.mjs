@@ -48,7 +48,26 @@ function publicPortConflict(result) {
 
 function publicStatus(status) {
   const processes = Array.isArray(status?.processes) ? status.processes.map((p) => ({
-    key: p.key, state: p.state, required: p.required === true,
+    key: p.key,
+    state: p.state,
+    required: p.required === true,
+    /**
+     * 实际端口。
+     *
+     * ★ 为什么要透出来：升级 helper 的健康检查里有一条**身份断言**
+     *   （`expectJson: { port }`），而它的用途正是区分「我们自己的实例」与
+     *   「上一次升级前留下的旧实例 / 别的程序占了同一个端口」
+     *   （见 `process-manifest.mjs` 的 team-hub 条目）。
+     *
+     *   拿 `DEFAULT_PORTS` 去代替真实读数，在最坏的情况下会得到一次
+     *   **看似通过**的健康检查：旧实例应答了 200，而它的 port 字段恰好
+     *   等于默认值。所以健康规格必须用 Launcher 真正用的那一组端口，
+     *   而这份读数的唯一来源就是这里（`launcher.status()` 已经带 `port`）。
+     *
+     * 只透出"够用的形状"：整数、在合法区间内，否则 `null`——而不是把原始值
+     * 原样带出去。
+     */
+    port: Number.isSafeInteger(p.port) && p.port > 0 && p.port <= 65535 ? p.port : null,
   })) : []
   const workbench = status?.processes?.find((p) => p.key === 'workbench' && p.state === 'ready')
   const url = workbench?.url

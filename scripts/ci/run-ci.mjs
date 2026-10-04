@@ -512,6 +512,7 @@ async function stageTest() {
         'desktop/update-service.test.mjs',
         'desktop/update-panel.test.mjs',
         'desktop/scripts/shell-files.test.mjs',
+        'desktop/scripts/update-payload.test.mjs',
         'scripts/update/publish.test.mjs',
       ],
       cwd: ROOT,

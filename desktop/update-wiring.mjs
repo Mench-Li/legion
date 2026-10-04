@@ -30,7 +30,7 @@ import { createUpdateClient } from '../product/update/client.mjs'
 import { runInstallTransaction } from '../product/update/install.mjs'
 import { writeTransactionFile, clearTransactionFile } from '../product/update/helper.mjs'
 import { healthSpecFromProcesses } from '../product/update/health.mjs'
-import { DEFAULT_PORTS, PROCESS_SPECS } from '../product/process-manifest.mjs'
+import { PROCESS_SPECS } from '../product/process-manifest.mjs'
 import { createUpdateService, registerUpdateIpc } from './update-service.mjs'
 
 /** 桌面端要读的"当前产品版本"来源（与 launcher 的 shared-backend 同一份文件）。 */
@@ -286,6 +286,42 @@ export function createInstallTransactionRunner({
 }
 
 /**
+ * 本次启动的**实际**端口（key → port）。
+ *
+ * @param {object} args
+ * @param {object|null} args.bridge        Launcher 的控制通道
+ * @param {Record<string, number>} [args.fallback] 拿不到读数时的兜底
+ *
+ * ★ 必须优先向 Launcher 要读数。
+ *
+ *   健康检查里有 `expectJson: { port }` 这条**身份断言**，它的用途正是
+ *   区分「我们自己的实例」与「上一次升级前留下的旧实例 / 别的程序占了
+ *   同一个端口」。用 `DEFAULT_PORTS` 去问一个跑在别的端口上的实例，
+ *   最坏的结果不是"拒绝"而是**看似通过**：旧实例应答 200，而它的 port
+ *   字段恰好也等于默认值。
+ *
+ *   所以：拿不到真实读数时**返回 null**，让调用方走 fail-closed
+ *   （不写健康规格 → helper 不提交），而不是拿默认值去凑一次检测。
+ */
+export async function readLauncherPorts({ bridge = null } = {}) {
+  if (bridge === null || typeof bridge.request !== 'function') return null
+  let status
+  try {
+    status = await bridge.request('status', {})
+  } catch {
+    return null
+  }
+  const processes = Array.isArray(status?.processes) ? status.processes : []
+  const ports = {}
+  for (const process of processes) {
+    if (typeof process?.key !== 'string') continue
+    if (Number.isSafeInteger(process.port) && process.port > 0 && process.port <= 65535) {
+      ports[process.key] = process.port
+    }
+  }
+  return Object.keys(ports).length === 0 ? null : ports
+}
+/**
  * 打包时 helper 入口的位置。
  *
  * ★ 它**不在** `installRoot` 里。设计 §3 line 57 要求 helper 及其所需 Node
@@ -321,14 +357,18 @@ export function buildDesktopInstaller({
   /**
    * 本次启动的**实际**端口（key → port）。
    *
-   * ★ 必须由调用方给出 Launcher 真正用的那一组，而不是让这里猜默认值：
-   *   健康检查里有一条 `expectJson: { port }` 的身份断言，它的用途正是
-   *   区分「我们自己的实例」与「上一次升级前留下的旧实例 / 别的程序占了
-   *   同一个端口」。用默认值去问一个跑在别的端口上的实例，得到的是
-   *   **更差**的结果——一次看似通过的健康检查（旧实例应答了 200，
-   *   而它的 port 字段恰好也等于默认值）。
+   * ★ 默认 `null`，意味着"向 Launcher 要读数"。
+   *
+   *   早先这里默认 `DEFAULT_PORTS`，那是一个**在真实部署里会出错**的默认值：
+   *   健康检查里那条 `expectJson: { port }` 身份断言的意义正是"确认端口上
+   *   是我的实例"，而拿默认值去问一个跑在别的端口上的实例，最坏的结果不是
+   *   "拒绝"而是**看似通过**（旧实例应答 200，它的 port 字段恰好也等于
+   *   默认值）。
+   *
+   *   所以：给了就用给的（测试/显式调用方），没给就向 bridge 要；
+   *   要不到 → 不写健康规格 → helper fail-closed 不提交。
    */
-  ports = DEFAULT_PORTS,
+  ports = null,
   now = () => Date.now(),
   drainTimeoutMs = null,
   log = () => {},
@@ -402,7 +442,13 @@ export function buildDesktopInstaller({
           //   每个服务的就绪路径、期望状态与身份断言（`expectJson`）。
           //   在别处再写一遍"哪个服务的哪个路径算健康"，两处会漂移——而漂移的
           //   表现是"升级成功之后用户发现某个服务是坏的"。
-          const health = healthSpecFromProcesses({ processes: PROCESS_SPECS, ports })
+          //
+          //   ★ 端口用**实际读数**：显式给的优先，否则向 Launcher 要。
+          //     要不到就不写规格（见下面 health.ok 分支）。
+          const resolvedPorts = ports ?? await readLauncherPorts({ bridge })
+          const health = resolvedPorts === null
+            ? { ok: false, reason: '拿不到 Launcher 的实际端口读数（健康检查的身份断言需要它）' }
+            : healthSpecFromProcesses({ processes: PROCESS_SPECS, ports: resolvedPorts })
           if (health.ok !== true) {
             // ★ 派生失败时**不**写入规格。缺规格会让 helper 走
             //   `helper-health-unverified` → 不提交并尝试回退（fail-closed）。
@@ -528,6 +574,34 @@ export async function selfCheckWiringAsync() {
   if (trayLabelFor({ usable: true, state: 'downloading', progress: { bytes: 5, total: 10 } }) !== '正在下载更新 50%') {
     problems.push(`下载中的托盘标签不对：${trayLabelFor({ usable: true, state: 'downloading', progress: { bytes: 5, total: 10 } })}`)
   }
+
+  // ★ 端口读数：拿不到就返回 null（让调用方 fail-closed），**不**用默认值凑。
+  if (await readLauncherPorts({ bridge: null }) !== null) problems.push('没有 bridge 时端口读数不是 null')
+  if (await readLauncherPorts({ bridge: { request: async () => { throw new Error('nope') } } }) !== null) {
+    problems.push('bridge 报错时端口读数不是 null')
+  }
+  if (await readLauncherPorts({ bridge: { request: async () => ({ processes: [] }) } }) !== null) {
+    problems.push('没有任何端口读数时返回了非 null')
+  }
+  const withPorts = await readLauncherPorts({
+    bridge: {
+      request: async () => ({
+        processes: [
+          { key: 'team-hub', port: 9001, state: 'ready' },
+          { key: 'workbench', port: 0, state: 'ready' },      // 非法端口 → 丢掉
+          { key: 'whiteboard', port: 9003, state: 'ready' },
+          { key: 'broken', port: 'nope', state: 'ready' },     // 非数字 → 丢掉
+        ],
+      }),
+    },
+  })
+  if (withPorts === null || withPorts['team-hub'] !== 9001 || withPorts.whiteboard !== 9003) {
+    problems.push(`端口读数不对：${JSON.stringify(withPorts)}`)
+  }
+  if (withPorts !== null && ('workbench' in withPorts || 'broken' in withPorts)) {
+    problems.push(`非法端口没有被丢掉：${JSON.stringify(withPorts)}`)
+  }
+
   return Object.freeze({ ok: problems.length === 0, problems: Object.freeze(problems) })
 }
 

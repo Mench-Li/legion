@@ -690,6 +690,48 @@ test('★ helper：有迁移要跑但拿不到迁移存储 → **不能**报"没
   assert.equal(readBarrier(ctx.dataDir).blocked, false, '回退成功之后屏障应当解除')
 })
 
+test('★ helper：**没有**健康探针 → 不提交（"没验证"与"验证失败"同一结论）', async (t) => {
+  // 设计 §8 第 8–9 步：保持维护模式 → 跑迁移、补丁自检、服务健康验证 →
+  // **验证成功之后**才刷盘提交。一次"没有任何健康证据"的升级如果被提交，
+  // 就是设计 §10 那句「不能把未知状态显示成升级成功」的另一个写法。
+  const { ctx, transaction, secretHex, helperDir } = helperSetup(t)
+  const fx = helperEffects()
+  const report = await runHelper({
+    paths: { installDir: ctx.installDir, dataDir: ctx.dataDir, helperDir },
+    // 事务文件里**没有** healthProbe。
+    transaction: { ...transaction, healthProbe: undefined },
+    credentialSecretHex: secretHex, effects: fx,
+  })
+  assert.notEqual(report.verdict, 'committed', '没有健康证据却提交了升级')
+  assert.equal(report.code, 'helper-health-unverified')
+  assert.ok(fx.calls.includes('rollback'), '没有健康证据时没有回退')
+  assert.equal(readBarrier(ctx.dataDir).blocked, false, '回退成功之后屏障应当解除')
+})
+
+test('★ helper：显式声明 allowUnverifiedHealth 之后才允许无探针提交', async (t) => {
+  const { ctx, transaction, secretHex, helperDir } = helperSetup(t)
+  const fx = helperEffects()
+  const report = await runHelper({
+    paths: { installDir: ctx.installDir, dataDir: ctx.dataDir, helperDir },
+    transaction: { ...transaction, healthProbe: undefined, allowUnverifiedHealth: true },
+    credentialSecretHex: secretHex, effects: fx,
+  })
+  assert.equal(report.verdict, 'committed', report.reason)
+  assert.equal(report.health.verdict, 'unsupported')
+})
+
+test('★ helper：没有探针且回退被拒 → 保持维护模式', async (t) => {
+  const { ctx, transaction, secretHex, helperDir } = helperSetup(t)
+  const fx = helperEffects({ rollbackUpgradeImpl: () => ({ ok: false, verdict: 'forward-fix-required', reason: '含 contract 迁移' }) })
+  const report = await runHelper({
+    paths: { installDir: ctx.installDir, dataDir: ctx.dataDir, helperDir },
+    transaction: { ...transaction, healthProbe: undefined, migrations: [{ version: 1, name: 'x', compatibility: 'breaking' }] },
+    credentialSecretHex: secretHex, effects: fx,
+  })
+  assert.equal(report.verdict, 'recovery-required')
+  assert.equal(readBarrier(ctx.dataDir).blocked, true, '不能自动恢复时把屏障放掉了')
+})
+
 test('helper：调用面缺字段一律拒绝', () => {  assert.equal(validateInvocation({}).ok, false)
   assert.equal(validateInvocation({
     paths: { installDir: 'a', dataDir: 'b', helperDir: 'c' },

@@ -390,10 +390,16 @@ export function buildDesktopInstaller({
             backupDir: join(dataDir, 'backups'),
             backupSnapshotRoot: spawnArgs.backupSnapshotRoot,
             migrations: spawnArgs.migrations ?? [],
-            // 健康探针跨不过进程边界（它是一个函数），所以由 helper 自己
+            // 健康探针跨不过进程边界（它是一个函数），所以必须由 helper 自己
             // 在进程内构造；这里只留超时。
             healthProbe: null,
             healthTimeoutMs: 30_000,
+            // ★ 显式写 `false`：没有探针时 helper **不会**提交（"没验证"与
+            //   "验证失败"在能不能提交上是同一件事）。这一行在探针接线之前
+            //   意味着稳定通道的自动升级会停在新版本验证不了这一步 ——
+            //   那是**刻意的**：一次未经健康验证的提交比一次拒绝升级危险得多。
+            //   接线之后把它改成探针，而不是把它改成 `true`。
+            allowUnverifiedHealth: false,
           })
           const started = await runner.spawnHelper(spawnArgs)
           if (started.ok === true) stage('installing')

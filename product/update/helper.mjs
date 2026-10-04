@@ -56,6 +56,8 @@ export const HELPER_CODES = Object.freeze({
   SWITCH_FAILED: 'helper-switch-failed',
   MIGRATION_FAILED: 'helper-migration-failed',
   HEALTH_FAILED: 'helper-health-failed',
+  /** 「没有验证」与「验证失败」在能不能提交上是同一件事。 */
+  HEALTH_UNVERIFIED: 'helper-health-unverified',
   COMMITTED: 'helper-committed',
   ROLLED_BACK: 'helper-rolled-back',
   RECOVERY_REQUIRED: 'helper-recovery-required',
@@ -338,35 +340,62 @@ export async function runHelper({
   }
 
   // 健康检查。**屏障仍然立着**：这一步失败要能干净地退回去。
+  //
+  // ★ 这里**不能** fail-open。
+  //
+  //   设计 §8 第 8–9 步的顺序是：新 Launcher 保持维护模式 → 跑迁移、补丁自检、
+  //   服务健康验证 → **验证成功之后**才刷盘提交。也就是说"没验证"与
+  //   "验证失败"在提交这件事上必须是同一个结论：不提交。
+  //
+  //   早先的实现把 `unsupported`（没有探针）当成通过，于是一次**没有任何
+  //   健康证据**的升级会一路提交。那正是设计 §10 验收表里
+  //   「切换或迁移期间断电、helper 崩溃、指针损坏 → 不能把未知状态显示成
+  //   升级成功」要防的那一类，只是它出现在"验证缺席"而不是"崩溃"上。
+  //
+  //   所以默认是 fail-closed：没有探针 → 按失败处置（尝试回退；回退被拒则
+  //   保持维护模式等人工）。部署方如果确实知道自己在做什么，可以在事务文件
+  //   里显式写 `allowUnverifiedHealth: true` 来承担这个风险。
   journal.advance('validate', '开始健康检查')
-  let health = { verdict: 'unsupported', reason: '没有提供健康检查探针' }
-  if (typeof fx.probeHealthImpl === 'function' && transaction.healthProbe !== undefined) {
-    health = await fx.probeHealthImpl({
+  const probeConfigured = typeof fx.probeHealthImpl === 'function' && transaction.healthProbe !== undefined
+    && transaction.healthProbe !== null
+  let health = probeConfigured
+    ? await fx.probeHealthImpl({
       probe: transaction.healthProbe,
       timeoutMs: transaction.healthTimeoutMs ?? 30_000,
       label: transaction.toVersion,
     })
-  }
-  journal.note('health', { verdict: health.verdict, reason: health.reason ?? null })
-  step('health', health.verdict === 'healthy' || health.verdict === 'unsupported',
+    : {
+      verdict: 'unsupported',
+      reason: '事务文件里没有健康探针：helper 无法确认新版本可用。'
+        + '「没有验证」与「验证失败」在能不能提交上是同一件事，所以本次不提交',
+    }
+  if (health === null || health === undefined) health = { verdict: 'unsupported', reason: '健康探针没有给出结论' }
+  journal.note('health', { verdict: health.verdict, reason: health.reason ?? null, probeConfigured })
+  step('health', health.verdict === 'healthy' || (health.verdict === 'unsupported' && transaction.allowUnverifiedHealth === true),
     health.reason ?? health.verdict)
 
-  if (health.verdict === 'unhealthy' || health.verdict === 'timeout') {
+  const healthFailed = health.verdict === 'unhealthy' || health.verdict === 'timeout'
+    || (health.verdict === 'unsupported' && transaction.allowUnverifiedHealth !== true)
+  if (healthFailed) {
+    const unverified = health.verdict === 'unsupported'
     const rollback = fx.rollbackUpgradeImpl({
       installRoot: installDir,
       appliedMigrations: migrationOutcome.applied ?? [],
       migrations,
       nowMs: now(),
     })
-    journal.note('health-failure', { rollbackVerdict: rollback.verdict, rollbackOk: rollback.ok })
+    journal.note('health-failure', { verdict: health.verdict, rollbackVerdict: rollback.verdict, rollbackOk: rollback.ok })
     if (rollback.ok === true) {
       releaseBarrier(dataDir, transaction.txnId)
       journal.finish('rolled-back', rollback.reason)
       destroyCredential(dataDir)
       step('rollback', true, rollback.reason)
       return finalize(dataDir, {
-        verdict: 'rolled-back', code: HELPER_CODES.HEALTH_FAILED,
-        reason: `新版本健康检查未通过（${health.verdict}）→ ${rollback.reason}`,
+        verdict: 'rolled-back',
+        code: unverified ? HELPER_CODES.HEALTH_UNVERIFIED : HELPER_CODES.HEALTH_FAILED,
+        reason: unverified
+          ? `新版本未经健康验证（${health.reason}）→ ${rollback.reason}`
+          : `新版本健康检查未通过（${health.verdict}）→ ${rollback.reason}`,
         steps, startedAtMs, now, migrationOutcome, health, rollback,
         fromVersion: before?.version ?? transaction.fromVersion, toVersion: transaction.toVersion,
       })
@@ -376,7 +405,9 @@ export async function runHelper({
     step('rollback', false, rollback.reason)
     return finalize(dataDir, {
       verdict: 'recovery-required', code: HELPER_CODES.RECOVERY_REQUIRED,
-      reason: `新版本不健康且不能自动回退：${rollback.reason}`,
+      reason: unverified
+        ? `新版本未经健康验证且不能自动回退：${rollback.reason}`
+        : `新版本不健康且不能自动回退：${rollback.reason}`,
       steps, startedAtMs, now, migrationOutcome, health, rollback,
       fromVersion: before?.version ?? transaction.fromVersion, toVersion: transaction.toVersion,
     })

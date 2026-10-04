@@ -53,6 +53,7 @@
 | §6 落盘字节的确定性 | `product/update/zip.mjs` | 同输入 → 逐字节相同的包（内部排序、时间戳钉死） |
 | §8 第 8 步"服务健康验证" | `product/update/health.mjs` | 声明式回环 HTTP 检查；**只允许回环**；身份断言（`expectJson`） |
 | §8 健康检查用**实际**端口 | `desktop-bridge.mjs` 透出 `port` → `readLauncherPorts` | 拿不到读数就不写规格（fail-closed），**不**拿默认值凑 |
+| §7 line 150 安装确认显示在途任务 | `product/upgrade/task-state.mjs` + `task-readings.mjs` + bridge `tasks` + `update.tasks` | 词表从**两套真实词表**派生（读源码比对）；读不到 ≠ 没有任务 |
 | §6 重启后复用前重新校验 | `cache.verifyReady` | 篡改缓存文件的用例证明它真的重算摘要 |
 | §6 取消不影响当前程序 | `cache.discard` | 只删 `.part`；取消不进失败退避 |
 | §7 有界操作表 | `desktop/update-service.mjs` + `update-preload.cjs` | 17 条 IPC 面用例：路径/URL/多余字段一律拒 |
@@ -140,6 +141,28 @@ sha256 没有不动点），所以 `closure.json` 必须**跳过**成员判定�
 由签名清单里的摘要保证。第一版没跳，于是每一份合法的包都被判成
 "含闭包之外的条目"。
 
+**⑪ 在途任务的词表与真实生产方对不上（最严重的一个）。**
+`preflight.mjs` 手写的 `ACTIVE_TASK_STATES` / `TERMINAL_TASK_STATES` 与产品里
+两套真实词表（看板 `in_progress`/`done`/`canceled`，运行尝试 `Running`/
+`Completed`/`DeadLetter`）**交集为空**。两个方向同时错：
+
+- 真实"在跑"的状态被当成认不出 → 按活跃处理（侥幸安全，靠的是"认不出按
+  活跃"那条判据写得好）；
+- 真实"已完成"的状态**也被当成认不出** → 同样按活跃 → **一台有过任务历史
+  的机器升级被永久拦下**，而被点名的 id 全是早就做完的。
+
+`product/update/install.mjs` 是**真的**把 `tasks` 传给 `runPreflight` 的，
+所以自动升级在真实机器上一次都进不去。**这也解释了为什么此前没有任何生产方
+写这个读数**：接上就永久阻塞，于是那一头一直是 `null`（同样拦）——两头都拦。
+
+修法：词表从真实源码**派生**（`task-state.mjs`，载入时读源码比对漂移），
+并补上第三档"已知但不执行"（`backlog`/`todo`/`in_review`/`blocked`）——
+把它们按活跃处理会让**一个被遗忘的评审永久阻塞这台机器的所有升级**。
+
+★ 这一处还有一个"测试与代码共享同一个错误假设"的教训：
+`preflight.test.mjs` 与模块自检用的都是 `'running'`/`'completed'`（**非真实**
+字面量），所以它们在旧词表下**恰好**通过。测试改真实值之后，缺陷才现形。
+
 ## 6. 明确**还没有做**的部分
 
 设计 §10 说「每阶段记录实际证据；**测试替身通过不能替代 Windows 真机升级
@@ -172,6 +195,13 @@ sha256 没有不动点），所以 `closure.json` 必须**跳过**成员判定�
   仍未验证的是**在真实进程树**上跑一遍：真实端口读数这条链
   （Launcher `status()` → bridge `publicStatus` → `readLauncherPorts`）
   目前只有单元级证据，没有一次"真起来四个服务然后验它们健康"的实测。
+- **在途任务读数已接线**（`task-state.mjs` + `task-readings.mjs`）；
+  仍有的一步是**在真实 team-hub 上端到端跑一次**：真起一个带任务的
+  team-hub，确认 `/api/board` 的响应形状与 `boardTasksFromPayload`
+  的判据一致（目前这条用的是合成响应，形状取自 `read-models.mjs`
+  的路由定义与 `server.mjs` 的 `STATUSES`）。
+  这一次实测能一次性回答两件事：真实响应的字段名、以及"有任务在跑时
+  升级确实被拦住"。
 
 ## 6.1 一次发布的完整顺序（现在都有落点）
 

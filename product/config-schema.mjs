@@ -36,9 +36,7 @@ export const LAUNCHER_ENV_NAMES = Object.freeze(['LEGION_READINESS_TIMEOUT_MS'])
  */
 export const CHILD_ENV_NAMES = Object.freeze([
   'TEAM_HUB_PORT', 'TEAM_HUB_HOST', 'TEAM_HUB_TOKEN', 'TEAM_HUB_DB', 'TEAM_HUB_URL',
-  'LEGION_WORKFLOW_PACK_PATH',
-  'DSH_HUB_UPSTREAM', 'DSH_WORKBENCH_TOKEN', 'LEGION_WORKSPACE_DIR',
-  'LEGION_DESKTOP_MODE',
+  'DSH_HUB_UPSTREAM', 'DSH_WORKBENCH_TOKEN',
   'DSH_HOME', 'LEGION_DATA_DIR', 'LEGION_LOG_DIR',
   // PRT-214 续：注入 Runtime 子进程的 Legion 身份（组合根的六项输入 + 三项审批口径）。
   // 它们是注入目标的**变量名**，不是本进程的读取点——本进程从不读它们，
@@ -295,7 +293,7 @@ export const SCHEMA = defineSchema({
       name: 'DSH_HOME',
       owner: 'DeepSeek Harness（DSH）',
       reason: 'DSH 用它定位自己的 $DSH_HOME/.credentials.yaml。Legion **只读**该文件作为凭证回退来源（PRT-509 路线 A′），'
-        + 'CLI 只在 Legion 自己的密钥库缺少引用时读取外部凭证，不写外部 DSH home。独立桌面桥将 Runtime 的 DSH_HOME 固定为产品 DataDir/runtime/dsh/home，并关闭外部凭证回退',
+        + '只在 Legion 自己的密钥库里没有那条引用时才去读，结果里带出处；不写它、不迁移、不猜路径',
     },
     // PRT-253 续批：`product/orchestrator/worker.mjs` **也**读这两个键
     // （`workerHubUrl = process.env.TEAM_HUB_URL`、`hubIo({hubToken: process.env.TEAM_HUB_TOKEN})`），
@@ -345,22 +343,36 @@ export const SCHEMA = defineSchema({
   ],
   nonEnvLiterals: [
 
-    // Desktop bridge/protocol and local HTTP guard error codes, not environment keys.
-    'BAD_ID', 'BAD_JSON', 'BAD_PAYLOAD', 'BAD_REQUEST', 'BAD_VERSION',
-    'BRIDGE_CLOSED', 'BRIDGE_FAILED', 'CONFIG_INVALID', 'LINE_TOO_LARGE', 'START_FAILED', 'UNKNOWN_TYPE',
-    'DESKTOP_AUTH_REQUIRED', 'DESKTOP_CREDENTIAL_CHANGED', 'DESKTOP_CREDENTIAL_REQUIRED',
+    // ── desktop / 共享后端 / 工作流包线（main a8ff20de 之后合入；此处**重新**登记）──
+    //
+    // 为什么会有"重新"这一说：本数组里这几组的条目曾被一次进行中的 desktop 线重构
+    // （工作区里已 `git add` 的 −27 行）提前删掉，但**被登记的那些码还在源码里**——
+    // `product/workflow-packs/pack.mjs`、`product/launcher/shared-backend.mjs`、
+    // `product/local-auth.mjs`、`product/launcher/cli.mjs` 都仍会产出它们。
+    // 登记与产出点必须同生共死：删掉代码的那一刀才该连带删掉这里的条目，
+    // 否则 `scan --check` 会红，而红的原因看起来会像"有人漏登记"。
+    //
+    // 逐组来源：
+    //   · product/workflow-packs/pack.mjs（14 条）——工作流包的清单/角色/阶段校验与安装事务的
+    //     具名码（WORKFLOW_PACK_*）、以及包内记录的工作区状态词（LOCAL_EDITS）与
+    //     安装事务用的 SQL 语句名（COMMIT / ROLLBACK）。它们不是进程环境变量名。
+    //   · product/launcher/shared-backend.mjs（11 条）——共享后端的发现/归属/版本判定结果
+    //     （BACKEND_*：未运行 / 不是属主 / 版本不符 / 工作区不符 / 路由未知 / 启动中 /
+    //     不可达 / 重启失败 / 身份不符 / 发现结果非法）与停进程失败（STOP_FAILED）。
+    //     它们是**诊断结论**：告诉人"后端处于什么状态"，没有一条是"读哪个 env"。
+    //   · product/local-auth.mjs（3 条）——本机 HTTP 守卫的拒绝码：Host 头不许、
+    //     Origin 不许、未授权。同族还有 DESKTOP_AUTH_REQUIRED（该码已随 desktop 桥一起撤下，
+    //     workbench 侧另有同名登记）。
+    //   · product/launcher/cli.mjs（1 条）——BACKEND_NOT_RUNNING：CLI 发现后端没在跑。
+    'COMMIT', 'LOCAL_EDITS', 'PACKAGE_RECEIPT_MISMATCH', 'ROLLBACK', 'SCOPE_ALREADY_EXISTS',
+    'WORKFLOW_PACK_ASSET_INVALID', 'WORKFLOW_PACK_CONTENT_INVALID', 'WORKFLOW_PACK_DUPLICATE_ID',
+    'WORKFLOW_PACK_MANIFEST_INVALID', 'WORKFLOW_PACK_NEXT_INVALID', 'WORKFLOW_PACK_ROLE_INVALID',
+    'WORKFLOW_PACK_ROLE_STAGE_MISMATCH', 'WORKFLOW_PACK_STAGE_INVALID', 'WORKFLOW_PACK_TOO_LARGE',
+    'BACKEND_DISCOVERY_INVALID', 'BACKEND_IDENTITY_MISMATCH', 'BACKEND_NOT_OWNER',
+    'BACKEND_RESTART_FAILED', 'BACKEND_ROUTE_UNKNOWN', 'BACKEND_STARTING', 'BACKEND_UNAVAILABLE',
+    'BACKEND_VERSION_INVALID', 'BACKEND_VERSION_MISMATCH', 'BACKEND_WORKSPACE_MISMATCH', 'STOP_FAILED',
     'DESKTOP_HOST_FORBIDDEN', 'DESKTOP_ORIGIN_FORBIDDEN', 'DESKTOP_UNAUTHORIZED',
-    'BRIDGE_BUSY', 'PREPARATION_CANCELLED', 'STOP_FAILED', 'PROCESS_EXIT_TIMEOUT', 'PROCESS_TREE_STOP_FAILED',
-    'INSTANCE_LOCK_RELEASE_FAILED', 'BUNDLE_PATH_INVALID', 'BUNDLE_PATH_CHANGED', 'BUNDLE_PATH_REQUIRED',
-    'BUNDLE_WORKER_FAILED', 'BUNDLE_IMPORT_FAILED', 'BUNDLE_STATE_UNREADABLE', 'BUNDLE_ENTRY_MISSING',
-    'BUNDLE_DESTINATION_LINK', 'BUNDLE_EXISTING_VERSION_MISMATCH', 'BUNDLE_TARGET_INCOMPLETE',
-    'BUNDLE_FORMAT_INVALID', 'BUNDLE_PLATFORM_MISMATCH', 'BUNDLE_VERSION_MISMATCH', 'BUNDLE_NODE_MISMATCH',
-    'BUNDLE_INVENTORY_INVALID', 'BUNDLE_LINK_REJECTED', 'BUNDLE_FILE_INVALID', 'BUNDLE_HASH_MISMATCH',
-    'BUNDLE_MANIFEST_UNREADABLE', 'BUNDLE_PROFILE_MISMATCH',
-    'DESKTOP_SETTINGS_INVALID', 'DESKTOP_SETTINGS_LINK', 'WORKSPACE_SELECTION_INVALID', 'WORKSPACE_SELECTION_CHANGED', 'DESKTOP_SETUP_BUSY',
-    'DESKTOP_SETUP_FAILED', 'DESKTOP_IDENTITY_INVALID', 'MODEL_NOT_CONFIGURED',
-    'MODEL_INPUT_INVALID', 'MODEL_PROBE_FAILED', 'MODEL_SECRET_STORE_FAILED', 'MODEL_VERIFICATION_INVALID',
-    'SECRETS_STORE_UNAVAILABLE', 'SECRET_REF_INVALID', 'INIT_FAILED',
+    'BACKEND_NOT_RUNNING',
 
     // ── PRT-009 `peak-resource` 采不到时的具名码 ─────────────────────────
     //
@@ -780,12 +792,6 @@ export const SCHEMA = defineSchema({
     // 「查了，太宽」与「没查出来」——这两个必须保持不同的码，把前者塌成后者
     // 会让"已经确认的危险"看起来像"这次没查到"。
     'SECRETS_PLACEMENT_INVALID', 'SECRETS_CHECK_FAILED', 'ACL_TOO_PERMISSIVE',
-    // Shared backend discovery/lifecycle outcomes; these are diagnostic codes,
-    // not environment variables or configurable authentication bypasses.
-    'BACKEND_NOT_RUNNING', 'BACKEND_PUBLISH_FAILED', 'BACKEND_RESTART_FAILED',
-    'BACKEND_VERSION_INVALID', 'BACKEND_NOT_OWNER', 'BACKEND_ROUTE_UNKNOWN',
-    'BACKEND_DISCOVERY_INVALID', 'BACKEND_WORKSPACE_MISMATCH', 'BACKEND_VERSION_MISMATCH',
-    'BACKEND_UNAVAILABLE', 'BACKEND_IDENTITY_MISMATCH', 'BACKEND_STARTING',
     // PRT-509 路线 A′：DSH 只读回退来源的两条启动诊断码
     // （`product/launcher/secrets-check.mjs` 的 `fallbackDiagnostic`）。
     //

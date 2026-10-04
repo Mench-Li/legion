@@ -575,11 +575,26 @@ test('P3-4：plugins schema 覆盖插件真实读取的全部 env，且扫描器
   // （P3-4 实测过反面教材：文件尚未提交时扫描器跳过未跟踪文件，空集合会给出假绿）
   assert.ok(plugins.filesScanned >= 10, 'plugins/src 应被完整扫描，实际文件数 ' + plugins.filesScanned)
   assert.equal(plugins.mode, 'git-tracked')
-  // 插件改造后不再直接读 env（统一走 plugins/src/config.ts + 引擎）；这里的价值是「以后新增读取点必须登记」
-  assert.deepEqual([...plugins.reads.keys()], [], 'plugins 不应再直接读 env：' + JSON.stringify([...plugins.reads.keys()]))
+  // 插件改造后不再直接读 env（统一走 plugins/src/config.ts + 引擎）；这里的价值是「以后新增读取点必须登记」。
+  //
+  // ★ T-170（并行任务文件冲突治理 S6/R-6）的 `plugins/src/legacyConvergence.ts:28-31` 是一个例外：
+  //   它**直接**读 `env.LEGION_INTEGRATION_MODE`（默认参数 `= process.env`）。诚实的写法是把
+  //   「直接读取点」这一**组**逐字写死——不是把断言删掉或放空：多一个未登记的读取点仍然红。
+  //
+  // ★ 2026-10-04 补第二个例外（`plugins/src/workflowTestRunner.ts:74`）：测试运行器直接读
+  //   `process.env.PATH ?? ''` 用来定位 npm/node（新文件随 agent-workflow / desktop 线合入）。
+  //   它**不是**产品配置，而是 OS 提供的可执行搜索路径，因此登记形态是
+  //   `plugins/config-schema.mjs` 的 fields（`processPath`，doc 写明「不是产品配置」），
+  //   与 team-hub 的 USERNAME / USER / USERDOMAIN 同例——真的读了就按字段登记，不塞进 nonEnvLiterals。
+  assert.deepEqual([...plugins.reads.keys()].sort(), ['LEGION_INTEGRATION_MODE', 'PATH'],
+    'plugins 的直接 env 读取点变了（新增的读取点必须同时登记进 plugins/config-schema.mjs 的 fields）：'
+    + JSON.stringify([...plugins.reads.keys()]))
+  // 这一份名单同样逐条对齐 fields：加一个键而不加读取点、或加了读取点而不进 fields，两个方向都会红。
   assert.deepEqual(PLUGINS.envNames().sort(), [
     'CHAT_CTX_BUDGET_CHARS', 'CHAT_CTX_DIGEST_BUDGET_CHARS', 'CHAT_CTX_FILE_CAP_CHARS',
+    'LEGION_INTEGRATION_MODE',
     'NORMS_GLOBAL_MAX', 'NORMS_SPACE_MAX', 'NORMS_TOTAL_MAX',
+    'PATH',
   ])
 
   // services-plugin 读的是 `baseEnv.NAME`（别名对象）——直接扫描看不到，靠 P3-4 新增的识别规则
@@ -975,6 +990,13 @@ test('★★ PRT-254：声明的 env 键必须等于 runtime 源码里两张键�
   //   于是这张表不存在 ⇒ 两半判据同时红（`runtime/` 出现字面量读取点；
   //   以及 `config-schema.mjs` 的 fields 里那个键在并集里找不到出处）。
   const { SPOOL_ENV_KEYS } = await import('../../runtime/dsh-composition/plugins/root-row.mjs')
+  // ★★★ 2026-10-04：runtime 契约行（`runtime-contract-registrar-row.mjs`）的键名表。
+  //   它此前是**字面量成员访问**（`env.LEGION_RUNTIME_TOKEN` / `env.LEGION_DATA_DIR`），
+  //   于是下面两条判据当场都红了：
+  //     ① `runtime/ 没有字面量形式的 env 读取点` —— 字面量成员访问绕过了这张表；
+  //     ② 本条的并集判据 —— `LEGION_RUNTIME_TOKEN` 在 fields 里、却不在任何键名表里（"编了一个键"）。
+  //   处置与 LEGION_DATA_DIR 那一轮同形：把读取点改写成 `env[表.成员]`，表从源码取。
+  const { REGISTRAR_ENV_KEYS } = await import('../../runtime/dsh-composition/plugins/runtime-contract-registrar-row.mjs')
   const expected = [...new Set([
     ...Object.values(DECIDE_ENV_KEYS),
     ...Object.values(ENFORCEMENT_CONFIG_FIELDS).flatMap((f) => [...f.envKeys]),
@@ -984,6 +1006,7 @@ test('★★ PRT-254：声明的 env 键必须等于 runtime 源码里两张键�
     ...EXTERNAL_API_SCOPE_PORT_ENV_KEYS,
     ...WHITELIST_PORT_ENV_KEYS,
     ...Object.values(SPOOL_ENV_KEYS),
+    ...Object.values(REGISTRAR_ENV_KEYS),
   ])].sort()
   // ★ 13 = 12 + `LEGION_EXECUTION_SCOPE`（第 19 轮，PRT-605）。
   //   这个数**不是**为了方便改的常量：它一变就要求复核"多出来的那个键
@@ -1027,7 +1050,7 @@ test('★★ PRT-254：声明的 env 键必须等于 runtime 源码里两张键�
   //      `effectiveEnv[SPOOL_ENV_KEYS.dataDir]`（此前是字面量成员访问，本轮改成下标）；
   //   ② 它**已经**在 `runtime/config-schema.mjs` 的 fields 里——所以本轮的红不是
   //      "门禁看不见它"，而是反向的：**看见了、却没在任何键名表里**。
-  assert.equal(expected.length, 16, `六张键名表共 ${expected.length} 个键（复核基线 16）：数量变了就要重新审一遍这份声明`)
+  assert.equal(expected.length, 17, `七张键名表共 ${expected.length} 个键（复核基线 17）：数量变了就要重新审一遍这份声明`)
   assert.deepEqual(RUNTIME.envNames().sort(), expected,
     'runtime/config-schema.mjs 的 fields 与源码里的键名表不一致（多一个=编了一个环境变量，少一个=门禁看不见它）')
 
@@ -1147,7 +1170,7 @@ test('★★ Trap 1：只按**精确 schema 路径**排除自身登记文本（�
   assert.deepEqual(cov.self.map((d) => d.file), ['demo/config-schema.mjs'], 'schema 文件自身必须被排除，且只排除它一个')
 })
 
-test('★ Trap 1 实测：runtime 19 处 = 11 处 schema 自身登记文本 + 8 处真实源（PRT-603 接线后自身文本变 11）', () => {
+test('★ Trap 1 实测：runtime 23 处 = 13 处 schema 自身登记文本 + 10 处真实源（2026-10-04 契约行两把键改键名表后自身文本变 13）', () => {
   // 这组数字是"重数一遍"的锚点：数量变了就要重新审这份声明，而不是改数字让它变绿。
   const rt = scanProcess('runtime', { includeTests: false })
   const rtCov = dynamicCoverage(rt, RUNTIME, { schemaFile: SCHEMA_FILES.runtime, processName: 'runtime' })
@@ -1215,9 +1238,19 @@ test('★ Trap 1 实测：runtime 19 处 = 11 处 schema 自身登记文本 + 8 
   //     与之后可以完全不同，而两次跑都是"绿/红得很自然"。**
   //     扫描器自己会打出"这些文件不在配置面里，请 git add 后重跑"，
   //     所以正确的应对是读那行输出，而不是把数字改成 16。
-  assert.equal(rt.dynamic.length, 19, 'runtime 动态命中数变了（基线 19）')
-  assert.equal(rtCov.self.length, 11, 'runtime 的 11 处自身登记文本必须被排除，而不是当成待登记读取')
-  assert.equal(rtCov.source.length, 8, 'runtime 的真实源动态读取是 8 处（root-row.mjs 2 + scope-port.mjs 2 + connector-port.mjs 1 + execution-scope-port.mjs 1 + external-api-scope-port.mjs 1 + whitelist-port.mjs 1）')
+  // ★★★ 19 → 23（2026-10-04，runtime 契约行的两把键改成键名表 + 下标）：
+  //   **+2 处自身登记文本**（`config-schema.mjs` 的 dynamicEnvReads 新增两条，
+  //     各含一处 `env[...]` 登记文本）**+2 处真实源**
+  //     （`runtime-contract-registrar-row.mjs` 的 `env[REGISTRAR_ENV_KEYS.runtimeToken]`
+  //      与 `env[REGISTRAR_ENV_KEYS.dataDir]`）。
+  //   ⇒ self 11 → 13、source 8 → 10。这一次是**同一份文件里两处、两个不同的键**，
+  //     所以是一条新源文件贡献 +2 source（此前每轮都是"+1 文件 +1 处"）。
+  //   ★ 复核过两件事：① 这两处都真的读进程环境（生产接线 `env = process.env`）；
+  //     ② `LEGION_DATA_DIR` 本来就在并集里（SPOOL_ENV_KEYS），`LEGION_RUNTIME_TOKEN`
+  //     原本**不在任何键名表里**——正是上面那条并集判据把它抓出来的。
+  assert.equal(rt.dynamic.length, 23, 'runtime 动态命中数变了（基线 23）')
+  assert.equal(rtCov.self.length, 13, 'runtime 的 13 处自身登记文本必须被排除，而不是当成待登记读取')
+  assert.equal(rtCov.source.length, 10, 'runtime 的真实源动态读取是 10 处（root-row.mjs 2 + scope-port.mjs 2 + connector-port.mjs 1 + execution-scope-port.mjs 1 + external-api-scope-port.mjs 1 + whitelist-port.mjs 1 + runtime-contract-registrar-row.mjs 2）')
   assert.ok(rtCov.self.every((d) => d.file === SCHEMA_FILES.runtime))
   assert.deepEqual(rtCov.uncovered, [], 'runtime 的 3 处真实源必须被现有 dynamicEnvReads 覆盖：' + JSON.stringify(rtCov.uncovered))
 
@@ -1363,7 +1396,10 @@ test('★ 端到端：scan --check 必须 PASS，且把「schema 自身登记文
   //   > 一个"我知道有一条红、而它的理由是 X"的结论，
   //   > 与一个"我知道有一条红、而 X 恰好也是个真理由"的结论，在报告里是同一句话——
   //   > 只不过前者的 X 是**推的**。
-  assert.match(r.out, /runtime\/config-schema\.mjs 命中 11 处/)
+  // ★ 11 → 13（2026-10-04）：runtime 契约行那两把键改成键名表 + 下标，
+  //   `dynamicEnvReads` 新增两条登记 —— 它们的登记文本本身又被同一条规则扫到，
+  //   因此这一行随之从 11 变 13（同上，是"登记文本"而不是新的读取点）。
+  assert.match(r.out, /runtime\/config-schema\.mjs 命中 13 处/)
   assert.match(r.out, /product\/config-schema\.mjs 命中 11 处/)
   assert.match(r.out, /allowlist\.mjs[\s\S]{0,60}write-target/)
   assert.match(r.out, /dsh-credentials\.mjs[\s\S]{0,60}foreign-object/)

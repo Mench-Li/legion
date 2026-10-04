@@ -80,6 +80,24 @@ export const ENV_NAMES = Object.freeze([
 
 /** 不是本进程读取的环境变量、但写法上形如 env 键的字面量（错误码 / 契约字符串 / 动作名）。 */
 export const NON_ENV_LITERALS = Object.freeze([
+  // ── 外部智能体（EXTERNAL_AGENT_*）与智能体工作流契约（AGENT_WORKFLOW_*）
+  //
+  // 来源与理由（逐条登记）：
+  //   · runtime/adapters/dsh/external-agent.mjs（9 条）——外部智能体启动前的闸门与结果判定：
+  //     缺父会话 / 权限模式未验证 / 缺预检 / 缺提示词 / 缺 provider（或 provider 名不合法）/
+  //     工作目录不符 / 结果结构非法 / 启动失败。它们是**拒绝与失败的原因**，
+  //     不是"从哪个环境变量取这个值"。
+  //   · runtime/contracts/agent-workflow.mjs（5 条）——智能体工作流契约的校验码：
+  //     契约本身非法 / 实现证据缺失 / 需要审查 / 未知审查种类 / 未知阶段。
+  //
+  // 判定依据同本文件一贯口径：这些字符串由运行时**产出**（进错误对象与事件），
+  // 本进程从不 `process.env.<名字>` 读它们。
+  'EXTERNAL_AGENT_PARENT_REQUIRED', 'EXTERNAL_AGENT_PERMISSION_MODE_UNVERIFIED',
+  'EXTERNAL_AGENT_PREFLIGHT_REQUIRED', 'EXTERNAL_AGENT_PROMPT_REQUIRED',
+  'EXTERNAL_AGENT_PROVIDER_MISSING', 'EXTERNAL_AGENT_PROVIDER_REQUIRED',
+  'EXTERNAL_AGENT_RESULT_INVALID', 'EXTERNAL_AGENT_START_FAILED', 'EXTERNAL_AGENT_WORKDIR_MISMATCH',
+  'AGENT_WORKFLOW_IMPLEMENTATION_EVIDENCE_MISSING', 'AGENT_WORKFLOW_INVALID',
+  'AGENT_WORKFLOW_REVIEW_REQUIRED', 'AGENT_WORKFLOW_UNKNOWN_REVIEW_KIND', 'AGENT_WORKFLOW_UNKNOWN_STAGE',
   // ── runtime/adapters/dsh/errors.mjs（14 条）
   'AUTH_FAILED', // runtime/adapters/dsh/errors.mjs 等 5 个文件
   'BUDGET_EXCEEDED', // runtime/adapters/dsh/errors.mjs 等 4 个文件
@@ -728,6 +746,23 @@ export const SCHEMA = defineSchema({
         '（七个键都已在上面 fields 声明）。' +
         '⚠️ 扫描器看不见这一处：参数名是 source 而不是 env，动态规则不匹配——' +
         '所以这条登记是它唯一的机器可读记录。',
+    },
+    {
+      file: 'runtime/dsh-composition/plugins/runtime-contract-registrar-row.mjs',
+      expr: 'env[REGISTRAR_ENV_KEYS.runtimeToken]',
+      reason: 'runtime 契约行按 REGISTRAR_ENV_KEYS（同文件导出）取运行期 token；' +
+        '键名 LEGION_RUNTIME_TOKEN 已在上方 fields 声明。' +
+        '⚠️ 此前这里是字面量成员访问（`env` + 点 + 键名，正是扫描器能直接看见、' +
+        '而 config.test.mjs 的「runtime 不留字面量读取」与「fields ⊆ 源码键名表」两条判据都会红的形态）；' +
+        '改成下标 + 键名表正是两条判据要求的形态（同 LEGION_DATA_DIR 那一轮的处置）。' +
+        '⚠️ 这段说明本身**不能再出现** `env` + 点 + 键名的写法：扫描器会把登记文本当成读取点，' +
+        '于是 `scan --check` 会报一把"未声明 env 键"。',
+    },
+    {
+      file: 'runtime/dsh-composition/plugins/runtime-contract-registrar-row.mjs',
+      expr: 'env[REGISTRAR_ENV_KEYS.dataDir]',
+      reason: '同一张表里的 LEGION_DATA_DIR（工具调用车道的目录锚，已在 fields 声明）；' +
+        '与上一处同一个文件、不同键，因此是两条独立登记（动态覆盖按「文件 + 归一化表达式」计）。',
     },
   ],
   nonEnvLiterals: NON_ENV_LITERALS,

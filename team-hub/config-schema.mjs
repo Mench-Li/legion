@@ -57,6 +57,30 @@ export const SCHEMA = defineSchema({
     { key: 'maxRulesLen', env: 'MAX_RULES_LEN', type: 'int', default: 3000, min: 1, doc: '规范内容长度上限（字符）' },
     // ── 运维脚本 ──
     { key: 'hubUrl', env: 'LEGION_HUB_URL', type: 'string', default: 'http://127.0.0.1:8787', doc: 'seed-pipeline 脚本要写入的 hub 地址' },
+    // ── T-170（并行任务文件冲突治理 S6/R-6）：合入通道模式 ──
+    //
+    // 这一把键**是真实的进程环境读取**（不是字面量误报）：`routes/delivery.mjs` 与
+    // `routes/write-intent.mjs` 在每条写入/交付路由的入口处 `process.env.LEGION_INTEGRATION_MODE === 'integration'`，
+    // `server.mjs` 另有三处（就绪读数 545、终态处置 552、交付提交 4494）。
+    //
+    // 三个值的语义**不是同一件事的三种强度**，而是三个不同的系统状态：
+    //   · legacy      —— 默认。旧 autoPromote/mediation 直合并通道照旧；路由不做额外拦截。
+    //   · observation —— 只记录"这里本应走集成 worker"的模拟判定，**不改派工**
+    //                    （团队侧只看 `=== 'integration'`，因此行为与 legacy 相同）。
+    //   · integration —— 唯一集成入口生效：`POST /api/deliveries`、`/api/integration/claim`、
+    //                    `/api/integration/transition`、`POST /api/deliveries/:id/decision` 一律
+    //                    409 `USE_VERIFIED_SUBMISSION`（必须走验证过的候选提交），
+    //                    手工释放写入占用在 in_progress/in_review 上被 409 `TASK_STILL_ACTIVE` 拒绝。
+    //
+    // 默认值取 `legacy` 而不是 `integration`：这是**灰度开关**，未灰度的仓库必须行为不变
+    // （README/docs/FEATURES.md 与 plugins 侧 `resolveIntegrationMode` 的回落值都写的是 legacy）。
+    // 注意 team-hub 只区分"是不是 integration"，`observation` 由插件侧判定——两边共用同一把键，
+    // 所以它必须是一把**枚举**，不能各写各的默认值（同一变量两种语义正是 P3-4 收口过的问题）。
+    {
+      key: 'integrationMode', env: 'LEGION_INTEGRATION_MODE', type: 'enum',
+      choices: ['legacy', 'observation', 'integration'], default: 'legacy',
+      doc: '合入通道模式：legacy=旧直合并通道照旧；observation=只模拟判定不改派工；integration=旧通道一律拒绝并转唯一集成 worker（S6/R-6）',
+    },
     // ── 操作系统给的"我是谁"（spec §6.7 的 ACL 加固要用）──
     //
     // 这三个**不是 Legion 的配置项**：没有默认值、没有可写的覆盖开关、
@@ -508,6 +532,111 @@ export const SCHEMA = defineSchema({
     'TOTALS_INVALID', 'PREVIOUS_LEVEL_INVALID', 'BUDGET_ALERT_FAILED',
     'NOT_CONFIGURED', 'SPEND_UNKNOWN', 'SPEND_PARTIAL', 'MIXED_CURRENCY',
     'LIMIT_CROSSED', 'DEGRADE_TARGET_UNSET',
+
+    // ── T-170（并行任务文件冲突治理 S2/S3/S4/S6 · R-2…R-6）：本目标新增模块的具名码 ──
+    //
+    // 这 77 条全部来自本目标新增/改动的模块。它们**不是 env 键**：进程不"读"它们，
+    // 而是把它们放进 HTTP 响应的 `code`、SQLite 的状态词、以及 git / journal 的拒绝理由里，
+    // 给调用方与值班的人看。名字是 SCREAMING_SNAKE，所以扫描器按名字怀疑它们是环境变量——不是。
+    //
+    // 逐条登记而不是加前缀通配：这份清单的全部价值在于「每一条都被看过一次」。
+    // 按**修复动作**分四组——同一个失败、改的地方不同，就该是两个码。
+    //
+    // ① 写入意图 / 文件占用域（S2 · R-2 · R-3）：write-intent-store.mjs 的 WRITE_INTENT_ERRORS、
+    //    claim-policy.mjs 的占用判定、routes/write-intent.mjs、run-store.mjs、server.mjs。
+    //    这一组的共同后果是**等待**而不是执行失败（设计 §3.1）：FILE_CONTENTION 走
+    //    HTTP 200 + ok:false，tasks.status 保持 todo、fixCount 不增；它同时是 metrics 端点
+    //    统计"同文件写入被挡"的事件名（routes/metrics.mjs:27），所以不能改写成中文描述。
+    //    EPOCH_STALE / REVISION_CONFLICT / ATTEMPT_MISMATCH 是 fencing 拒绝（该**重新认领**，
+    //    不是重试）；SINGLE_WRITER_REQUIRED 是**能力降级**（非 Git 仓库只允许一个写者），
+    //    与争用分开；RECONCILING / RESERVED / RESERVATION_ACTIVE / RESERVATION_RECONCILING /
+    //    REBOUND_FOR_RETRY / RETRY_RESERVATION_MISSING / INVALID_PATHS 是预约台账的落库状态词；
+    //    WRITE_INTENT_REQUIRED / NEW_ATTEMPT_REQUIRED / OUT_OF_FILE_DOMAIN 是交付前的资格闸
+    //    （没有意图 / 候选已登记改候选要重开 Attempt / 计划范围越出任务文件域）。
+    'FILE_CONTENTION', 'EPOCH_STALE', 'REVISION_CONFLICT', 'ATTEMPT_MISMATCH', 'INVALID_PATHS',
+    'NO_ACTIVE_RESERVATION', 'NO_RECONCILING_RESERVATION', 'NO_INTENT', 'RECONCILING',
+    'REBOUND_FOR_RETRY', 'RESERVATION_ACTIVE', 'RESERVED', 'RETRY_RESERVATION_MISSING',
+    'SINGLE_WRITER_REQUIRED', 'OUT_OF_FILE_DOMAIN', 'WRITE_INTENT_REQUIRED', 'NEW_ATTEMPT_REQUIRED',
+    'RESERVATION_RECONCILING', 'SCOPE_MISMATCH', 'REPO_UNBOUND', 'INVALID_REPO',
+    'MISSING_SCOPE', 'MISSING_EPOCH', 'STOP_CONFIRMATION_REQUIRED', 'STOP_CONFIRMATION_DENIED',
+    'TASK_STILL_ACTIVE', 'TASK_NOT_EXECUTING',
+    //
+    // ② 交付子状态 / 集成 job / 裁决（S3 · S4 · R-4 · R-5 · R-6）：
+    //    delivery-store.mjs 的 DELIVERY_ERRORS、integration-runner.mjs、integration-worker.mjs、
+    //    integration-job-thread.mjs、routes/delivery.mjs、server.mjs 的 /api/deliveries/submit 与
+    //    集成线程桥。ENQUEUE_GATE 是"没到 ready 不许入队"；INVALID_TRANSITION / TERMINAL_STATE
+    //    是七值交付状态机的拒绝（terminal 与"这条没找到"分开）；JOB_CONTENTION 是
+    //    "同仓库同 target ref 已有活跃 job"；DELIVERY_NOT_READY / DELIVERY_NOT_INTEGRATED /
+    //    DELIVERY_ALREADY_EXISTS 是三个不同的时点；INVALID_VERIFY_CONFIG / NO_VERIFY_CONFIG 是
+    //    仓库验证配置坏了 vs 根本没配；WRITE_RESERVATION_MISSING / RESERVATION_RELEASE_FAILED
+    //    是集成期对预约台账的核对；USE_VERIFIED_SUBMISSION / INTEGRATION_NOT_WIRED 是
+    //    integration 模式（见上方 integrationMode 字段）下的两个**接线**判定；
+    //    INTEGRATION_RUNNER_ERROR / INTEGRATION_RUNNER_EXIT 把 worker 线程"抛了"与"退了"分开。
+    'ENQUEUE_GATE', 'INVALID_TRANSITION', 'TERMINAL_STATE', 'JOB_CONTENTION', 'JOB_NOT_FOUND',
+    'NOT_FOUND', 'DELIVERY_NOT_FOUND', 'DELIVERY_NOT_READY', 'DELIVERY_ALREADY_EXISTS',
+    'DELIVERY_NOT_INTEGRATED', 'INVALID_VERIFY_CONFIG', 'NO_VERIFY_CONFIG',
+    'WRITE_RESERVATION_MISSING', 'RESERVATION_RELEASE_FAILED', 'REPO_BINDING_CHANGED',
+    'SOURCE_MISSING', 'TARGET_REF_MISSING', 'TARGET_NOT_CHECKED_OUT', 'INVALID_SOURCE_COMMIT',
+    'INTEGRATION_RUNNER_ERROR', 'INTEGRATION_RUNNER_EXIT', 'INTEGRATION_NOT_WIRED',
+    'RECOVERY_CONFIRMATION_REQUIRED', 'USE_VERIFIED_SUBMISSION', 'VALIDATION_FAILED',
+    'VALIDATION_UNCONFIRMED', 'GENERAL_APPROVAL_REQUIRED', 'FORBIDDEN',
+    'MISSING_TASK_ID', 'MISSING_REPO',
+    //
+    // ③ git 接缝与候选应用（S3 · R-4 · I-9）：git-plumbing.mjs、integration-worker.mjs、server.mjs。
+    //    它们是**git 退出状态的具名翻译**（不是 shell 输出片段）：DIRTY_WORKSPACE 是"候选区有
+    //    未提交改动"（拒绝在脏区上快进）、FAST_FORWARD_FAILED / NON_FAST_FORWARD / HEAD_ADVANCED
+    //    是目标 ref 在候选期间动了、GIT_CONFLICT 是候选真的冲突（要人工裁决，不是重试）、
+    //    APPLY_UNVERIFIED 是"没验证就想接"、REF_CAS_FAILED 是 ref CAS 失败、
+    //    UNAPPLIED_AFTER_CRASH / WORKSPACE_OUT_OF_SYNC 是崩溃恢复对账的两种结果。
+    'APPLY_UNVERIFIED', 'COMMIT_TREE_FAILED', 'DIRTY_WORKSPACE', 'FAST_FORWARD_FAILED',
+    'GIT_CONFLICT', 'GIT_ERROR', 'HEAD_ADVANCED', 'HEAD_ADVANCED_LIMIT', 'NON_FAST_FORWARD',
+    'REF_CAS_FAILED', 'UNAPPLIED_AFTER_CRASH', 'WORKSPACE_OUT_OF_SYNC', 'WORKTREE_FAILED',
+    'BASE_MISSING', 'DIFF_FAILED',
+    //
+    // ④ 新路由共用的请求层拒绝码：UNAUTHORIZED / BAD_BODY / BAD_JSON / MISSING_ACTOR /
+    //    INVALID_TARGET_REF 由 routes/delivery.mjs 与 routes/write-intent.mjs 共用
+    //    （metrics.mjs 也回 UNAUTHORIZED）。它们与既有的 MISSING_PARAM 同族：描述**这次请求**
+    //    哪里不合法，与上面三组的**系统状态**码是两类东西，混在一起会让调用方去改请求。
+    'UNAUTHORIZED', 'BAD_BODY', 'BAD_JSON', 'MISSING_ACTOR', 'INVALID_TARGET_REF',
+
+    // ── 会话/智能体面与工作流包（main a8ff20de 之后合入的 agent-conversations / workflow-packs 线）──
+    //
+    // 来源与理由（逐条登记，不加前缀通配）：
+    //   · team-hub/agent-conversations.mjs（22 条）——会话/派单状态机的具名码：找不到对象
+    //     （AGENT_NOT_FOUND / CONVERSATION_NOT_FOUND / MESSAGE_NOT_FOUND / COMMAND_NOT_FOUND）、
+    //     拒绝这次动作（TASK_HELD / TASK_TERMINAL / HOLD_NOT_OWNED / TARGET_MISMATCH /
+    //     TARGET_AMBIGUOUS / UNSUPPORTED_CAPABILITY / IDEMPOTENCY_CONFLICT）、需要人工或重试
+    //     （RECONCILIATION_REQUIRED / STALE_RUN_TARGET / OUTCOME_UNKNOWN / TASK_VERSION_CONFLICT）、
+    //     以及请求体/事件非法（INVALID_BODY / INVALID_EVENT / INVALID_INTENT）与
+    //     生命周期事实（AGENT_ARCHIVED / AGENT_NOT_REGISTERED / QUESTION_RESOLVED / EVENT_LIMIT）。
+    //   · team-hub/server.mjs（19 条）——智能体节点/模型/工具装配的解析码
+    //     （AGENT_MODEL_CONFIG_* / AGENT_NODE_* / AGENT_TOOL_CONFIG_UNRESOLVED）与
+    //     智能体工作流契约码（AGENT_WORKFLOW_*）；DESKTOP_AUTH_REQUIRED 是请求被桌面鉴权
+    //     通道拒绝时回的码（同族见 workbench 侧同名登记）。
+    //   · team-hub/routes/agents.mjs（1 条）——AGENT_REQUEST_FAILED：上游请求失败，请求层的事。
+    //   · team-hub/run-store.mjs（1 条）——BAD_AGENT_SELECTION_SNAPSHOT：任务上的
+    //     agent_selection_snapshot 反序列化失败（数据坏了，不是配置）。
+    //   · team-hub/routes/workflow-packs.mjs（1 条）——WORKFLOW_PACK_NOT_INSTALLABLE：
+    //     这份工作流包当前不可安装（清单/平台判据不满足）。
+    //
+    // 它们全是**错误码/状态字面量**，没有任何一处是 `process.env.X` 的键名。
+    'AGENT_ARCHIVED', 'AGENT_NOT_FOUND', 'AGENT_NOT_REGISTERED', 'COMMAND_NOT_FOUND',
+    'CONVERSATION_NOT_FOUND', 'EVENT_LIMIT', 'HOLD_NOT_OWNED', 'IDEMPOTENCY_CONFLICT',
+    'INVALID_BODY', 'INVALID_EVENT', 'INVALID_INTENT', 'MESSAGE_NOT_FOUND',
+    'OUTCOME_UNKNOWN', 'QUESTION_RESOLVED', 'RECONCILIATION_REQUIRED', 'STALE_RUN_TARGET',
+    'TARGET_AMBIGUOUS', 'TARGET_MISMATCH', 'TASK_HELD', 'TASK_TERMINAL',
+    'TASK_VERSION_CONFLICT', 'UNSUPPORTED_CAPABILITY',
+    'AGENT_MODEL_CONFIG_UNRESOLVED', 'AGENT_MODEL_CONFIG_UNSUPPORTED', 'AGENT_NODE_MISMATCH',
+    'AGENT_NODE_NOT_READY', 'AGENT_NODE_PROVIDER_INCOMPATIBLE', 'AGENT_NODE_WORKSPACE_MISMATCH',
+    'AGENT_NODE_WORKSPACE_UNAVAILABLE', 'AGENT_TOOL_CONFIG_UNRESOLVED', 'AGENT_WORKFLOW_ACTOR_MISMATCH',
+    'AGENT_WORKFLOW_CONTRACT_INVALID', 'AGENT_WORKFLOW_DESIGN_ARTIFACT_MISSING',
+    'AGENT_WORKFLOW_GOAL_CANCELED', 'AGENT_WORKFLOW_GRAPH_INVALID',
+    'AGENT_WORKFLOW_HANDOFF_EVIDENCE_MISSING', 'AGENT_WORKFLOW_INSTANCE_MISSING',
+    'AGENT_WORKFLOW_SNAPSHOT_MISSING', 'AGENT_WORKFLOW_TARGET_MISSING', 'AGENT_WORKFLOW_TASK_STATE',
+    'DESKTOP_AUTH_REQUIRED',
+    'AGENT_REQUEST_FAILED',
+    'BAD_AGENT_SELECTION_SNAPSHOT',
+    'WORKFLOW_PACK_NOT_INSTALLABLE',
   ],
   // team-hub 的 CHAT_ 前缀覆盖了插件的提示词预算变量（CHAT_CTX_*）：它们是**插件**读的配置，
   // team-hub 不读，登记为外来变量，避免误报成「拼写错误」（P3-4）。

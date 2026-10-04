@@ -10,7 +10,6 @@ export const SCHEMA = defineSchema({
   title: '军团指挥台（workbench 宿主：静态托管 + /hub 代理 + 文件/浏览器 API）',
   prefixes: ['DSH_WORKBENCH_', 'DSH_WEB_', 'DSH_HUB_'],
   fields: [
-    { key: 'desktopMode', env: 'LEGION_DESKTOP_MODE', type: 'bool', default: false, doc: '桌面模式：敏感读写及代理入口强制鉴权' },
     // ── 监听与鉴权（P3-2 统一项）──
     // 0 合法（Node listen(0) = OS 分配空闲端口）；契约测试有用 `?root=` + 导入式用法，勿收紧为 >= 1
     { key: 'port', env: 'DSH_WORKBENCH_PORT', cli: 'port', type: 'int', default: 5173, min: 0, max: 65535, doc: '监听端口（生产实例默认 5173；0 = 由 OS 分配）' },
@@ -39,6 +38,22 @@ export const SCHEMA = defineSchema({
     { key: 'shotEnable', env: 'DSH_WEB_SHOT_ENABLE', type: 'bool', default: false, doc: '启用截图能力（默认关闭；需本机浏览器）' },
     { key: 'shotBrowser', env: 'DSH_WEB_SHOT_BROWSER', type: 'path', default: '', doc: '截图用的浏览器可执行文件路径（空=自动探测）' },
     { key: 'shotDir', env: 'DSH_WEB_SHOT_DIR', type: 'path', default: '', doc: '截图输出目录（空=data/web-shots）' },
+    // ── 与 team-hub 共用的三把键（interface-preview 拉起隔离 hub 用）──
+    //
+    // ★ 它们的**归属**是 team-hub（本进程自己的 hub 连接项只有 DSH_HUB_UPSTREAM）：
+    //   `workbench/scripts/interface-preview.mjs` 把 DB 路径 / 端口 / 监听地址写进**子进程**环境，
+    //   用来在预览时拉起一个隔离的 team-hub 实例。登记为字段与上面 TEAM_HUB_TOKEN 同例——
+    //   同一个变量在多进程里各有一份声明，语义必须逐字一致（P3-4 收口过的问题）。
+    { key: 'previewHubDb', env: 'TEAM_HUB_DB', type: 'path', default: '', doc: 'team-hub 的 SQLite 库路径（归属 team-hub）：preview 脚本用它把隔离 hub 指到夹具库' },
+    { key: 'previewHubHost', env: 'TEAM_HUB_HOST', type: 'string', default: '', doc: 'team-hub 的监听地址（归属 team-hub）：preview 脚本注入给隔离 hub' },
+    { key: 'previewHubPort', env: 'TEAM_HUB_PORT', type: 'int', default: 0, min: 0, max: 65535, doc: 'team-hub 的监听端口（归属 team-hub）：preview 脚本注入给隔离 hub（0=不指定）' },
+    // ── 前端静态资源的基准路径（Vite 构建期注入，不是进程环境变量）──
+    //
+    // ★ `workbench/src/components/{Sidebar,WorkspaceNavigation}.tsx` 用的是
+    //   `import.meta.env.BASE_URL`——它由 Vite 在**构建时**替换成字面量；
+    //   运行时没有这个进程环境变量，也不该由 Legion 去设。扫描器按"env 读取点"报出来，
+    //   因此在此显式登记并写明它的真实归属（Vite 构建期常量）。
+    { key: 'assetBaseUrl', env: 'BASE_URL', type: 'string', default: '/', doc: 'Vite 在构建期注入的静态资源基准路径（import.meta.env.BASE_URL），不是进程环境变量' },
   ],
   // `envBytes(name, def)` 与配置读取辅助里的 `process.env[name]`（键名来自上面的字面量）
   dynamicEnvReads: [
@@ -46,7 +61,6 @@ export const SCHEMA = defineSchema({
     { file: 'workbench/scripts/serve.mjs', expr: 'process.env[env[name]]', reason: '配置读取辅助按映射表取 env；键名集合已在上方声明' },
   ],
   nonEnvLiterals: [
-    'DESKTOP_AUTH_REQUIRED', // Desktop startup refusal, not an environment variable.
     'DELETE', 'OPTIONS', 'PATCH', 'ENOENT', 'ENOTDIR', 'INCOMPLETE', 'OFFSET_MISMATCH', 'SIGINT', 'SIGTERM',
     // PRT-507 模型设置页（workbench/src/modelSettings.ts）。这两个是**探测判定的码**，
     // 由 hub 的运行时契约（runtime/contracts/model-probe.mjs 的 PROBE_VERDICT_CODES）产生，
@@ -55,6 +69,18 @@ export const SCHEMA = defineSchema({
     //   UNCLASSIFIED       — 无法归类。**不能猜成"暂时问题"**，否则用户会反复重试
     //                        一个永远不会好的配置错误，而重试对它毫无作用。
     'CAPABILITY_MISSING', 'UNCLASSIFIED',
+    // T-170（并行任务文件冲突治理 S4/R-8）：任务详情页展示的**实时冲突码**。
+    // 它是 team-hub `write-intent-store.mjs` 的冲突码（同设计 §3.1：等待而不是执行失败），
+    // workbench 只是把 `liveContention.code` 翻成界面提示（TaskDetailModal.tsx:453）——
+    // 不是本进程读的环境变量。
+    'FILE_CONTENTION',
+    // ── 预览脚本与桌面鉴权通道的字面量 ──
+    //   · COMMIT / ROLLBACK —— workbench/scripts/interface-preview.mjs 给夹具库播种时用的
+    //     SQL 事务语句名（`db.exec('COMMIT')`），形如 env 键但不是配置。
+    //   · DESKTOP_AUTH_REQUIRED —— workbench/scripts/serve.mjs 在桌面模式下拒绝未鉴权写操作时
+    //     回的码（与 product/local-auth.mjs 的 DESKTOP_* 同族；那条 desktop 线正在撤，
+    //     但**产出这个码的代码还在**，因此登记也必须还在）。
+    'COMMIT', 'ROLLBACK', 'DESKTOP_AUTH_REQUIRED',
   ],
   // 前缀撞名的外部变量：DSH 宿主自己用 DSH_WEB_URL 表示「Web GUI 地址」，
   // 与 workbench 的 DSH_WEB_*（P2-8 浏览器助手配置）同名空间重叠。它不属于 workbench 的配置面，

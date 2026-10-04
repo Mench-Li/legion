@@ -27,6 +27,8 @@ import { join } from 'node:path'
 
 import { loadUpdateConfig } from '../product/update/config.mjs'
 import { createUpdateClient } from '../product/update/client.mjs'
+import { runInstallTransaction } from '../product/update/install.mjs'
+import { writeTransactionFile, clearTransactionFile } from '../product/update/helper.mjs'
 import { createUpdateService, registerUpdateIpc } from './update-service.mjs'
 
 /** 桌面端要读的"当前产品版本"来源（与 launcher 的 shared-backend 同一份文件）。 */
@@ -64,7 +66,14 @@ export async function resolveUpdateRuntime({
   cacheDir,
   channel = null,
   currentVersion = null,
-  installer = null,
+  /** `undefined` = 用桌面默认实现（`buildDesktopInstaller`）；`null` = 明确不接线。 */
+  installer = undefined,
+  /** Launcher 的 bridge 客户端（`runtime.mjs` 的 `createBridgeClient`）。 */
+  bridge = null,
+  dataDir = null,
+  nodePath = process.execPath,
+  helperEntry = null,
+  drainTimeoutMs = null,
   fetchImpl = globalThis.fetch,
   now = () => Date.now(),
   random = Math.random,
@@ -90,7 +99,20 @@ export async function resolveUpdateRuntime({
   const config = loadUpdateConfig({ installRoot, channel })
   // ★ 配置不可用时**仍然**把客户端建起来：面板要能显示"为什么不可用"。
   //   直接返回 `{ok:false}` 会让面板只能显示一句泛泛的失败。
+  //
+  // 安装事务：把 Stage C 的接线装进去。默认实现见 `buildDesktopInstaller`
+  // （不内联在这里，是为了它能被单独读到、单独测到）。
+  const resolvedInstaller = installer === undefined
+    ? buildDesktopInstaller({
+      bridge, installRoot, cacheDir, nodePath, now, log,
+      dataDir: dataDir ?? join(cacheDir, '..'),
+      helperEntry: helperEntry ?? defaultHelperEntry(installRoot),
+      drainTimeoutMs,
+    })
+    : installer
+
   const client = createUpdateClient({
+    installer: resolvedInstaller,
     config: config.usable === true ? config : {
       ok: false, usable: false, code: config.code, reason: config.reason,
       channel: config.channel ?? channel, host: config.host ?? null,
@@ -98,7 +120,6 @@ export async function resolveUpdateRuntime({
     },
     cacheDir,
     currentVersion: version,
-    installer,
     fetchImpl,
     now, random, setTimer, clearTimer, log,
   })
@@ -139,6 +160,269 @@ export async function resolveUpdateRuntime({
     markInteractive: () => client.markInteractive(),
     close: () => { unregister(); service.close() },
   })
+}
+
+/**
+ * 构造 Stage C 的安装事务接线。
+ *
+ * 设计 §8 的九步里，第 1–6 步在 Launcher/主进程侧，第 7–9 步交给独立 helper。
+ * 这个函数把两者接起来，并把"当前进程做得到的事"与"必须交给 helper 的事"
+ * 分开：
+ *
+ *   · 停止认领 / 等待在途任务 / 停止服务 —— 通过 bridge 请求 Launcher；
+ *   · 启动 helper —— 用随包 Node 起一个**独立进程**（设计 §3 line 57）。
+ *
+ * 刻意不做的事：**不在这个进程里替换程序目录**。Electron 主进程是要被
+ * 停掉的那一批进程之一，让它在停掉自己之后继续负责恢复是不可能的
+ * （设计 §3：「不得由已退出的 Electron 进程承担恢复责任」）。
+ *
+ * @param {object} args
+ * @param {object} args.bridge       `runtime.mjs` 的 bridge 客户端（可为 null）
+ * @param {string} args.dataDir
+ * @param {string} args.installDir
+ * @param {string} args.nodePath    随包 Node（打包时在 resources/node/node.exe）
+ * @param {string} args.helperEntry helper 的入口脚本
+ */
+export function createInstallTransactionRunner({
+  bridge = null,
+  dataDir,
+  installDir,
+  nodePath = process.execPath,
+  helperEntry = null,
+  spawnImpl = null,
+  now = () => Date.now(),
+  drainTimeoutMs = null,
+} = {}) {
+  if (typeof dataDir !== 'string' || dataDir === '') throw new Error('createInstallTransactionRunner 需要 dataDir')
+  if (typeof installDir !== 'string' || installDir === '') throw new Error('createInstallTransactionRunner 需要 installDir')
+
+  const forward = async (type, payload = {}) => {
+    if (bridge === null || typeof bridge.request !== 'function') {
+      throw Object.assign(new Error(`没有可用的后台通道来执行 ${type}`), { code: 'UPDATE_LAUNCHER_UNAVAILABLE' })
+    }
+    return bridge.request(type, payload)
+  }
+
+  return Object.freeze({
+    /**
+     * 第 2 步：准备目标 DSH 精确版本与补丁（**不改变当前运行时活动指针**）。
+     *
+     * 设计 §8：「网络失败在此停止。」所以这一步的失败就是 `not-started`，
+     * 而它由 Launcher 的 `prepare-runtime` 承担（那里才知道 DSH 的精确版本
+     * 与补丁该从哪儿来）。
+     */
+    async prepare({ identity }) {
+      try {
+        const result = await forward('prepare-runtime', { releaseId: identity?.releaseId ?? null })
+        return { ok: result?.state === 'prepared', detail: result?.state ?? null }
+      } catch (error) {
+        return { ok: false, reason: error?.message ?? String(error) }
+      }
+    },
+
+    /**
+     * 启动独立 helper（第 7 步的前半）。
+     *
+     * 事务文件由 `runInstallTransaction` 之外的代码先写好——这里只负责
+     * **起进程**，并立刻把控制权交出去。启动之后 Electron 就地退出。
+     */
+    async spawnHelper(args) {
+      if (helperEntry === null) {
+        return { ok: false, reason: '没有配置 helper 入口（打包时应写入 resources/update/helper-entry.mjs）' }
+      }
+      const spawn = spawnImpl ?? (await import('node:child_process')).spawn
+      const child = spawn(nodePath, [helperEntry], {
+        cwd: installDir,
+        windowsHide: true,
+        // ★ `detached: true` + `stdio: 'ignore'`：它必须在父进程退出之后
+        //   继续跑。用管道的话，父进程一退出，子进程的 stdout 就没有读者，
+        //   某些平台上写日志会直接失败并杀掉它——而那正好是切换程序的那一步。
+        detached: true,
+        stdio: 'ignore',
+        env: {
+          ...process.env,
+          LEGION_UPDATE_TXN: args.txnId,
+          LEGION_UPDATE_DATA_DIR: dataDir,
+          LEGION_UPDATE_INSTALL_DIR: installDir,
+          ...(args.cacheDir === null ? {} : { LEGION_UPDATE_CACHE_DIR: args.cacheDir }),
+        },
+      })
+      if (child === null || child === undefined || typeof child.pid !== 'number') {
+        return { ok: false, reason: 'helper 进程没有启动' }
+      }
+      child.unref?.()
+      return { ok: true, pid: child.pid }
+    },
+
+    /**
+     * 第 6 步的退出核对。
+     *
+     * 「helper 校验退出身份与进程树，句柄未释放则安全中止。」真实核对要问
+     * Launcher（它才知道受管进程树的样子），所以这里转成一次 bridge 请求。
+     */
+    async verifyExit() {
+      try {
+        const result = await forward('status')
+        const processes = Array.isArray(result?.processes) ? result.processes : []
+        const alive = processes.filter((p) => p?.state !== 'stopped' && p?.state !== 'ready')
+        // `ready` 也算"还在运行"：调用方必须在请求这一步之前先 stop。
+        const stillRunning = processes.filter((p) => p?.state !== 'stopped')
+        if (stillRunning.length > 0) {
+          return { ok: false, detail: `仍有 ${stillRunning.length} 个受管进程在运行（${stillRunning.map((p) => p.key).join(', ')}）` }
+        }
+        void alive
+        return { ok: true }
+      } catch (error) {
+        return { ok: false, detail: `无法确认受管进程状态：${error?.message ?? error}` }
+      }
+    },
+
+    forward,
+    drainTimeoutMs,
+    now,
+  })
+}
+
+/**
+ * 打包时 helper 入口的位置。
+ *
+ * ★ 它**不在** `installRoot` 里。设计 §3 line 57 要求 helper 及其所需 Node
+ *   文件「不属于本次待切换的目录」——反过来的话，一次"替换程序目录 → 重启
+ *   → 新版本起不来"的过程里，负责恢复的那段代码本身已经被换成了未验证的
+ *   新版本代码。所以打包时它落在 `resources/update/`，与 `resources/legion/`
+ *   平级。
+ */
+export function defaultHelperEntry(installRoot) {
+  return join(installRoot, '..', 'update', 'helper-entry.mjs')
+}
+
+/**
+ * 构造桌面端的安装事务实现（设计 §8 第 1–6 步 + 交接）。
+ *
+ * 它把"当前进程做得到的事"与"必须交给 helper 的事"分开：
+ *
+ *   · 停止认领 / 等待在途任务 / 停止服务 —— 通过 bridge 请求 Launcher；
+ *   · 写事务文件、签发一次性凭证、启动 helper —— 在**主进程**里做，
+ *     因为这些输入必须来自主进程，而不是渲染进程（设计 §7 line 162）。
+ *
+ * 刻意不做的事：**不在这个进程里替换程序目录**。Electron 主进程正是要被
+ * 停掉的那一批进程之一，让它在停掉自己之后继续负责恢复是不可能的
+ * （设计 §3：「不得由已退出的 Electron 进程承担恢复责任」）。
+ */
+export function buildDesktopInstaller({
+  bridge = null,
+  installRoot,
+  dataDir,
+  cacheDir,
+  nodePath = process.execPath,
+  helperEntry = null,
+  now = () => Date.now(),
+  drainTimeoutMs = null,
+  log = () => {},
+} = {}) {
+  if (typeof installRoot !== 'string' || installRoot === '') throw new Error('buildDesktopInstaller 需要 installRoot')
+  if (typeof dataDir !== 'string' || dataDir === '') throw new Error('buildDesktopInstaller 需要 dataDir')
+
+  return Object.freeze({
+    async install({ identity, release, packagePath, pendingTasks = null, onStage = () => {}, signal = null } = {}) {
+      const runner = createInstallTransactionRunner({
+        bridge, dataDir, installDir: installRoot, nodePath, helperEntry, now, drainTimeoutMs,
+      })
+      const current = readRuntimeManifest(installRoot)
+      const stage = (name) => { try { onStage(name) } catch (error) { log(`[update] 阶段回调报错：${error?.message ?? error}`) } }
+
+      // ★ 事务 ID 在这里生成，并同时进入：日志、活动描述符、凭证、事务文件。
+      //   四处用同一个 ID 是 helper 能判断"这是本次要做的"的前提。
+      const txnId = `ut-${now().toString(36)}-${Math.floor(Math.random() * 0xffffffff).toString(16)}`
+      stage('waiting-for-tasks')
+
+      // ★ 把"入参不完整"折成一次明确的失败结果，而不是让它抛出去。
+      //   `runInstallTransaction` 对不完整输入是**抛**的（那是对的：那是编程
+      //   错误），但这条调用链的另一端是 IPC —— 一次抛出去会让渲染进程拿到
+      //   一个空的错误对象，而用户看到的是一句没有内容的失败。
+      if (release === null || release === undefined) {
+        return { ok: false, code: 'update-install-failed', reason: '没有已验证的发行清单，无法开始安装' }
+      }
+      if (typeof packagePath !== 'string' || packagePath === '') {
+        return { ok: false, code: 'update-not-ready', reason: '没有已就绪的更新包' }
+      }
+
+      return runInstallTransaction({
+        paths: {
+          installDir: installRoot,
+          dataDir,
+          configPath: join(dataDir, 'config.json'),
+          backupDir: join(dataDir, 'backups'),
+          cacheDir: cacheDir ?? join(dataDir, 'cache'),
+          helperDir: helperEntry === null ? null : join(helperEntry, '..'),
+        },
+        current,
+        release,
+        identity,
+        packagePath,
+        txnId,
+        // `tasks: null` 会被预检拦成"未知"——那是刻意的：真实部署里调用方
+        // 必须给出任务读数（`update.install` 的 `pendingTasks`）。
+        tasks: Array.isArray(pendingTasks) ? pendingTasks.map((item) => (typeof item === 'string' ? { id: item, state: 'running' } : item)) : null,
+        stopClaiming: () => runner.forward('stop-claiming'),
+        drainInFlight: async () => {
+          const status = await runner.forward('status')
+          const processes = Array.isArray(status?.processes) ? status.processes : []
+          // 受管服务仍在"运行"就说明任务可能还在跑。真正的在途任务读数
+          // 由 Launcher 提供，这里只用它做一次保守的复核。
+          const active = processes.filter((p) => p?.state === 'running' || p?.state === 'starting')
+          return active.length === 0
+            ? { ok: true, detail: '受管服务状态已收敛' }
+            : { ok: false, reason: `${active.length} 个受管服务仍在运行（${active.map((p) => p.key).join(', ')}）` }
+        },
+        stopServices: () => runner.forward('stop'),
+        spawnHelper: async (spawnArgs) => {
+          // ★ 事务文件写在这里：路径与内容都来自**主进程**，渲染进程无法影响。
+          //   它必须在启动 helper **之前**落盘，且与凭证绑定同一个 txnId
+          //   与包摘要（`credential.mjs` 的 MAC 会拒掉任何改动）。
+          writeTransactionFile(dataDir, {
+            txnId: spawnArgs.txnId,
+            fromVersion: spawnArgs.fromVersion,
+            toVersion: spawnArgs.toVersion,
+            releaseId: spawnArgs.releaseId,
+            packagePath: spawnArgs.packagePath,
+            packageSha256: spawnArgs.packageSha256,
+            backupDir: join(dataDir, 'backups'),
+            backupSnapshotRoot: spawnArgs.backupSnapshotRoot,
+            migrations: spawnArgs.migrations ?? [],
+            // 健康探针跨不过进程边界（它是一个函数），所以由 helper 自己
+            // 在进程内构造；这里只留超时。
+            healthProbe: null,
+            healthTimeoutMs: 30_000,
+          })
+          const started = await runner.spawnHelper(spawnArgs)
+          if (started.ok === true) stage('installing')
+          return started
+        },
+        verifyExit: () => runner.verifyExit(),
+        signal,
+        now,
+        requireSignature: false,
+      }).then((result) => {
+        if (result.verdict === 'handed-off') stage('installing')
+        else if (result.code === 'install-drain-timeout') stage('tasks-timeout')
+        else if (result.verdict === 'maintenance-required') stage('prepare-failed')
+        // 失败路径上把事务文件清掉：留着一份"指向一次没开始的升级"的事务
+        // 文件会让下一次恢复判定读到一个不存在的事务。
+        if (result.verdict !== 'handed-off') clearTransactionFile(dataDir)
+        return result
+      })
+    },
+  })
+}
+
+/** 读运行时清单（当前产品清单）。读不出来返回 null——预检会因此拦下。 */
+export function readRuntimeManifest(installRoot) {
+  try {
+    return JSON.parse(readFileSync(runtimeManifestPath(installRoot), 'utf8'))
+  } catch {
+    return null
+  }
 }
 
 /**

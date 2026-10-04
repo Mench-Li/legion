@@ -381,14 +381,30 @@ export function identityLabel(identity) {
 // 自检
 // ---------------------------------------------------------------------------
 
+/**
+ * 样例产品清单。
+ *
+ * ★ 字段名必须与仓库里真正的 `product/release/runtime-manifest.json` 一致：
+ *   格式字段叫 **`manifestFormat`**（不是 `format`），而且
+ *   `runtimeContractVersion`/`packProtocolVersion`/`schemaVersion` 是必需的。
+ *
+ *   早先这里写的是 `format`，而 `validateRelease` 只检查"它是个对象 +
+ *   摘要对得上 + 版本一致"，所以样例一路通过——直到发布脚本真的去调
+ *   `validateManifest` 才暴露。一份"看起来对但字段名不对"的样例，正是让
+ *   判据在**最不该暴露的时刻**才暴露的原因。
+ */
 function sampleProductManifest(productVersion = '1.1.0') {
   return {
-    format: 'legion/version-manifest@1',
+    manifestFormat: 'legion/version-manifest@1',
     productVersion,
     legionVersion: productVersion,
     dshVersion: '0.8.3',
     dshCompositionPatchVersion: 2,
+    runtimeContractVersion: 1,
+    packProtocolVersion: 1,
+    schemaVersion: 1,
     channel: 'stable',
+    releasedAt: '2026-10-03T00:00:00.000Z',
   }
 }
 

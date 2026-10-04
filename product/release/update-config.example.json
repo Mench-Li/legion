@@ -1,0 +1,33 @@
+{
+  "_comment": [
+    "Legion 更新地址配置（设计 §4/§11 的「部署时填写」）。",
+    "",
+    "这个文件在**打包时**被写入 installRoot/product/release/update-config.json，",
+    "客户端只读它。示例里的域名与 IP 都不可用，正式发布前必须替换。",
+    "",
+    "★ 通道各自写 origin/prefix，而不是一个全局开关：",
+    "   一个全局的 allowInsecureHttp 会在某次为 internal 打开它时让 stable 也走 HTTP。",
+    "   stable 上的 HTTP 意味着中间人可以把清单换成任意内容——而签名能挡住伪造，",
+    "   挡不住'把客户端引到一个只提供旧版清单的托管'这种降级。",
+    "",
+    "★ 没有域名时不把自签证书或关闭证书验证作为正式方案（计划文档收尾原话）。",
+    "   所以测试通道用 http + 显式 allowInsecureHttp，生产通道必须是 https。"
+  ],
+  "channels": {
+    "stable": {
+      "origin": "https://updates.example.com",
+      "prefix": "/legion"
+    },
+    "canary": {
+      "origin": "https://updates.example.com",
+      "prefix": "/legion"
+    },
+    "internal": {
+      "origin": "http://117.72.146.36",
+      "prefix": "/test/legion",
+      "allowInsecureHttp": true
+    }
+  },
+  "defaultChannel": "stable",
+  "checkOnStartup": true
+}

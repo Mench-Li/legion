@@ -179,7 +179,16 @@ function startUpdateRuntime() {
       updateRuntime = await resolveUpdateRuntime({
         installRoot,
         cacheDir,
+        // 数据目录与 update-config 读的是同一份安装布局；`--data-dir` 的
+        // 覆盖由 Launcher 负责，这里用 userData 下的固定位置。
+        dataDir: join(app.getPath('userData'), 'legion-data'),
         desktopDir,
+        // ★ 安装事务要通过 bridge 请求 Launcher 停认领/停服务。
+        //   它是**同一批要被停掉的进程**的控制通道，所以必须在 Electron 退出
+        //   之前完成"停止服务"那一步；切换程序本身交给独立 helper。
+        get bridge() { return bridge },
+        nodePath,
+        helperEntry: join(process.resourcesPath ?? installRoot, 'update', 'helper-entry.mjs'),
         onNotify: (snapshot) => {
           // 主动提醒（设计 §7 line 146）：同一发行 24 小时内不重复。
           // 只有托盘气泡，不弹模态窗口——自动检查不该打断用户工作。

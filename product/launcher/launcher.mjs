@@ -91,6 +91,30 @@ import {
 } from './run-record.mjs'
 import * as nodeFs from 'node:fs'
 import { publishBackend } from './shared-backend.mjs'
+// 升级维护闸门（自动更新设计 §8 line 182）。**只看磁盘**：维护屏障文件与
+// 事务日志。不读任何 UI 状态——设计里那句「不只依赖最后一条 UI 状态」
+// 说的正是这件事。
+import { startupGate } from '../update/barrier.mjs'
+import { planRecovery } from '../update/journal.mjs'
+
+/**
+ * 默认的升级维护闸门。
+ *
+ * `dataDir` 为空时放行：没有数据目录就说明这次启动还没进入"有业务数据"
+ * 的世界（首次设置路径），门禁本身没有意义。
+ *
+ * 出任何异常也放行——但**只放行这一条**：一次"读屏障时抛了个异常"不该
+ * 让 Legion 完全起不来，而屏障本身读不出来时 `readBarrier` 已经按
+ * "维护中"处理（见 `barrier.mjs`），所以真正的危险路径不靠这个兜底。
+ */
+function defaultUpdateGate({ dataDir = null } = {}) {
+  if (typeof dataDir !== 'string' || dataDir === '') return Object.freeze({ allowed: true })
+  try {
+    return startupGate({ dataDir, planRecovery: (args) => planRecovery(args) })
+  } catch {
+    return Object.freeze({ allowed: true, code: null, reason: null })
+  }
+}
 
 /** 产品级状态 → 用户可见文案（spec §6.3 的「产品状态」列）。 */
 export const PRODUCT_STATE_TEXT = Object.freeze({
@@ -281,6 +305,16 @@ export function createLauncher({
   runtimeEnv = {},
   /** 日志策略（PRT-709）。缺省用 `DEFAULT_LOG_POLICY`。 */
   logPolicy = {},
+  /**
+   * 升级维护闸门（自动更新设计 §8 line 182）。
+   *
+   * 「新旧 Launcher 均识别未完成事务，在恢复结束前禁止正常业务启动。」
+   *
+   * 注入点而不是硬编码，是因为这条判据要能被"驱动到"——真实世界里没法按需
+   * 制造一次断电中断的升级事务。默认实现读**磁盘**上的维护屏障与事务日志
+   * （`product/update/barrier.mjs` + `journal.mjs`），不看任何 UI 状态。
+   */
+  updateGate = defaultUpdateGate,
   /**
    * 单实例锁的**拿锁实现**（PRT-708）。默认 `acquireSingleInstance`（真实现）。
    *
@@ -1485,6 +1519,33 @@ export function createLauncher({
 
     /** 只做检查，不启动任何东西。产品入口在真正启动前调用它。 */
     async preflight() {
+      // ── 升级维护闸门：排在**所有**检查之前（自动更新设计 §8 line 182）──
+      //
+      // 位置是这条判据的全部内容。一次升级中断时，数据库可能已经跑过一部分
+      // 迁移；而"端口占用""密钥库可读"这些检查此刻都可能通过——于是服务会
+      // 正常起来，开始往一个旧版本读不懂的结构上写。
+      //
+      // 反过来说：把一个"停在切换之前"（程序未被动过）的中断也算成
+      // "禁止启动"是对的——维护屏障在那时已经立着，恢复要先把屏障处理掉。
+      const gate = updateGate === null ? { allowed: true } : updateGate({ dataDir: layout.dataDir ?? null })
+      if (gate !== null && gate !== undefined && gate.allowed === false) {
+        return Object.freeze({
+          ok: false,
+          phase: 'update-maintenance',
+          code: gate.code ?? 'UPDATE_MAINTENANCE',
+          // 诊断走既有的 `diagnostics` 形状，所以桌面端与 CLI 不需要为它
+          // 新增一条渲染路径。
+          diagnostics: Object.freeze([
+            ...planDiagnostics,
+            Object.freeze({
+              severity: 'error', process: 'update', code: gate.code ?? 'UPDATE_MAINTENANCE',
+              message: gate.reason ?? 'Legion 正在维护中',
+              ...(typeof gate.advice === 'string' ? { advice: gate.advice } : {}),
+              ...(typeof gate.recoveryVerdict === 'string' ? { recoveryVerdict: gate.recoveryVerdict } : {}),
+            }),
+          ]),
+        })
+      }
       const blocking = planDiagnostics.filter((d) => d.severity === 'error')
       if (blocking.length > 0) {
         return Object.freeze({ ok: false, phase: 'plan', diagnostics: Object.freeze([...planDiagnostics]) })

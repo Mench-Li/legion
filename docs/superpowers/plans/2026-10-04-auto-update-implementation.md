@@ -557,17 +557,22 @@ node scripts/update/verify-host.mjs --origin <生产 origin> --prefix /legion \
 ## 7. 复现证据
 
 ```bash
-# 全部自动更新相关用例（549 条）
+# 全部自动更新相关用例（599 条）
 node --test product/update/*.test.mjs product/upgrade/*.test.mjs \
   desktop/update-*.test.mjs desktop/main.test.mjs \
   scripts/update/*.test.mjs product/launcher/update-gate.test.mjs \
+  product/launcher/desktop-bridge.test.mjs product/launcher/desktop-protocol.test.mjs \
+  product/launcher/launcher.test.mjs \
   desktop/scripts/shell-files.test.mjs desktop/scripts/update-payload.test.mjs
 
 # 全链路集成（发布 → 托管 → 检查 → 下载 → 事务 → helper → 提交）
 node --test product/update/integration.test.mjs
 
-# 接线层：六个读数的生产方
+# 接线层：六个读数的生产方 + 协议对齐
 node --test desktop/update-wiring.test.mjs
+
+# 错误码文案表的完备性
+node --test product/update/errors.test.mjs
 
 # 各模块的装载期自检汇总（22 层）
 node -e "import('./product/update/index.mjs').then(async m => console.log(JSON.stringify(await m.selfCheckAll(), null, 2)))"
@@ -580,9 +585,51 @@ node --test desktop/scripts/shell-files.test.mjs
 node scripts/ci/run-ci.mjs
 ```
 
-### 7.1 全量 CI 里**不属于本分支**的红灯（前存债务）
+### 7.1 全量 CI 的实际读数（`fc94ad8e`，57 分钟）
 
-`run-ci.mjs` 的九道门禁里，`env` 与 `boundary` 在本分支上是红的。逐条在
+```
+syntax PASS   env FAIL   boundary FAIL   deps PASS   build PASS
+test   FAIL   smoke PASS  stage PASS      doc PASS
+```
+
+**本分支自己的套件是全绿的**，包括门禁跑的那一份（不是我在本地挑着跑的子集）：
+
+```
+PASS product-update（自动更新：协议验签、下载缓存、状态机、事务与恢复）
+     exit=0 tests=344 pass=344 fail=0 skipped=0
+```
+
+`test` 阶段在这一台机器上共 **44 个套件红**（243 个套件绿）。这 44 个**不属于
+本分支**，判据分两层：
+
+**① 与我的改动相邻的那些，逐条在基点 `a8ff20de` 上对过账，读数完全相同。**
+
+| 文件 | 分支 | 基点 `a8ff20de` |
+|---|---|---|
+| `product/launcher/runtime-contract-wiring.test.mjs` | 3 过 / **9 失败** | 3 过 / **9 失败**（失败用例名逐条相同） |
+| `product/launcher/enforcement-identity.test.mjs` | 22 过 / **1 失败** | 22 过 / **1 失败** |
+| `scripts/config/config.test.mjs` | 47 过 / **6 失败** | 47 过 / **6 失败**（失败用例名逐条相同） |
+| `scripts/ci/dsh-boundary.mjs` | **8 处**违规 | **8 处**违规 |
+| `scripts/config/scan.mjs --check` | **187 项** | **187 项** |
+
+这几条是"我可能碰到的地方"，所以**必须**逐条对账，而不是"看起来像环境问题"。
+它们全部是**真进程／真 DSH 检出／真浏览器**那一类，在本机同时跑几十个真进程时
+超时被杀（`test` 阶段 3 430 秒里有相当一部分是 300 秒超时）。
+
+**② 其余的红灯分布在我**完全没有碰过**的目录**：`team-hub/routes`、
+`workbench/scripts`、`runtime/contracts`、`run-plane`、`route-family`、
+`role-pack`、`metrics`、`experience`…。本分支的 diff 只落在
+`product/update/`、`product/upgrade/`、`product/launcher/`（三个文件）、
+`desktop/`、`scripts/update/`、`scripts/config/scan` 的登记项与文档。
+
+★ 这一条也解释了**为什么本地子集全绿不等于 CI 绿**：门禁会跑 287 个套件，
+其中相当一部分要求真 DSH 检出、真浏览器、以及足够的机器资源。所以"我跑过了"
+这句话在本仓里必须说清楚**跑的是哪一份**——本文件的 §7 命令是更新相关的子集，
+而上面那 344 条是**门禁那一份**。
+
+### 7.2 那两道静态门禁为什么红（前存债务，逐条对过账）
+
+`env` 与 `boundary` 在本分支上是红的。逐条在
 本分支的基点 `a8ff20de` 上核对过，**数量与内容完全相同**，所以它们是前存
 债务，不是这次工作引入的：
 

@@ -85,7 +85,24 @@ describe('P3-4 插件配置：默认值与 schema 一致（非循环漂移检查
     // 消费模块拿到的就是同一份值（不是各自再读一次 env）
     assert.deepEqual(r.spaceDigest, { fileCap: 4000, digestBudget: 4000 })
     assert.deepEqual(r.norms, { g: 3000, s: 4000, t: 7000 })
-    for (const v of Object.values(r.sources)) assert.equal(v, 'default')
+    // ── 本断言的口径：**Legion 可配项**在"没设任何 Legion 变量"时必须全部来自默认值 ──
+    //
+    // ★ 例外只有一个，而且它必须被**显式说出来**（不是被静默跳过）：
+    //   `processPath`（env PATH）是 OS 给每个进程的既有事实，不是 Legion 的配置项
+    //   （读取点 `plugins/src/workflowTestRunner.ts:74`，用来定位 npm/node）。
+    //   它登记在 schema 的 `fields` 里是**必须的**——`scan --check` 的"直接读取点"判据只认
+    //   fields 的 envNames()；但也正因为它放进了 fields，配置引擎会为它算出来源，
+    //   而 PATH 在任何进程里都有值 ⇒ 来源恒为 `env`，永远不可能是 `default`。
+    //   ⇒ 这里把它排除出"必须来自默认值"的集合，并**反过来断言**它的来源就是 `env`：
+    //     这样"PATH 与七个预算字段不是一类东西"这件事在用例里是可见的。
+    const OS_ONLY_FIELDS = ['processPath']
+    for (const [k, v] of Object.entries(r.sources)) {
+      if (OS_ONLY_FIELDS.includes(k)) continue
+      assert.equal(v, 'default', `可配项 ${k} 在没设 Legion 变量时应来自默认值，实际 ${v}`)
+    }
+    for (const k of OS_ONLY_FIELDS) {
+      assert.equal(r.sources[k], 'env', `${k} 是 OS 提供的既有事实，来源必须如实报成 env`)
+    }
   })
 })
 

@@ -47,12 +47,18 @@ export const SCHEMA = defineSchema({
     // 为什么默认取 legacy 而不是 integration：这是**灰度开关**，没灰度的仓库必须行为不变
     // （README / docs 与 plugins 侧 `resolveIntegrationMode` 的回落值写的都是 legacy）。
     { key: 'integrationMode', env: 'LEGION_INTEGRATION_MODE', type: 'enum', choices: ['legacy', 'observation', 'integration'], default: 'legacy', doc: '合入通道模式（与 team-hub 同一把键）：legacy=旧直合并通道照旧；observation=只模拟判定不改派工；integration=旧通道一律拒绝并转唯一集成 worker（S6/R-6）' },
-    // ── OS 提供的可执行搜索路径 ──
+    // ── OS 提供的可执行搜索路径（不是本进程的产品配置）──
     //
-    // ★ 这是**真实读取**（`plugins/src/workflowTestRunner.ts:74` 的 `process.env.PATH ?? ''`），
-    //   用途是解析 npm/node 可执行文件的位置；不是 Legion 的可配置项，也不该由产品去"设默认值"。
-    //   登记为 fields（而不是 nonEnvLiterals）是本仓一贯口径：真的读了就按字段登记并说明它不是产品配置
-    //   （同 team-hub 的 USERNAME / USER / USERDOMAIN）。
+    // ★ `plugins/src/workflowTestRunner.ts:74` 的确**读**它（`process.env.PATH ?? ''`，用来定位 npm/node）。
+    //   为什么必须登记为 `fields` 而不是 `foreignEnv`：`scan --check` 的**直接读取点**判据
+    //   （`undeclaredReads`）只认 `fields` 的 `envNames()`；`foreignEnv` 只参与"疑似 env 字面量"
+    //   那一条判据。实测：写进 foreignEnv 后 `scan --check` 报「未声明 env 键（1）：PATH」。
+    //   （同 team-hub 的 USERNAME / USER / USERDOMAIN，也是 OS 事实但登记在 fields。）
+    //
+    // ★ 它与另外七个预算字段的**区别**必须记住：那七个是 Legion 可配项，"没设变量就取默认值"；
+    //   PATH 在任何进程里都有值，所以它的取值来源**永远是 `env`**。
+    //   `plugins/tests/config.test.mjs` 那条"没设 Legion 变量时所有字段都来自默认值"因此显式排除它
+    //   （并反过来断言它的来源就是 `env`）——那个例外是写在用例里的，不是被静默跳过的。
     { key: 'processPath', env: 'PATH', type: 'string', default: '', doc: 'OS 提供的可执行搜索路径（不是产品配置）：测试运行器用它定位 npm/node，并把解析结果转发给子进程' },
   ],
   // 动态下标读取：`runnerEnvironment()` 把白名单里的 OS 变量**逐字**复制给测试子进程

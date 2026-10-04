@@ -584,12 +584,14 @@ test('P3-4：plugins schema 覆盖插件真实读取的全部 env，且扫描器
   // ★ 2026-10-04 补第二个例外（`plugins/src/workflowTestRunner.ts:74`）：测试运行器直接读
   //   `process.env.PATH ?? ''` 用来定位 npm/node（新文件随 agent-workflow / desktop 线合入）。
   //   它**不是**产品配置，而是 OS 提供的可执行搜索路径，因此登记形态是
-  //   `plugins/config-schema.mjs` 的 fields（`processPath`，doc 写明「不是产品配置」），
-  //   与 team-hub 的 USERNAME / USER / USERDOMAIN 同例——真的读了就按字段登记，不塞进 nonEnvLiterals。
+  //   `plugins/config-schema.mjs` 的 **fields**（`processPath`）——★ 必须放 fields：
+  //   `scan --check` 的"直接读取点"判据只认 fields 的 envNames()，写进 foreignEnv 会报
+  //   「未声明 env 键（1）：PATH」（本批实测）。它是 OS 事实而非 Legion 可配项这一点，
+  //   由 `plugins/tests/config.test.mjs` 里那条显式例外（并反证其来源恒为 `env`）钉住。
   assert.deepEqual([...plugins.reads.keys()].sort(), ['LEGION_INTEGRATION_MODE', 'PATH'],
     'plugins 的直接 env 读取点变了（新增的读取点必须同时登记进 plugins/config-schema.mjs 的 fields）：'
     + JSON.stringify([...plugins.reads.keys()]))
-  // 这一份名单同样逐条对齐 fields：加一个键而不加读取点、或加了读取点而不进 fields，两个方向都会红。
+  // 这一份名单逐条对齐 fields：加一个键而不加读取点、或加了读取点而不进 fields，两个方向都会红。
   assert.deepEqual(PLUGINS.envNames().sort(), [
     'CHAT_CTX_BUDGET_CHARS', 'CHAT_CTX_DIGEST_BUDGET_CHARS', 'CHAT_CTX_FILE_CAP_CHARS',
     'LEGION_INTEGRATION_MODE',

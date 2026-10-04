@@ -187,16 +187,31 @@ curl "http://127.0.0.1:8787/api/chat/messages?conv=25&limit=200"  # 用户会话
 
 ## 7. 边界
 
-- 本次**改了**：`team-hub/agent-conversations.mjs`（`report()` 多播 + 不补播）、
-  `team-hub/agent-conversations.test.mjs`（+2 例）、`scripts/ci/run-ci.mjs`（登记下面那两个套件）。
-  **没有**改库、没有重启任何进程、没有动 `main`。
-- **部署要动一处并重启**：中枢侧改的是 `team-hub/server.mjs` 的依赖模块
-  （`agent-conversations.mjs`）⇒ 8787 独立进程与宿主外壳都要重启才生效。
+- 本次**改了**：`team-hub/agent-conversations.mjs`（`report()` 多播 + 不补播 + 标题后缀与存量补标题）、
+  `team-hub/agent-conversations.test.mjs`（+3 例）、`scripts/ci/run-ci.mjs`（登记下面那两个套件）、
+  `workbench/scripts/interface-preview.mjs`（不再读宿主的 `DSH_WEB_URL`，见下）。
+- **基线漂移与解冲突**：施工期间 `main` 自己前进了 4 个提交（desktop 线配置登记等），
+  其中两处与我的改动同文件（`workbench/scripts/config-schema.mjs`、`scripts/config/config.test.mjs`）
+  ——合并没有冲突。但**合并把一处我引入的配置面缺陷暴露了出来**：
+  `interface-preview.mjs` 读过 `process.env.DSH_WEB_URL`，而它在 workbench schema 里登记的是
+  **foreignEnv（DSH 宿主拥有）**。扫描器判的是**读取点**（`foreignEnv` 只豁免字面量与 unknownEnv），
+  于是 `scan --check --process=workbench` 红。已改为只认已声明的 `DSH_MODELS_BASE_URL`，
+  缺配置时打印一句怎么补。合并后 workbench / services-plugin 两个配置面 **PASS**。
+- **部署实况（2026-10-05 00:13 实测）**：
+  - `main` 已合入并 **8787 / 5173 已重启**（服务托管插件自愈拉起，新 PID 2460 / 13628）：
+    两个端口 200、`/hub/api/config` 200、WAL 每 3s 推进。
+  - **标题后缀已在生产库生效**：conv 3–10 全部变成 `XXX · 汇报流`，conv 24/25 保持不变。
+  - ★ **仍待一次 DSH 宿主重启**（`plugins/lib` 与宿主内插件族）：宿主进程启动于 21:53:51，
+    而新 `lib` 构建于 00:12:29 ⇒ 宿主内跑的仍是**旧**的守护与 services-plugin。
+    后果两条：① 守护的岗位身份/任务上下文接线未生效（BUG-002 的第二半）；
+    ② services-plugin 不会注入 `DSH_MODELS_BASE_URL`（日志实见 `modelsBaseUrl=(空)`）
+    ⇒ **BUG-001 的注入侧要等这次重启才生效**。
 - **`agent-conversations` / `agent-main-chat` 两个套件此前没有任何 CI 登记**（一次都没被执行过），
   本次按 BUG-002 的同一处置**登记**（不加 `EXEMPT`）：这一族正是"汇报投影"的契约所在，
   而 BUG-003 的现场在这两个文件里没有任何一条断言在管。
 - **不做时间驱动汇报**（用户确认）：§7.2 的设计原样保留——长任务在两次状态变化之间不会
   产生"仍在努力"式消息。要改这条属于新增能力，不是本 Bug。
+- **修法 C（单入口）已出方案**：`docs/bugs/BUG-003-C-plan-single-entry.md`（未实施）。
 - 上面 ① 的第一版对账脚本有两处会得出相反结论的错法，都已改正并留痕在 §3.4：
   ① 拿消息 `meta.sourceRefs` 当汇报键（它只带 `taskId`/`version`，不带 `status`）⇒ 会报"168 条应报未报"；
   ② 把"无在职岗位"的任务算成漏报。**权威键是 `agent_reports.source_key`**，且要用副本探针交叉复核。

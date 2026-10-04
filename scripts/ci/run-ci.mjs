@@ -382,6 +382,14 @@ async function stageBuild() {
 async function stageTest() {
   const suites = [
     { label: 'chat（对话中心契约）', files: ['team-hub/chat.test.mjs'], cwd: ROOT },
+    // ── BUG-003：岗位 Agent 会话与汇报投影的契约，此前**一个都没有登记** ──
+    //   `agent-conversations.test.mjs`（稳定身份/幂等/汇报去重/控制命令）与
+    //   `agent-main-chat.test.mjs`（同岗位复用会话、岗位载荷由服务端解析）都是真断言、
+    //   也真的能过，但它们不在任何套件里 ⇒ 一次都没被执行过。
+    //   而"定时汇报到底有没有落进用户看的那条会话"正是这一族的事——BUG-003 的现场
+    //   （两条同名会话、汇报全在没人看的那条）在这两个文件里没有任何一条断言在管。
+    //   处置同 BUG-002 那一处：**登记**，不加 EXEMPT（豁免一份能跑的判据等于把它降级成声明）。
+    { label: 'agent-conversations（岗位 Agent 会话：稳定身份/幂等/汇报投影多播与不补播）', files: ['team-hub/agent-conversations.test.mjs', 'team-hub/agent-main-chat.test.mjs'], cwd: ROOT },
     { label: 'skills（共享技能回归）', files: ['team-hub/skills.test.mjs'], cwd: ROOT },
     {
       // PRT-214：静态 hard floor 的**派生**（spec §6.8 `:437-440` 控制面那一格）。

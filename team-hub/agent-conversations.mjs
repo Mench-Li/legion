@@ -299,17 +299,47 @@ export function createAgentConversationService({ db, withTx, audit, clock = Date
       return { questionId:qId,version:1 }
     })
   }
-  function report(a,taskId,sourceKey,body,sourceRefs,meta = {}) {
-    const cv = conversation({ agentId:a.agent_id,scope:a.scope,by:'system:agent-report' })
-    const convs = db.prepare('SELECT * FROM agent_conversation_bindings WHERE agent_id=? AND (task_id IS NULL OR task_id=?)').all(a.agent_id,taskId)
-    for (const b of convs) withTx(() => {
+  /**
+   * 把一条汇报投影成消息：**绑定会话各一份 + 该岗位的「对话中心」会话一份**（BUG-003）。
+   *
+   * 为什么是多播而不是换目标：界面上给用户打开的是 `conversations.agent_role` 那条会话
+   * （`workbench/src/components/ChatView.tsx` 的 `list.find(c => c.agentRole === agent.role)`），
+   * 而汇报只写进 `agent_conversation_bindings` 那条 ⇒ 同一个 (空间, 岗位) 有两条同名会话，
+   * 用户对着自己那条**永远看不到汇报**（实测：conv 7 有 32 条汇报、conv 25 有 0 条）。
+   * `agent_reports` 的唯一键本来就是 `(source_key, conv_id)`，**同一事件在每个会话各一份投影**
+   * 是设计允许的形状；多播因此不需要迁移、不需要改任何协议。
+   *
+   * 副本的 `author` 用 `agent:<scope>:<role>`（该会话里这位 Agent 说话时用的身份，与 AI 回复
+   * 回写时的身份**同一个**）；绑定会话里仍用稳定 `agent_id`（`AgentConversationPanel` 按它认人）。
+   * 两处身份约定不同是"两套会话"这件事的一部分，不是笔误。
+   *
+   * ★ **只播本轮新产生的事件，不补播存量**：`insertMessage` 的时间戳是"现在"，
+   *   而存量汇报描述的是几周前的状态。实测在生产库副本上补播一次会往用户那条会话里
+   *   灌 43 条历史状态（`T-006 任务状态：已取消。`……），每一条都以**当前时刻**出现——
+   *   那不是"补全历史"，是**把旧事件重新盖章成刚刚发生**。
+   *   所以：副本只在主场确有新投递（或该 Agent 一个绑定会话都没有）时写。
+   *   代价是部署后那条会话要等**下一次状态变化**才有第一条汇报，这一点写进了文档。
+   */
+  function report(a, taskId, sourceKey, body, sourceRefs, meta = {}) {
+    const cv = conversation({ agentId: a.agent_id, scope: a.scope, by: 'system:agent-report' })
+    const convs = db.prepare('SELECT * FROM agent_conversation_bindings WHERE agent_id=? AND (task_id IS NULL OR task_id=?)').all(a.agent_id, taskId)
+    const roleConv = db.prepare('SELECT id FROM conversations WHERE scope=? AND agent_role=?').get(a.scope, a.role)
+    const multicast = roleConv && !convs.some(b => b.conv_id === roleConv.id)
+      ? { conv_id: roleConv.id, scope: a.scope, agent_id: a.agent_id, task_id: null, author: `agent:${a.scope}:${a.role}` }
+      : null
+    /** 投递一份；返回本次是否**新写了一条消息**（已投递过 → false）。 */
+    const deliver = (b) => withTx(() => {
       const rId=id('report')
       db.prepare('INSERT OR IGNORE INTO agent_reports(report_id,source_key,conv_id,source_refs) VALUES(?,?,?,?)').run(rId,sourceKey,b.conv_id,JSON.stringify(sourceRefs))
       const r = db.prepare('SELECT * FROM agent_reports WHERE source_key=? AND conv_id=?').get(sourceKey,b.conv_id)
-      if (r.message_id) return
-      const messageId=insertMessage(b,a.agent_id,body,{ source:'progress',semanticType:'progress',agentId:a.agent_id,taskId,sourceRefs,reportId:r.report_id,...meta })
+      if (r.message_id) return false
+      const messageId=insertMessage(b,b.author ?? a.agent_id,body,{ source:'progress',semanticType:'progress',agentId:a.agent_id,taskId,sourceRefs,reportId:r.report_id,...meta })
       db.prepare("UPDATE agent_reports SET message_id=?,state='delivered' WHERE report_id=?").run(messageId,r.report_id)
+      return true
     })
+    let fresh = false
+    for (const b of convs) if (deliver(b)) fresh = true
+    if (multicast && (fresh || convs.length === 0)) deliver(multicast)
     return cv
   }
   function reconcile() {

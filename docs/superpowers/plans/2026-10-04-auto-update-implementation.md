@@ -48,6 +48,9 @@
 | §6 空闲 60s / 清单 30s / 256 KiB | `transport.mjs` | 边收边判，超限立刻 abort |
 | §6 `.part` 流式下载与原子改名 | `transport.mjs` + `cache.mjs` | 改名**在验签之后**，由调用方显式提交 |
 | §6 解压前后校验闭包、拒越界/链接/重复/炸弹/未知可执行 | `product/update/extract.mjs` | 25 条用例，含**语法合法但恶意**的归档（自带 ZIP 构造器） |
+| §6 闭包的载体与可信来源 | `product/update/closure.mjs` | 包内 `closure.json`，摘要在签过名的发行清单里（逐文件闭包放不进 256 KiB） |
+| §6 落盘字节的确定性 | `product/update/zip.mjs` | 同输入 → 逐字节相同的包（内部排序、时间戳钉死） |
+| §8 第 8 步"服务健康验证" | `product/update/health.mjs` | 声明式回环 HTTP 检查；**只允许回环**；身份断言（`expectJson`） |
 | §6 重启后复用前重新校验 | `cache.verifyReady` | 篡改缓存文件的用例证明它真的重算摘要 |
 | §6 取消不影响当前程序 | `cache.discard` | 只删 `.part`；取消不进失败退避 |
 | §7 有界操作表 | `desktop/update-service.mjs` + `update-preload.cjs` | 17 条 IPC 面用例：路径/URL/多余字段一律拒 |
@@ -116,6 +119,25 @@
 回退被拒则保持维护模式），只有事务文件显式写 `allowUnverifiedHealth: true`
 才放行。
 
+**⑧ 展开占位符的两连错。** `{teamHubPort}` 没有被展开（占位符名字与 ports
+的 key 对不上），于是期望端口号是字面量 `"{teamHubPort}"`——一个**永远
+不可能成立**的断言，而它能顺利通过规格校验。修它时新写的 `expandStrict`
+又只处理字符串，而调用点传进去的是 `{ port: '{teamHubPort}' }` 这个
+**对象**——于是"严格展开"一次都没发生。只有"用真实进程清单派生一遍"那条
+判据发现了第二个错。
+
+**⑨ 闭包来自包内时，内容摘要一次都没被检查。** `extractArchive` 原先按
+调用方传进来的 `closure` 参数核对逐文件摘要，而闭包来自包内
+（`closureEntry`）时那个参数是 `null`。于是"闭包来自包内"这条路径上，
+大小与条目集合的判据全部通过，**而每一条内容摘要都被跳过**。发现它的是
+`zip.test.mjs` 的「内容被替换」用例——一个只测"注入闭包数组"的套件不会
+碰到它，因为那条路径上 `closure` 恰好不是 null。
+
+**⑩ 闭包条目被当成"闭包之外的条目"。** 闭包不可能列出自己的摘要（自指，
+sha256 没有不动点），所以 `closure.json` 必须**跳过**成员判定，它的可信度
+由签名清单里的摘要保证。第一版没跳，于是每一份合法的包都被判成
+"含闭包之外的条目"。
+
 ## 6. 明确**还没有做**的部分
 
 设计 §10 说「每阶段记录实际证据；**测试替身通过不能替代 Windows 真机升级
@@ -132,15 +154,17 @@
   `product/release/update-config.example.json` 与 `update-trust.example.json`。
 - **helper 的打包闭包已接线，`unpack` 已用真实实现**（`extract.mjs`：
   越界路径/软链接/重复目标/解压炸弹/未知可执行五条判据，解压前后各核一次
-  闭包）。仍未验证的是**真实发行包的 ZIP 形状**——发布端目前产出的 ZIP 由
-  外部打包含成，没有一次"上传 → 下载 → 解压 → 切换"的真机端到端。
-- **健康探针未接线**。`healthProbe` 是一个函数，跨不过进程边界，必须由
-  helper 在进程内构造；目前留空。接线之前 helper 的行为是**不提交**
-  （`helper-health-unverified` → 尝试回退程序）：设计 §8 第 8–9 步要求
-  "验证成功之后"才刷盘提交，而"没有验证"与"验证失败"在能不能提交上是
-  同一个结论。所以稳定通道的自动升级在探针接线之前会停在验证这一步——
-  这是刻意的，而不是缺陷。接线时把事务文件里的 `healthProbe` 换成真实探针，
-  而**不是**把 `allowUnverifiedHealth` 改成 `true`。
+  闭包；闭包来自包内 `closure.json`，摘要在签过名的发行清单里）。
+  `publish.mjs --package-root` 能产出这种形状的包，`zip.test.mjs` /
+  `publish.test.mjs` / `install.test.mjs` 把"发布端产出 → 回读 → 解压 →
+  切换 → 提交"这条链在本机跑通了。
+  仍未验证的是**在真实 Windows 机器上**跑一遍：打包闭包与桌面 `stage.mjs`
+  产出的实际文件树对齐（`desktop-release.json` 与桌面安装包布局）。
+- **健康探针已接线且是声明式的**（`health.mjs`）：规格从
+  `process-manifest.mjs` 派生、只允许回环、带身份断言。仍未验证的是
+  **在真实进程树**上跑一遍——真实端口读数目前取自 `DEFAULT_PORTS`，
+  而 `buildDesktopInstaller` 的 `ports` 参数必须由调用方给出 Launcher
+  真正用的那一组（给错时身份断言会拦住，即 fail-closed，但那是"拦住"而不是"接对"）。
 - **`desktop/main.mjs` 的单实例互斥未与 helper 协调**。一次升级期间如果
   用户手动再开一次 Legion，第二次启动会被 Launcher 的维护闸门挡住（那是
   对的），但界面只会显示维护状态，不会提示"正在升级，请稍候"。

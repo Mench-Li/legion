@@ -1,7 +1,7 @@
 import { cp, mkdir, readFile, writeFile, copyFile, lstat, rm, stat } from 'node:fs/promises'
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
-import { dirname, join } from 'node:path'
+import { basename, dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { performance } from 'node:perf_hooks'
 import asar from '@electron/asar'
@@ -9,6 +9,7 @@ import { inventoryTree, hashFile, DESKTOP_MANIFEST_FORMAT, DESKTOP_COMPONENTS, v
 import { validateWorkflowPack } from '../../product/workflow-packs/pack.mjs'
 import { createSoftwareCollaborationPack } from './software-collaboration-pack.mjs'
 import { pruneWindowsX64Payload } from './platform-filter.mjs'
+import { DESKTOP_SHELL_DIRS, DESKTOP_SHELL_FILES, HELPER_ENTRY, SHELL_PRODUCT_FILES, helperClosure } from './shell-files.mjs'
 
 const root = fileURLToPath(new URL('../../', import.meta.url))
 const build = join(root, '.desktop-build')
@@ -107,12 +108,37 @@ const archiveBuildMs = Math.round(performance.now() - archiveStartedAt)
 await rm(join(resources, 'dsh'), { recursive: true, force: true })
 
 await mkdir(join(shell, 'desktop'), { recursive: true })
-for (const file of ['main.mjs', 'runtime.mjs', 'preload.cjs', 'startup.html', 'startup.mjs', 'messages.mjs', 'assets']) {
-  if (file === 'assets') await copyTree(join(root, 'desktop', file), join(shell, 'desktop', file))
-  else await copyFile(join(root, 'desktop', file), join(shell, 'desktop', file))
+// ★ 清单来自 `shell-files.mjs`，并由 `shell-files.test.mjs` 用一条**闭包判据**
+//   钉住：从 `main.mjs` 出发的静态相对导入，每一个落点都必须在清单里。
+//   手写数组在"只改老文件"时没问题，只在新增一个被 import 的文件时失效——
+//   而那时的表现是"开发机正常、装完才报 ERR_MODULE_NOT_FOUND"。
+for (const file of DESKTOP_SHELL_FILES) {
+  await copyFile(join(root, 'desktop', file), join(shell, 'desktop', file))
 }
-await mkdir(join(shell, 'product', 'launcher'), { recursive: true })
-await copyFile(join(root, 'product', 'launcher', 'desktop-protocol.mjs'), join(shell, 'product', 'launcher', 'desktop-protocol.mjs'))
+for (const dir of DESKTOP_SHELL_DIRS) {
+  await copyTree(join(root, 'desktop', dir), join(shell, 'desktop', dir))
+}
+for (const path of SHELL_PRODUCT_FILES) {
+  const target = join(shell, ...path.split('/'))
+  await mkdir(dirname(target), { recursive: true })
+  await copyFile(join(root, ...path.split('/')), target)
+}
+
+// ── 独立升级 helper：**不在**待切换的程序目录里（设计 §3 line 57）──
+//
+//   resources/legion/**   ← installRoot，本次会被整体替换
+//   resources/update/**   ← helper 与它需要的产品代码，替换范围之外
+//
+// 闭包里的路径保留仓库内的相对形状（`update/product/update/helper.mjs`），
+// 于是 helper-entry 里那句 `../product/update/helper.mjs` 在打包之后仍然成立。
+const updateRoot = join(resources, 'update')
+await mkdir(updateRoot, { recursive: true })
+await copyFile(join(root, ...HELPER_ENTRY.split('/')), join(updateRoot, basename(HELPER_ENTRY)))
+for (const path of helperClosure({ root }).closure) {
+  const target = join(updateRoot, ...path.split('/'))
+  await mkdir(dirname(target), { recursive: true })
+  await copyFile(join(root, ...path.split('/')), target)
+}
 await writeFile(join(shell, 'package.json'), `${JSON.stringify({ name: desktop.name, version: desktop.version,
   private: true, type: 'module', main: 'desktop/main.mjs' }, null, 2)}\n`)
 const npm = JSON.parse(await readFile(join(resources, 'node', 'node_modules', 'npm', 'package.json'), 'utf8')).version

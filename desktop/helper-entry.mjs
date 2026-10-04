@@ -51,9 +51,14 @@ async function main() {
 
   // ★ 在这里才 import 产品代码：真正的判据都在 `product/update/helper.mjs`，
   //   而这个入口要保证"即使产品代码装载失败，进程也留下一个可读的结论"。
+  //
+  //   用**普通的相对说明符**而不是 `new URL('./x', import.meta.url)`：
+  //   打包端的闭包收集（`scripts/shell-files.mjs`）走的是静态说明符，
+  //   而一个藏在 `new URL(...)` 里的路径会被它漏掉——于是打包出来的
+  //   `resources/update/` 里没有产品代码，helper 一启动就报"无法装载"。
   let helperModule
   try {
-    helperModule = await import(new URL('../product/update/helper.mjs', import.meta.url))
+    helperModule = await import('../product/update/helper.mjs')
   } catch (error) {
     process.stderr.write(`[update-helper] 无法装载 helper 实现：${error?.message ?? error}\n`)
     // 装载失败时**不**去动任何东西：程序目录、指针、数据库都不碰。

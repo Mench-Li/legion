@@ -479,6 +479,41 @@ async function stageTest() {
       cwd: ROOT,
     },
     {
+      // 自动更新（spec: docs/superpowers/specs/2026-10-02-legion-desktop-auto-update-design.md）。
+      //
+      // 与上面那套（阶段 8：安装/升级/回滚）的分工是：
+      //   · product-upgrade 管**本机内部**的事务原语（备份、迁移、切换、审计）；
+      //   · 这一套管**跨网络**的那一层——从公网取清单、验签、下载、
+      //     以及"停在维护状态还是能把程序换回去"。
+      //
+      // 三套各自的重点：
+      //   · `client.test.mjs` 用**真签名、真摘要、真文件**驱动一次完整更新，
+      //     所以它守的是"接线"而不是"判据"：协议件各自的单测都过，而
+      //     "验签之后的摘要有没有比对""被拒的清单有没有抬高 sequence 水位"
+      //     这些问题只在把件装起来之后才存在。
+      //   · `install.test.mjs` 逐个驱动设计 §8 的失败表——每一个失败点都必须
+      //     能被真的走到，因为真实世界里没法按需制造"服务拒绝退出"。
+      //   · `modules.test.mjs` 汇总 17 个模块的装载期自检，并要求**读得出
+      //     真读数**：一条永远返回 ok 的自检比没有自检更糟，它会让"有人放宽了
+      //     某条拒绝"看起来已经通过。
+      //
+      // ⚠️ 诚实边界：这些都是**判据与用例自洽**。测试替身通过不等于 Windows
+      //   真机升级验收（设计 §10 最后一行原话）。真实安装包签名、干净机器、
+      //   断电故障注入与撤回演练仍未执行。
+      label: 'product-update（自动更新：协议验签、下载缓存、状态机、事务与恢复）',
+      files: [
+        'product/update/client.test.mjs',
+        'product/update/install.test.mjs',
+        'product/update/modules.test.mjs',
+        'product/launcher/update-gate.test.mjs',
+        'desktop/update-service.test.mjs',
+        'desktop/update-panel.test.mjs',
+        'desktop/scripts/shell-files.test.mjs',
+        'scripts/update/publish.test.mjs',
+      ],
+      cwd: ROOT,
+    },
+    {
       // PRT-907（spec §10 line 990）：支持诊断与故障处置手册。
       //
       // 这一套盯的**不是**"有没有一份手册"，而是**支持人员照着它做的时候会不会撞墙**。

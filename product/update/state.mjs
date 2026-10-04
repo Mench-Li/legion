@@ -86,6 +86,15 @@ export const UPDATE_EVENTS = Object.freeze([
   'download-failed',
   'download-cancelled',
   'install-requested',
+  /**
+   * 安装前重查通道时发现目标已被撤回（设计 §9 line 204）。
+   *
+   * ★ 它是一条**状态迁移**而不是"保持原状态"：撤回的意义是"这个候选不算数
+   *   了"。停在 `ready` 会让界面继续显示"可以安装"，而每一次点击都会再失败
+   *   一次——用户会以为按钮坏了。落回 `available` 说的是"通道上有东西，但
+   *   不是你已经下载的那一个"；下一次检查会取回真正的候选。
+   */
+  'recall-discarded',
   'tasks-wait-started',
   'tasks-wait-failed',
   'prepare-started',
@@ -126,6 +135,12 @@ const T = Object.freeze({
   'download-failed': Object.freeze({ downloading: 'download-failed', verifying: 'download-failed' }),
   'download-cancelled': Object.freeze({ downloading: 'cancelled', verifying: 'cancelled' }),
   'install-requested': Object.freeze({ ready: 'waiting-for-tasks' }),
+  // ★ 从 `ready` 落回 `available`：候选还在通道上（所以不是 `up-to-date`），
+  //   只是**不是你已经下载的那一个**了。`waiting-for-tasks` 与 `preparing`
+  //   也允许——撤回可能正好发生在交接进行到一半的时候。
+  'recall-discarded': Object.freeze({
+    ready: 'available', 'waiting-for-tasks': 'available', preparing: 'available',
+  }),
   'tasks-wait-started': Object.freeze({ ready: 'waiting-for-tasks' }),
   'tasks-wait-failed': Object.freeze({ 'waiting-for-tasks': 'install-blocked' }),
   'prepare-started': Object.freeze({ 'waiting-for-tasks': 'preparing' }),

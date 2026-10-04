@@ -48,7 +48,20 @@ export const TRANSPORT_CODES = Object.freeze({
   DIGEST_MISMATCH: 'net-digest-mismatch',
   CANCELLED: 'net-cancelled',
   REDIRECT: 'net-redirect',
-  BAD_HEADERS: 'net-bad-headers',
+  // ★ 这里原本还有一个 `BAD_HEADERS: 'net-bad-headers'`，已删除。
+  //
+  //   它**从来没有被任何分支返回过**——声明了却不发出的错误码，与一条不存在
+  //   的判据是同一回事：读代码的人会以为"响应头有问题"这个情形被处理了。
+  //
+  //   实际情况是：头的唯一用途是读 `Content-Length`，而
+  //   `declaredLengthOf()` 对"缺失"与"非法"给同一个答案 `null`（跳过
+  //   声明值与实际值的比对），真正的上限由 `TransformLimit` 那条**流式**
+  //   上限兜住，内容再由签名清单里的摘要兜住。所以这里没有缺一条判据，
+  //   缺的是"这个码有意义"这件事——那就把码删掉。
+  //
+  //   处置与 `release.mjs` 的 `BAD_MIGRATION_PLAN` 相反（那一个改成了真的会
+  //   发出），因为那一次**确实缺一条判据**，而这一次不缺。判断依据是同一个
+  //   问题：**这个码背后该有一个检查吗？**
   WRITE_FAILED: 'net-write-failed',
 })
 

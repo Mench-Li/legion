@@ -503,6 +503,7 @@ async function stageTest() {
       label: 'product-update（自动更新：协议验签、下载缓存、状态机、事务与恢复）',
       files: [
         'product/update/client.test.mjs',
+        'product/update/errors.test.mjs',
         'product/update/extract.test.mjs',
         'product/update/zip.test.mjs',
         'product/update/health.test.mjs',

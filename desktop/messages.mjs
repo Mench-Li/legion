@@ -39,6 +39,10 @@ const remedies = Object.freeze({
   UPDATE_MAINTENANCE: 'Legion 正在升级或维护中，请稍候再打开。升级完成后会自动恢复。',
   UPDATE_TRANSACTION_UNFINISHED: '上一次升级尚未结束，Legion 正在按记录恢复。请稍候再打开；'
     + '如果长时间停在这里，请联系管理员，**不要**删除数据目录。',
+  // ★ 这张表**只**放桌面端自己的码（`main.mjs` / `bridge` 报上来的）。
+  //   自动更新客户端的码（`update-*`）由 `product/update/errors.mjs` 的
+  //   `ERROR_TEXT` 负责，而面板显示的是客户端给出的整句 `reason`——
+  //   在这里再放一份会让同一个码有**两个**文案来源，改了其中一个就会分叉。
 })
 
 const portServices = Object.freeze({

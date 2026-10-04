@@ -152,7 +152,7 @@ function makeConfig() {
 }
 
 function makeClient({
-  fetchImpl, cacheDir, installRootUnused = null, configOverrides = {},
+  fetchImpl, cacheDir, installRootUnused = null, configOverrides = {}, installer = null,
   setTimer = (fn, ms) => setTimeout(fn, ms), clearTimer = (handle) => clearTimeout(handle),
 } = {}) {
   void installRootUnused
@@ -173,6 +173,8 @@ function makeClient({
     //   （它不会失败，只会安静地什么都不做）。
     setTimer,
     clearTimer,
+    // 安装事务可注入（`null` = 没接线，用来测"尚未接线"那条判据）。
+    installer,
   })
 }
 
@@ -691,6 +693,110 @@ test('并发检查共享一次请求：托管只被问了一次通道清单', as
   assert.equal(b.shared, true)
   const feedRequests = ctx.fetchImpl.requests.filter((r) => r.url.endsWith('feeds/stable/win-x64.json'))
   assert.equal(feedRequests.length, 1, `通道清单被请求了 ${feedRequests.length} 次`)
+})
+
+// ---------------------------------------------------------------------------
+// ★ 安装前重查通道（设计 §9 line 204：撤回必须挡得住**已下载**的人）
+// ---------------------------------------------------------------------------
+
+test('★★★ 安装前重查通道：目标被撤回 → 禁止安装，并取消旧候选', async (t) => {
+  // 在这条判据之前 `install()` **不读通道**：只核对 `readyIdentity` 与调用方
+  // 给的身份一致，然后直接交接。而"下载完成"与"用户点安装"之间可以隔很久，
+  // 发布端在那段时间里完全可能撤回那个版本——撤回的**全部意义**就是"别让它
+  // 再被装上"。没有这一步时，撤回只能挡住还没下载的人；而撤回通常恰恰是因为
+  // 那个包会弄坏数据，所以挡不住已经下载的人 ≈ 没撤。
+  let feedReads = 0
+  const ctx = setup({
+    mutate: (relative, entry) => {
+      if (relative !== 'feeds/stable/win-x64.json') return entry
+      feedReads += 1
+      // 第一次（检查时）给正常通道；第二次（安装前）给撤回清单：更高
+      // sequence，指向**安全的旧版本**——这正是设计描述的那种撤回。
+      if (feedReads < 2) return entry
+      const recall = buildFeedPayload({
+        channel: 'stable', platform: 'win32', arch: 'x64', sequence: 43,
+        issuedAt: '2026-10-03T00:00:00Z', expiresAt: '2026-10-10T00:00:00Z',
+        releaseId: `rel-${CURRENT}`, productVersion: CURRENT,
+        manifestPath: `releases/rel-${CURRENT}/manifest.json`, manifestSha256: 'f'.repeat(64),
+      })
+      return {
+        bytes: Buffer.from(serializeEnvelope(signEnvelope(recall, {
+          privateKeyPem: ctx.keys.privateKeyPem, keyId: 'release-2026-a',
+        })), 'utf8'),
+        cache: FEED_CACHE_CONTROL,
+      }
+    },
+  })
+  t.after(() => rmSync(ctx.cacheDir, { recursive: true, force: true }))
+  // ★ 装一个**会成功**的替身安装器。
+  //
+  //   不装的话 `install()` 会先返回 `install-not-wired`，于是这条用例即使在
+  //   "撤回根本没被检查"的情况下也会"通过"——它测的就变成了别的东西。
+  //   装了之后，"没拦住"会直接表现为 `result.ok === true`，拦不住就红。
+  const installer = { async install({ identity }) { return { ok: true, identity, reachedStage: 'committed' } } }
+  const client = makeClient({ ...ctx, installer })
+
+  const checked = await client.check({ trigger: 'manual' })
+  assert.equal(checked.outcome, 'available', checked.reason)
+  const downloaded = await client.download(checked.candidate.releaseId, checked.candidate.manifestSha256)
+  assert.equal(downloaded.ok, true, downloaded.reason)
+  assert.equal(client.snapshot().ready, true)
+
+  const result = await client.install(checked.candidate.releaseId, checked.candidate.manifestSha256)
+  assert.equal(result.ok, false, '目标已被撤回，却仍然允许安装')
+  assert.equal(result.code, 'update-target-recalled')
+  // ★ 撤回清单必须**取消旧候选**：否则界面一直显示"有新版本可安装"，而每一次
+  //   点击都在这里失败——用户会以为按钮坏了。
+  assert.equal(client.candidate(), null, '已撤回的候选没有被取消')
+  assert.equal(client.snapshot().ready, false, '已撤回的包仍然处于"就绪"')
+  // 状态落回 `available`（通道上有东西，但不是你已经下载的那一个）。
+  assert.equal(client.state(), 'available')
+  // ★ 而且**不能**授予降级权限：撤回清单指向的是当前版本，但客户端不该因此
+  //   把"退回 CURRENT"当成一个可选动作。
+  assert.equal(client.release(), null, '撤回之后仍然留着一份发行清单')
+})
+
+test('★★★ 安装前读不到通道 → 同样不装（fail-closed）', async (t) => {
+  // "读不到"与"被撤回了"必须给出同一个结论：能证明"它没被撤回"的只有通道
+  // 本身。把读不到当成"那就装吧"，等于让一次网络故障取消掉撤回保护。
+  let feedReads = 0
+  const ctx = setup({
+    mutate: (relative, entry) => {
+      if (relative !== 'feeds/stable/win-x64.json') return entry
+      feedReads += 1
+      return feedReads < 2 ? entry : { status: 503, headers: { 'cache-control': 'no-store' }, bytes: Buffer.alloc(0) }
+    },
+  })
+  t.after(() => rmSync(ctx.cacheDir, { recursive: true, force: true }))
+  // 同样装一个会成功的替身：否则"读不到通道却放行"会被 `install-not-wired`
+  // 掩盖，用例测的就不是这条判据了。
+  const installer = { async install({ identity }) { return { ok: true, identity, reachedStage: 'committed' } } }
+  const client = makeClient({ ...ctx, installer })
+
+  const checked = await client.check({ trigger: 'manual' })
+  const downloaded = await client.download(checked.candidate.releaseId, checked.candidate.manifestSha256)
+  assert.equal(downloaded.ok, true, downloaded.reason)
+
+  const result = await client.install(checked.candidate.releaseId, checked.candidate.manifestSha256)
+  assert.equal(result.ok, false, '读不到通道却放行了安装')
+  assert.equal(result.code, 'update-recall-unverified')
+  // ★ 与"撤回"不同：这里**不**取消候选。读不到可能只是一次网络抖动，而把候选
+  //   丢掉会让用户失去一个已经下载好的包（还得重新下几百 MB）。所以状态保持
+  //   `ready`，用户重试即可。
+  assert.equal(client.snapshot().ready, true, '仅仅"读不到通道"就丢掉了已下载的包')
+  assert.notEqual(client.candidate(), null, '仅仅"读不到通道"就取消了候选')
+})
+
+test('★★ 通道没变时安装照常进行（这条判据不能什么都拦）', async (t) => {
+  const ctx = setup()
+  t.after(() => rmSync(ctx.cacheDir, { recursive: true, force: true }))
+  const installer = { async install({ identity }) { return { ok: true, identity, reachedStage: 'committed' } } }
+  const client = makeClient({ ...ctx, installer })
+  const checked = await client.check({ trigger: 'manual' })
+  const downloaded = await client.download(checked.candidate.releaseId, checked.candidate.manifestSha256)
+  assert.equal(downloaded.ok, true, downloaded.reason)
+  const result = await client.install(checked.candidate.releaseId, checked.candidate.manifestSha256)
+  assert.equal(result.ok, true, `通道未变却拒绝了安装：${result.code} ${result.reason}`)
 })
 
 // ---------------------------------------------------------------------------

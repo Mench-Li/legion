@@ -6,7 +6,7 @@
   "main": "main.mjs",
   "scripts": {
     "start": "electron .",
-    "test": "node --test main.test.mjs update-service.test.mjs update-wiring.test.mjs update-panel.test.mjs ../product/update/client.test.mjs ../product/update/install.test.mjs ../product/update/integration.test.mjs ../product/update/platform-build.test.mjs ../product/update/extract.test.mjs ../product/update/zip.test.mjs ../product/update/health.test.mjs ../product/update/modules.test.mjs ../product/launcher/update-gate.test.mjs scripts/shell-files.test.mjs scripts/update-payload.test.mjs scripts/prepare-payload.test.mjs scripts/platform-filter.test.mjs",
+    "test": "node --test main.test.mjs update-service.test.mjs update-wiring.test.mjs update-panel.test.mjs ../product/update/client.test.mjs ../product/update/errors.test.mjs ../product/update/install.test.mjs ../product/update/integration.test.mjs ../product/update/platform-build.test.mjs ../product/update/extract.test.mjs ../product/update/zip.test.mjs ../product/update/health.test.mjs ../product/update/modules.test.mjs ../product/launcher/update-gate.test.mjs scripts/shell-files.test.mjs scripts/update-payload.test.mjs scripts/prepare-payload.test.mjs scripts/platform-filter.test.mjs",
     "prepare:payload": "node scripts/prepare-payload.mjs",
     "prepare:node": "node scripts/prepare-node.mjs",
     "prepare:git": "node scripts/prepare-git.mjs",

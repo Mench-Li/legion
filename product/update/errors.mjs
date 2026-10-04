@@ -42,6 +42,16 @@ export const UPDATE_CODES_CLIENT = Object.freeze({
   TASKS_RUNNING: 'update-tasks-running',
   /** 目标版本不支持本机的 Windows build（或读不出本机 build）。 */
   UNSUPPORTED_PLATFORM: 'update-unsupported-platform',
+  /**
+   * 目标版本已不在通道上（被撤回、或被更新版本取代）——设计 §9 line 204。
+   *
+   * 与 `RECALL_UNVERIFIED` 分开：这一条是"确认了，而且确认到的是**不能装**"，
+   * 另一条是"**没能确认**"。用户在两者之间该做的事不同（前者重查一次就好，
+   * 后者可能是网络问题），而把它们合成一个"安装被拒绝"会让排查从零开始。
+   */
+  RECALLED: 'update-target-recalled',
+  /** 安装前无法重新确认通道：按"不能证明它没被撤回"处理，即不安装。 */
+  RECALL_UNVERIFIED: 'update-recall-unverified',
 })
 
 /** 错误码 → 是否值得让用户点"重试"。 */
@@ -50,6 +60,15 @@ export const RETRYABLE_CODES = Object.freeze([
   'envelope-expired', 'envelope-clock-skew',
   'update-check-failed', 'update-not-enough-space', 'update-tasks-running',
   'update-no-download', 'update-not-ready',
+  /**
+   * ★ `update-recall-unverified` 是**可重试**的：它说的是"这次没能确认"，
+   *   而没能确认的原因通常是一次网络抖动。
+   *
+   *   而 `update-target-recalled` **不在**这里：目标已经不在通道上，重试
+   *   永远得到同一个结论。把它放进来会让界面给用户一个"重试"按钮，
+   *   而那个按钮无论点多少次都不会有用。
+   */
+  'update-recall-unverified',
 ])
 
 /** 错误码 → 用户可见的一句话。 */
@@ -116,6 +135,29 @@ export const ERROR_TEXT = Object.freeze({
   'update-install-failed': '安装更新失败，当前版本仍可继续使用。',
   'update-not-enough-space': '磁盘空间不足，无法安装这个更新。请清理空间后重试。',
   'update-tasks-running': '还有任务正在运行，暂时不能安装更新。',
+  /**
+   * 安装前重新检查通道的两个结论（设计 §9 line 204）。
+   *
+   * ★ 两条**必须分开**：用户能做的动作不同。
+   *   · 被撤回：重试没有意义（那个版本已经不在通道上了），要重新检查更新。
+   *   · 没能确认：可能只是一次网络抖动，重试就有用；而且已下载的包还在。
+   *   合成一个"安装被拒绝"会让这两件事看起来一样——而其中一件重试有用、
+   *   另一件重试永远没用。
+   */
+  'update-target-recalled': '这个版本已被发布方撤回，不能再安装（已下载的文件也已作废）。请重新检查更新获取当前版本。',
+  'update-recall-unverified': '安装前需要再确认一次该版本仍在发布通道上，但这次没能确认（可能是网络问题）。已下载的安装包还在，请稍后重试。',
+  /**
+   * 目标版本要求的 Windows 版本高于本机（或者本机版本读不出来）。
+   *
+   * ★ 这一条是 ⑭ 那个"门禁从未生效"的缺陷补完之后**新出现的**一条用户可见
+   *   失败路径：门禁生效了，就意味着用户会真的撞上它。而在此之前它没有文案，
+   *   用户会看到「更新过程中出现未知问题，请稍后重试或联系管理员。」——
+   *   一句让他去重试、而重试永远不会有用的话（本机版本不会自己变高）。
+   *
+   *   这正是"补上一条判据"与"补上它的文案"是两件事的例子：前者让升级
+   *   停得对，后者让用户知道该做什么。
+   */
+  'update-unsupported-platform': '这个更新需要更高版本的 Windows，本机当前版本不支持。请先更新系统，或联系管理员获取适配版本。',
   'json-too-large': '更新清单过大，已拒绝。',
   'json-duplicate-key': '更新清单格式不正确（重复字段），已拒绝。请联系管理员。',
   'json-malformed': '更新清单格式不正确，已拒绝。请联系管理员。',

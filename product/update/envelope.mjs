@@ -66,7 +66,18 @@ export const ENVELOPE_CODES = Object.freeze({
   BAD_SIGNATURE: 'envelope-bad-signature',
   UNSUPPORTED_KEY: 'envelope-unsupported-key',
   EXPIRED: 'envelope-expired',
-  NOT_YET_VALID: 'envelope-not-yet-valid',
+  // ★ 这里原本还有一个 `NOT_YET_VALID: 'envelope-not-yet-valid'`，已删除。
+  //
+  //   它**从来没有被任何分支返回过**。两个真实情形各有更好的码，而且都已经
+  //   在用：
+  //
+  //     · **密钥**尚未生效 → `KEY_NOT_YET_VALID`（`verifyEnvelope` 的
+  //       有效期窗口判据，line ~167）。它说的是"这把钥匙还不能用"。
+  //     · **清单**的 `issuedAt` 落在未来 → `BAD_CLOCK`（`checkValidityWindow`）。
+  //       它说的是"请校正系统时间"——而这正是那种情况下用户唯一该做的事。
+  //
+  //   留着 `NOT_YET_VALID` 只会让人以为"清单尚未生效"是第三种、未处理的
+  //   情形，或者以为上面两条判断里有一条没接线。
   BAD_PAYLOAD: 'envelope-bad-payload',
   BAD_CLOCK: 'envelope-clock-skew',
 })

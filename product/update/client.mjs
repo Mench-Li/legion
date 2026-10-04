@@ -237,6 +237,43 @@ export function createUpdateClient({
     })
   }
 
+  /**
+   * 读通道清单：取字节、验签、校验形状、判 sequence 高水位。
+   *
+   * ★ 抽出来是因为**安装前要再读一次**（设计 §9 line 204：「已下载目标安装前
+   *   必须重新检查通道；目标被撤回时禁止安装」）。两处各写一遍会漂移，而漂移
+   *   的表现是"检查时用的判据比安装时严"——那正好是这个缺陷的方向。
+   */
+  async function readChannelFeed(signal) {
+    const url = feedUrl(config.host)
+    const feedResult = await fetchVerifiedEnvelope(url, {
+      expectedFormat: ENVELOPE_FORMATS.FEED,
+      relativePath: relativePathOf(url, config.host),
+      signal,
+    })
+    if (!feedResult.ok) return Object.freeze({ ok: false, code: feedResult.code, reason: feedResult.reason })
+
+    const validatedFeed = validateFeedPayload(feedResult.payload, {
+      channel: config.channel, platform: config.host.platform, arch: config.host.arch,
+    })
+    if (!validatedFeed.ok) {
+      return Object.freeze({
+        ok: false, code: validatedFeed.code,
+        reason: describeError(validatedFeed.code, validatedFeed.reason),
+      })
+    }
+
+    const feed = validatedFeed.feed
+    const judgement = judgeSequence(sequenceStore.read(), feed)
+    if (!judgement.accept) {
+      return Object.freeze({
+        ok: false, code: judgement.code,
+        reason: describeError(judgement.code, judgement.reason),
+      })
+    }
+    return Object.freeze({ ok: true, feed })
+  }
+
   async function performCheck(trigger, signal) {
     if (config?.usable !== true) {
       return Object.freeze({
@@ -246,33 +283,12 @@ export function createUpdateClient({
     }
 
     // —— 第 1 步：通道清单 ——
-    const feedResult = await fetchVerifiedEnvelope(feedUrl(config.host), {
-      expectedFormat: ENVELOPE_FORMATS.FEED,
-      relativePath: relativePathOf(feedUrl(config.host), config.host),
-      signal,
-    })
-    if (!feedResult.ok) return Object.freeze({ outcome: 'failed', code: feedResult.code, reason: feedResult.reason })
-
-    const validatedFeed = validateFeedPayload(feedResult.payload, {
-      channel: config.channel, platform: config.host.platform, arch: config.host.arch,
-    })
-    if (!validatedFeed.ok) {
-      return Object.freeze({
-        outcome: 'failed', code: validatedFeed.code,
-        reason: describeError(validatedFeed.code, validatedFeed.reason),
-      })
-    }
-    const feed = validatedFeed.feed
+    const feedRead = await readChannelFeed(signal)
+    if (!feedRead.ok) return Object.freeze({ outcome: 'failed', code: feedRead.code, reason: feedRead.reason })
+    const feed = feedRead.feed
 
     // —— sequence 高水位（设计 §5 line 126）——
     const existing = sequenceStore.read()
-    const judgement = judgeSequence(existing, feed)
-    if (!judgement.accept) {
-      return Object.freeze({
-        outcome: 'failed', code: judgement.code,
-        reason: describeError(judgement.code, judgement.reason),
-      })
-    }
 
     // —— 第 2 步：发行清单，摘要必须与通道声明的**逐字节**一致 ——
     const manifestUrl = releaseManifestUrl(config.host, feed.releaseId)
@@ -611,6 +627,48 @@ export function createUpdateClient({
     if (installer === null || typeof installer.install !== 'function') {
       return fail('install', UPDATE_CODES_CLIENT.NOT_WIRED, '安装事务尚未接线（本阶段只完成检查与下载）')
     }
+
+    // ★★ 安装前**重新检查通道**（设计 §9 line 204）。
+    //
+    //   「已下载目标安装前必须重新检查通道；**目标被撤回时禁止安装**。
+    //     撤回清单允许取消旧候选，但不能授予降级权限。」
+    //
+    //   在这之前这一步**不存在**：`install()` 只核对 `readyIdentity` 与调用方
+    //   给的身份一致，然后就直接交接。而"下载完成"与"用户点安装"之间可以隔
+    //   很久（用户先去干别的、或者界面就停在确认页），发布端在这段时间里完全
+    //   可能撤回那个版本——撤回的**全部意义**就是"别让它再被装上"。
+    //
+    //   没有这一步时，撤回只能阻止**还没下载**的人；已经下载好的人照装不误。
+    //   而撤回通常恰恰是因为那个包会弄坏数据，所以挡不住已经下载的人≈没撤。
+    //
+    //   ★ 方向是 fail-closed：**读不到通道时也不装**。"读不到"与"被撤回了"
+    //     在这里必须给出同一个结论，因为能证明"它没被撤回"的只有通道本身。
+    //     这与设计对整条链的要求一致：判据的输入缺失时，缺的不是"便利性"，
+    //     而是"这次安装安不安全"。
+    const reconfirm = await readChannelFeed(signal)
+    if (!reconfirm.ok) {
+      return fail('install', UPDATE_CODES_CLIENT.RECALL_UNVERIFIED,
+        `安装前无法确认该版本仍在通道上（${reconfirm.reason}），因此不安装。`
+        + '请稍后重试；若持续如此，请联系管理员')
+    }
+    if (reconfirm.feed.releaseId !== readyIdentity.releaseId
+      || reconfirm.feed.manifestSha256 !== readyIdentity.manifestSha256) {
+      // ★ 目标已经不在通道上了：撤回（指向安全版本）或被更新版本取代，
+      //   两种都不该继续装这个包。
+      //
+      //   同时**取消旧候选**（设计 §9 line 204 那句"撤回清单允许取消旧候选"）：
+      //   否则界面会一直显示"有新版本可安装"，而每一次点击都失败在这里。
+      const withdrawn = readyIdentity
+      candidate = null
+      release = null
+      readyIdentity = null
+      setState('recall-discarded', {})
+      return fail('install', UPDATE_CODES_CLIENT.RECALLED,
+        `目标版本 ${withdrawn.releaseId} 已不在${config?.channel ?? ''}通道上`
+        + `（通道现在指向 ${reconfirm.feed.releaseId}），已取消这次安装并丢弃已下载的候选。`
+        + '请重新检查更新')
+    }
+
     setState('install-requested', {})
     const packagePath = cache.readyPath(release.releaseId, release.package.path)
     const started = await installer.install({

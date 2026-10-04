@@ -1,4 +1,4 @@
-// product/update/index.mjs
+﻿// product/update/index.mjs
 // ============================================================================
 // 自动更新的公开面 —— 依据 docs/superpowers/specs/2026-10-02-legion-desktop-auto-update-design.md
 //
@@ -152,6 +152,7 @@ export async function selfCheckAll() {
     layer('closure', await import('./closure.mjs')),
     layer('zip', await import('./zip.mjs')),
     layer('health', await import('./health.mjs')),
+    layer('platform-build', await import('./platform-build.mjs')),
     layer('state', await import('./state.mjs')),
     layer('config', await import('./config.mjs')),
     layer('errors', await import('./errors.mjs')),

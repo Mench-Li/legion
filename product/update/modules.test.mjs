@@ -23,6 +23,7 @@ import { fileURLToPath } from 'node:url'
 const EXPECTED_MODULES = Object.freeze([
   'barrier', 'cache', 'canonical', 'client', 'closure', 'config', 'credential', 'envelope',
   'errors', 'extract', 'feed', 'health', 'helper', 'host', 'index', 'install', 'journal',
+  'platform-build',
   'release', 'schedule', 'semver', 'state', 'transport', 'zip',
 ])
 
@@ -44,6 +45,7 @@ const CHECKED_EXPORTS = Object.freeze({
   closure: 'CLOSURE_CHECKED',
   zip: 'ZIP_CHECKED',
   health: 'HEALTH_CHECKED',
+  'platform-build': 'PLATFORM_BUILD_CHECKED',
   journal: 'JOURNAL_CHECKED',
   barrier: 'BARRIER_CHECKED',
   credential: 'CREDENTIAL_CHECKED',
@@ -93,13 +95,17 @@ test('自检结论本身是检查过的（不是恒真的占位）', async () =>
     install: (c) => c.steps.length >= 8,
     extract: (c) => c.executableExtensions >= 15,
     health: (c) => c.loopbackHosts.length >= 3,
+    'platform-build': (c) => c.codes.UNSUPPORTED === 'platform-build-unsupported',
     closure: (c) => c.protocol === 'legion/update-closure@1',
     zip: (c) => c.methods.DEFLATE === 8,
   })
   for (const [name, predicate] of Object.entries(requirements)) {
     const mod = await import(new URL(`./${name}.mjs`, import.meta.url))
-    const checked = mod[`${name.toUpperCase()}_CHECKED`]
-    assert.ok(predicate(checked), `${name} 的自检读数看起来是占位的：${JSON.stringify(checked.sample ?? checked)}`)
+    // 模块名里的连字符要换成下划线：`platform-build` → `PLATFORM_BUILD_CHECKED`。
+    // （不带这个替换时，带连字符的模块会被查成 `PLATFORM-BUILD_CHECKED`——
+    // 一个永远 undefined 的读数，于是这条用例对那个模块**什么也没检查**。）
+    const checked = mod[`${name.toUpperCase().replace(/-/g, '_')}_CHECKED`]
+    assert.ok(predicate(checked), `${name} 的自检读数看起来是占位的：${JSON.stringify(checked?.sample ?? checked)}`)
   }
 })
 

@@ -40,6 +40,8 @@ export const UPDATE_CODES_CLIENT = Object.freeze({
   INSTALL_FAILED: 'update-install-failed',
   SPACE: 'update-not-enough-space',
   TASKS_RUNNING: 'update-tasks-running',
+  /** 目标版本不支持本机的 Windows build（或读不出本机 build）。 */
+  UNSUPPORTED_PLATFORM: 'update-unsupported-platform',
 })
 
 /** 错误码 → 是否值得让用户点"重试"。 */

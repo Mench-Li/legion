@@ -29,12 +29,14 @@
 // ============================================================================
 
 import { createHash } from 'node:crypto'
+import { release as osRelease } from 'node:os'
 import { join } from 'node:path'
 
 import { createDownloadCache } from './cache.mjs'
 import { createCheckScheduler, CHECK_OUTCOMES } from './schedule.mjs'
 import { createSequenceStore, judgeSequence, recordSequence, selectCandidate, validateFeedPayload } from './feed.mjs'
 import { releaseIdentity, sameIdentity, validateRelease } from './release.mjs'
+import { checkLocalWindowsBuild } from './platform-build.mjs'
 import { UPDATE_CODES_CLIENT, describeError } from './errors.mjs'
 import {
   MAX_MANIFEST_BYTES, commitDownload, createTransport, discardDownload, hashFileOnDisk,
@@ -42,6 +44,20 @@ import {
 import { artifactUrl, feedUrl, releaseManifestUrl } from './host.mjs'
 import { ENVELOPE_FORMATS, verifyEnvelope } from './envelope.mjs'
 import { transition, UPDATE_CHAIN } from './state.mjs'
+
+/**
+ * 本机内核版本字符串（`os.release()` 的形状，如 `10.0.19045`）。
+ *
+ * 读不到给 `null`，由 `checkLocalWindowsBuild` 决定怎么处置
+ * （在 win32 上那是**失败**，不是跳过——见那个模块的文件头）。
+ */
+function currentWindowsBuildSource() {
+  try {
+    return osRelease()
+  } catch {
+    return null
+  }
+}
 
 /** 检查的结论（与 `schedule.mjs` 的 `CHECK_OUTCOMES` 对齐）。 */
 export { CHECK_OUTCOMES }
@@ -98,6 +114,15 @@ export function createUpdateClient({
   log = () => {},
   platform = 'win32',
   arch = 'x64',
+  /**
+   * 本机内核版本字符串（`os.release()` 的形状，如 `10.0.19045`）。
+   *
+   * `null` = 自己去读 `os.release()`。测试与需要在别的平台上模拟 win32 的
+   * 调用方显式给值——`os.release()` 在这台机器上是什么，是不受用例控制的。
+   */
+  localKernelRelease = null,
+  /** 正在跑这段代码的机器（与目标发行声明的 `platform` 是两件事）。 */
+  hostPlatform = process.platform,
 } = {}) {
   if (typeof currentVersion !== 'string' || currentVersion === '') {
     throw new Error('createUpdateClient 需要 currentVersion')
@@ -261,6 +286,28 @@ export function createUpdateClient({
     }
 
     // —— 第 3 步：校验发行清单并把身份钉到通道清单上 ——
+    //
+    // ★ `minWindowsBuildRequired` 必须真的传进来。
+    //
+    //   `release.mjs` 里那条「需要 Windows build N，本机是 M」的判据由它驱动，
+    //   而在此之前**全仓没有任何调用方传过**——那条判据在生产里不可达，
+    //   于是一份声明"只支持 Win11"（`minWindowsBuild: 22000`）的发行会在
+    //   Win10 19045 上被接受并安装。同一批里 `install.mjs` 把 `windowsBuild`
+    //   传给了 `runPreflight`，而 `runPreflight` 从不读它——两处加起来，
+    //   操作系统的版本门禁从来没有生效过。
+    //
+    //   读不出本机版本时**明确失败**（不是跳过）：`checkLocalWindowsBuild`
+    //   的注释里说明了为什么"读不出来"与"支持"是两件事。
+    const buildFloor = checkLocalWindowsBuild({
+      hostPlatform,
+      platform: feed.platform,
+      minWindowsBuild: manifestResult.payload?.minWindowsBuild ?? null,
+      release: localKernelRelease ?? currentWindowsBuildSource(),
+    })
+    if (buildFloor.ok !== true) {
+      return Object.freeze({ outcome: 'failed', code: UPDATE_CODES_CLIENT.UNSUPPORTED_PLATFORM, reason: buildFloor.reason })
+    }
+
     const validatedRelease = validateRelease(manifestResult.payload, {
       expect: {
         releaseId: feed.releaseId,
@@ -269,6 +316,10 @@ export function createUpdateClient({
         platform: feed.platform,
         arch: feed.arch,
       },
+      // 上面那一步已经拒过一次（带着更具体的说法），这里仍然把读数传进去：
+      // `validateRelease` 的那条判据是**清单自检**的一部分，而"清单自检里
+      // 的一条判据永远不可达"正是这次要修的东西。
+      minWindowsBuildRequired: buildFloor.local ?? null,
     })
     if (!validatedRelease.ok) {
       return Object.freeze({

@@ -506,6 +506,7 @@ async function stageTest() {
         'product/update/extract.test.mjs',
         'product/update/zip.test.mjs',
         'product/update/health.test.mjs',
+        'product/update/platform-build.test.mjs',
         'product/update/install.test.mjs',
         'product/update/modules.test.mjs',
         // 在途任务读数：词表（两套真实词表的一致性）与生产端。

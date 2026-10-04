@@ -176,6 +176,12 @@ export function describeBackoff(consecutiveFailures, policy = CHECK_POLICY_DEFAU
 export function createCheckScheduler({
   runCheck,
   policy = CHECK_POLICY_DEFAULTS,
+  /**
+   * 自动检查是否启用（配置文件的 `checkOnStartup`）。
+   *
+   * `false` 时不安排任何定时器，但手动检查照常——见 `reschedule` 的注释。
+   */
+  automatic = true,
   now = () => Date.now(),
   random = Math.random,
   setTimer = (fn, ms) => setTimeout(fn, ms),
@@ -207,6 +213,10 @@ export function createCheckScheduler({
       dueAtMs,
       dueKind,
       dueReason,
+      // ★ `automatic` 是一个**读数**，不是内部状态：界面要能说出"为什么
+      //   没有安排任何检查"。一个"什么都没发生"的界面与一个"被用户关掉了"
+      //   的界面长得一样，而前者会让用户以为功能坏了。
+      automatic,
       inFlight: inFlight !== null,
       stopped,
       backoff: describeBackoff(consecutiveFailures, policy),
@@ -217,6 +227,26 @@ export function createCheckScheduler({
 
   function reschedule({ trigger = 'periodic' } = {}) {
     if (stopped) return snapshot()
+    // ★ 用户关掉自动检查时**不安排**任何定时器。
+    //
+    //   `checkOnStartup: false` 在配置文件里是**文档化**的（`config.mjs` 的
+    //   JSON 示例里有它），而在此之前**没有任何消费者**：`markInteractive()`
+    //   照样安排首次检查，周期检查也照样每 6 小时发一次网络请求。也就是
+    //   说，一个"关掉自动检查"的设置会被静默忽略，而用户会以为它生效了。
+    //
+    //   > 一个被静默忽略的"关闭"开关，与一个不存在的关闭开关，
+    //   > 对用户来说是同一件事——只不过前者让用户以为自己是安全的。
+    //
+    //   手动检查**不受影响**（`manual()`/`retry()` 直接调 `run`）：
+    //   关掉自动检查的意思不是"这个功能不能用了"。
+    if (automatic === false) {
+      if (timer !== null) { clearTimer(timer); timer = null }
+      dueAtMs = null
+      dueKind = null
+      dueReason = trigger === 'startup' ? '自动检查已关闭' : null
+      publish()
+      return snapshot()
+    }
     const plan = planNextCheck({ nowMs: now(), interactiveAtMs, lastCheckAtMs, consecutiveFailures, policy, random })
     dueAtMs = plan.dueAtMs
     dueKind = plan.kind
@@ -347,6 +377,27 @@ export function selfCheckSchedule() {
   if (p.jitterRatio !== 0.2) problems.push('抖动不是 ±20%')
   if (p.backoffMs.join(',') !== [15, 30, 60].map((m) => m * 60_000).join(',')) problems.push('退避阶梯不是 15/30/60 分钟')
   if (p.maxBackoffMs !== 6 * 60 * 60 * 1000) problems.push('退避上限不是 6 小时')
+
+  // ★ 关掉自动检查时**不安排**任何定时器（配置的 `checkOnStartup: false`）。
+  //   在此之前那个键没有消费者，用户的关闭意图被静默忽略。
+  {
+    const timers = []
+    const off = createCheckScheduler({
+      runCheck: async () => ({ outcome: 'up-to-date' }),
+      automatic: false,
+      now: () => 0,
+      setTimer: (fn, ms) => { const t = { fn, ms, unref() {} }; timers.push(t); return t },
+      clearTimer: () => {},
+    })
+    const snap = off.markInteractive()
+    if (timers.length !== 0) problems.push('关掉自动检查之后仍然安排了定时器（用户的关闭被忽略）')
+    if (snap.automatic !== false) problems.push('读数里没有报告"自动检查已关闭"')
+    if (snap.dueReason !== '自动检查已关闭') problems.push(`关闭时的理由不对：${snap.dueReason}`)
+    // 手动检查**不受影响**：关掉自动检查不是"这个功能不能用了"。
+    const manualTimersBefore = timers.length
+    void off.manual()
+    if (timers.length !== manualTimersBefore) problems.push('手动检查被"关闭自动检查"挡住了')
+  }
 
   // ① 未进入可交互状态：没有排定时间。
   const notInteractive = planNextCheck({ nowMs: 0, random: () => 0.5 })

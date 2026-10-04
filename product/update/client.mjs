@@ -658,6 +658,11 @@ export function createUpdateClient({
 
   const scheduler = createCheckScheduler({
     runCheck: (trigger, signal) => check({ trigger, signal }),
+    // ★ 配置里的 `checkOnStartup` 在这里才被**消费**。
+    //   在此之前它是配置模块文档化的一个键，而全仓没有消费者：
+    //   `markInteractive()` 照样安排首次检查、周期检查照样发请求。
+    //   用户关掉自动检查的意图被静默忽略，而他会以为自己关掉了。
+    automatic: config?.checkOnStartup !== false,
     now, random, setTimer, clearTimer, log,
     onState: () => publish(),
   })

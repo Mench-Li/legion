@@ -151,18 +151,28 @@ function makeConfig() {
   return hostResult.host
 }
 
-function makeClient({ fetchImpl, cacheDir, installRootUnused = null }) {
+function makeClient({
+  fetchImpl, cacheDir, installRootUnused = null, configOverrides = {},
+  setTimer = (fn, ms) => setTimeout(fn, ms), clearTimer = (handle) => clearTimeout(handle),
+} = {}) {
+  void installRootUnused
   return createUpdateClient({
     config: {
       ok: true, usable: true, code: null, reason: null, channel: 'stable',
       host: fetchImpl.host ?? makeConfig(),
       trustStore: fetchImpl.trustStore,
       trustEntries: [], trustSequence: 1, checkOnStartup: true,
+      ...configOverrides,
     },
     cacheDir,
     currentVersion: CURRENT,
     fetchImpl,
     now: () => NOW_MS,
+    // ★ 计时器可注入：`checkOnStartup` 那条判据的**可观测结果**正是
+    //   "有没有安排定时器"，而真实的 `setTimeout` 让那件事看不见
+    //   （它不会失败，只会安静地什么都不做）。
+    setTimer,
+    clearTimer,
   })
 }
 
@@ -674,4 +684,57 @@ test('并发检查共享一次请求：托管只被问了一次通道清单', as
   assert.equal(b.shared, true)
   const feedRequests = ctx.fetchImpl.requests.filter((r) => r.url.endsWith('feeds/stable/win-x64.json'))
   assert.equal(feedRequests.length, 1, `通道清单被请求了 ${feedRequests.length} 次`)
+})
+
+// ---------------------------------------------------------------------------
+// ★ 配置里的 checkOnStartup 必须**真的**被消费
+// ---------------------------------------------------------------------------
+
+test('★★★ checkOnStartup:false 时**不**自动检查；手动检查照常', async (t) => {
+  // 这个键在 `config.mjs` 的 JSON 示例里是**文档化**的，而在此之前全仓
+  // 没有消费者：`markInteractive()` 照样安排首次检查、周期检查照样每 6 小时
+  // 发一次网络请求。也就是"关掉自动检查"被静默忽略，而用户会以为它生效了。
+  //
+  //   > 一个被静默忽略的"关闭"开关，与一个不存在的关闭开关，
+  //   > 对用户来说是同一件事——只不过前者让用户以为自己是安全的。
+  //
+  // ★ 断言走**客户端**这一层，而不是直接调 `createCheckScheduler`：
+  //   缺陷的位置是"配置到调度器之间没有接线"，只测调度器会把那一段漏掉。
+  const ctx = setup()
+  t.after(() => rmSync(ctx.cacheDir, { recursive: true, force: true }))
+  const scheduled = []
+  const client = makeClient({
+    ...ctx,
+    configOverrides: { checkOnStartup: false },
+    setTimer: (fn, ms) => { const timer = { fn, ms, unref() {} }; scheduled.push(timer); return timer },
+    clearTimer: () => {},
+  })
+
+  const snap = client.markInteractive()
+  assert.equal(scheduled.length, 0, '配置关掉了自动检查，却仍然安排了定时器')
+  assert.equal(snap.automatic, false, '调度器读数没有反映出"自动检查已关闭"')
+  assert.equal(snap.dueReason, '自动检查已关闭')
+  // 唤醒补检也不该安排任何东西。
+  assert.equal(client.notifyResume().due, false)
+  assert.equal(scheduled.length, 0)
+  // ★ 手动检查**不受影响**：关掉自动检查不是"这个功能不能用了"。
+  const manual = await client.check({ trigger: 'manual' })
+  assert.equal(manual.outcome, 'available', manual.reason)
+  assert.equal(scheduled.length, 0, '手动检查之后又安排了自动定时器')
+})
+
+test('★ checkOnStartup 开启（默认）时照常安排首次检查', async (t) => {
+  const ctx = setup()
+  t.after(() => rmSync(ctx.cacheDir, { recursive: true, force: true }))
+  const scheduled = []
+  const client = makeClient({
+    ...ctx,
+    setTimer: (fn, ms) => { const timer = { fn, ms, unref() {} }; scheduled.push(timer); return timer },
+    clearTimer: () => {},
+  })
+  const snap = client.markInteractive()
+  assert.equal(scheduled.length, 1, '默认（开启）时没有安排首次检查')
+  assert.equal(snap.automatic, true)
+  // 首次延迟落在设计 §6 line 132 的 30～90 秒里。
+  assert.ok(scheduled[0].ms >= 30_000 && scheduled[0].ms <= 90_000, `首次延迟 ${scheduled[0].ms} 越界`)
 })

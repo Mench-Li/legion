@@ -298,8 +298,21 @@ function platformToken(platform) {
   return platform === 'win32' ? 'win' : platform
 }
 
-/** 把一次发行的文件写到输出目录，并按上传顺序打印命令。 */
-export function writePublish(publish, outDir, { log = (line) => process.stdout.write(`${line}\n`) } = {}) {
+/**
+ * 把一次发行的文件写到输出目录，并渲染上传计划。
+ *
+ * `target` / `remoteRoot`+`prefix` 决定上传计划指向哪棵树（见
+ * `renderUploadPlan`）。**产物总是写出来**——"构建/签名"与"决定发到哪棵树"
+ * 是两件事（设计 §9 的第 1、2 步是构建与校验，第 3 步才是上传）。
+ *
+ * ★ 但没有目标时写出的**不是**一份计划，而是一份拒答说明：里面**没有**任何
+ *   `scp` 行。理由与 `renderUploadPlan` 相同——一份把目标猜错的指令会被人
+ *   照着执行，而"没有指令"不可能被执行错。
+ */
+export function writePublish(publish, outDir, {
+  target = null, remoteRoot = null, prefix = null,
+  log = (line) => process.stdout.write(`${line}\n`),
+} = {}) {
   const immutableDir = join(outDir, 'immutable')
   for (const entry of publish.immutable) {
     const target = join(immutableDir, entry.path)
@@ -325,41 +338,155 @@ export function writePublish(publish, outDir, { log = (line) => process.stdout.w
     log(`ok  channel   ${entry.path}  ${entry.bytes.length} 字节`)
   }
   const plan = join(outDir, 'upload-plan.txt')
-  writeFileSync(plan, renderUploadPlan(publish, outDir), 'utf8')
+  if (target === null && remoteRoot === null && prefix === null) {
+    writeFileSync(plan, renderNoTargetNotice(publish), 'utf8')
+    log(`⚠ 没有给出上传目标，upload-plan.txt 里**没有**可执行的 scp 命令：${plan}`)
+    log('  给 --target test|production（已部署的两棵树）或 --remote-root + --prefix 之后再生成一次')
+    return { immutableDir, plan, planned: false }
+  }
+  writeFileSync(plan, renderUploadPlan(publish, outDir, { target, remoteRoot, prefix }), 'utf8')
   log(`ok  上传计划 ${plan}`)
-  return { immutableDir, plan }
+  return { immutableDir, plan, planned: true }
 }
+
+/**
+ * 没给上传目标时写出来的**拒答**（不是计划）。
+ *
+ * 它的全部内容都指向"去把目标填上"，而且**一行 `scp` 都没有**：一份可以被
+ * 误执行的半成品，比一份明确的拒答危险得多。
+ */
+export function renderNoTargetNotice(publish) {
+  return [
+    '# Legion 更新发布：**没有**上传计划（缺上传目标）',
+    '#',
+    '# 本文件不是指令，请不要从中抄命令——这里一行 scp 都没有。',
+    '#',
+    '# 产物已经写好了（immutable/ 与 channel/），但"发到哪棵树"是一个必须',
+    '# 显式给出的部署决定。原先的脚本把它默认成**生产树**，于是一次测试通道',
+    '# 的发行会生成一份指向生产目录的上传指令——照做的人每一步都对，地方错了。',
+    '#',
+    '# 用下面两种之一重新生成一次：',
+    '#   --target test|production    （托管上已部署的两棵树）',
+    ...Object.entries(UPLOAD_TARGETS).map(([name, t]) => `#     ${name} → ${t.remoteRoot}  前缀 ${t.prefix}`),
+    '#   --remote-root <user@host:/path> --prefix <url 前缀>   （域名接入后的其它托管）',
+    '#',
+    '# ★ 本通道（' + String(publish?.summary?.channel ?? '?') + '）按仓库里的 update-config.example.json',
+    '#   应当发到：' + (CHANNEL_TARGETS[publish?.summary?.channel] ?? '（这个通道没有既定映射，请自行确认）'),
+    '',
+    '# 本次发行摘要（留档）',
+    canonicalJson(publish.summary),
+    '',
+  ].join('\n')
+}
+
+/**
+ * 托管上的两棵发布树（`2026-10-04-update-host-bootstrap.md` 的部署结果）。
+ *
+ * `test` 那棵给 internal 通道用（仓库里的 `update-config.example.json` 把
+ * `internal` 映到 `http://117.72.146.36/test/legion`），`production` 那棵给
+ * canary/stable 用。
+ */
+export const UPLOAD_TARGETS = Object.freeze({
+  test: Object.freeze({ remoteRoot: 'root@117.72.146.36:/srv/legion-updates/test/legion', prefix: '/test/legion' }),
+  production: Object.freeze({ remoteRoot: 'root@117.72.146.36:/srv/legion-updates/production/legion', prefix: '/legion' }),
+})
+
+/** 通道 → 它该去的那棵树。**这是判据，不是提示**（见 `renderUploadPlan` 的说明）。 */
+const CHANNEL_TARGETS = Object.freeze({ internal: 'test', canary: 'production', stable: 'production' })
 
 /**
  * 渲染上传计划。
  *
- * 两条命令、**固定顺序**，理由见文件头注释。它用 `scp`/`rsync` 而不是自研
- * 上传器，是因为"我们自己的上传实现"是又一个需要被审计的组件，而这一步的
- * 全部要求只是"把字节放到位置上"。
+ * 三条命令、**固定顺序**，理由见文件头注释。它用 `scp` 而不是自研上传器，
+ * 是因为"我们自己的上传实现"是又一个需要被审计的组件，而这一步的全部要求
+ * 只是"把字节放到位置上"。
+ *
+ * ★★ **目标树必须显式给，没有默认值。**
+ *
+ *   这里原先的签名是
+ *   `{ remoteRoot = 'root@117.72.146.36:/srv/legion-updates/production/legion' }`
+ *   ——一个**写死的生产路径**，而它与通道无关。于是一次 `--channel internal`
+ *   的测试发行会生成一份**指向生产树**的上传计划，还带着 `--prefix /legion`
+ *   的回读命令（internal 的前缀其实是 `/test/legion`）。
+ *
+ *   这不是"默认值选得不好"，而是**生成了一条把测试物写进生产目录的操作指令**：
+ *   照它执行的人会做对每一步，却把东西放错地方。而 `verify-host` 随后要么
+ *   404、要么核到另一棵树——两种结果都不会告诉他"你传错了树"。
+ *
+ *   > 一份把目标猜错的部署指令，比一份要求你填目标的指令危险得多：
+ *   > 前者会被人照着执行。
+ *
+ *   所以现在：要么给 `target`（`'test'` / `'production'`，对应托管上那两棵
+ *   已部署的树），要么给 `remoteRoot` + `prefix` 这一**对**（用于域名接入后的
+ *   其它托管）。两者都不给就**拒绝渲染**，并说清为什么没有默认值。
+ *
+ * ★ 另加一条通道/目标的一致性判据：`internal` 是测试通道（仓库的
+ *   `update-config.example.json` 把它映到 `/test/legion`），把它发到生产树
+ *   会被配好的客户端**永远读不到**——那是往生产里留垃圾，所以直接拒绝。
  */
-export function renderUploadPlan(publish, outDir, { remoteRoot = 'root@117.72.146.36:/srv/legion-updates/production/legion' } = {}) {
+export function renderUploadPlan(publish, outDir, { target = null, remoteRoot = null, prefix = null } = {}) {
+  const channel = publish?.summary?.channel ?? null
+  let root = remoteRoot
+  let urlPrefix = prefix
+
+  if (target !== null) {
+    if (remoteRoot !== null || prefix !== null) {
+      throw new Error('renderUploadPlan 的 target 与 remoteRoot/prefix 只能给一种：两处都给时"以哪个为准"没有答案')
+    }
+    const chosen = UPLOAD_TARGETS[target]
+    if (chosen === undefined) {
+      throw new Error(`未知的上传目标 ${JSON.stringify(target)}：只支持 ${Object.keys(UPLOAD_TARGETS).join(' / ')}`)
+    }
+    root = chosen.remoteRoot
+    urlPrefix = chosen.prefix
+  }
+
+  if (typeof root !== 'string' || root === '' || typeof urlPrefix !== 'string' || urlPrefix === '') {
+    throw new Error(
+      'renderUploadPlan 需要一个**显式**的上传目标：给 --target test|production，'
+      + '或给 --remote-root 与 --prefix 这一对。\n'
+      + '  ★ 这里刻意**没有**默认值：原先的默认是写死的生产路径，'
+      + '    于是测试通道的发行会生成一份指向生产目录的上传指令。\n'
+      + `    已部署的两棵树：${Object.entries(UPLOAD_TARGETS).map(([k, v]) => `${k} → ${v.remoteRoot}（前缀 ${v.prefix}）`).join('；')}`,
+    )
+  }
+
+  const expected = CHANNEL_TARGETS[channel]
+  if (expected !== undefined && target !== null && target !== expected) {
+    throw new Error(
+      `通道 ${channel} 的发行应该发到 ${expected} 那棵树，而不是 ${target}：`
+      + (expected === 'test'
+        ? `内部/测试通道的订阅地址是 ${UPLOAD_TARGETS.test.prefix}，发到生产树会被配好的客户端永远读不到`
+        : `正式通道的发行必须走生产树与门禁流程（设计 §10：stable 需阶段 D 通过后才开放）`),
+    )
+  }
+
   const lines = []
   lines.push('# Legion 更新发布上传计划')
   lines.push('#')
   lines.push('# 顺序**不可交换**（设计 §9 line 202）：')
   lines.push('#   先传全部不可变文件，人工/CI 核对之后再替换通道清单。')
   lines.push('#   反过来的话，任何一次部分失败都会留下"通道指向一个不存在的 releaseId"。')
+  lines.push('#')
+  lines.push(`# ★ 目标树：${target ?? '(显式给出)'} → ${root}`)
+  lines.push(`#   客户端将从这个前缀读到通道清单：${urlPrefix}`)
+  lines.push(`#   （发布前确认这就是该通道该去的那棵树——这一步没有默认值。）`)
   lines.push('')
   lines.push(`# 第 1 步：不可变文件（发行目录不会被覆盖，可以安全重传）`)
-  lines.push(`scp -r "${join(outDir, 'immutable', 'releases')}" ${remoteRoot}/`)
+  lines.push(`scp -r "${join(outDir, 'immutable', 'releases')}" ${root}/`)
   lines.push('')
   lines.push('# 第 2 步：公网回读核对（必须在这一步通过之后才做第 3 步）')
-  lines.push(`node scripts/update/verify-host.mjs --origin <生产 origin> --prefix /legion \\`)
-  lines.push(`  --channel ${publish.summary.channel} --expect-release-id ${publish.summary.releaseId}`)
+  lines.push(`node scripts/update/verify-host.mjs --origin <该树的 origin> --prefix ${urlPrefix} \\`)
+  lines.push(`  --channel ${channel} --expect-release-id ${publish.summary.releaseId}`)
   lines.push('')
   lines.push('# 第 3 步：替换通道清单（单个对象，最后一步）')
   for (const entry of publish.mutable) {
-    lines.push(`scp "${join(outDir, 'channel', entry.path)}" ${remoteRoot}/${entry.path}`)
+    lines.push(`scp "${join(outDir, 'channel', entry.path)}" ${root}/${entry.path}`)
   }
   lines.push('')
   lines.push('# 第 4 步：再次回读，确认通道清单的 sequence 已经推进')
-  lines.push(`node scripts/update/verify-host.mjs --origin <生产 origin> --prefix /legion \\`)
-  lines.push(`  --channel ${publish.summary.channel} --expect-sequence ${publish.summary.sequence}`)
+  lines.push(`node scripts/update/verify-host.mjs --origin <该树的 origin> --prefix ${urlPrefix} \\`)
+  lines.push(`  --channel ${channel} --expect-sequence ${publish.summary.sequence}`)
   lines.push('')
   lines.push(`# 本次发行摘要（留档）`)
   lines.push(canonicalJson(publish.summary))
@@ -445,6 +572,27 @@ export function migrationPlanDigestFromArgs(planPath, explicitDigest) {
 
 export function main(argv = process.argv.slice(2)) {
   const args = parseArgs(argv)
+
+  /**
+   * 上传目标：`--target test|production`，或 `--remote-root` + `--prefix` 一对。
+   *
+   * ★ 命令行这边**必须**给，而且**先于**任何构建工作给（与 `writePublish` 的
+   *   宽松不同）。一次"发布"在操作者心里总是包含"发到哪"，所以让工具在开头
+   *   就把这件事问清楚，比等产物写完之后再警告一句要好——后者很容易被忽略。
+   */
+  const target = typeof args.get('target') === 'string' && args.get('target') !== 'true' ? args.get('target') : null
+  const remoteRoot = typeof args.get('remote-root') === 'string' && args.get('remote-root') !== 'true' ? args.get('remote-root') : null
+  const prefix = typeof args.get('prefix') === 'string' && args.get('prefix') !== 'true' ? args.get('prefix') : null
+  if (target === null && (remoteRoot === null || prefix === null)) {
+    process.stderr.write(
+      '发布需要显式的上传目标：--target test|production，或 --remote-root <user@host:/path> 与 --prefix <url 前缀> 一起给。\n'
+      + '  ★ 这里刻意没有默认值：原先默认成**生产树**，于是测试通道的发行会生成一份\n'
+      + '    指向生产目录的上传指令——照做的人每一步都对，地方错了。\n'
+      + Object.entries(UPLOAD_TARGETS).map(([name, t]) => `    ${name} → ${t.remoteRoot}  前缀 ${t.prefix}\n`).join(''),
+    )
+    return 2
+  }
+
   try {
     const productManifestPath = requireString(args, 'product-manifest')
     const productManifest = JSON.parse(readFileSync(productManifestPath, 'utf8'))
@@ -480,8 +628,8 @@ export function main(argv = process.argv.slice(2)) {
       expiresAt: requireString(args, 'expires-at'),
       outDir,
     })
-    writePublish(publish, outDir)
-    process.stdout.write(`${JSON.stringify(publish.summary, null, 2)}\n`)
+    const written = writePublish(publish, outDir, { target, remoteRoot, prefix })
+    process.stdout.write(`${JSON.stringify({ ...publish.summary, planned: written.planned }, null, 2)}\n`)
     return 0
   } catch (error) {
     process.stderr.write(`发布失败：${error?.message ?? error}\n`)

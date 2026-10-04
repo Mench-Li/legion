@@ -13,7 +13,7 @@
 // ============================================================================
 
 import assert from 'node:assert/strict'
-import { readdirSync, readFileSync, mkdirSync, mkdtempSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { existsSync, readdirSync, readFileSync, mkdirSync, mkdtempSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { Readable } from 'node:stream'
@@ -169,11 +169,83 @@ test('发布：写出去之后回读核对字节（写坏就抛）', (t) => {
 test('发布：上传计划把顺序写死（不可变 → 回读 → 通道）', (t) => {
   const ctx = setup(t)
   const publish = buildPublish(publishArgs(ctx))
-  const plan = renderUploadPlan(publish, join(ctx.root, 'out'))
+  const plan = renderUploadPlan(publish, join(ctx.root, 'out'), { target: 'production' })
   const immutableAt = plan.indexOf('第 1 步')
   const verifyAt = plan.indexOf('第 2 步')
   const channelAt = plan.indexOf('第 3 步')
   assert.ok(immutableAt >= 0 && verifyAt > immutableAt && channelAt > verifyAt, '上传计划的三步顺序不对')
+  assert.match(plan, /scp/)
+})
+
+test('★★★ 上传计划**不能**把目标猜成生产树（原先的默认值就是这个）', (t) => {
+  // ★ 这是一个真实的、危险的缺陷：`renderUploadPlan` 原先的签名是
+  //   `{ remoteRoot = 'root@117.72.146.36:/srv/legion-updates/production/legion' }`
+  //   ——一个**写死的生产路径**，与通道无关。于是一次 `--channel internal`
+  //   的测试发行会生成一份指向**生产树**的上传计划，还带着 `--prefix /legion`
+  //   的回读命令（internal 的前缀其实是 `/test/legion`）。
+  //
+  //   照它执行的人会做对每一步，却把东西放错地方；而 verify-host 随后要么
+  //   404、要么核到另一棵树——两种结果都不会告诉他"你传错了树"。
+  //
+  //   > 一份把目标猜错的部署指令，比一份要求你填目标的指令危险得多：
+  //   > 前者会被人照着执行。
+  const ctx = setup(t)
+  const publish = buildPublish(publishArgs(ctx))
+  const outDir = join(ctx.root, 'out')
+  assert.throws(() => renderUploadPlan(publish, outDir), /显式.*上传目标|没有默认值/,
+    '不给目标时仍然渲染出了一份计划——那正是"猜目标"的老毛病')
+  assert.throws(() => renderUploadPlan(publish, outDir, { target: 'staging' }), /未知的上传目标/)
+  // 两种给法不能同时用（"以哪个为准"没有答案）。
+  assert.throws(
+    () => renderUploadPlan(publish, outDir, { target: 'test', remoteRoot: 'r', prefix: '/p' }),
+    /只能给一种/,
+  )
+})
+
+test('★★★ internal 通道的发行**不能**发到生产树（配好的客户端永远读不到）', (t) => {
+  const ctx = setup(t)
+  const internal = buildPublish(publishArgs(ctx, { channel: 'internal' }))
+  const outDir = join(ctx.root, 'out')
+  assert.throws(
+    () => renderUploadPlan(internal, outDir, { target: 'production' }),
+    /应该发到 test 那棵树/,
+  )
+  const plan = renderUploadPlan(internal, outDir, { target: 'test' })
+  // 目标树与前缀都要**是 internal 那一套**。
+  assert.match(plan, /legion-updates\/test\/legion/)
+  assert.match(plan, /--prefix \/test\/legion/)
+  assert.equal(plan.includes('/srv/legion-updates/production'), false, '测试通道的计划里出现了生产路径')
+})
+
+test('★★ 没有目标时写出的 upload-plan.txt **一行 scp 都没有**', (t) => {
+  // 产物照写（构建与"决定发到哪棵树"是两件事），但那份文件必须是**拒答**，
+  // 不是半成品计划：一份可以被误执行的半成品，比一份明确的拒答危险得多。
+  const ctx = setup(t)
+  const publish = buildPublish(publishArgs(ctx))
+  const outDir = join(ctx.root, 'out')
+  const written = writePublish(publish, outDir, { log: () => {} })
+  assert.equal(written.planned, false)
+  const notice = readFileSync(written.plan, 'utf8')
+  // ★ 判据是"没有**可执行的命令行**"，不是"没有出现 scp 这三个字母"——
+  //   后者会被解释文字里的 "这里一行 scp 都没有" 判红，那样一条分不清
+  //   "命令"与"关于命令的话"的断言，会在正确的那一件事上先响。
+  const commandLines = notice.split('\n').filter((line) => /^\s*(scp|rsync|ssh)\b/.test(line))
+  assert.deepEqual(commandLines, [], `拒答文件里有可执行的命令：${JSON.stringify(commandLines)}`)
+  assert.match(notice, /不是指令/)
+  assert.match(notice, /--target test\|production/)
+  // 产物仍然真的写出来了。
+  assert.equal(existsSync(join(outDir, 'channel', `feeds/${publish.summary.channel}/win-x64.json`)), true)
+})
+
+test('★★ 给了目标时 planned=true，且计划指向那棵树', (t) => {
+  const ctx = setup(t)
+  const publish = buildPublish(publishArgs(ctx))
+  const outDir = join(ctx.root, 'out')
+  const written = writePublish(publish, outDir, { target: 'production', log: () => {} })
+  assert.equal(written.planned, true)
+  const plan = readFileSync(written.plan, 'utf8')
+  assert.match(plan, /legion-updates\/production\/legion/)
+  assert.match(plan, /--prefix \/legion/)
   assert.match(plan, /scp/)
 })
 

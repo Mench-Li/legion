@@ -133,9 +133,27 @@ function artifactProblems(kind, artifact, problems) {
     problems.push(releaseProblem(RELEASE_CODES.BAD_ARTIFACT, `${kind} 必须是对象`, kind))
     return
   }
+  // 升级包多两个**可选**字段：包内闭包的位置与摘要（设计 §6「校验闭包」的
+  // 载体）。安装程序与发布说明没有它们——那两个产物不参与"解压到版本目录"。
+  //
+  // ★ 判据是"必须是允许字段的**子集**，且三个必需字段都在"，而不是
+  //   "字段集合必须完全等于某个列表"。写成后者时 `package` 会被要求
+  //   **必须**带闭包——而"没有闭包的包"是一种合法的旧形态（它仍然受
+  //   "可执行文件必须被授权"那条判据约束，见 extract.mjs）。
+  const allowed = kind === 'package'
+    ? ['closurePath', 'closureSha256', 'path', 'sha256', 'sizeBytes']
+    : ['path', 'sha256', 'sizeBytes']
   const keys = Object.keys(artifact).sort()
-  if (keys.join(',') !== 'path,sha256,sizeBytes') {
-    problems.push(releaseProblem(RELEASE_CODES.BAD_ARTIFACT, `${kind} 的字段必须是 path/sizeBytes/sha256，实际 ${keys.join(',')}`, kind))
+  const unknown = keys.filter((key) => !allowed.includes(key))
+  if (unknown.length > 0) {
+    problems.push(releaseProblem(RELEASE_CODES.BAD_ARTIFACT,
+      `${kind} 含未知字段 ${unknown.join(',')}（允许：${allowed.join('/')}）`, kind))
+    return
+  }
+  const missing = ['path', 'sha256', 'sizeBytes'].filter((key) => !keys.includes(key))
+  if (missing.length > 0) {
+    problems.push(releaseProblem(RELEASE_CODES.BAD_ARTIFACT,
+      `${kind} 缺少必需字段 ${missing.join(',')}`, kind))
     return
   }
   const pathCheck = validateRelativePath(artifact.path, { field: `${kind}.path` })
@@ -148,6 +166,25 @@ function artifactProblems(kind, artifact, problems) {
   }
   if (!isSha256Hex(artifact.sha256)) {
     problems.push(releaseProblem(RELEASE_CODES.BAD_DIGEST, `${kind}.sha256 必须是 64 位小写十六进制`, `${kind}.sha256`))
+  }
+  // ★ 闭包的两个字段必须**同时**出现。
+  //
+  //   只给 `closurePath` 而漏掉摘要时，闭包就失去了可信来源——客户端会拿
+  //   一份包内的、没人签过名的清单当授权依据，而那正是"未知可执行文件"
+  //   那条判据要防的东西。反过来只给摘要时，没人知道去包里哪个条目取闭包。
+  const hasPath = typeof artifact.closurePath === 'string'
+  const hasDigest = typeof artifact.closureSha256 === 'string'
+  if (kind === 'package' && hasPath !== hasDigest) {
+    problems.push(releaseProblem(RELEASE_CODES.BAD_ARTIFACT,
+      'package 的 closurePath 与 closureSha256 必须同时给出或同时省略', kind))
+  }
+  if (hasPath) {
+    const closureCheck = validateRelativePath(artifact.closurePath, { field: `${kind}.closurePath`, allowSubdirDepth: 5 })
+    if (!closureCheck.ok) problems.push(releaseProblem(closureCheck.code, closureCheck.reason, `${kind}.closurePath`))
+    if (!isSha256Hex(artifact.closureSha256)) {
+      problems.push(releaseProblem(RELEASE_CODES.BAD_DIGEST,
+        `${kind}.closureSha256 必须是 64 位小写十六进制`, `${kind}.closureSha256`))
+    }
   }
 }
 
@@ -340,13 +377,19 @@ export function buildRelease({
 }
 
 /** 由字节构造一个产物描述（发布端在写完文件之后用它）。 */
-export function artifactFromBytes(path, bytes) {
+export function artifactFromBytes(path, bytes, extra = null) {
   const buffer = Buffer.isBuffer(bytes) ? bytes : Buffer.from(bytes)
-  return Object.freeze({
+  const base = {
     path: validateRelativePath(path).ok ? path : null,
     sizeBytes: buffer.length,
     sha256: createHash('sha256').update(buffer).digest('hex'),
-  })
+  }
+  // 升级包多带闭包的位置与摘要（闭包的形状见 `closure.mjs`）。
+  if (extra !== null && typeof extra === 'object'
+    && typeof extra.closurePath === 'string' && typeof extra.closureSha256 === 'string') {
+    return Object.freeze({ ...base, closurePath: extra.closurePath, closureSha256: extra.closureSha256 })
+  }
+  return Object.freeze(base)
 }
 
 /** 发行身份：候选必须以 releaseId、版本和摘要**共同**标识（设计 §6 line 138）。 */

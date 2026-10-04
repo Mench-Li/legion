@@ -19,10 +19,13 @@ import { join } from 'node:path'
 import { Readable } from 'node:stream'
 import { test } from 'node:test'
 
-import { buildPublish, renderUploadPlan, writePublish } from './publish.mjs'
+import { buildPublish, packDirectory, renderUploadPlan, writePublish } from './publish.mjs'
 import { verifyHost } from './verify-host.mjs'
 import { buildTrustTable } from './trust-file.mjs'
 import { createTrustStore, generateReleaseKeyPair } from '../../product/update/envelope.mjs'
+import { extractArchive, planExtraction, verifyExtractedTree } from '../../product/update/extract.mjs'
+import { buildZip } from '../../product/update/zip.mjs'
+import { createTransport } from '../../product/update/transport.mjs'
 import { createHostConfig, FEED_CACHE_CONTROL, RELEASE_CACHE_CONTROL } from '../../product/update/host.mjs'
 import { createHash } from 'node:crypto'
 
@@ -328,6 +331,169 @@ test('端到端：sequence 与预期不符 → 那一条检查失败但其余照
   assert.match(check.detail, /43/)
   // 签名与 schema 仍然是通过的：一次"序号不对"不该掩盖"签名是好的"。
   assert.equal(result.checks.find((c) => c.name === 'feed-signature').ok, true)
+})
+
+// ---------------------------------------------------------------------------
+// ④ 由目录树打包（带闭包）→ 回读 → 解压：真正的闭环
+// ---------------------------------------------------------------------------
+
+test('★ 闭环：目录树 → 打包（含闭包）→ 回读验签 → 解压 → 解压后再核闭包', async (t) => {
+  const ctx = setup(t)
+  // 一份"产品树"：一个可执行 + 一个数据文件。
+  const payloadRoot = join(ctx.root, 'payload')
+  const files = [
+    { path: 'product/launcher/cli.mjs', bytes: Buffer.from('#!/usr/bin/env node\nconsole.log(1)\n') },
+    { path: 'product/release/runtime-manifest.json', bytes: Buffer.from(JSON.stringify(ctx.productManifest)) },
+    { path: 'product/assets/icon.png', bytes: Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x01]) },
+  ]
+  for (const file of files) {
+    const target = join(payloadRoot, ...file.path.split('/'))
+    mkdirSync(join(target, '..'), { recursive: true })
+    writeFileSync(target, file.bytes)
+  }
+
+  const outDir = join(ctx.root, 'out')
+  const publish = buildPublish(publishArgs(ctx, { packageRoot: payloadRoot, packageZipPath: null, outDir }))
+  // ★ 清单里带上了闭包的位置与摘要。
+  assert.equal(publish.release.package.closurePath, 'closure.json')
+  assert.match(publish.release.package.closureSha256, /^[0-9a-f]{64}$/)
+  assert.equal(publish.summary.closureFileCount, files.length)
+
+  writePublish(publish, outDir)
+
+  // 回读：客户端同一套代码必须验得过。
+  const verified = await verifyHost({
+    origin: ORIGIN, prefix: PREFIX, channel: 'stable',
+    trustStore: ctx.trustStore, fetchImpl: hostFrom(outDir, { full: true }),
+    expectReleaseId: 'rel-1.1.0', now: () => NOW_MS,
+  })
+  assert.equal(verified.ok, true,
+    `回读未通过：\n${verified.checks.filter((c) => !c.ok).map((c) => `  ${c.name}: ${c.detail}`).join('\n')}`)
+
+  // 解压：用发行清单钉住的闭包条目，逐文件核对内容摘要。
+  const zipPath = join(outDir, 'immutable', 'releases', 'rel-1.1.0', 'legion-win-x64.zip')
+  const archiveBytes = readFileSync(zipPath)
+  const targetDir = join(ctx.root, 'installed', 'versions', '1.1.0')
+  const extracted = extractArchive({
+    archiveBytes,
+    targetDir,
+    closureEntry: {
+      path: publish.release.package.closurePath,
+      sha256: publish.release.package.closureSha256,
+    },
+  })
+  assert.equal(extracted.ok, true, extracted.reason)
+  for (const file of files) {
+    assert.deepEqual(readFileSync(join(targetDir, ...file.path.split('/'))), file.bytes, `${file.path} 内容不符`)
+  }
+  // 解压**之后**的闭包核对。
+  const verdict = verifyExtractedTree({ targetDir, expected: extracted.written })
+  assert.equal(verdict.ok, true, verdict.problems.join('；'))
+})
+
+test('★ 闭包拦得住"发布端多塞了一个可执行文件"', async (t) => {
+  const ctx = setup(t)
+  const payloadRoot = join(ctx.root, 'payload')
+  const good = Buffer.from('#!/usr/bin/env node\n')
+  mkdirSync(join(payloadRoot, 'product', 'launcher'), { recursive: true })
+  writeFileSync(join(payloadRoot, 'product', 'launcher', 'cli.mjs'), good)
+
+  // 直接用打包函数拿到闭包字节：`buildPublish` 把它们放进包里，而这个用例
+  // 要**手改包**来模拟一次投毒。
+  const packed = packDirectory({ root: payloadRoot })
+  assert.equal(packed.ok, true, packed.reason)
+
+  // 攻击形态：包里多塞一个可执行文件，而闭包内容完全一致。
+  const tampered = buildZip([
+    { path: 'product/launcher/cli.mjs', bytes: good },
+    { path: 'product/evil.exe', bytes: Buffer.from('MZ') },
+    { path: 'closure.json', bytes: packed.closureBytes },
+  ])
+  assert.equal(tampered.ok, true, tampered.reason)
+
+  const planned = planExtraction({
+    archiveBytes: tampered.bytes,
+    closureEntry: { path: 'closure.json', sha256: packed.closureSha256 },
+  })
+  assert.equal(planned.ok, false)
+  assert.equal(planned.code, 'extract-unknown-executable')
+  assert.match(planned.reason, /evil\.exe/)
+  // 而**干净**的那一份必须通过——否则这条用例只证明了"什么都拒"。
+  const clean = planExtraction({
+    archiveBytes: packed.zipBytes,
+    closureEntry: { path: 'closure.json', sha256: packed.closureSha256 },
+  })
+  assert.equal(clean.ok, true, clean.reason)
+})
+
+test('★ 回读发现包被换过：整包摘要不符', async (t) => {
+  const ctx = setup(t)
+  const payloadRoot = join(ctx.root, 'payload')
+  mkdirSync(join(payloadRoot, 'product'), { recursive: true })
+  writeFileSync(join(payloadRoot, 'product', 'a.txt'), 'hello')
+  const outDir = join(ctx.root, 'out')
+  const publish = buildPublish(publishArgs(ctx, { packageRoot: payloadRoot, packageZipPath: null, outDir }))
+  writePublish(publish, outDir)
+  // 托管上的包被换成了另一份字节。
+  const fetchImpl = hostFrom(outDir, { full: true })
+  const zipKey = 'releases/rel-1.1.0/legion-win-x64.zip'
+  fetchImpl.files.set(zipKey, Buffer.from('PK\u0003\u0004 totally different bytes'))
+
+  // 回读只探测前 4 KiB，所以"包被换过"由**下载端**的整包摘要拦住；
+  // 这里断言的是"回读仍然能通过签名与清单校验"（包的字节完整性问题
+  // 属于下载阶段，见 client.test.mjs 的「包被替换」用例）。
+  const verified = await verifyHost({
+    origin: ORIGIN, prefix: PREFIX, channel: 'stable',
+    trustStore: ctx.trustStore, fetchImpl, now: () => NOW_MS,
+  })
+  assert.equal(verified.checks.find((c) => c.name === 'release-signature').ok, true)
+  // 而完整下载会算摘要 —— 用 transport 直接验证这一点。
+  const transport = createTransport({ fetchImpl, now: () => NOW_MS })
+  const host = createHostConfig({ origin: ORIGIN, prefix: PREFIX, channel: 'stable' }).host
+  const download = await transport.downloadToFile(host, `${ORIGIN}${PREFIX}/${zipKey}`, {
+    targetPath: join(ctx.root, 'downloaded.zip'),
+    expectedSize: publish.release.package.sizeBytes,
+    expectedSha256: publish.release.package.sha256,
+  })
+  assert.equal(download.ok, false)
+  assert.ok(['net-digest-mismatch', 'net-too-large', 'net-too-small'].includes(download.code), download.code)
+})
+
+test('打包拒绝符号链接（闭包描述的是另一个位置的内容）', (t) => {
+  const ctx = setup(t)
+  const root = join(ctx.root, 'payload')
+  mkdirSync(root, { recursive: true })
+  writeFileSync(join(root, 'real.txt'), 'x')
+  try {
+    symlinkSync(join(root, 'real.txt'), join(root, 'link.txt'))
+  } catch {
+    return // Windows 上无权限创建符号链接时跳过
+  }
+  const packed = packDirectory({ root })
+  assert.equal(packed.ok, false)
+  assert.match(packed.reason, /符号链接/)
+})
+
+test('打包拒绝目录树里已有的 closure.json（避免覆盖调用方的数据）', (t) => {
+  const ctx = setup(t)
+  const root = join(ctx.root, 'payload')
+  mkdirSync(root, { recursive: true })
+  writeFileSync(join(root, 'closure.json'), '{}')
+  const packed = packDirectory({ root })
+  assert.equal(packed.ok, false)
+  assert.match(packed.reason, /已经有 closure\.json/)
+})
+
+test('两种包来源只能给一个（"用哪一个"必须有答案）', (t) => {
+  const ctx = setup(t)
+  assert.throws(
+    () => buildPublish(publishArgs(ctx, { packageRoot: ctx.stage, outDir: ctx.root })),
+    /只能给一个/,
+  )
+  assert.throws(
+    () => buildPublish(publishArgs(ctx, { packageZipPath: null, packageRoot: null })),
+    /需要 --package-zip/,
+  )
 })
 
 // ---------------------------------------------------------------------------

@@ -911,6 +911,115 @@ test('★ helper：规格**存在但非法** → 记下来并按"不健康"处�
   assert.equal(fx.calls.includes('health'), false)
 })
 
+test('★ 端到端：发布端格式的包（含 closure.json）→ helper 解压 → 提交', async (t) => {
+  // 这一条把**发布端**与**执行端**接起来：
+  //
+  //   `zip.mjs` 的写端 + `closure.mjs` 的闭包  →  一个与 `publish.mjs`
+  //   产出格式相同的包（含包内 `closure.json`）
+  //     → 事务文件带 `closureEntry`（摘要在签过名的发行清单里的那个）
+  //     → helper 的真实 unpack（`extract.mjs`）→ 切换 → 健康 → 提交。
+  //
+  // 之前那些用例都注入 `unpack` 替身，所以它们证明的是"判据接得上"；
+  // 这一条证明的是"发布端的字节形状能被执行端完整接受"。
+  const ctx = setup(t)
+  const { createHash } = await import('node:crypto')
+  const { writeFileSync } = await import('node:fs')
+  const { buildZip } = await import('./zip.mjs')
+  const { CLOSURE_ENTRY_NAME, buildClosure, closureDigest, serializeClosure } = await import('./closure.mjs')
+
+  const files = [
+    { path: 'product/launcher/cli.mjs', bytes: Buffer.from('#!/usr/bin/env node\nconsole.log(1)\n') },
+    { path: 'product/release/runtime-manifest.json', bytes: Buffer.from(`${JSON.stringify(currentManifest(NEXT_VERSION))}\n`) },
+  ]
+  const closure = buildClosure(files.map((file) => ({
+    path: file.path, bytes: file.bytes.length, sha256: createHash('sha256').update(file.bytes).digest('hex'),
+  })))
+  const closureBytes = serializeClosure(closure)
+  const zipped = buildZip([...files, { path: CLOSURE_ENTRY_NAME, bytes: closureBytes }])
+  assert.equal(zipped.ok, true, zipped.reason)
+
+  const packagePath = join(ctx.root, 'package.zip')
+  writeFileSync(packagePath, zipped.bytes)
+  const packageSha256 = createHash('sha256').update(zipped.bytes).digest('hex')
+  mkdirSync(join(ctx.installDir, 'versions'), { recursive: true })
+
+  acquireBarrier({ dataDir: ctx.dataDir, txnId: 'ut-e2e', now: () => NOW })
+  const issued = issueCredential({
+    dataDir: ctx.dataDir, txnId: 'ut-e2e', toVersion: NEXT_VERSION,
+    fromVersion: CURRENT_VERSION, releaseId: `rel-${NEXT_VERSION}`, packageSha256, now: () => NOW,
+  })
+  const fx = helperEffects({ listInstalledVersionsImpl: () => [CURRENT_VERSION, NEXT_VERSION] })
+  delete fx.unpack
+  const report = await runHelper({
+    paths: { installDir: ctx.installDir, dataDir: ctx.dataDir, helperDir: join(ctx.root, 'helper') },
+    transaction: {
+      txnId: 'ut-e2e', fromVersion: CURRENT_VERSION, toVersion: NEXT_VERSION,
+      releaseId: `rel-${NEXT_VERSION}`, packagePath, packageSha256,
+      // ★ 与 `publish.mjs` 产出的发行清单同形：闭包的摘要在清单里，内容在包里。
+      closureEntry: { path: CLOSURE_ENTRY_NAME, sha256: closureDigest(closureBytes) },
+      healthProbe: async () => ({ ok: true }),
+    },
+    credentialSecretHex: issued.secretHex, effects: fx,
+  })
+  assert.equal(report.verdict, 'committed', report.reason)
+  for (const file of files) {
+    assert.deepEqual(
+      readFileSync(join(ctx.installDir, 'versions', NEXT_VERSION, ...file.path.split('/'))),
+      file.bytes,
+      `${file.path} 内容不符`,
+    )
+  }
+  const journal = readJournal(ctx.dataDir)
+  assert.ok(journal.records.some((r) => r.kind === 'result' && r.action === 'commit'))
+  assert.equal(readBarrier(ctx.dataDir).blocked, false)
+})
+
+test('★ 端到端：闭包摘要被改掉 → 在写任何文件之前拒绝', async (t) => {
+  const ctx = setup(t)
+  const { createHash } = await import('node:crypto')
+  const { writeFileSync } = await import('node:fs')
+  const { buildZip } = await import('./zip.mjs')
+  const { CLOSURE_ENTRY_NAME, buildClosure, closureDigest, serializeClosure } = await import('./closure.mjs')
+
+  const files = [{ path: 'product/a.txt', bytes: Buffer.from('hello') }]
+  const closure = buildClosure(files.map((file) => ({
+    path: file.path, bytes: file.bytes.length, sha256: createHash('sha256').update(file.bytes).digest('hex'),
+  })))
+  const closureBytes = serializeClosure(closure)
+  const zipped = buildZip([...files, { path: CLOSURE_ENTRY_NAME, bytes: closureBytes }])
+  const packagePath = join(ctx.root, 'package.zip')
+  writeFileSync(packagePath, zipped.bytes)
+  const packageSha256 = createHash('sha256').update(zipped.bytes).digest('hex')
+  mkdirSync(join(ctx.installDir, 'versions'), { recursive: true })
+
+  acquireBarrier({ dataDir: ctx.dataDir, txnId: 'ut-e2e2', now: () => NOW })
+  const issued = issueCredential({
+    dataDir: ctx.dataDir, txnId: 'ut-e2e2', toVersion: NEXT_VERSION,
+    fromVersion: CURRENT_VERSION, releaseId: `rel-${NEXT_VERSION}`, packageSha256, now: () => NOW,
+  })
+  const fx = helperEffects()
+  delete fx.unpack
+  const report = await runHelper({
+    paths: { installDir: ctx.installDir, dataDir: ctx.dataDir, helperDir: join(ctx.root, 'helper') },
+    transaction: {
+      txnId: 'ut-e2e2', fromVersion: CURRENT_VERSION, toVersion: NEXT_VERSION,
+      releaseId: `rel-${NEXT_VERSION}`, packagePath, packageSha256,
+      // 摘要对不上（模拟"发行清单里的闭包摘要是另一份"）。
+      closureEntry: { path: CLOSURE_ENTRY_NAME, sha256: 'f'.repeat(64) },
+      healthProbe: async () => ({ ok: true }),
+    },
+    credentialSecretHex: issued.secretHex, effects: fx,
+  })
+  assert.equal(report.verdict, 'rolled-back', report.reason)
+  assert.equal(report.code, 'helper-unpack-failed')
+  assert.match(report.reason, /closure-entry|摘要与发行清单不符/)
+  // 版本目录不该被创建/写入。
+  assert.equal(existsSync(join(ctx.installDir, 'versions', NEXT_VERSION, 'product')), false,
+    '拒绝之前已经把文件写到磁盘上了')
+  assert.equal(fx.calls.some((c) => Array.isArray(c) && c[0] === 'activate'), false)
+  void closureDigest
+})
+
 test('helper：调用面缺字段一律拒绝', () => {
   assert.equal(validateInvocation({}).ok, false)
   assert.equal(validateInvocation({

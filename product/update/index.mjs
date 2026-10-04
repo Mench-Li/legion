@@ -69,10 +69,19 @@ export {
 } from './schedule.mjs'
 export { CACHE_CHECKED, CACHE_CODES, PART_SUFFIX, cacheRelativePath, createDownloadCache, selfCheckCache } from './cache.mjs'
 export {
-  BOMB_POLICY, EXECUTABLE_EXTENSIONS, EXTRACT_CHECKED, EXTRACT_CODES, SUPPORTED_METHODS,
-  extractArchive, isInside, looksExecutable, planExtraction, readCentralDirectory, selfCheckExtract,
-  validateEntryName, verifyExtractedTree,
+  BOMB_POLICY, EXECUTABLE_EXTENSIONS, EXTRACT_CHECKED, EXTRACT_CODES, MAX_CLOSURE_BYTES, SUPPORTED_METHODS,
+  extractArchive, isInside, looksExecutable, parseClosureBytes, planExtraction, readCentralDirectory,
+  resolveClosureEntry, selfCheckExtract, validateEntryName, verifyExtractedTree,
 } from './extract.mjs'
+export {
+  CLOSURE_CHECKED, CLOSURE_CODES, CLOSURE_ENTRY_NAME, CLOSURE_PROTOCOL, MAX_CLOSURE_BYTES as MAX_CLOSURE_FILE_BYTES,
+  buildClosure, closureDigest, closureFromDirectory, parseClosure, selfCheckClosure, serializeClosure,
+  toClosurePath, validateClosure,
+} from './closure.mjs'
+export {
+  DEFAULT_DEFLATE_LEVEL, ZIP_CHECKED, ZIP_CODES, ZIP_METHODS, buildZip, crc32Of, dosDateTime, selfCheckZip,
+  shouldCompress,
+} from './zip.mjs'
 
 // —— 事务层 ——
 export {
@@ -140,6 +149,8 @@ export async function selfCheckAll() {
     layer('schedule', await import('./schedule.mjs')),
     layer('cache', await import('./cache.mjs')),
     layer('extract', await import('./extract.mjs')),
+    layer('closure', await import('./closure.mjs')),
+    layer('zip', await import('./zip.mjs')),
     layer('health', await import('./health.mjs')),
     layer('state', await import('./state.mjs')),
     layer('config', await import('./config.mjs')),

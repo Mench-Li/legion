@@ -1,4 +1,4 @@
-﻿// product/update/modules.test.mjs
+// product/update/modules.test.mjs
 // ============================================================================
 // 装载期自检的汇总回归
 //
@@ -21,9 +21,9 @@ import { test } from 'node:test'
 import { fileURLToPath } from 'node:url'
 
 const EXPECTED_MODULES = Object.freeze([
-  'barrier', 'cache', 'canonical', 'client', 'config', 'credential', 'envelope',
+  'barrier', 'cache', 'canonical', 'client', 'closure', 'config', 'credential', 'envelope',
   'errors', 'extract', 'feed', 'health', 'helper', 'host', 'index', 'install', 'journal',
-  'release', 'schedule', 'semver', 'state', 'transport',
+  'release', 'schedule', 'semver', 'state', 'transport', 'zip',
 ])
 
 /** 模块 → 它导出的自检结论名。 */
@@ -41,6 +41,8 @@ const CHECKED_EXPORTS = Object.freeze({
   config: 'CONFIG_CHECKED',
   errors: 'ERRORS_CHECKED',
   extract: 'EXTRACT_CHECKED',
+  closure: 'CLOSURE_CHECKED',
+  zip: 'ZIP_CHECKED',
   health: 'HEALTH_CHECKED',
   journal: 'JOURNAL_CHECKED',
   barrier: 'BARRIER_CHECKED',
@@ -91,6 +93,8 @@ test('自检结论本身是检查过的（不是恒真的占位）', async () =>
     install: (c) => c.steps.length >= 8,
     extract: (c) => c.executableExtensions >= 15,
     health: (c) => c.loopbackHosts.length >= 3,
+    closure: (c) => c.protocol === 'legion/update-closure@1',
+    zip: (c) => c.methods.DEFLATE === 8,
   })
   for (const [name, predicate] of Object.entries(requirements)) {
     const mod = await import(new URL(`./${name}.mjs`, import.meta.url))

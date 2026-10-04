@@ -504,6 +504,8 @@ async function stageTest() {
       files: [
         'product/update/client.test.mjs',
         'product/update/extract.test.mjs',
+        'product/update/zip.test.mjs',
+        'product/update/health.test.mjs',
         'product/update/install.test.mjs',
         'product/update/modules.test.mjs',
         'product/launcher/update-gate.test.mjs',

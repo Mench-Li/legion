@@ -1,4 +1,4 @@
-﻿// product/update/extract.mjs
+// product/update/extract.mjs
 // ============================================================================
 // 升级包解压 —— 设计 §6 line 142 那五条拒绝判据
 //
@@ -58,6 +58,10 @@ export const EXTRACT_CODES = Object.freeze({
   MISSING_ENTRY: 'extract-missing-entry',
   EXTRA_ENTRY: 'extract-extra-entry',
   WRITE_FAILED: 'extract-write-failed',
+  /** 包内闭包与外部闭包不一致（"我用的是哪一份"没有答案）。 */
+  CLOSURE_MISMATCH: 'extract-closure-mismatch',
+  /** 包内闭包条目本身有问题（缺失/过大/不是合法闭包/摘要不符）。 */
+  CLOSURE_ENTRY: 'extract-closure-entry',
 })
 
 /** 压缩方式。只认这两个。 */
@@ -85,6 +89,16 @@ export const BOMB_POLICY = Object.freeze({
   /** 条目数上限。 */
   maxEntries: 100_000,
 })
+
+/**
+ * 包内闭包条目的大小上限。
+ *
+ * 与 `closure.mjs` 的 `MAX_CLOSURE_BYTES` 是同一个数，但**不**从那里 import：
+ * 那份模块的路径判据用的正是本模块的 `validateEntryName`，反向 import 会成环。
+ * 两条常量各自声明，`closure.test.mjs` 有一条断言要求它们相等——一旦有人改了
+ * 一边，契约就红。
+ */
+export const MAX_CLOSURE_BYTES = 32 * 1024 * 1024
 
 const MAX_ARCHIVE_BYTES = 8 * 1024 * 1024 * 1024
 
@@ -213,19 +227,145 @@ export function looksExecutable(path) {
 }
 
 /**
+ * 取出并核对包内的闭包条目。
+ *
+ * 这是"闭包可信"这条链上唯一一处把**包内字节**与**签名清单里的摘要**
+ * 连起来的地方，所以它自己每一步都拒得干脆：
+ *   · 条目不在归档里 → 拒；
+ *   · 条目是目录、名字不合法、或声明的摘要不是 64 位十六进制 → 拒；
+ *   · 解出来的字节摘要与声明不符 → 拒；
+ *   · 解出来的字节不是一份合法闭包 → 拒。
+ */
+export function resolveClosureEntry(archiveBytes, entries, closureEntry) {
+  if (closureEntry === null || typeof closureEntry !== 'object') {
+    return { ok: false, code: EXTRACT_CODES.CLOSURE_ENTRY, reason: 'closureEntry 必须是对象' }
+  }
+  const nameCheck = validateEntryName(closureEntry.path)
+  if (!nameCheck.ok) {
+    return { ok: false, code: EXTRACT_CODES.CLOSURE_ENTRY, reason: `闭包条目路径不合法：${nameCheck.reason}` }
+  }
+  if (!/^[0-9a-f]{64}$/.test(closureEntry.sha256 ?? '')) {
+    return { ok: false, code: EXTRACT_CODES.CLOSURE_ENTRY, reason: 'closureEntry.sha256 必须是 64 位小写十六进制' }
+  }
+  const entry = entries.find((item) => !item.isDirectory && item.name === nameCheck.path)
+  if (entry === undefined) {
+    return { ok: false, code: EXTRACT_CODES.CLOSURE_ENTRY, reason: `归档里没有闭包条目 ${nameCheck.path}` }
+  }
+  if (entry.method !== SUPPORTED_METHODS.STORED && entry.method !== SUPPORTED_METHODS.DEFLATE) {
+    return { ok: false, code: EXTRACT_CODES.CLOSURE_ENTRY, reason: `闭包条目用了不支持的压缩方式 ${entry.method}` }
+  }
+  if (entry.uncompressedBytes > MAX_CLOSURE_BYTES) {
+    return {
+      ok: false, code: EXTRACT_CODES.CLOSURE_ENTRY,
+      reason: `闭包条目声明 ${entry.uncompressedBytes} 字节，超过上限 ${MAX_CLOSURE_BYTES}`,
+    }
+  }
+  const bytes = readEntry(archiveBytes, entry)
+  if (bytes === null) {
+    return { ok: false, code: EXTRACT_CODES.CLOSURE_ENTRY, reason: '闭包条目解不出来（本地头损坏或大小不符）' }
+  }
+  const digest = createHash('sha256').update(bytes).digest('hex')
+  if (digest !== closureEntry.sha256) {
+    return {
+      ok: false, code: EXTRACT_CODES.CLOSURE_ENTRY,
+      reason: `闭包条目的摘要与发行清单不符（清单 ${closureEntry.sha256.slice(0, 12)}…，实际 ${digest.slice(0, 12)}…）`,
+    }
+  }
+  const parsed = parseClosureBytes(bytes)
+  if (parsed.ok !== true) {
+    return { ok: false, code: EXTRACT_CODES.CLOSURE_ENTRY, reason: `闭包条目不是合法闭包：${parsed.reason}` }
+  }
+  return { ok: true, code: null, reason: null, files: parsed.files, sha256: digest }
+}
+
+/** 逐条比较两份闭包。返回第一处不一致的可读说明，全一致时返回 null。 */
+export function compareClosures(a, b) {
+  if (a.length !== b.length) return `条目数不同（${a.length} vs ${b.length}）`
+  const byPath = new Map(b.map((item) => [item.path, item]))
+  for (const item of a) {
+    const other = byPath.get(item.path)
+    if (other === undefined) return `包内闭包缺少 ${item.path}`
+    if (other.sha256 !== item.sha256) return `${item.path} 的摘要不同`
+    if (other.bytes !== item.bytes) return `${item.path} 的大小不同（${item.bytes} vs ${other.bytes}）`
+  }
+  return null
+}
+
+/**
+ * 解析闭包字节。
+ *
+ * ★ 这里**不** import `closure.mjs`：`closure.mjs` 的路径判据用的正是本模块的
+ *   `validateEntryName`，反向 import 会成一个环。闭包的形状很窄（一个 protocol
+ *   加一个 {path,bytes,sha256} 数组），在这里解析一遍的代价远小于一个环导入
+ *   在将来带来的初始化顺序问题。
+ */
+export function parseClosureBytes(bytes) {
+  let parsed
+  try {
+    parsed = JSON.parse(Buffer.isBuffer(bytes) ? bytes.toString('utf8') : String(bytes))
+  } catch (error) {
+    return { ok: false, reason: `不是 JSON：${error?.message ?? error}`, files: null }
+  }
+  if (parsed === null || typeof parsed !== 'object' || !Array.isArray(parsed.files)) {
+    return { ok: false, reason: '缺少 files 数组', files: null }
+  }
+  if (parsed.protocol !== 'legion/update-closure@1') {
+    return { ok: false, reason: `protocol 不是 legion/update-closure@1（实际 ${JSON.stringify(parsed.protocol)}）`, files: null }
+  }
+  const files = []
+  const seen = new Set()
+  let previous = null
+  for (const raw of parsed.files) {
+    if (raw === null || typeof raw !== 'object') return { ok: false, reason: '闭包含非对象条目', files: null }
+    const check = validateEntryName(raw.path)
+    if (!check.ok || check.path !== raw.path) {
+      return { ok: false, reason: `闭包条目路径不合法或未规范化：${JSON.stringify(raw.path)}`, files: null }
+    }
+    if (!Number.isSafeInteger(raw.bytes) || raw.bytes < 0) {
+      return { ok: false, reason: `闭包条目 ${raw.path} 的 bytes 不合法`, files: null }
+    }
+    if (!/^[0-9a-f]{64}$/.test(raw.sha256)) {
+      return { ok: false, reason: `闭包条目 ${raw.path} 的 sha256 不合法`, files: null }
+    }
+    if (seen.has(raw.path)) return { ok: false, reason: `闭包条目路径重复：${raw.path}`, files: null }
+    if (previous !== null && raw.path <= previous) {
+      return { ok: false, reason: `闭包条目顺序不是严格升序：${previous} 之后是 ${raw.path}`, files: null }
+    }
+    seen.add(raw.path)
+    previous = raw.path
+    files.push(Object.freeze({ path: raw.path, bytes: raw.bytes, sha256: raw.sha256 }))
+  }
+  return { ok: true, reason: null, files: Object.freeze(files) }
+}
+
+/**
  * 计划一次解压：只读中央目录 + 校验，**不写任何文件**。
  *
  * 分成"计划"与"执行"两步，是因为设计 §6 要求"解压**前后**校验闭包"：
  * 计划阶段回答"这个归档允不允许展开"，执行阶段回答"展开出来的东西与
  * 清单是否逐字节一致"。
  *
+ * ## `closureEntry`：闭包从包里来，但摘要在签名清单里
+ *
+ * 一份真实产品树的逐文件闭包有几万个条目，放不进受 256 KiB 上限约束的
+ * 发行清单（见 `closure.mjs` 的文件头）。所以闭包的载体是**包内的一个
+ * 条目**，而发行清单只钉住它的摘要：
+ *
+ *     closureEntry = { path: 'closure.json', sha256: '<64 位十六进制>' }
+ *
+ * 本函数在计划阶段就把那**一个**条目解出来、核对摘要、解析成闭包，然后用
+ * 它去校验其余条目。顺序是硬的：一份"先解压全部文件、之后才发现闭包对不上"
+ * 的实现已经把文件写到磁盘上了，而那时"拒绝"只在报告里成立。
+ *
  * @param {object} args
  * @param {Buffer} args.archiveBytes
  * @param {ReadonlyArray<{path: string, sha256: string, bytes: number}>} [args.closure]
- *        允许出现的条目闭包。给了它就会**同时**拒未知可执行文件与多余条目。
+ *        直接给出的闭包。与 `closureEntry` 可以并用（两者必须一致）。
+ * @param {{path: string, sha256: string}} [args.closureEntry]
+ *        包内闭包条目。给了它就会**先**验证并解出闭包。
  * @param {object} [args.policy]
  */
-export function planExtraction({ archiveBytes, closure = null, policy = BOMB_POLICY } = {}) {
+export function planExtraction({ archiveBytes, closure = null, closureEntry = null, policy = BOMB_POLICY } = {}) {
   const directory = readCentralDirectory(archiveBytes)
   if (!directory.ok) return Object.freeze({ ok: false, code: directory.code, reason: directory.reason, plan: null })
 
@@ -236,7 +376,29 @@ export function planExtraction({ archiveBytes, closure = null, policy = BOMB_POL
     })
   }
 
-  const closureByPath = closure === null ? null : new Map(closure.map((item) => [item.path, item]))
+  // ── 第 0 步：把包内闭包取出来并核对摘要（在解压任何东西**之前**）──
+  let effectiveClosure = closure
+  let closureDigest = null
+  let closureEntryPath = null
+  if (closureEntry !== null && closureEntry !== undefined) {
+    const resolved = resolveClosureEntry(archiveBytes, directory.entries, closureEntry)
+    if (!resolved.ok) return Object.freeze({ ok: false, code: resolved.code, reason: resolved.reason, plan: null })
+    effectiveClosure = resolved.files
+    closureDigest = resolved.sha256
+    closureEntryPath = validateEntryName(closureEntry.path).path
+    if (closure !== null) {
+      // 同时给了两份闭包：必须完全一致，否则"我用的是哪一份"没有答案。
+      const mismatch = compareClosures(closure, effectiveClosure)
+      if (mismatch !== null) {
+        return Object.freeze({
+          ok: false, code: EXTRACT_CODES.CLOSURE_MISMATCH,
+          reason: `外部闭包与包内闭包不一致：${mismatch}`, plan: null,
+        })
+      }
+    }
+  }
+
+  const closureByPath = effectiveClosure === null ? null : new Map(effectiveClosure.map((item) => [item.path, item]))
   const targets = new Map()
   const files = []
   let totalBytes = 0
@@ -300,7 +462,13 @@ export function planExtraction({ archiveBytes, closure = null, policy = BOMB_POL
     }
 
     // ⑤ 未知可执行文件 + 多余条目。
-    if (closureByPath !== null) {
+    //
+    // ★ 闭包条目**本身**不做成员判定：闭包不可能列出自己的摘要（那是一个
+    //   自指，sha256 没有不动点）。它的可信度由另一条路保证——它的摘要在
+    //   **签过名的发行清单**里（第 0 步已经核过）。所以这里跳过它，
+    //   否则每一份合法的包都会被判成"含闭包之外的条目"。
+    const isClosureEntry = closureEntryPath !== null && path === closureEntryPath
+    if (closureByPath !== null && !isClosureEntry) {
       if (!closureByPath.has(path)) {
         return Object.freeze({
           ok: false,
@@ -318,7 +486,7 @@ export function planExtraction({ archiveBytes, closure = null, policy = BOMB_POL
           reason: `条目 ${path} 声明 ${entry.uncompressedBytes} 字节，闭包声明 ${expected.bytes} 字节`, plan: null,
         })
       }
-    } else if (looksExecutable(path)) {
+    } else if (!isClosureEntry && looksExecutable(path)) {
       // 没有闭包时**仍然**拒可执行文件：一条"没给闭包所以可执行文件随便进"
       // 的默认路径，会在某一次调用方忘了传闭包时静默放行。
       return Object.freeze({
@@ -349,6 +517,17 @@ export function planExtraction({ archiveBytes, closure = null, policy = BOMB_POL
       directories: Object.freeze([...targets.entries()].filter(([, kind]) => kind === 'directory').map(([path]) => path)),
       totalUncompressedBytes: totalBytes,
       entryCount: directory.entries.length,
+      /**
+       * ★ 生效的闭包（可能来自 `closure`，也可能来自包内的 `closureEntry`）。
+       *
+       *   执行阶段必须按**这一份**核对内容摘要，而不是按调用方传进来的
+       *   `closure` 参数——否则"闭包来自包内"这条路径上，逐文件的内容摘要
+       *   一次都不会被检查，而计划里的其他判据（大小、条目集合）全都通过。
+       *   这个缺口正是 `zip.test.mjs` 的「内容被替换」用例发现的。
+       */
+      closureFiles: effectiveClosure === null ? null : Object.freeze([...effectiveClosure]),
+      closureEntryPath,
+      closureDigest,
     }),
   })
 }
@@ -385,14 +564,16 @@ function readEntry(buffer, entry) {
  * @param {object} args
  * @param {Buffer} args.archiveBytes
  * @param {string} args.targetDir
- * @param {ReadonlyArray<object>} [args.closure]
+ * @param {ReadonlyArray<object>} [args.closure]      外部闭包
+ * @param {{path: string, sha256: string}} [args.closureEntry] 包内闭包条目
  * @param {boolean} [args.dryRun] 只做校验，不写文件
  * @param {Function} [args.onProgress]
  */
 export function extractArchive({
-  archiveBytes, targetDir, closure = null, policy = BOMB_POLICY, dryRun = false, onProgress = null,
+  archiveBytes, targetDir, closure = null, closureEntry = null,
+  policy = BOMB_POLICY, dryRun = false, onProgress = null,
 } = {}) {
-  const planned = planExtraction({ archiveBytes, closure, policy })
+  const planned = planExtraction({ archiveBytes, closure, closureEntry, policy })
   if (!planned.ok) return Object.freeze({ ok: false, code: planned.code, reason: planned.reason, written: Object.freeze([]) })
 
   const root = resolve(targetDir)
@@ -419,15 +600,18 @@ export function extractArchive({
     }
     const digest = createHash('sha256').update(bytes).digest('hex')
     digests.set(file.path, Object.freeze({ sha256: digest, bytes: bytes.length }))
-    if (closure !== null) {
-      const expected = closure.find((item) => item.path === file.path)
-      if (expected !== undefined && typeof expected.sha256 === 'string' && expected.sha256 !== digest) {
-        return Object.freeze({
-          ok: false, code: EXTRACT_CODES.DIGEST_MISMATCH,
-          reason: `条目 ${file.path} 的内容摘要不符（闭包 ${String(expected.sha256).slice(0, 12)}…，实际 ${digest.slice(0, 12)}…）`,
-          written: Object.freeze(written),
-        })
-      }
+    // ★ 按**生效的闭包**核对内容摘要（它可能来自包内）。见 planExtraction 里
+    //   `closureFiles` 的注释：只按调用方传进来的 `closure` 核对，会让
+    //   "闭包来自包内"这条路径上的内容摘要一次都不被检查。
+    const expect = planned.plan.closureFiles === null
+      ? null
+      : planned.plan.closureFiles.find((item) => item.path === file.path) ?? null
+    if (expect !== null && typeof expect.sha256 === 'string' && expect.sha256 !== digest) {
+      return Object.freeze({
+        ok: false, code: EXTRACT_CODES.DIGEST_MISMATCH,
+        reason: `条目 ${file.path} 的内容摘要不符（闭包 ${String(expect.sha256).slice(0, 12)}…，实际 ${digest.slice(0, 12)}…）`,
+        written: Object.freeze(written),
+      })
     }
     if (!dryRun) {
       const absolute = resolve(root, ...file.path.split('/'))

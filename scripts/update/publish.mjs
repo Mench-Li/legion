@@ -39,14 +39,16 @@
 // ============================================================================
 
 import { createHash } from 'node:crypto'
-import { copyFileSync, existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs'
-import { basename, join, relative, resolve } from 'node:path'
+import { copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs'
+import { basename, join, resolve } from 'node:path'
 
 import { buildFeedPayload } from '../../product/update/feed.mjs'
 import { buildRelease, validateRelease, validateRelativePath } from '../../product/update/release.mjs'
 import { serializeEnvelope, signEnvelope } from '../../product/update/envelope.mjs'
 import { canonicalJson } from '../../product/update/canonical.mjs'
 import { feedRelativePath } from '../../product/update/host.mjs'
+import { CLOSURE_ENTRY_NAME, closureDigest, closureFromDirectory, serializeClosure } from '../../product/update/closure.mjs'
+import { buildZip } from '../../product/update/zip.mjs'
 import { RELEASE_CHANNELS } from '../../product/upgrade/channels.mjs'
 import { validateManifest } from '../../product/upgrade/manifest.mjs'
 
@@ -92,6 +94,61 @@ export function artifactOfFile(relativePath, absolutePath) {
 }
 
 /**
+ * 从一个目录树打出升级包，并生成它的闭包（发布端的真路径）。
+ *
+ * ## 为什么闭包要在**打包时**生成，而不是让调用方单独给一份
+ *
+ * 因为它必须与包里的字节**逐条一致**。让调用方分两次提供（一次给目录、
+ * 一次给闭包文件）就多了一次"两份东西没对齐"的机会，而那个后果是客户端
+ * 在解压时拒收自己刚发布的包——排查方向会落在客户端。
+ *
+ * ## 闭包的载体是包内条目，摘要在签名清单里
+ *
+ * 逐文件闭包放不进受 256 KiB 上限约束的发行清单（见 `closure.mjs` 的文件头）。
+ * 所以：`closure.json` 作为**一个条目**写进包内，而 `package.closureSha256`
+ * 钉住它。这条链的可信度来自发行清单已经签过名。
+ */
+export function packDirectory({
+  root,
+  closureName = CLOSURE_ENTRY_NAME,
+  readFile = (path) => readFileSync(path),
+  readdir = (path) => readdirSync(path, { withFileTypes: true }),
+} = {}) {
+  if (typeof root !== 'string' || root === '') return { ok: false, reason: 'packDirectory 需要 root' }
+  if (!existsSync(root)) return { ok: false, reason: `目录不存在：${root}` }
+  const resolved = resolve(root)
+  // 闭包条目名要能过同一套路径判据（它在包内是一个普通条目）。
+  const nameCheck = validateRelativePath(closureName, { field: 'closureName', allowSubdirDepth: 1 })
+  if (!nameCheck.ok) return { ok: false, reason: `闭包条目名不合法：${nameCheck.reason}` }
+
+  const collected = closureFromDirectory(resolved, { readFile, readdir })
+  if (collected.ok !== true) return { ok: false, reason: `从目录树构造闭包失败：${collected.problems.join('；')}` }
+  // 闭包条目**自己不进闭包**：它不可能列出自己的摘要（自指，sha256 没有
+  // 不动点）。它的可信度由签名清单里的 `closureSha256` 保证。
+  if (collected.closure.files.some((file) => file.path === closureName)) {
+    return { ok: false, reason: `目录树里已经有 ${closureName} 了：它会被本函数覆盖，请先删掉` }
+  }
+
+  const closureBytes = serializeClosure(collected.closure)
+  const files = collected.closure.files.map((file) => ({
+    path: file.path,
+    bytes: readFile(join(resolved, ...file.path.split('/'))),
+  }))
+  const built = buildZip([...files, { path: closureName, bytes: closureBytes }])
+  if (built.ok !== true) return { ok: false, reason: `打包失败：${built.reason}` }
+
+  return {
+    ok: true,
+    zipBytes: built.bytes,
+    closure: collected.closure,
+    closureBytes,
+    closureSha256: closureDigest(closureBytes),
+    closureName,
+    fileCount: files.length,
+  }
+}
+
+/**
  * 构造一次发行的全部文件（内存里），由调用方决定往哪写。
  *
  * 返回的 `files` 是一张 `相对路径 → 字节` 的表，路径全部相对**存储前缀**
@@ -100,9 +157,9 @@ export function artifactOfFile(relativePath, absolutePath) {
 export function buildPublish({
   productVersion, channel, releaseId, platform = 'win32', arch = 'x64',
   productManifest, supportedFromVersions, minWindowsBuild = 19045, requiredFreeBytes,
-  packageZipPath, installerPath, notesPath,
+  packageZipPath = null, packageRoot = null, installerPath, notesPath,
   migrationPlanDigest, rollbackPolicy = 'program-only',
-  keyId, privateKeyPem, sequence, issuedAt, expiresAt,
+  keyId, privateKeyPem, sequence, issuedAt, expiresAt, outDir = null,
 } = {}) {
   if (!RELEASE_CHANNELS.includes(channel)) throw new Error(`未知通道：${channel}`)
   const manifestCheck = validateManifest(productManifest)
@@ -112,9 +169,40 @@ export function buildPublish({
   if (productManifest.productVersion !== productVersion) {
     throw new Error(`产品清单的 productVersion=${productManifest.productVersion} 与 --product-version=${productVersion} 不一致`)
   }
+  if (packageZipPath === null && packageRoot === null) {
+    throw new Error('publish 需要 --package-zip（已有的包）或 --package-root（由一个目录树现打）')
+  }
+  if (packageZipPath !== null && packageRoot !== null) {
+    throw new Error('--package-zip 与 --package-root 只能给一个：两个都给时"用哪一个"没有答案')
+  }
 
   const releasePrefix = `releases/${releaseId}`
-  const pkg = artifactOfFile(`${releasePrefix}/legion-${platformToken(platform)}-${arch}.zip`, packageZipPath)
+  const packageRelative = `${releasePrefix}/legion-${platformToken(platform)}-${arch}.zip`
+
+  // ★ 两种产出方式，但**只有一种**会带上闭包：
+  //
+  //   · `--package-root`：由本脚本打 ZIP，因此它知道包里每个文件的摘要，
+  //     并把它写成包内的 `closure.json`；
+  //   · `--package-zip`：包是别处打的，本脚本**只能**钉住整包摘要。
+  //     这时 `closurePath`/`closureSha256` 缺席（合法的旧形态），而解压端
+  //     仍然会拒未授权的可执行文件——只是"逐文件闭包"这一层没有证据。
+  let pkg
+  let packed = null
+  let packageLocalPath
+  if (packageRoot !== null) {
+    packed = packDirectory({ root: packageRoot })
+    if (packed.ok !== true) throw new Error(packed.reason)
+    if (outDir === null) throw new Error('--package-root 需要 --out：打出来的包要落到磁盘上再算摘要')
+    const target = join(outDir, 'package', basename(packageRelative))
+    mkdirSync(join(target, '..'), { recursive: true })
+    writeFileSync(target, packed.zipBytes)
+    packageLocalPath = target
+    const base = artifactOfFile(packageRelative, target)
+    pkg = Object.freeze({ ...base, closurePath: packed.closureName, closureSha256: packed.closureSha256 })
+  } else {
+    packageLocalPath = packageZipPath
+    pkg = artifactOfFile(packageRelative, packageZipPath)
+  }
   const installer = artifactOfFile(`${releasePrefix}/${basename(installerPath)}`, installerPath)
   const notes = artifactOfFile(`${releasePrefix}/${basename(notesPath)}`, notesPath)
 
@@ -160,7 +248,7 @@ export function buildPublish({
      */
     immutable: Object.freeze([
       Object.freeze({ path: `${releasePrefix}/manifest.json`, bytes: manifestBytes, sha256: manifestSha256 }),
-      Object.freeze({ path: pkg.path, localPath: packageZipPath, bytes: null, sha256: pkg.sha256, sizeBytes: pkg.sizeBytes }),
+      Object.freeze({ path: pkg.path, localPath: packageLocalPath, bytes: null, sha256: pkg.sha256, sizeBytes: pkg.sizeBytes }),
       Object.freeze({ path: installer.path, localPath: installerPath, bytes: null, sha256: installer.sha256, sizeBytes: installer.sizeBytes }),
       Object.freeze({ path: notes.path, localPath: notesPath, bytes: null, sha256: notes.sha256, sizeBytes: notes.sizeBytes }),
     ]),
@@ -173,6 +261,10 @@ export function buildPublish({
       feedSha256: createHash('sha256').update(feedBytes).digest('hex'),
       packageSha256: pkg.sha256,
       packageSizeBytes: pkg.sizeBytes,
+      /** 闭包只在 `--package-root` 那条路上存在（见 buildPublish 的注释）。 */
+      closurePath: pkg.closurePath ?? null,
+      closureSha256: pkg.closureSha256 ?? null,
+      closureFileCount: packed?.fileCount ?? null,
     }),
   })
 }
@@ -254,6 +346,11 @@ export function main(argv = process.argv.slice(2)) {
   try {
     const productManifestPath = requireString(args, 'product-manifest')
     const productManifest = JSON.parse(readFileSync(productManifestPath, 'utf8'))
+    const outDir = resolve(args.get('out') ?? join('dist', 'update', requireString(args, 'release-id')))
+    const packageRoot = typeof args.get('package-root') === 'string' && args.get('package-root') !== 'true'
+      ? args.get('package-root') : null
+    const packageZipArg = typeof args.get('package-zip') === 'string' && args.get('package-zip') !== 'true'
+      ? args.get('package-zip') : null
     const publish = buildPublish({
       productVersion: requireString(args, 'product-version'),
       channel: requireString(args, 'channel'),
@@ -264,7 +361,9 @@ export function main(argv = process.argv.slice(2)) {
       supportedFromVersions: String(args.get('from-versions') ?? requireString(args, 'from-version')).split(',').map((s) => s.trim()).filter(Boolean),
       minWindowsBuild: Number(args.get('min-windows-build') ?? 19045),
       requiredFreeBytes: args.get('required-free-bytes') !== undefined ? Number(args.get('required-free-bytes')) : undefined,
-      packageZipPath: requireString(args, 'package-zip'),
+      // ★ 两者只能给一个。都由 `buildPublish` 检查，理由在那里。
+      packageRoot,
+      packageZipPath: packageZipArg,
       installerPath: requireString(args, 'installer'),
       notesPath: requireString(args, 'notes'),
       migrationPlanDigest: requireString(args, 'migration-plan-digest'),
@@ -274,8 +373,8 @@ export function main(argv = process.argv.slice(2)) {
       sequence: Number(requireString(args, 'sequence')),
       issuedAt: requireString(args, 'issued-at'),
       expiresAt: requireString(args, 'expires-at'),
+      outDir,
     })
-    const outDir = resolve(args.get('out') ?? join('dist', 'update', publish.summary.releaseId))
     writePublish(publish, outDir)
     process.stdout.write(`${JSON.stringify(publish.summary, null, 2)}\n`)
     return 0

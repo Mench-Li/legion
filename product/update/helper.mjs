@@ -89,6 +89,25 @@ const DEFAULT_EFFECTS = Object.freeze({
 })
 
 /**
+ * 从事务文件里取出包内闭包条目。
+ *
+ * 两个字段都要在，且形状要对。只给一个时返回 `null` 并**不**报错——
+ * "没有闭包"是一种合法的旧形态（解压端仍会拒未授权的可执行文件），
+ * 而把它当成错误会让一次本来安全的升级在解压之前就失败。
+ */
+function normalizeClosureEntry(transaction) {
+  if (transaction.closureEntry !== undefined && transaction.closureEntry !== null) {
+    const entry = transaction.closureEntry
+    if (typeof entry?.path === 'string' && typeof entry?.sha256 === 'string') return entry
+    return null
+  }
+  if (typeof transaction.closurePath === 'string' && typeof transaction.closureSha256 === 'string') {
+    return { path: transaction.closurePath, sha256: transaction.closureSha256 }
+  }
+  return null
+}
+
+/**
  * 默认解压实现。
  *
  * 返回的 `closure` 用来在**解压之后**再核一次目录内容——设计 §6 要求
@@ -100,7 +119,7 @@ const DEFAULT_EFFECTS = Object.freeze({
  */
 async function defaultUnpack({
   packagePath, installDir, toVersion, releaseId,
-  closure = null, readFile = readFileSyncDefault, log = () => {},
+  closure = null, closureEntry = null, readFile = readFileSyncDefault, log = () => {},
 } = {}) {
   const layout = installLayout(installDir)
   const targetDir = join(layout.versionsDir, toVersion)
@@ -110,7 +129,7 @@ async function defaultUnpack({
   } catch (error) {
     return { ok: false, reason: `读不到升级包 ${packagePath}：${error?.message ?? error}` }
   }
-  const extracted = extractArchive({ archiveBytes, targetDir, closure })
+  const extracted = extractArchive({ archiveBytes, targetDir, closure, closureEntry })
   if (extracted.ok !== true) {
     return { ok: false, reason: `${extracted.code}：${extracted.reason}` }
   }
@@ -241,9 +260,13 @@ export async function runHelper({
         toVersion: transaction.toVersion,
         releaseId: transaction.releaseId,
         expectedSha256: transaction.packageSha256,
-        // 闭包由发布端在发行清单里给出；没有它时 `extractArchive` 仍然会
-        // 拒可执行文件（见 extract.mjs 的注释：一条"没给闭包所以随便进"
-        // 的默认路径会在某次调用方忘了传闭包时静默放行）。
+        // 闭包的两个来源，按可信度排序：
+        //   ① `closureEntry` —— 包内闭包条目，摘要在**签过名的发行清单**里
+        //      （发行清单有 256 KiB 上限，放不下逐文件闭包，见 closure.mjs）。
+        //   ② `closure` —— 直接给出的闭包数组（测试路径）。
+        // 两者都不给时 `extractArchive` 仍然会拒可执行文件（见它的注释：
+        // 一条"没给闭包所以随便进"的默认路径会在某次忘了传闭包时静默放行）。
+        closureEntry: normalizeClosureEntry(transaction),
         closure: Array.isArray(transaction.closure) ? transaction.closure : null,
         log,
       })

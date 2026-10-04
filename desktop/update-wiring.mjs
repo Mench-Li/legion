@@ -424,6 +424,12 @@ export function buildDesktopInstaller({
             backupDir: join(dataDir, 'backups'),
             backupSnapshotRoot: spawnArgs.backupSnapshotRoot,
             migrations: spawnArgs.migrations ?? [],
+            // 包内闭包条目：摘要在**签过名的发行清单**里（`package.closureSha256`）。
+            // 没有它时 helper 仍然会拒未授权的可执行文件，只是"逐文件闭包"
+            // 这一层没有证据（旧的 `--package-zip` 产出属于这种形态）。
+            ...(typeof release.package?.closurePath === 'string' && typeof release.package?.closureSha256 === 'string'
+              ? { closureEntry: { path: release.package.closurePath, sha256: release.package.closureSha256 } }
+              : {}),
             ...(health.ok === true ? { healthProbeSpec: health.spec } : {}),
             healthTimeoutMs: 30_000,
             // ★ 显式写 `false`：规格派生不出来时**不会**提交

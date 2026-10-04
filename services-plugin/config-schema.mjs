@@ -31,11 +31,15 @@ export const SCHEMA = defineSchema({
       key: 'hubUpstream', env: 'DSH_HUB_UPSTREAM', type: 'string', default: DEFAULT_HUB_UPSTREAM,
       doc: '注入给 workbench 子进程的 hub 上游地址；优先级：composition 的 config.hubUpstream > 本环境变量 > 默认',
     },
+    {
+      key: 'dshWebUrl', env: 'DSH_WEB_URL', type: 'string', default: '',
+      doc: '宿主自身的 GUI 地址（只读兜底）：拿不到 ctx.webServer.port 时用它派生给 workbench 的 DSH_MODELS_BASE_URL',
+    },
   ],
   // 本文件自己会被扫描（dirs 含整个 services-plugin/）：injects 里的 `TEAM_HUB_PORT` /
-  // `DSH_WORKBENCH_PORT` 是**注入目标的变量名**，不是本进程的读取点，故显式排除，
-  // 否则 `scan --check` 会要求把它们当成读取点登记（P3-4 实测：这正是「未处理字面量」的两项）。
-  nonEnvLiterals: ['TEAM_HUB_PORT', 'DSH_WORKBENCH_PORT'],
+  // `DSH_WORKBENCH_PORT` / `DSH_MODELS_BASE_URL` 是**注入目标的变量名**，不是本进程的读取点，
+  // 故显式排除，否则 `scan --check` 会要求把它们当成读取点登记（P3-4 实测：这正是「未处理字面量」的两项）。
+  nonEnvLiterals: ['TEAM_HUB_PORT', 'DSH_WORKBENCH_PORT', 'DSH_MODELS_BASE_URL'],
   injects: [
     {
       target: 'team-hub', env: 'TEAM_HUB_PORT', via: 'env', value: String(DEFAULT_TEAM_HUB_PORT), from: 'teamHubPort',
@@ -45,6 +49,10 @@ export const SCHEMA = defineSchema({
     { target: 'team-hub', env: 'TEAM_HUB_TOKEN', via: 'env', from: 'teamHubToken', note: '回落到同环境变量（为空也会显式注入空值）' },
     { target: 'workbench', env: 'DSH_HUB_UPSTREAM', via: 'env', from: 'hubUpstream', note: '回落到同环境变量' },
     { target: 'workbench', env: 'TEAM_HUB_TOKEN', via: 'env', from: 'teamHubToken', note: '回落到同环境变量' },
+    {
+      target: 'workbench', env: 'DSH_MODELS_BASE_URL', via: 'env', from: 'ctx.webServer.port',
+      note: '**派生值**：模型配置 Remote 必须指向本次启动的宿主（Desktop 实测 19387），而不是默认 3080 —— 写死时「供应商与模型」整页读不出来（Bug #1）',
+    },
     {
       target: 'workbench', env: 'DSH_WORKBENCH_PORT', via: 'cli', cli: 'port', value: String(DEFAULT_WORKBENCH_PORT), from: 'workbenchPort',
       note: '以 workbench 的 `--port` 参数注入（CLI 优先级高于环境变量），取值来自 composition 的 config.workbenchPort，缺省 5173',

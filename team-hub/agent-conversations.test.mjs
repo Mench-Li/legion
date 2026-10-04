@@ -67,6 +67,87 @@ test('reports recover and duplicate projection creates one message per conversat
   assert.equal(db.prepare('SELECT COUNT(*) AS n FROM messages').get().n,before)
   assert.equal(db.prepare("SELECT COUNT(*) AS n FROM messages WHERE body LIKE '%待验收%'").get().n,2)
 })
+
+// ── BUG-003「定时汇报看不到」：汇报必须也落到**对话中心给用户打开的那条会话**上 ──
+//
+// 现场：同一个 (空间, 岗位) 有两条同名会话——绑定那条（汇报流，32 条）与
+// `conversations.agent_role` 那条（用户在用的，0 条汇报）。对话中心按 agentRole 找会话，
+// 于是用户对着自己那条永远看不到汇报。判据三条：多播一份 + 幂等（reconcile 两次不加消息）
+// + 身份是该会话里这位 Agent 说话用的 `agent:<scope>:<role>`。
+test('★ 汇报多播进「对话中心」那条会话（agent_role），幂等且作者身份正确',() => {
+  const role='coder'
+  const conv=hub.createConversation({ scope:'agent-test', agentRole:role, by:'general' })
+  assert.equal(db.prepare('SELECT COUNT(*) AS n FROM agent_conversation_bindings WHERE conv_id=?').get(conv.id).n,0,
+    '对话中心那条会话**不是**绑定会话（这正是两条同名的由来）')
+  db.prepare("UPDATE tasks SET status='done',version=version+1 WHERE id='T-9999'").run()
+  service.reconcile()
+  const rows=db.prepare('SELECT * FROM messages WHERE conv_id=? ORDER BY id').all(conv.id)
+  const taskReport=rows.filter(r => /已完成/.test(r.body))
+  assert.equal(taskReport.length,1,'汇报没有落进对话中心那条会话（用户看到的仍然是一条都没有）')
+  assert.equal(taskReport[0].author,'agent:agent-test:coder',
+    '作者必须是该会话里这位 Agent 说话用的身份：用稳定 agent_id 会让对话中心把它显示成一串 uuid')
+  assert.equal(JSON.parse(taskReport[0].meta).source,'progress')
+  assert.ok(rows.length >= 1, '同一轮里的其它家族（如 attempt 状态）也可以落到这条会话，但至少要有任务状态那条')
+  // 幂等：再对账两次不许加消息（多播不是"每次都再发一条"）
+  const before=db.prepare('SELECT COUNT(*) AS n FROM messages').get().n
+  service.reconcile();service.reconcile()
+  assert.equal(db.prepare('SELECT COUNT(*) AS n FROM messages').get().n,before)
+  assert.equal(db.prepare("SELECT COUNT(*) AS n FROM messages WHERE conv_id=? AND body LIKE '%已完成%'").get(conv.id).n,1)
+  // 反向锚：绑定会话（AgentConversationPanel 读的那条）不许因为多播而少掉这一条
+  assert.equal(db.prepare("SELECT COUNT(*) AS n FROM messages WHERE conv_id=? AND body LIKE '%已完成%'").get(cv.convId).n,1,
+    '两条会话各一份投影：多播不是搬家')
+})
+
+// ★ 部署时的关键一条：**存量历史不补播**。
+//   实测在生产库副本上补播一次会往用户那条会话灌 43 条历史状态，而 insertMessage 的时间戳
+//   是"现在" ⇒ 那不是补全历史，是**把几周前的事件重新盖章成刚刚发生**。
+//   判据：① 新建的对话中心会话在"事件早已投递过"时**一条都不收**；
+//        ② 新事件（版本+1）才同时进两条会话。
+test('★ 存量汇报不补播：已投递过的事件不许以"现在"的戳灌进对话中心会话',() => {
+  // 独立岗位（writer2），避免与上一条用例共用 (scope, agent_role) 那条会话
+  db.prepare('INSERT OR REPLACE INTO roster(scope,role,name) VALUES(?,?,?)').run('agent-test','writer2','文案员')
+  db.prepare('INSERT INTO tasks(id,title,scope,role,status,createdAt,updatedAt) VALUES(?,?,?,?,?,?,?)')
+    .run('T-9940','文案','agent-test','writer2','done',new Date().toISOString(),new Date().toISOString())
+  service.syncRoster()
+  // ① 先把这条"历史"投递到绑定会话（此时对话中心那条会话还不存在）
+  service.reconcile()
+  const w=service.list('agent-test').find(x => x.role==='writer2')
+  const bound=service.conversation({ agentId:w.agentId,scope:w.scope,by:'general' })
+  assert.ok(db.prepare('SELECT COUNT(*) n FROM messages WHERE conv_id=?').get(bound.convId).n>=1,'历史事件应当已投递到绑定会话')
+  // ② 现在才创建对话中心那条会话 → 再对账**不许**把历史灌进来
+  const conv=hub.createConversation({ scope:'agent-test', agentRole:'writer2', by:'general' })
+  service.reconcile();service.reconcile()
+  assert.equal(db.prepare('SELECT COUNT(*) AS n FROM messages WHERE conv_id=?').get(conv.id).n,0,
+    '存量汇报被补播进了对话中心会话（每条都会被 insertMessage 盖上"现在"的时间戳 ⇒ 旧事件看起来刚刚发生）')
+  // ③ 新事件（版本+1）才同时进两条会话
+  db.prepare("UPDATE tasks SET status='canceled',version=version+1 WHERE id='T-9940'").run()
+  service.reconcile()
+  assert.equal(db.prepare("SELECT COUNT(*) AS n FROM messages WHERE conv_id=? AND body LIKE '%已取消%'").get(conv.id).n,1,
+    '新事件必须进对话中心会话')
+  assert.equal(db.prepare("SELECT COUNT(*) AS n FROM messages WHERE conv_id=? AND body LIKE '%已取消%'").get(bound.convId).n,1,
+    '新事件同样必须进绑定会话')
+})
+test('★ 汇报流会话标题带后缀，且**存量**会话启动时被补上（幂等，任务会话不动）',async () => {
+  // 独立空间，避免与其余用例共用 agent_registry / conversations
+  db.prepare('INSERT OR REPLACE INTO roster(scope,role,name) VALUES(?,?,?)').run('agent-title','coder','编码员')
+  db.prepare('INSERT INTO tasks(id,title,scope,role,status,createdAt,updatedAt) VALUES(?,?,?,?,?,?,?)')
+    .run('T-9911','任务会话','agent-title','coder','todo',new Date().toISOString(),new Date().toISOString())
+  service.syncRoster()
+  const at=service.list('agent-title').find(x => x.role==='coder')
+  // 新会话：建出来就带后缀
+  const fresh=service.conversation({ agentId:at.agentId,scope:'agent-title',by:'general' })
+  assert.equal(db.prepare('SELECT title FROM conversations WHERE id=?').get(fresh.convId).title,'编码员 · 汇报流')
+  // 任务会话保持「岗位 · 任务号」的形状，不加汇报流后缀
+  service.conversation({ agentId:at.agentId,scope:'agent-title',taskId:'T-9911',by:'general' })
+  assert.equal(db.prepare("SELECT title FROM conversations WHERE scope='agent-title' AND kind='task'").get().title,'编码员 · T-9911')
+  // 存量：手工把标题改回岗位名（模拟修复前建的会话），重跑补标题应把它补上；已有后缀的不重复叠加
+  db.prepare('UPDATE conversations SET title=? WHERE id=?').run('编码员',fresh.convId)
+  service.backfillReportStreamTitles()
+  assert.equal(db.prepare('SELECT title FROM conversations WHERE id=?').get(fresh.convId).title,'编码员 · 汇报流','存量汇报流会话的标题没有被补上（空间列表里仍然与同名会话分不开）')
+  assert.equal(db.prepare("SELECT title FROM conversations WHERE scope='agent-title' AND kind='task'").get().title,'编码员 · T-9911','任务会话的标题不许被改写')
+  service.backfillReportStreamTitles();service.backfillReportStreamTitles()
+  assert.equal(db.prepare('SELECT title FROM conversations WHERE id=?').get(fresh.convId).title,'编码员 · 汇报流','重复执行不许把后缀叠成两遍')
+})
 test('hold is persistent, release versioned and stale commands rejected',() => {
   db.prepare("UPDATE tasks SET status='todo' WHERE id='T-9999'").run()
   const t=db.prepare("SELECT * FROM tasks WHERE id='T-9999'").get()

@@ -311,6 +311,42 @@ describe('S9 TC-S9-06 回复队列：awaiting 列表含上下文 + limit + 跨�
   })
 })
 
+describe('★ Bug #2「Agent 对话失败」：队列取数窗口必须是**最近**的消息，不是最早的那一批', () => {
+  // 现场（2026-10-04，software 空间）：
+  //   137 条消息（id 1..169）里，用户在第 165 条问「什么进展了」→ aiStatus=awaiting →
+  //   120s 没有任何回复 → 服务端兜底标 failed「回复超时（120000ms 内未收到回复方应答）」。
+  //   守护（chat-responder）每 30s 拉一次队列，却**恒为空**：它固定传 sinceMsgId=0，
+  //   而 `ORDER BY id ASC LIMIT n*4`（n=limit=20 ⇒ 80）取的是本空间**最早**的 80 条
+  //   —— 新消息永远不在窗口里。旧行为在消息数 < 80 的空间里完全正确，这正是它活了这么久的原因。
+  it('★ 本空间先攒满超过取数窗口的非 awaiting 消息，新提问仍必须出现在队列里', () => {
+    const scope = 's9-window'
+    const conv = mod.createConversation({ scope, title: '窗口会话', kind: 'space', by: 'general' })
+    // 回复方自己的消息不会进队列（by === 回复方身份 ⇒ 不标 awaiting），正好用来铺满窗口。
+    for (let i = 0; i < 90; i += 1) mod.postMessage({ conv: conv.id, body: `历史记录 ${i}`, by: `${scope}-assistant` })
+    const fresh = mod.postMessage({ conv: conv.id, body: '什么进展了', by: 'general' })
+    const queue = mod.listAwaitingReplies({ scope, limit: 20 })
+    assert.ok(queue.some(x => x.id === fresh.id),
+      `新提问（id ${fresh.id}）必须出现在队列里——取最旧 80 条的实现会在这里返回空队列，`
+      + '而空队列在守护日志里与"没有消息"长得一模一样')
+    // 反向锚：窗口里那 90 条历史（回复方自己发的）一条都不许当成待回复消息
+    assert.deepEqual(queue.map(x => x.id), [fresh.id], '只有新提问是 awaiting')
+  })
+
+  it('★ 队列仍按 id 升序返回（对外契约不变），且 limit 生效', () => {
+    const scope = 's9-window2'
+    const conv = mod.createConversation({ scope, title: '窗口会话2', kind: 'space', by: 'general' })
+    for (let i = 0; i < 90; i += 1) mod.postMessage({ conv: conv.id, body: `历史 ${i}`, by: `${scope}-assistant` })
+    const a = mod.postMessage({ conv: conv.id, body: '问题 A', by: 'general' })
+    const b = mod.postMessage({ conv: conv.id, body: '问题 B', by: 'general' })
+    const all = mod.listAwaitingReplies({ scope, limit: 20 })
+    assert.deepEqual(all.map(x => x.id), [a.id, b.id], '升序 + 窗口内两条都在')
+    const one = mod.listAwaitingReplies({ scope, limit: 1 })
+    assert.deepEqual(one.map(x => x.id), [a.id], 'limit 截断后取窗口内**最早**的那条（先来先答，不饿死）')
+    const sinceB = mod.listAwaitingReplies({ scope, sinceMsgId: a.id })
+    assert.deepEqual(sinceB.map(x => x.id), [b.id], 'sinceMsgId 语义在窗口翻转后仍然成立')
+  })
+})
+
 describe('S9 TC-S9-08/11 CAS 回写：awaiting→replied；重复/并发幂等不产生第二条回复', () => {
   it('postAiReply 落回复消息（author=by）+ 源消息 replied + audit/SSE；第二次回写幂等 skipped', async () => {
     const conv = mod.createConversation({ scope: 's9-cas', title: 'CAS 会话', kind: 'space', by: 'general' })

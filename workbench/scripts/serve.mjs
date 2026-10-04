@@ -2622,7 +2622,9 @@ function routeRequest(req, res) {
         const body = await readBodyJson(req)
         // Same-origin browser calls only. DSH owns its own session authentication.
         if (req.headers.origin && new URL(req.headers.origin).host !== req.headers.host) { httpErr(res, 403, '模型配置请求来源无效'); return }
-        sendJson(res, 200, { ok: true, value: await forwardDshModels(body, { cookie: req.headers.cookie ?? '' }) })
+        // ★ 宿主地址是**派生值**（Bug #1）：`DSH_MODELS_BASE_URL` 由启动方（legion-services
+        //   插件按 ctx.webServer.port）注入；空则桥接层回落到 web profile 的 3080。
+        sendJson(res, 200, { ok: true, value: await forwardDshModels(body, { cookie: req.headers.cookie ?? '', baseUrl: CFG.values.modelsBaseUrl }) })
       } catch (e) { httpErr(res, e.status ?? (String(e.message).includes('token 无效') ? 401 : 400), e.message) }
     })()
     return

@@ -3656,6 +3656,18 @@ function markStaleAwaiting(scope, nowMs = Date.now()) {
 /**
  * awaiting 回复队列：返回 scope 下 aiStatus=awaiting 的消息（id > sinceMsgId），
  * 每条带同会话最近 CHAT_REPLY_CONTEXT_LIMIT 条消息作为应答上下文；读取前先执行超龄兜底。
+ *
+ * ★ 取数窗口必须是**最近**的消息（Bug #2「Agent 对话失败」的根因）。
+ *   原写法 `... WHERE scope=? AND id > ? ORDER BY id ASC LIMIT min(n*4,800)`：调用方
+ *   （守护的 chat-responder）**固定传 sinceMsgId=0**（它没有游标），于是这个窗口永远是
+ *   "本空间**最早**的那 80 条"。实测：software 攒到 137 条消息（id 1..169）之后，新提问
+ *   id=165 根本不在窗口里 ⇒ **队列恒为空** ⇒ 守护永远不回复 ⇒ 120s 后服务端兜底标
+ *   `failed`「回复超时（120000ms 内未收到回复方应答）」——界面上就是「Agent 对话失败」，
+ *   而守护日志里一行都不会有（守的是"空队列"，空队列本来就是正常状态）。
+ *   窗口的方向决定了「新消息能不能被看见」；取最旧的 N 条，与取最近窗口，
+ *   在只有几十条消息的空间里是同一个东西——这正是它在仓库里活了这么久的原因。
+ *   现在先按 id DESC 取最近窗口，再翻回升序返回：对外契约不变（仍是「id > since 的
+ *   awaiting、升序」），但新消息一定在窗口内。
  */
 export function listAwaitingReplies({ scope, sinceMsgId = 0, limit = 20 } = {}) {
   if (typeof scope !== 'string' || scope.trim().length === 0) throw new Error('缺少参数 scope')
@@ -3666,7 +3678,8 @@ export function listAwaitingReplies({ scope, sinceMsgId = 0, limit = 20 } = {}) 
   if (!Number.isInteger(lim) || lim <= 0) throw new Error('limit 必须是正整数')
   const n = Math.min(lim, 200)
   markStaleAwaiting(sc)
-  const rows = db.prepare('SELECT * FROM messages WHERE scope = ? AND id > ? ORDER BY id ASC LIMIT ?').all(sc, since, Math.min(n * 4, 800))
+  const rows = db.prepare('SELECT * FROM messages WHERE scope = ? AND id > ? ORDER BY id DESC LIMIT ?').all(sc, since, Math.min(n * 4, 800))
+  rows.reverse()
   const out = []
   for (const row of rows) {
     const meta = parseJson(row.meta, {})

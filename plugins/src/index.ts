@@ -3264,6 +3264,16 @@ function spaceWorker(ctx: AppContext, config: Config): void {
     context?: Array<{ id: number; author: string; kind?: string; body: string }>
     /** S3/E1：本条消息绑定的附件引用（内容不入消息体，答问前另行取回）。 */
     meta?: { attachments?: AttachmentRef[] }
+    /** 岗位 Agent 会话（/api/agent-messages 那条线）：服务端按会话绑定解析出的岗位身份与任务记录。
+     *  来源是服务端的对话绑定，**不是**消息正文——客户端自报的 agentRole 不改变它（agent-main-chat 用例）。
+     *  identity 就是本空间该岗位的回复方身份（`agent:<scope>:<role>`）。 */
+    agent?: {
+      role: string
+      name: string
+      kind: string
+      identity: string
+      tasks: Array<{ id: string; title: string; status: string; goalId?: string | null; updatedAt?: string }>
+    }
   }
   interface ReplySettingsPayload { enabled: boolean; model: string | null; identity: string | null; systemHint: string | null }
   async function fetchJson<T>(url: string): Promise<T | null> {
@@ -3290,7 +3300,14 @@ function spaceWorker(ctx: AppContext, config: Config): void {
       // 1) 回复设置：开关关 / 拉取失败 → 空转零出站（TC-S10-05；失败按「等下一轮」处理）
       const settings = await fetchJson<ReplySettingsPayload>(`${hubUrl}/api/chat/reply-settings?scope=${encodeURIComponent(msg.scope)}`)
       if (settings === null || !settings.enabled) return
-      const identity = chatIdentityFor(msg.scope, settings.identity)
+      // 岗位 Agent 会话用**服务端解析出的岗位身份**回答（`agent:<scope>:<role>`），
+      // 空间会话仍用 `<scope>-assistant`。这个身份同时决定四件事，所以不能只用空间口径：
+      //   ① 提示词里"你是谁"（回复方是编码工程师，不是匿名对话助手）；
+      //   ② 回写时的 author（服务端 postAiReply 按 by 落库）——写错会让界面把回复显示成别人；
+      //   ③ 防自我触发（岗位自己的进度消息 author === identity 时不再回答）；
+      //   ④ 失败回写的 by（与应答同一身份，审计里才对得上）。
+      // 取值只认服务端的对话绑定：客户端自报的 agentRole 不参与（见 team-hub/agent-main-chat.test.mjs）。
+      const identity = msg.agent?.identity ?? chatIdentityFor(msg.scope, settings.identity)
       // 2) 防自我触发：identity 消息不再次进入回答流程（TC-S10-04，服务端已不标 awaiting，双保险）
       if (msg.author === identity) return
       // 3) 模型解析（TC-S10-06/D-14）：settings.model ?? 该空间默认（agent_models）?? 守护当前选择
@@ -3334,6 +3351,10 @@ function spaceWorker(ctx: AppContext, config: Config): void {
         convTitle: msg.convTitle,
         systemHint: settings.systemHint,
         identity,
+        // 岗位 Agent 会话：把服务端解析出的岗位与任务记录喂进提示词（chatResponder 早已支持这个块，
+        // 但这条线此前没有把它传下去 —— 于是「发给编码工程师」被一条通用对话助手规则回答了）。
+        // 任务记录只是**已保存记录**：提示词里明写"没有证据不能声称已执行"（chatResponder L200）。
+        ...(msg.agent ? { agent: msg.agent } : {}),
         context: [...(msg.context ?? []), { id: msg.id, author: msg.author, body: msg.body }],
         spaceDigest: ctxBundle.spaceDigest,
         attachments: ctxBundle.attachments,
@@ -3380,7 +3401,8 @@ function spaceWorker(ctx: AppContext, config: Config): void {
       }
     } catch (e) {
       log(`chat-responder 处理消息 ${msg.id} 失败：${String(e)}`)
-      const ident = chatIdentityFor(msg.scope)
+      // 失败回写的 by 与应答身份一致（岗位会话就是该岗位身份）：审计里"谁答的"与"谁失败的"必须同名。
+      const ident = msg.agent?.identity ?? chatIdentityFor(msg.scope)
       // S1（R-1/A1）：catch 吞错路径同样经分类器生成可行动文案（含原文片段 ≤500 契约），不悬挂 awaiting
       await markChatFailed(msg.id, msg.scope, ident, classifyChatError({ stopReason: 'error', error: String(e) }).message).catch(() => undefined)
     }

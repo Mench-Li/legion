@@ -382,6 +382,14 @@ async function stageBuild() {
 async function stageTest() {
   const suites = [
     { label: 'chat（对话中心契约）', files: ['team-hub/chat.test.mjs'], cwd: ROOT },
+    // ── BUG-003：岗位 Agent 会话与汇报投影的契约，此前**一个都没有登记** ──
+    //   `agent-conversations.test.mjs`（稳定身份/幂等/汇报去重/控制命令）与
+    //   `agent-main-chat.test.mjs`（同岗位复用会话、岗位载荷由服务端解析）都是真断言、
+    //   也真的能过，但它们不在任何套件里 ⇒ 一次都没被执行过。
+    //   而"定时汇报到底有没有落进用户看的那条会话"正是这一族的事——BUG-003 的现场
+    //   （两条同名会话、汇报全在没人看的那条）在这两个文件里没有任何一条断言在管。
+    //   处置同 BUG-002 那一处：**登记**，不加 EXEMPT（豁免一份能跑的判据等于把它降级成声明）。
+    { label: 'agent-conversations（岗位 Agent 会话：稳定身份/幂等/汇报投影多播与不补播）', files: ['team-hub/agent-conversations.test.mjs', 'team-hub/agent-main-chat.test.mjs'], cwd: ROOT },
     { label: 'skills（共享技能回归）', files: ['team-hub/skills.test.mjs'], cwd: ROOT },
     {
       // PRT-214：静态 hard floor 的**派生**（spec §6.8 `:437-440` 控制面那一格）。
@@ -1455,6 +1463,16 @@ async function stageTest() {
     //   选择"登记"而不是"加进 EXEMPT"：这 21 例断言是真的、且真的能过（实测 21/21），
     //   豁免它们等于把一份可执行的证据降级成一份声明。
     { label: 'reveal-open（P4-7 打开所在位置：落点计算/祖先回落/安全矩阵与读面同强度/引导）', files: ['workbench/scripts/reveal-open.test.mjs'], cwd: ROOT },
+    // ── Bug #1「供应商与模型无法读取」：桥接层的判据必须**真的跑** ──
+    //   `workbench/scripts/dsh-models-bridge.test.mjs` 是 71d737e1/1a1ee3fc 一起写下的
+    //   （含"未授权要说得清、写路径只许改供应商配置"这些护栏），却**从未登记进任何套件**：
+    //   CI 的完备性检查会点名它，而在那之前，这些断言一次都没执行过。
+    //   Bug #1 的真因（宿主地址写死 3080）当时也没有任何一条断言守着——正是这件事的后果。
+    //   处置选**登记**而不是 `EXEMPT`：这些断言是真的、也能过，豁免等于把它们降级成声明。
+    { label: 'dsh-models（模型配置桥：宿主地址随部署走、连不上时说得清、宿主鉴权与写入边界）', files: ['workbench/scripts/dsh-models-bridge.test.mjs'], cwd: ROOT },
+    //   同一个 Bug #1 的**注入侧**：`DSH_MODELS_BASE_URL` 由 legion-services 按宿主端口派生。
+    //   这一侧的失败形状更隐蔽——注入了错的地址，界面还是那句 `fetch failed`。
+    { label: 'legion-services（服务托管插件：宿主地址派生自本次启动的宿主，取不到就**不注入**）', files: ['services-plugin/index.test.mjs'], cwd: ROOT },
     { label: 'hub-event-stream（F-01 scope/游标/信封）', files: ['workbench/scripts/hub-event-stream.test.mjs'], cwd: ROOT, nodeArgs: ['--experimental-strip-types'] },
     // ── 并行任务文件冲突治理（G-mujfc9vi-1 S1–S8）──
     // 每个测试文件都必须显式登记：未登记 = 不存在的断言（本文件 4568 行的完备性检查会拦）。

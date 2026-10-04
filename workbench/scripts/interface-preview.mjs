@@ -46,8 +46,13 @@ const children=[]
 const start=(script,env)=>{const child=spawn(process.execPath,[join(root,script)],{cwd:root,env:{...process.env,...env},stdio:'inherit',windowsHide:true});children.push(child);child.on('exit',code=>{if(code){console.error(`${script} exited: ${code}`);for(const peer of children)peer.kill();process.exitCode=code}});return child}
 // 预览实例同样要被告知宿主地址（Bug #1「供应商与模型无法读取」）：不注入的话桥接层会回落到
 // 3080 —— 在 Desktop 部署上那是没人监听的端口，模型供应商页会整页读不出来。
-// 宿主地址优先取显式配置，其次取 DSH 会话里的 DSH_WEB_URL。
-const dshModelsBaseUrl=process.env.DSH_MODELS_BASE_URL??process.env.DSH_WEB_URL??''
+// ★ 只认 `DSH_MODELS_BASE_URL`（workbench schema 里**已声明**的键）。
+//   曾经这里还回落到宿主的 `DSH_WEB_URL`，那让 `scan --check` 报出「未声明 env 键」——
+//   而 `DSH_WEB_URL` 在 schema 里登记的是 **foreignEnv（DSH 宿主拥有、不属于 workbench 的配置面）**：
+//   一个「声明为别人拥有」的变量又被自己读，两者必有一句是假的。缺配置时**打印一句怎么补**，
+//   比偷偷读一个外来的变量更诚实。
+const dshModelsBaseUrl=process.env.DSH_MODELS_BASE_URL??''
+if(!dshModelsBaseUrl) console.log('提示：未设置 DSH_MODELS_BASE_URL，模型供应商页将按 web profile 默认（3080）回落；桌面部署可先 DSH_MODELS_BASE_URL=http://127.0.0.1:<宿主端口>')
 start('team-hub/server.mjs',{})
 start('workbench/scripts/serve.mjs',{DSH_WORKBENCH_PORT:'4821',DSH_WORKBENCH_HOST:'127.0.0.1',DSH_WORKBENCH_TOKEN:'',DSH_HUB_UPSTREAM:'http://127.0.0.1:8791',...(dshModelsBaseUrl?{DSH_MODELS_BASE_URL:dshModelsBaseUrl}:{})})
 const stop=()=>{for(const child of children)child.kill()};process.on('SIGINT',stop);process.on('SIGTERM',stop)

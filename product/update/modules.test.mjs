@@ -1,4 +1,4 @@
-// product/update/modules.test.mjs
+﻿// product/update/modules.test.mjs
 // ============================================================================
 // 装载期自检的汇总回归
 //
@@ -22,7 +22,7 @@ import { fileURLToPath } from 'node:url'
 
 const EXPECTED_MODULES = Object.freeze([
   'barrier', 'cache', 'canonical', 'client', 'config', 'credential', 'envelope',
-  'errors', 'extract', 'feed', 'helper', 'host', 'index', 'install', 'journal',
+  'errors', 'extract', 'feed', 'health', 'helper', 'host', 'index', 'install', 'journal',
   'release', 'schedule', 'semver', 'state', 'transport',
 ])
 
@@ -41,6 +41,7 @@ const CHECKED_EXPORTS = Object.freeze({
   config: 'CONFIG_CHECKED',
   errors: 'ERRORS_CHECKED',
   extract: 'EXTRACT_CHECKED',
+  health: 'HEALTH_CHECKED',
   journal: 'JOURNAL_CHECKED',
   barrier: 'BARRIER_CHECKED',
   credential: 'CREDENTIAL_CHECKED',
@@ -89,6 +90,7 @@ test('自检结论本身是检查过的（不是恒真的占位）', async () =>
     state: (c) => c.sample.chainLength >= 11,
     install: (c) => c.steps.length >= 8,
     extract: (c) => c.executableExtensions >= 15,
+    health: (c) => c.loopbackHosts.length >= 3,
   })
   for (const [name, predicate] of Object.entries(requirements)) {
     const mod = await import(new URL(`./${name}.mjs`, import.meta.url))

@@ -100,6 +100,10 @@ export {
   runInstallTransaction, selfCheckInstall, writeHelperReport,
 } from './install.mjs'
 export {
+  HEALTH_CODES, HEALTH_CHECKED, HEALTH_LIMITS, HEALTH_PROTOCOL, LOOPBACK_HOSTS, checkUrl, compareSubset,
+  createHealthProbe, expandStrict, healthSpecFromProcesses, selfCheckHealth, validateHealthSpec,
+} from './health.mjs'
+export {
   HELPER_CHECKED, HELPER_CODES, HELPER_PROTOCOL, clearTransactionFile, runHelper, runHelperProcess,
   selfCheckHelper, validateInvocation, writeTransactionFile,
 } from './helper.mjs'
@@ -136,6 +140,7 @@ export async function selfCheckAll() {
     layer('schedule', await import('./schedule.mjs')),
     layer('cache', await import('./cache.mjs')),
     layer('extract', await import('./extract.mjs')),
+    layer('health', await import('./health.mjs')),
     layer('state', await import('./state.mjs')),
     layer('config', await import('./config.mjs')),
     layer('errors', await import('./errors.mjs')),
@@ -158,7 +163,7 @@ export const UPDATE_MODULES = Object.freeze({
   transport: Object.freeze(['./transport.mjs', './schedule.mjs', './cache.mjs', './extract.mjs']),
   transaction: Object.freeze([
     './state.mjs', './client.mjs', './journal.mjs', './barrier.mjs',
-    './credential.mjs', './install.mjs', './helper.mjs',
+    './credential.mjs', './install.mjs', './health.mjs', './helper.mjs',
   ]),
   config: Object.freeze(['./config.mjs', './errors.mjs']),
 })

@@ -1,4 +1,4 @@
-﻿// product/update/install.test.mjs
+// product/update/install.test.mjs
 // ============================================================================
 // 安装事务的失败点驱动 —— 设计 §8 的失败表逐行
 //
@@ -823,7 +823,96 @@ test('★ helper：包里有闭包之外的可执行文件 → 解压被拒，�
   assert.equal(readBarrier(ctx.dataDir).blocked, false)
 })
 
-test('helper：调用面缺字段一律拒绝', () => {  assert.equal(validateInvocation({}).ok, false)
+test('★ helper：声明式健康规格（healthProbeSpec）在生产路径上真的被用起来', async (t) => {
+  // 这一条**不注入**探针函数：它走 `health.mjs` 的 `createHealthProbe`，
+  // 验证"函数跨不过进程边界"这件事已经被声明式规格解决了。
+  //
+  // 一个只测"注入函数能提交"的套件不会发现 helper 在真实部署里
+  // 永远拿不到探针——而那正是之前的状态（fail-closed 到永远不提交）。
+  const { ctx, transaction, secretHex, helperDir } = helperSetup(t)
+  const fx = helperEffects()
+  // 走**真实**的 `probeHealth`：注入探针替身会让这条用例失去意义——
+  // 它要验证的正是"声明式规格被变成了一个真的会发请求的探针"。
+  delete fx.probeHealthImpl
+  const calls = []
+  fx.healthFetchImpl = async (url) => {
+    calls.push(url)
+    return { status: 200, text: async () => JSON.stringify({ port: 8787 }) }
+  }
+  const report = await runHelper({
+    paths: { installDir: ctx.installDir, dataDir: ctx.dataDir, helperDir },
+    transaction: {
+      ...transaction,
+      healthProbe: undefined,
+      healthProbeSpec: {
+        protocol: 'legion/update-health@1',
+        checks: [{ name: 'team-hub', host: '127.0.0.1', port: 8787, path: '/api/config', expectJson: { port: 8787 } }],
+      },
+    },
+    credentialSecretHex: secretHex, effects: fx,
+  })
+  assert.equal(report.verdict, 'committed', report.reason)
+  assert.deepEqual(calls, ['http://127.0.0.1:8787/api/config'], '声明式规格没有真的发出请求')
+})
+
+test('★ helper：声明式规格里服务不健康 → 不提交并回退', async (t) => {
+  const { ctx, transaction, secretHex, helperDir } = helperSetup(t)
+  const fx = helperEffects()
+  delete fx.probeHealthImpl
+  // 旧的实例还活着并应答 200，但端口字段对不上——身份断言必须拦住它。
+  fx.healthFetchImpl = async () => ({ status: 200, text: async () => JSON.stringify({ port: 9999 }) })
+  const report = await runHelper({
+    paths: { installDir: ctx.installDir, dataDir: ctx.dataDir, helperDir },
+    transaction: {
+      ...transaction,
+      healthProbe: undefined,
+      healthProbeSpec: {
+        protocol: 'legion/update-health@1',
+        checks: [{ name: 'team-hub', host: '127.0.0.1', port: 8787, path: '/api/config', expectJson: { port: 8787 } }],
+      },
+    },
+    credentialSecretHex: secretHex, effects: fx,
+  })
+  assert.equal(report.verdict, 'rolled-back', report.reason)
+  assert.equal(report.code, 'helper-health-failed')
+  assert.ok(fx.calls.includes('rollback'), '身份断言失败之后没有回退')
+})
+
+test('★ helper：规格**存在但非法** → 记下来并按"不健康"处置', async (t) => {
+  const { ctx, transaction, secretHex, helperDir } = helperSetup(t)
+  const fx = helperEffects()
+  delete fx.probeHealthImpl
+  const report = await runHelper({
+    paths: { installDir: ctx.installDir, dataDir: ctx.dataDir, helperDir },
+    transaction: {
+      ...transaction,
+      healthProbe: undefined,
+      // 非回环主机：这是明确的配置错误，不是"没有证据"。
+      healthProbeSpec: {
+        protocol: 'legion/update-health@1',
+        checks: [{ name: 'x', host: 'evil.example', port: 80, path: '/' }],
+      },
+    },
+    credentialSecretHex: secretHex, effects: fx,
+  })
+  assert.notEqual(report.verdict, 'committed', '非法规格却提交了升级')
+  // ★ 落点是 **health-failed** 而不是 health-unverified，这个区别是有意的：
+  //   我们**有**一份规格、它只是坏的 —— 那是一次明确的配置错误，
+  //   而不是"没有证据"。`createHealthProbe` 因此返回一个**恒为不健康**的
+  //   探针（而不是 null），于是它会走正常的"不健康 → 回退"路径。
+  assert.equal(report.code, 'helper-health-failed')
+  assert.equal(report.verdict, 'rolled-back')
+  // 日志里必须有规格非法的痕迹，否则排查只能看到"服务不健康"。
+  const invalidNote = report.steps.find((item) => item.name === 'health-spec')
+  assert.ok(invalidNote !== undefined, '没有记录规格非法的步骤读数')
+  assert.equal(invalidNote.ok, false)
+  assert.match(invalidNote.detail, /回环|loopback/i)
+  // 而且**没有发出任何请求**：规格非法时不该去连任何东西。
+  assert.equal(fx.calls.includes('health'), false)
+})
+
+test('helper：调用面缺字段一律拒绝', () => {
+  assert.equal(validateInvocation({}).ok, false)
   assert.equal(validateInvocation({
     paths: { installDir: 'a', dataDir: 'b', helperDir: 'c' },
     transaction: { txnId: 'x', toVersion: '1', packagePath: 'nonexistent', packageSha256: 'a'.repeat(64) },

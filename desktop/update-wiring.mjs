@@ -29,6 +29,8 @@ import { loadUpdateConfig } from '../product/update/config.mjs'
 import { createUpdateClient } from '../product/update/client.mjs'
 import { runInstallTransaction } from '../product/update/install.mjs'
 import { writeTransactionFile, clearTransactionFile } from '../product/update/helper.mjs'
+import { healthSpecFromProcesses } from '../product/update/health.mjs'
+import { DEFAULT_PORTS, PROCESS_SPECS } from '../product/process-manifest.mjs'
 import { createUpdateService, registerUpdateIpc } from './update-service.mjs'
 
 /** 桌面端要读的"当前产品版本"来源（与 launcher 的 shared-backend 同一份文件）。 */
@@ -316,6 +318,17 @@ export function buildDesktopInstaller({
   cacheDir,
   nodePath = process.execPath,
   helperEntry = null,
+  /**
+   * 本次启动的**实际**端口（key → port）。
+   *
+   * ★ 必须由调用方给出 Launcher 真正用的那一组，而不是让这里猜默认值：
+   *   健康检查里有一条 `expectJson: { port }` 的身份断言，它的用途正是
+   *   区分「我们自己的实例」与「上一次升级前留下的旧实例 / 别的程序占了
+   *   同一个端口」。用默认值去问一个跑在别的端口上的实例，得到的是
+   *   **更差**的结果——一次看似通过的健康检查（旧实例应答了 200，
+   *   而它的 port 字段恰好也等于默认值）。
+   */
+  ports = DEFAULT_PORTS,
   now = () => Date.now(),
   drainTimeoutMs = null,
   log = () => {},
@@ -377,6 +390,27 @@ export function buildDesktopInstaller({
         },
         stopServices: () => runner.forward('stop'),
         spawnHelper: async (spawnArgs) => {
+          // ★ 健康检查是**声明式**的（`product/update/health.mjs`）：
+          //   事务文件里放的是一组**回环地址**的 HTTP 检查，helper 在
+          //   自己的进程里把它变成探针函数。
+          //
+          //   为什么不放一个函数或一段代码：函数跨不过 JSON 事务文件，而
+          //   "允许事务文件带可执行代码"等于把 helper（权限最高的一段代码）
+          //   变成一个任意代码执行器。
+          //
+          //   规格从**同一份** `process-manifest.mjs` 派生：那个文件已经声明了
+          //   每个服务的就绪路径、期望状态与身份断言（`expectJson`）。
+          //   在别处再写一遍"哪个服务的哪个路径算健康"，两处会漂移——而漂移的
+          //   表现是"升级成功之后用户发现某个服务是坏的"。
+          const health = healthSpecFromProcesses({ processes: PROCESS_SPECS, ports })
+          if (health.ok !== true) {
+            // ★ 派生失败时**不**写入规格。缺规格会让 helper 走
+            //   `helper-health-unverified` → 不提交并尝试回退（fail-closed）。
+            //   反方向（写一份带字面占位符的规格）会让健康检查"永远不成立"，
+            //   于是升级每次都失败在验证那一步，而原因看起来像"服务没起来"。
+            log(`[update] 健康检查规格派生失败，本次升级不会提交：${health.reason}`)
+          }
+
           // ★ 事务文件写在这里：路径与内容都来自**主进程**，渲染进程无法影响。
           //   它必须在启动 helper **之前**落盘，且与凭证绑定同一个 txnId
           //   与包摘要（`credential.mjs` 的 MAC 会拒掉任何改动）。
@@ -390,15 +424,11 @@ export function buildDesktopInstaller({
             backupDir: join(dataDir, 'backups'),
             backupSnapshotRoot: spawnArgs.backupSnapshotRoot,
             migrations: spawnArgs.migrations ?? [],
-            // 健康探针跨不过进程边界（它是一个函数），所以必须由 helper 自己
-            // 在进程内构造；这里只留超时。
-            healthProbe: null,
+            ...(health.ok === true ? { healthProbeSpec: health.spec } : {}),
             healthTimeoutMs: 30_000,
-            // ★ 显式写 `false`：没有探针时 helper **不会**提交（"没验证"与
-            //   "验证失败"在能不能提交上是同一件事）。这一行在探针接线之前
-            //   意味着稳定通道的自动升级会停在新版本验证不了这一步 ——
-            //   那是**刻意的**：一次未经健康验证的提交比一次拒绝升级危险得多。
-            //   接线之后把它改成探针，而不是把它改成 `true`。
+            // ★ 显式写 `false`：规格派生不出来时**不会**提交
+            //   （"没验证"与"验证失败"在能不能提交上是同一件事）。
+            //   真机验收时应当补上能派生的端口读数，而不是把这个开关改成 `true`。
             allowUnverifiedHealth: false,
           })
           const started = await runner.spawnHelper(spawnArgs)

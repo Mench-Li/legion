@@ -39,6 +39,7 @@ import { createJournal } from './journal.mjs'
 import { readBarrier, releaseBarrier } from './barrier.mjs'
 import { helperReportPath, writeHelperReport } from './install.mjs'
 import { extractArchive, verifyExtractedTree } from './extract.mjs'
+import { createHealthProbe } from './health.mjs'
 import { activateVersion, installLayout, listInstalledVersions, probeHealth, readActivePointer, rollbackUpgrade } from '../upgrade/switchover.mjs'
 import { planRetention, restoreSnapshot, listSnapshots } from '../upgrade/backup.mjs'
 import { runMigrations } from '../upgrade/migration.mjs'
@@ -409,17 +410,40 @@ export async function runHelper({
   //   保持维护模式等人工）。部署方如果确实知道自己在做什么，可以在事务文件
   //   里显式写 `allowUnverifiedHealth: true` 来承担这个风险。
   journal.advance('validate', '开始健康检查')
-  const probeConfigured = typeof fx.probeHealthImpl === 'function' && transaction.healthProbe !== undefined
-    && transaction.healthProbe !== null
+  // ★ 探针的两种来源，顺序是刻意的：
+  //
+  //   ① `healthProbeSpec`（**声明式**，生产路径）—— 事务文件里的一组回环
+  //      HTTP 检查，helper 在**本进程内**把它变成探针函数
+  //      （见 `health.mjs`：函数跨不过 JSON 事务文件，而"允许事务文件带一段
+  //      可执行代码"等于把 helper 变成任意代码执行器）。
+  //   ② `healthProbe`（函数，测试路径）—— 只由注入产生，不来自磁盘。
+  const specProbe = transaction.healthProbeSpec === undefined || transaction.healthProbeSpec === null
+    ? null
+    : (fx.createHealthProbe ?? createHealthProbe)(transaction.healthProbeSpec, {
+      ...(fx.healthFetchImpl === undefined ? {} : { fetchImpl: fx.healthFetchImpl }),
+    })
+  if (specProbe !== null && specProbe.ok !== true) {
+    // 规格**存在但非法**：那是一次明确的配置错误，不是"没有证据"。
+    // 如实记下来，然后按不健康落地（`healthProbe` 仍然会被下面当成一个
+    // 恒为 false 的探针，所以提交路径自然走不通）。
+    journal.note('health-spec-invalid', { code: specProbe.code, reason: specProbe.reason })
+    step('health-spec', false, specProbe.reason)
+  } else if (specProbe !== null) {
+    step('health-spec', true, `${transaction.healthProbeSpec.checks?.length ?? 0} 项回环检查`)
+  }
+  const effectiveProbe = specProbe !== null && specProbe.ok === true
+    ? specProbe.probe
+    : (typeof transaction.healthProbe === 'function' ? transaction.healthProbe : (specProbe === null ? null : specProbe.probe))
+  const probeConfigured = typeof effectiveProbe === 'function'
   let health = probeConfigured
     ? await fx.probeHealthImpl({
-      probe: transaction.healthProbe,
+      probe: effectiveProbe,
       timeoutMs: transaction.healthTimeoutMs ?? 30_000,
       label: transaction.toVersion,
     })
     : {
       verdict: 'unsupported',
-      reason: '事务文件里没有健康探针：helper 无法确认新版本可用。'
+      reason: '事务文件里没有健康探针（也没有 healthProbeSpec）：helper 无法确认新版本可用。'
         + '「没有验证」与「验证失败」在能不能提交上是同一件事，所以本次不提交',
     }
   if (health === null || health === undefined) health = { verdict: 'unsupported', reason: '健康探针没有给出结论' }

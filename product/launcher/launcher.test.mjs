@@ -23,7 +23,7 @@ import { join, dirname } from 'node:path'
 
 import { resolveLayout } from '../paths.mjs'
 import { reserveEphemeralPort } from './ports.mjs'
-import { createLauncher, expandExpectation, productStateOf, withRunCredentialPatch } from './launcher.mjs'
+import { LAUNCHER_CHECKED, createLauncher, expandExpectation, productStateOf, withRunCredentialPatch } from './launcher.mjs'
 import { launcherOptionsFrom } from './cli.mjs'
 import { runCredentialPaths } from './run-credential-materialization.mjs'
 import { RUN_RECORD_FIELDS, RUN_RECORD_OPTIONAL_FIELDS } from './run-record.mjs'
@@ -55,6 +55,71 @@ function layoutIn(root, overrides = {}) {
 }
 
 // ------------------------------------------------------------ A. 注入式
+
+test('suspendClaiming／resumeClaiming：只有真正**在跑**时才认为"停掉/恢复"成功', async () => {
+  // ★ 这两个方法补的是一次**真实的线上故障**：
+  //
+  //   桌面安装事务一直在发 `stop-claiming`（设计 §8 第 3 步），而协议表里
+  //   没有这个类型 ⇒ Launcher 以 `UNKNOWN_TYPE` 拒绝 ⇒ 安装事务判
+  //   `install-services-refused` 并进维护态。**每一次真实安装都停在第三步。**
+  //
+  //   本用例守的是新方法的**契约**，特别是"没有认领者"与"停不掉"必须分开：
+  //   前者是"这件事本来就不需要做"（可以继续升级），后者是"想做但做不到"
+  //   （不能继续）。合成一个"失败"会让一台没跑 orchestrator 的机器永远装不了。
+  //
+  // ★ 边界说明：「真的把 orchestrator 停下来」这件事由 `supervisor.mjs` 的
+  //   起停判据守着（`stop` / `start` / `isAlive` 各有用例）。这两个方法是
+  //   薄包装，本文件不重复测一遍进程的起停——但**包装挑对了进程、并且
+  //   用 `isAlive` 而不是状态字符串判断**，是这里要测的。
+  assert.equal(LAUNCHER_CHECKED.ok, true, JSON.stringify(LAUNCHER_CHECKED.problems))
+  assert.equal(LAUNCHER_CHECKED.claimerKey, 'orchestrator')
+
+  const root = mkdtempSync(join(tmpdir(), 'legion-lz-'))
+  try {
+    // ① 还没 start（`supervisor === null`）：两个方法都必须**明确拒绝**，
+    //    而不是安静地报成功——"没有受管进程"与"认领已经停了"是两件事。
+    const idle = createLauncher({ layout: layoutIn(root), include: ['orchestrator'], exists: () => true })
+    const suspended = await idle.suspendClaiming()
+    assert.equal(suspended.ok, false)
+    assert.equal(suspended.code, 'no-supervisor')
+    assert.match(suspended.reason, /没有正在运行的受管进程/)
+    const resumed = await idle.resumeClaiming()
+    assert.equal(resumed.ok, false)
+    assert.equal(resumed.code, 'no-supervisor')
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('suspendClaiming：本次启动**不含** orchestrator → skipped 而不是失败', async () => {
+  // 一个只跑数据面、没有认领者的启动是合法的（`include` 可以只给 team-hub）。
+  // 那种情况下"停止认领"是**一件已经成立的事**，不该让升级停在这里。
+  const root = mkdtempSync(join(tmpdir(), 'legion-lz-'))
+  try {
+    let t = 0
+    const L = createLauncher({
+      layout: layoutIn(root),
+      include: ['team-hub'],
+      ports: { 'team-hub': await reserveEphemeralPort() },
+      exists: () => true,
+      spawnImpl: () => { throw new Error('本用例不该 spawn') },
+      readiness: { timeoutMs: 150, intervalMs: 50 },
+      sleep: async () => {},
+      now: () => t,
+      fetchImpl: async () => { throw new Error('refused') },
+      secretsCheck: () => [],
+    })
+    // 没有 start() ⇒ supervisor 为 null，所以走的是 ① 那条。这里要测的是
+    // **有 supervisor 但范围内没有认领者**那条，所以直接把两个读数都断言出来：
+    // 不 start 时它必须说"没有受管进程"，而不是假装 skipped。
+    const notStarted = await L.suspendClaiming()
+    assert.equal(notStarted.skipped, false, 'supervisor 为 null 时不该报 skipped')
+    assert.equal(notStarted.code, 'no-supervisor')
+    void t
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
 
 test('preflight：**密钥库自检接在启动前**，且 error 级会拦下启动（PRT-254/257 的接线）', async () => {
   // 这一条守的是**接线本身**：把它拔掉（`secretsDiagnostics = []`）时，

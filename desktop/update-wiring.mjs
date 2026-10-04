@@ -30,7 +30,7 @@ import { createUpdateClient } from '../product/update/client.mjs'
 import { runInstallTransaction } from '../product/update/install.mjs'
 import { writeTransactionFile, clearTransactionFile } from '../product/update/helper.mjs'
 import { healthSpecFromProcesses } from '../product/update/health.mjs'
-import { normalizeTaskReadings } from '../product/upgrade/task-state.mjs'
+import { classifyTaskState, normalizeTaskReadings } from '../product/upgrade/task-state.mjs'
 import { PROCESS_SPECS } from '../product/process-manifest.mjs'
 import { createUpdateService, registerUpdateIpc } from './update-service.mjs'
 
@@ -542,6 +542,14 @@ export function buildDesktopInstaller({
    *   （那会在 Windows 上留下一个短暂的句柄，让临时目录删不掉）。
    */
   spawnImpl = null,
+  /**
+   * 备份实现的注入点（`runInstallTransaction` 的同名参数透传）。
+   *
+   * 用途与 `spawnImpl` 同一条理由：**备份失败**是一条必须能被真的驱动到的
+   * 中止路径（设计 §8 失败表第一行），而真实世界里没法按需制造"快照被拒绝"。
+   * 而"中止路径有没有把认领还回去"这件事，只有驱动到它才测得出来。
+   */
+  snapshotFactory = null,
   now = () => Date.now(),
   drainTimeoutMs = null,
   log = () => {},
@@ -555,6 +563,8 @@ export function buildDesktopInstaller({
         bridge, dataDir, installDir: installRoot, nodePath, helperEntry, now, drainTimeoutMs,
         // 进程边界可注入（见 `buildDesktopInstaller` 的参数注释）。
         spawnImpl,
+        // 备份实现可注入（同上：备份失败是一条必须能驱动到的中止路径）。
+        ...(snapshotFactory === null ? {} : { snapshotFactory }),
       })
       const current = readRuntimeManifest(installRoot)
       const stage = (name) => { try { onStage(name) } catch (error) { log(`[update] 阶段回调报错：${error?.message ?? error}`) } }
@@ -719,16 +729,89 @@ export function buildDesktopInstaller({
          */
         backupBytes: directoryBytes(join(dataDir, 'backups')),
         dataDirBytes: directoryBytes(dataDir),
+        // 备份实现（注入点，见 `buildDesktopInstaller` 的说明）。
+        ...(snapshotFactory === null ? {} : { snapshotFactory }),
         stopClaiming: () => runner.forward('stop-claiming'),
-        drainInFlight: async () => {
-          const status = await runner.forward('status')
-          const processes = Array.isArray(status?.processes) ? status.processes : []
-          // 受管服务仍在"运行"就说明任务可能还在跑。真正的在途任务读数
-          // 由 Launcher 提供，这里只用它做一次保守的复核。
-          const active = processes.filter((p) => p?.state === 'running' || p?.state === 'starting')
-          return active.length === 0
-            ? { ok: true, detail: '受管服务状态已收敛' }
-            : { ok: false, reason: `${active.length} 个受管服务仍在运行（${active.map((p) => p.key).join(', ')}）` }
+        /**
+         * 恢复认领（中止路径）。
+         *
+         * 与 `stopClaiming` 成对：停了认领之后升级若在后面的某一步放弃，
+         * 必须把它还回来，否则用户手上留下一个"服务都在跑、但再也领不到活"
+         * 的 Legion，而界面上没有任何东西提示这件事。
+         */
+        resumeClaiming: () => runner.forward('resume-claiming'),
+        /**
+         * **等待在途任务收敛**（设计 §8 第 3 步的后半段）。
+         *
+         * ★ 这个方法此前是**假的**，而且假得有两层：
+         *
+         *   ① 它把 `install.mjs` 传进来的 `{ timeoutMs, pendingTasks }` 全部
+         *      丢掉（形参都没写），然后去问进程读数——**从来没看过任务**。
+         *      而这一步的全部内容就是"等任务结束"。
+         *   ② 它挑的状态是 `'running' | 'starting'`，而 `supervisor.mjs` 的
+         *      状态取值是 `pending/starting/ready/stopped/failed/circuit-open/
+         *      restarting`——**没有 `running`**。一个正在正常服务的进程报的是
+         *      `ready`，所以 `active.length === 0` 恒成立，它**无条件**回报
+         *      "受管服务状态已收敛"。
+         *
+         *   把两层合起来看：它在服务最忙的时候（全都 ready）宣布"已经收敛"。
+         *   方向是 fail-open——而这正是要在备份之前确保"没有写入者"的那一步。
+         *
+         * 现在按设计做：**轮询任务读数**，直到没有活跃任务或者超时。
+         * 超时的落点是 `ok: false`，由调用方按设计 §7 line 150 处置
+         * （「超时回到可选择界面，不默认强杀」）——这一层不杀任何东西。
+         */
+        drainInFlight: async ({ timeoutMs = null, pendingTasks = null } = {}) => {
+          const budgetMs = Number.isFinite(timeoutMs) && timeoutMs > 0 ? timeoutMs : 5 * 60 * 1000
+          const deadline = Date.now() + budgetMs
+          const intervalMs = Math.min(5_000, Math.max(200, Math.floor(budgetMs / 6)))
+          let lastReason = '还没有读到任务状态'
+          // 第一轮用**调用方已经读到的**那份读数：它在预检时才读过，而预检与
+          // 这里之间可能刚过去几毫秒——再问一次只是多一次 IPC。
+          let reading = Array.isArray(pendingTasks) ? pendingTasks : null
+          for (;;) {
+            if (reading === null) {
+              reading = await readPendingTasks({ bridge })
+              if (reading === null) {
+                // 读不到 ≠ 没有任务。这一步的结论只有两种，而"读不到"必须落在
+                // 「不能证明可以开始」那一边。
+                return { ok: false, reason: '读不到在途任务读数（查不到 ≠ 没有），无法确认任务已收敛' }
+              }
+            }
+            const normalized = normalizeTaskReadings(reading).tasks
+            /**
+             * 只有 `active` 与 `unrecognized` 需要等。
+             *
+             * ★ 用 `classifyTaskState` 而不是在这里列状态名：那是**同一个**
+             *   词表判据（`task-state.mjs`），而"在别处再写一份活跃状态表"
+             *   正是 ⑪ 那个缺陷的形状——两份手写清单的交集最后会是空的。
+             *
+             * ★ `waiting`（`todo`/`in_review`/`blocked`/`backlog`）**不等**：
+             *   它们没有在跑，也没有在写库。把它们也算进去会让一台"看板上
+             *   堆着待办"的机器永远等不到收敛——而预检那边已经同意放行了
+             *   （`WAITING_TASK_STATES`），两处必须一致。
+             *
+             * ★ `unrecognized` 必须**算活跃**（fail-closed）：读不懂一条记录
+             *   时假设它没在跑，就是让升级踩着一条读不懂的记录开始。
+             */
+            const active = normalized.filter((t) => {
+              const verdict = classifyTaskState(t?.state)
+              return verdict === 'active' || verdict === 'unrecognized'
+            })
+            if (active.length === 0) {
+              return { ok: true, detail: normalized.length === 0 ? '没有在途任务' : `在途任务已收敛（共 ${normalized.length} 条记录）` }
+            }
+            lastReason = `${active.length} 条任务仍在进行中（${active.slice(0, 3).map((t) => `${t.id ?? '?'}:${t.state ?? '未知'}`).join(', ')}${active.length > 3 ? ' …' : ''}）`
+            if (Date.now() >= deadline) {
+              return {
+                ok: false,
+                reason: `等待在途任务收敛超时（${budgetMs}ms）：${lastReason}。按设计不强制中断任务，本次安装取消`,
+                timeout: true,
+              }
+            }
+            await new Promise((resolve) => setTimeout(resolve, intervalMs))
+            reading = null
+          }
         },
         stopServices: () => runner.forward('stop'),
         spawnHelper: async (spawnArgs) => {

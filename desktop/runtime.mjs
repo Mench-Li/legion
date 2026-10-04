@@ -43,8 +43,21 @@ export function desktopRequestHeaders(details, { origin, token, webContentsId })
 
 const PORT_PROCESS_KEYS = new Set(['team-hub', 'workbench', 'runtime', 'whiteboard'])
 
-function clientError(code, { portConflict = null } = {}) {
-  const error = Object.assign(new Error(code), { code })
+/**
+ * 造一个"后台拒绝了这次请求"的错误。
+ *
+ * ★ `reason` 必须带上。后台的拒绝**一直**带着一句中文说明（
+ *   `desktop-bridge.mjs` 每个 `ok: false` 的 payload 里都有 `reason`），
+ *   而这里此前只取 `code`，把那句话丢掉了——于是用户看到的是一串大写的
+ *   内部码，而写那句话的人本来是为了让他看懂。
+ *
+ *   > 一条被丢掉的错误解释，与一条从来没写过的错误解释，
+ *   > 在用户那一端是同一个东西。
+ */
+function clientError(code, { portConflict = null, reason = null } = {}) {
+  const detail = typeof reason === 'string' && reason !== '' ? `：${reason}` : ''
+  const error = Object.assign(new Error(`${code}${detail}`), { code })
+  if (typeof reason === 'string' && reason !== '') error.reason = reason
   if (portConflict && typeof portConflict === 'object' && PORT_PROCESS_KEYS.has(portConflict.process)
     && Number.isInteger(portConflict.port) && portConflict.port > 0 && portConflict.port <= 65535
     && typeof portConflict.listening === 'boolean') {
@@ -53,7 +66,28 @@ function clientError(code, { portConflict = null } = {}) {
   return error
 }
 
-export const BRIDGE_DEADLINES = Object.freeze({ status: 10_000, detach: 10_000, start: 720_000, restart: 780_000, stop: 90_000, 'prepare-runtime': 600_000, 'configure-workspace': 30_000, 'configure-identity': 30_000, 'configure-model': 45_000 })
+/**
+ * 每个命令的等待上限。
+ *
+ * ★★ 这张表**必须覆盖协议里的每一个类型**，因为取值的写法是
+ *   `deadlines[type] ?? BRIDGE_DEADLINES[type]`，而 `undefined` 传给
+ *   `setTimeout` 是 **0 毫秒**——不是在"没有上限"和"用默认值"之间选，而是
+ *   **立刻超时**。一个新命令忘了登记在这张表里，表现是它永远返回
+ *   `BRIDGE_TIMEOUT`，而原因看起来像"Launcher 卡住了"。
+ *
+ *   `desktop/main.test.mjs` 有一条判据拿协议的类型表逐个问这张表，
+ *   就是为了让"新加一个命令"这件事不能只改一半。
+ */
+export const BRIDGE_DEADLINES = Object.freeze({
+  status: 10_000, detach: 10_000, start: 720_000, restart: 780_000, stop: 90_000,
+  // 停止认领要等 `orchestrator` 进程体面退出（Launcher 侧给 5s 宽限，加上
+  // 进程树回收），所以比 `stop` 再宽松一档；恢复认领只是拉起一个进程。
+  'stop-claiming': 120_000, 'resume-claiming': 60_000,
+  'prepare-runtime': 600_000, 'configure-workspace': 30_000,
+  'configure-identity': 30_000, 'configure-model': 45_000,
+  // 在途任务读数是**读**命令（走的是本地 HTTP），给一个短上限即可。
+  tasks: 15_000,
+})
 
 export function createBridgeClient(child, {
   onEvent = () => {}, deadlines = BRIDGE_DEADLINES, maxPending = 16, exitTimeoutMs = 15_000,
@@ -85,7 +119,7 @@ export function createBridgeClient(child, {
     pending.delete(message.id)
     clearTimeout(slot.timer)
     if (message.ok === true) slot.resolve(message.payload)
-    else slot.reject(clientError(message.payload?.code ?? 'BRIDGE_FAILED', { portConflict: message.payload?.portConflict }))
+    else slot.reject(clientError(message.payload?.code ?? 'BRIDGE_FAILED', { portConflict: message.payload?.portConflict, reason: message.payload?.reason }))
   })
   child.stdout.on('data', (chunk) => decoder.push(chunk))
   child.on('exit', (code, signal) => {

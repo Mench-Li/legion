@@ -1095,6 +1095,12 @@ export const SCHEMA = defineSchema({
     'NET_TOO_LARGE', 'UND_ERR_CONNECT_TIMEOUT',
     'TASKS_LAUNCHER_NOT_STARTED', 'TASKS_UNREADABLE',
     'UPDATE_MAINTENANCE', 'UPDATE_TRANSACTION_UNFINISHED',
+    // 停止/恢复认领（设计 §8 第 3 步）的三个拒绝码。它们是
+    // `desktop-bridge.mjs` 的具名拒绝，说的是"这个桌面端没有权限改别人启的
+    // 后台状态"（`UNAVAILABLE`）／"这个版本的 Launcher 没实现"（`UNSUPPORTED`）
+    // ／"试了但没成功"（`FAILED`）。三者分开的理由是**处置不同**：
+    // 第一个要用户从原入口操作，第二个要升级产品，第三个可以重试。
+    'CLAIM_CONTROL_UNAVAILABLE', 'CLAIM_CONTROL_UNSUPPORTED', 'CLAIM_CONTROL_FAILED',
   ],
   injects: [
     { target: 'team-hub', env: 'TEAM_HUB_PORT', via: 'env', from: 'ports.team-hub', note: '端口由 Launcher 决定，不由各进程的代码默认值决定' },

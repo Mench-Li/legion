@@ -101,6 +101,15 @@ function effects(overrides = {}) {
   return {
     calls,
     stopClaiming: async () => { calls.push('stopClaiming') },
+    /**
+     * 恢复认领。它是 `stopClaiming` 的配对，**默认就得在夹具里**：
+     *
+     *   · 不提供它，中止路径就少做一件事——而"少做一件事"在用例里看不出来
+     *     （安装照样返回 not-started）。夹具替生产补上缺失的能力，正是这一批
+     *     缺陷的共同形状，所以这里刻意让它**默认存在**并记录调用。
+     *   · 用它可以把"中止路径有没有把认领还回去"断言成一条真的判据。
+     */
+    resumeClaiming: async () => { calls.push('resumeClaiming'); return { ok: true, reason: '已恢复认领' } },
     drainInFlight: async () => { calls.push('drainInFlight'); return { ok: true, detail: 'no tasks' } },
     stopServices: async () => { calls.push('stopServices') },
     verifyExit: async () => { calls.push('verifyExit'); return { ok: true } },
@@ -153,9 +162,19 @@ test('正常路径：九步走完并交接 helper，屏障保持立着', async (
   assert.equal(result.verdict, 'handed-off', result.reason)
   assert.equal(result.ok, true)
   assert.equal(result.reachedStep, 'handoff')
-  // 顺序：屏障在停服务**之前**。
+  /**
+   * ★★ 顺序就是设计 §8 的 3→4→5→6 步，而这条断言是它的守卫。
+   *
+   *   `stopClaiming` / `drainInFlight` 必须排在 `snapshot` **之前**。
+   *   原先它们是排在**之后**的（快照先做），于是那份备份是"边写边拷"的：
+   *   维护屏障是一个闸门文件，它拦得住"之后还来写的进程"，拦不住一个
+   *   已经在跑、正在写 SQLite 的任务。而备份是整次升级的回退源。
+   *
+   *   > 「先立屏障、所以快照是一致的」里的"一致"指的是**之后没人再写**，
+   *   > 而不是**此刻没有人在写**。
+   */
   assert.deepEqual(fx.calls.filter((c) => typeof c === 'string'),
-    ['snapshot', 'stopClaiming', 'drainInFlight', 'stopServices', 'verifyExit'])
+    ['stopClaiming', 'drainInFlight', 'snapshot', 'stopServices', 'verifyExit'])
   // ★ 交接之后屏障**必须还立着**：写入仍被挡住，直到 helper 验证通过。
   const barrier = readBarrier(ctx.dataDir)
   assert.equal(barrier.blocked, true, '交接之后屏障被提前解除了')
@@ -164,7 +183,7 @@ test('正常路径：九步走完并交接 helper，屏障保持立着', async (
   const journal = readJournal(ctx.dataDir)
   const intents = journal.records.filter((r) => r.kind === 'intent').map((r) => r.action)
   const results = journal.records.filter((r) => r.kind === 'result').map((r) => r.action)
-  for (const action of ['lock', 'recheck', 'barrier-acquire', 'backup', 'stop-claiming', 'drain-in-flight', 'stop-services', 'helper-handoff']) {
+  for (const action of ['lock', 'recheck', 'stop-claiming', 'drain-in-flight', 'barrier-acquire', 'backup', 'stop-services', 'helper-handoff']) {
     assert.ok(intents.includes(action), `缺少 ${action} 的意图记录`)
     assert.ok(results.includes(action), `缺少 ${action} 的结果记录`)
   }
@@ -202,29 +221,64 @@ test('包摘要不符：在动任何东西之前停止', async (t) => {
   assert.deepEqual(fx.calls, [])
 })
 
-test('备份失败：立即停止并**释放**屏障（此刻真的什么都没改）', async (t) => {
+test('备份失败：立即停止、**释放**屏障并**恢复认领**（此刻真的什么都没改）', async (t) => {
   const ctx = setup(t)
-  const fx = effects({ snapshotFactory: () => ({ ok: false, snapshot: null, reason: '数据库快照被拒绝/不完整' }) })
+  const fx = effects({
+    // ★ 覆写 `snapshotFactory` 时**自己也要记一笔**：夹具里那一份会 push
+    //   'snapshot'，而覆写会把它连同记录一起换掉——于是"停认领早于快照"
+    //   这条断言会因为**看不到**快照而被判成假。记一半的夹具会让顺序断言
+    //   指向空白。
+    snapshotFactory: () => { fx.calls.push('snapshot'); return { ok: false, snapshot: null, reason: '数据库快照被拒绝/不完整' } },
+  })
   const result = await runInstallTransaction(baseArgs(ctx, fx))
   assert.equal(result.verdict, 'not-started')
   assert.equal(result.code, 'install-backup-failed')
   assert.equal(result.reachedStep, 'backup')
   assert.equal(readBarrier(ctx.dataDir).blocked, false, '备份失败之后仍被锁在维护状态里')
-  assert.equal(fx.calls.includes('stopClaiming'), false, '备份失败之后仍然停了认领')
+  /**
+   * ★ 认领**必须**在备份之前停、在失败之后**还回去**。
+   *
+   *   这条断言原先写的是"备份失败之后仍然停了认领"——它守的其实是那个
+   *   **错的顺序**（备份在停认领之前），而那个顺序让备份变成"边写边拷"。
+   *
+   *   现在守的是设计 §8 的两件事：
+   *     · 认领确实停过（否则备份时可能仍有任务在写）；
+   *     · 失败之后确实还回去了（否则用户得到一个"看起来正常、再也领不到活"
+   *       的 Legion——设计 §8 失败表第一行说这一档要「当前版本继续运行」）。
+   */
+  assert.equal(fx.calls.includes('stopClaiming'), true, '备份之前没有停认领：快照可能是边写边拷的')
+  assert.equal(fx.calls.includes('resumeClaiming'), true, '中止之后没有把认领还回去')
+  assert.ok(fx.calls.indexOf('stopClaiming') < fx.calls.indexOf('snapshot'), '停认领必须早于快照')
+  assert.ok(fx.calls.indexOf('snapshot') < fx.calls.indexOf('resumeClaiming'), '恢复认领必须在快照（失败）之后')
 })
 
-test('等待在途任务超时：停在维护状态，且不默认强杀', async (t) => {
+test('等待在途任务超时：**回到可选择界面**，不默认强杀，也不停在维护态', async (t) => {
   const ctx = setup(t)
   const fx = effects({ drainInFlight: async () => ({ ok: false, reason: '超时（5 分钟）' }) })
   const result = await runInstallTransaction(baseArgs(ctx, fx, { pendingTasks: [{ id: 't1' }] }))
-  assert.equal(result.verdict, 'maintenance-required')
+  /**
+   * ★ 落点是 `not-started`，**不是** `maintenance-required`。
+   *
+   *   设计 §7 line 150：「安装确认显示是否有在途任务。默认等待任务结束；
+   *   **超时回到可选择界面，不默认强杀**。」设计 §8 的失败表也把"任务等待"
+   *   与"下载/校验/预检/备份"归在同一档：「当前版本继续运行；不改变活动指针」。
+   *
+   *   而原先的实现把超时判成维护态。代价是：用户只是因为**有一个任务在跑**，
+   *   就得到一台"起不来、要人工处理"的 Legion——而这次升级**一个字节都没改**。
+   *
+   *   > 把一次"什么都没发生的取消"渲染成一次故障，
+   *   > 会让用户去做只有故障才需要做的事（重装、清数据、找管理员）。
+   */
+  assert.equal(result.verdict, 'not-started')
   assert.equal(result.code, 'install-drain-timeout')
   assert.equal(result.reachedStep, 'drain-in-flight')
-  assert.match(result.reason, /可稍后重试或先取消任务/)
-  // ★ 屏障必须**还立着**：此刻认领已停、备份已做，直接放行会让用户回到
-  //   一个"看起来正常但少了几个服务"的 Legion。
-  assert.equal(readBarrier(ctx.dataDir).blocked, true)
+  assert.match(result.reason, /当前版本继续运行/)
+  // ★ 屏障**没有**立起来：这一步在任何东西被动过之前，所以不需要维护态。
+  assert.equal(readBarrier(ctx.dataDir).blocked, false, '超时之后把用户锁进了维护态')
+  // ★ 认领要还回去：这一次的结论是"当前版本继续运行"，那就得真的能继续干活。
+  assert.equal(fx.calls.includes('resumeClaiming'), true, '超时之后没有恢复认领')
   assert.equal(fx.calls.includes('stopServices'), false, '超时之后仍然停了服务')
+  assert.equal(fx.calls.includes('snapshot'), false, '超时之后仍然做了备份')
 })
 
 test('停止服务失败：保留旧版本并恢复维护状态', async (t) => {

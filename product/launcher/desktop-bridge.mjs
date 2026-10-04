@@ -263,6 +263,32 @@ export function createDesktopBridge({
         stopPending = false
         return { version: DESKTOP_PROTOCOL_VERSION, id, type: 'result', ok: true, payload: { state: 'stopped' } }
       }
+      // ── 停止 / 恢复认领（设计 §8 第 3 步；见 desktop-protocol 的 TYPES）──
+      //
+      // ★ 只在**自己拥有生命周期**时才允许：如果后台是别人（另一个入口）启的，
+      //   停它的认领等于替别人改运行状态，而桌面端没有那个授权。这与 `stop`
+      //   的判据同形（`ownsLifecycle && launcher !== null`）。
+      if (type === 'stop-claiming' || type === 'resume-claiming') {
+        if (!ownsLifecycle || launcher === null) {
+          return { version: DESKTOP_PROTOCOL_VERSION, id, type: 'result', ok: false,
+            payload: { code: 'CLAIM_CONTROL_UNAVAILABLE', reason: '共享后台不由桌面端管理，无法停止或恢复它的任务认领' } }
+        }
+        const method = type === 'stop-claiming' ? 'suspendClaiming' : 'resumeClaiming'
+        if (typeof launcher[method] !== 'function') {
+          return { version: DESKTOP_PROTOCOL_VERSION, id, type: 'result', ok: false,
+            payload: { code: 'CLAIM_CONTROL_UNSUPPORTED', reason: `Launcher 没有实现 ${method}` } }
+        }
+        const result = await launcher[method]()
+        return {
+          version: DESKTOP_PROTOCOL_VERSION, id, type: 'result', ok: result?.ok === true,
+          payload: {
+            state: type === 'stop-claiming' ? 'claiming-suspended' : 'claiming-active',
+            ...(result?.ok === true ? {} : { code: safeCode(result?.code, 'CLAIM_CONTROL_FAILED'), reason: result?.reason ?? null }),
+            skipped: result?.skipped === true,
+            detail: result?.reason ?? null,
+          },
+        }
+      }
       // ── 在途任务读数（设计 §7 line 150：安装确认要显示有没有在途任务）──
       //
       // ★ 这是一个**读**命令，所以它不走队列（与 `status` 同样处置）：

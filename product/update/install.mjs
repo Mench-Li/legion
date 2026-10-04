@@ -129,6 +129,34 @@ function installError(code, message) {
 }
 
 /**
+ * 中止路径上把认领还回去。
+ *
+ * ★ 为什么需要它：第 3 步停了认领之后，**第 4、5 步仍然可能放弃**
+ *   （屏障建不起来、备份失败）。而那些失败的设计落点是"当前版本继续运行"
+ *   （设计 §8 失败表第一行）——"继续运行"必须包含"还能领活"。
+ *
+ *   否则用户会得到一个**看起来完全正常**的 Legion：服务都在、界面能开、
+ *   只是再也领不到任何活。而那件事没有任何界面读数会提示他。
+ *
+ * ★ 恢复失败**不改变**本次事务的结论：升级已经放弃了，多一个"恢复认领也失败"
+ *   只应被记进日志，不该把一个"未开始"变成"维护中"——那会让用户为一件事
+ *   付两次代价。但它是**如实记下**的，不是吞掉。
+ */
+async function resumeClaimingAfterAbort(journal, resumeClaiming) {
+  if (typeof resumeClaiming !== 'function') return
+  try {
+    const resumed = await resumeClaiming()
+    if (resumed?.ok === true) {
+      journal.note('resume-claiming', { ok: true, detail: resumed.reason ?? null })
+      return
+    }
+    journal.note('resume-claiming', { ok: false, reason: resumed?.reason ?? '恢复认领没有成功' })
+  } catch (error) {
+    journal.note('resume-claiming', { ok: false, reason: String(error?.message ?? error) })
+  }
+}
+
+/**
  * 跑一次安装事务。
  *
  * 全部外部效果都是注入的。这不是为了灵活——是因为**四个失败点必须能被
@@ -159,6 +187,14 @@ export async function runInstallTransaction({
   manifestDigest = null,
   // —— 注入的效果 ——
   stopClaiming = null,
+  /**
+   * 恢复认领。**与 `stopClaiming` 成对**：中止路径上必须把它还回去。
+   *
+   * ★ 没有它就不该停认领。设计 §7 line 150 对超时说的「回到可选择界面」
+   *   指的是"用户回到一个能正常干活的 Legion"——而一个认领被停掉、又不恢复
+   *   的 Legion，界面上看起来完全正常，只是再也领不到活。
+   */
+  resumeClaiming = null,
   drainInFlight = null,
   stopServices = null,
   spawnHelper = null,
@@ -352,11 +388,94 @@ export async function runInstallTransaction({
     journal.result('prepare', { ok: true, skipped: true })
   }
 
+  // ── ③ 停止认领 / 等待在途任务结束（设计 §8 第 3 步）──
+  //
+  // ★★ 顺序：这两步**必须**排在维护屏障与备份**之前**。
+  //
+  //   设计的第 3/4/5/6 步是：停认领、等在途任务 → 建立屏障 → 备份 → 停服务。
+  //   而原先的实现是：屏障 → 备份 → 停认领 → 等在途 → 停服务。
+  //
+  //   反转的后果不是"顺序不好看"，而是**第 5 步那份备份不再是设计要的那一份**：
+  //
+  //     · 设计第 4 步的原话是「建立覆盖所有写入入口的维护屏障**并刷新数据**；
+  //       使用 SQLite backup API 或**关闭数据库后的**完整一致快照，**禁止复制
+  //       孤立的 WAL 主文件**」。
+  //     · 屏障是 Launcher 的一个**闸门文件**（`barrier.mjs`），它拦的是
+  //       "之后还来写的进程"，**拦不住一个已经跑起来、正在写 SQLite 的任务**。
+  //     · 而"在途任务"恰恰就是那些写入者。所以原顺序下的备份是**边写边拷的**：
+  //       `team.db` 与它旁边的 `-wal` 是在两个不同时刻被复制的，而同一份设计
+  //       明确禁止的正是这个形状。
+  //
+  //   备份是整次升级的**回退源**。一个不一致的回退源，会让设计 §8 失败表里
+  //   「切换后、未改数据库 → 回到旧版本」这一行落在一个坏掉的库上——而那正是
+  //   用户最需要它好用的时刻。
+  //
+  //   > 「先立屏障、所以快照是一致的」这句话里，"一致"指的是**之后没人再写**，
+  //   > 而不是**此刻没有人在写**。这两件事在"备份"这个动作上不是一回事。
+  //
+  // ③⑥ 的失败落点也随之下移（见下面 `maintenance` 的定义处）：
+  // 认领/任务这两步现在发生在**任何东西被动过之前**，所以失败时可以干净地
+  // 回到"当前版本继续运行"（设计 §8 失败表第一行把"任务等待"就归在那一档）。
+  if (typeof stopClaiming === 'function') {
+    journal.intent('stop-claiming', null)
+    try {
+      await stopClaiming()
+      journal.result('stop-claiming', { ok: true })
+      journal.advance('stop-claiming', '已停止任务认领')
+    } catch (error) {
+      journal.result('stop-claiming', { ok: false, reason: String(error?.message ?? error) })
+      // 认领没能停掉 ⇒ 什么都没变（`stopClaiming` 自己失败时不会留下半停状态），
+      // 所以这里可以干净地回到"当前版本继续运行"。
+      return finish('not-started', INSTALL_CODES.SERVICES_REFUSED, {
+        reachedStep: 'stop-claiming', preflight,
+        reason: `停止任务认领失败，未做任何改动：${error?.message ?? error}`,
+      })
+    }
+  } else {
+    journal.intent('stop-claiming', { skipped: true })
+    journal.result('stop-claiming', { ok: true, skipped: true })
+  }
+
+  if (typeof drainInFlight === 'function') {
+    journal.intent('drain-in-flight', { pendingTasks: Array.isArray(pendingTasks) ? pendingTasks.length : null, timeoutMs: drainTimeoutMs })
+    try {
+      const drained = await drainInFlight({ timeoutMs: drainTimeoutMs, pendingTasks })
+      if (drained?.ok !== true) {
+        journal.result('drain-in-flight', { ok: false, reason: drained?.reason ?? null })
+        // ★ 超时的落点是**回到可选择界面**，不是维护态（设计 §7 line 150：
+        //   「默认等待任务结束；超时回到可选择界面，不默认强杀」；设计 §8 失败表
+        //   第一行也把"任务等待"归在"当前版本继续运行"那一档）。
+        //
+        //   而"停在维护态"会把一次**什么都没改**的取消变成一次需要人工处理的
+        //   故障——用户看到的是一台起不来的 Legion，原因只是他有个任务在跑。
+        //   所以：把认领还回去，然后如实说"任务还没结束，本次没装"。
+        await resumeClaimingAfterAbort(journal, resumeClaiming)
+        return finish('not-started', INSTALL_CODES.DRAIN_TIMEOUT, {
+          reachedStep: 'drain-in-flight', preflight,
+          reason: `在途任务未在期限内结束，本次安装取消，当前版本继续运行：${drained?.reason ?? ''}`,
+        })
+      }
+      journal.result('drain-in-flight', { ok: true, detail: drained.detail ?? null })
+      journal.advance('drain-in-flight', '在途任务已收敛')
+    } catch (error) {
+      journal.result('drain-in-flight', { ok: false, reason: String(error?.message ?? error) })
+      await resumeClaimingAfterAbort(journal, resumeClaiming)
+      return finish('not-started', INSTALL_CODES.DRAIN_TIMEOUT, {
+        reachedStep: 'drain-in-flight', preflight,
+        reason: `等待在途任务时出错，本次安装取消，当前版本继续运行：${error?.message ?? error}`,
+      })
+    }
+  } else {
+    journal.intent('drain-in-flight', { skipped: true })
+    journal.result('drain-in-flight', { ok: true, skipped: true })
+  }
+
   // ── ④ 维护屏障（在停服务**之前**，见 barrier.mjs 的注释）──
   journal.intent('barrier-acquire', { txnId: id })
   const barrier = acquireBarrier({ dataDir: paths.dataDir, txnId: id, reason: `升级到 ${identity?.productVersion ?? '新版本'}`, now })
   if (!barrier.ok) {
     journal.result('barrier-acquire', { ok: false, reason: barrier.reason })
+    await resumeClaimingAfterAbort(journal, resumeClaiming)
     return finish('not-started', INSTALL_CODES.BARRIER_FAILED, {
       reachedStep: 'barrier', barrier,
       reason: `无法建立维护屏障，未做任何改动：${barrier.reason}`,
@@ -365,7 +484,7 @@ export async function runInstallTransaction({
   journal.result('barrier-acquire', { ok: true, reason: barrier.reason })
   journal.advance('barrier', '维护屏障已建立')
 
-  // ── ⑤ 备份（屏障之内，所以快照是一致的）──
+  // ── ⑤ 备份（此时认领已停、在途任务已收敛，所以快照是一致的）──
   let backup = null
   const backupDir = typeof paths.backupDir === 'string' ? paths.backupDir : null
   if (backupDir !== null) {
@@ -379,11 +498,13 @@ export async function runInstallTransaction({
     })
     if (backup.ok !== true) {
       // ★ 备份失败**立即停止**，并且**释放屏障**——因为此刻真的什么都没改，
-      //   把用户锁在维护状态里换不到任何安全性。
+      //   把用户锁在维护状态里换不到任何安全性。认领也要还回去：它在第 3 步
+      //   被停了，而"当前版本继续运行"的意思就是它得真的能继续干活。
       journal.result('backup', { ok: false, reason: backup.reason })
       releaseBarrier(paths.dataDir, id)
       journal.finish('rolled-back', { reason: `备份失败：${backup.reason}` })
       destroyCredential(paths.dataDir)
+      await resumeClaimingAfterAbort(journal, resumeClaiming)
       return finish('not-started', INSTALL_CODES.BACKUP_FAILED, {
         reachedStep: 'backup', backup, preflight,
         reason: `备份失败，未做任何改动：${backup.reason}`,
@@ -396,51 +517,15 @@ export async function runInstallTransaction({
   }
   journal.advance('backup', backup?.snapshot?.id ?? '没有备份目录')
 
-  // ── ③⑥ 停止认领 / 等待在途任务 / 停止服务 ──
+  // ── ⑥ 停止受管服务 ──
   //
-  // ★ 这三步失败时**保持维护状态**（设计 §8 失败表第二行："保留旧版本，
-  //   恢复维护状态并提示重试"）。为什么不像备份失败那样直接放行：
-  //   此刻认领可能已经被停掉、服务可能已经停了一半，直接把用户放回去
-  //   会得到一个"看起来正常但少了几个服务"的 Legion。
+  // ★ 到这一步为止认领已经停了、任务已经收敛、屏障已经立着、备份已经做完。
+  //   所以这里失败时的落点仍然是**维护态**（设计 §8 失败表第二行："保留旧版本，
+  //   恢复维护状态并提示重试"）：服务可能已经停了一半，直接把用户放回去会得到
+  //   一个"看起来正常但少了几个服务"的 Legion。
   const maintenance = (step, code, reason, extra = {}) => {
     journal.advance('recovery-required', reason)
     return finish('maintenance-required', code, { reachedStep: step, backup, preflight, reason, ...extra })
-  }
-
-  if (typeof stopClaiming === 'function') {
-    journal.intent('stop-claiming', null)
-    try {
-      await stopClaiming()
-      journal.result('stop-claiming', { ok: true })
-      journal.advance('stop-claiming', '已停止任务认领')
-    } catch (error) {
-      journal.result('stop-claiming', { ok: false, reason: String(error?.message ?? error) })
-      return maintenance('stop-claiming', INSTALL_CODES.SERVICES_REFUSED, `停止任务认领失败：${error?.message ?? error}`)
-    }
-  } else {
-    journal.intent('stop-claiming', { skipped: true })
-    journal.result('stop-claiming', { ok: true, skipped: true })
-  }
-
-  journal.intent('drain-in-flight', { pendingTasks: Array.isArray(pendingTasks) ? pendingTasks.length : null, timeoutMs: drainTimeoutMs })
-  if (typeof drainInFlight === 'function') {
-    let drained
-    try {
-      drained = await drainInFlight({ timeoutMs: drainTimeoutMs, pendingTasks })
-    } catch (error) {
-      drained = { ok: false, reason: String(error?.message ?? error) }
-    }
-    if (drained?.ok !== true) {
-      journal.result('drain-in-flight', { ok: false, reason: drained?.reason ?? null })
-      // ★ 设计 §7 line 150：「超时回到可选择界面，不默认强杀。」
-      //   所以超时是一个**可选择**的落点，而不是"强行继续"。
-      return maintenance('drain-in-flight', INSTALL_CODES.DRAIN_TIMEOUT,
-        `等待在途任务结束未完成：${drained?.reason ?? '超时'}。当前版本未被改动，可稍后重试或先取消任务`, { drained })
-    }
-    journal.result('drain-in-flight', { ok: true, detail: drained.detail ?? null })
-    journal.advance('drain-in-flight', '在途任务已收敛')
-  } else {
-    journal.result('drain-in-flight', { ok: true, skipped: true })
   }
 
   if (typeof stopServices === 'function') {
@@ -451,27 +536,38 @@ export async function runInstallTransaction({
       journal.advance('stop-services', '受管服务已停止')
     } catch (error) {
       journal.result('stop-services', { ok: false, reason: String(error?.message ?? error) })
-      return maintenance('stop-services', INSTALL_CODES.SERVICES_REFUSED,
-        `停止受管服务失败，尚未切换程序：${error?.message ?? error}`)
+      return maintenance('stop-services', INSTALL_CODES.SERVICES_REFUSED, `停止受管服务失败：${error?.message ?? error}`)
     }
   } else {
     journal.intent('stop-services', { skipped: true })
     journal.result('stop-services', { ok: true, skipped: true })
   }
 
-  // ── ⑥-b 核对退出身份与进程树；句柄未释放则安全中止 ──
   if (typeof verifyExit === 'function') {
-    const exit = await verifyExit()
-    journal.note('verify-exit', { ok: exit?.ok === true, detail: exit?.detail ?? null })
-    if (exit?.ok !== true) {
-      // ★ 设计 §8 失败表第二行：「Windows 文件占用、切换前退出失败 → 保留
-      //   旧版本，恢复维护状态并提示重试」。这里**不**继续交接 helper——
-      //   交接之后 helper 会去替换一个仍被占用的目录，而那在 Windows 上
-      //   会以"部分文件已替换"结束。
-      return maintenance('verify-exit', INSTALL_CODES.HANDLE_HELD,
-        `受管进程或桌面端尚未完全退出（${exit?.detail ?? '句柄可能仍被占用'}），已保留旧版本，请稍后重试`)
+    journal.intent('verify-exit', null)
+    try {
+      const exit = await verifyExit()
+      if (exit?.ok !== true) {
+        journal.result('verify-exit', { ok: false, reason: exit?.reason ?? null })
+        // ★ 设计 §8 失败表第二行：「Windows 文件占用、切换前退出失败 → 保留
+        //   旧版本，恢复维护状态并提示重试」。这里**不**继续交接 helper——
+        //   交接之后 helper 会去替换一个仍被占用的目录，而那在 Windows 上
+        //   会以"部分文件已替换"结束。
+        return maintenance('verify-exit', INSTALL_CODES.HANDLE_HELD,
+          exit?.reason ?? `受管进程或桌面端尚未完全退出（${exit?.detail ?? '句柄可能仍被占用'}），已保留旧版本，请稍后重试`)
+      }
+      journal.result('verify-exit', { ok: true, detail: exit.detail ?? null })
+      journal.advance('verify-exit', '受管进程已退出')
+    } catch (error) {
+      journal.result('verify-exit', { ok: false, reason: String(error?.message ?? error) })
+      return maintenance('verify-exit', INSTALL_CODES.HANDLE_HELD, `核对进程退出时出错：${error?.message ?? error}`)
     }
+  } else {
+    journal.intent('verify-exit', { skipped: true })
+    journal.result('verify-exit', { ok: true, skipped: true })
   }
+
+  // ── ⑦ 交接 helper（解压、切换、迁移、健康验证由它在服务停止后完成）──
 
   // ── ⑦ 交接：签发一次性凭证并启动独立 helper ──
   journal.intent('helper-handoff', { helperDir: paths.helperDir ?? null })

@@ -6,7 +6,7 @@ import { readFileSync } from 'node:fs'
 import { runInNewContext } from 'node:vm'
 import { fileURLToPath } from 'node:url'
 import { dirname, join } from 'node:path'
-import { canNavigate, closeAction, createBridgeClient, desktopRequestHeaders, externalUrl, workbenchTarget } from './runtime.mjs'
+import { BRIDGE_DEADLINES, canNavigate, closeAction, createBridgeClient, desktopRequestHeaders, externalUrl, workbenchTarget } from './runtime.mjs'
 import { failureMessage, portConflictMessage } from './messages.mjs'
 
 function fakeBridge() {
@@ -221,6 +221,54 @@ test('★ 真正的故障仍然说"无法启动"并给出错误代码', () => {
   render({ state: 'failed', code: 'PORT_IN_USE' })
   assert.equal(elements.get('#heading').textContent, 'Legion 暂时无法启动')
   assert.match(elements.get('#detail').textContent, /PORT_IN_USE/)
+})
+
+test('★★★ 协议里的每个命令都在期限表里有上限（漏一个 = 它立刻超时）', () => {
+  // ★ 取值的写法是 `deadlines[type] ?? BRIDGE_DEADLINES[type]`，而把
+  //   `undefined` 交给 `setTimeout` 是 **0 毫秒**——不是在"没有上限"与
+  //   "用默认值"之间选，而是**立刻超时**。
+  //
+  //   所以"加一个命令、忘了加期限"的表现是：那条命令永远返回 `BRIDGE_TIMEOUT`，
+  //   而排查会从"Launcher 卡住了"开始——离真正的原因（少一行表项）很远。
+  //
+  //   这条判据拿**协议的类型表**逐个问期限表，让"加命令"这件事不能只改一半。
+  const protocolSource = readFileSync(join(dirname(fileURLToPath(import.meta.url)), '..', 'product', 'launcher', 'desktop-protocol.mjs'), 'utf8')
+  const match = protocolSource.match(/const TYPES = new Set\(\[([\s\S]*?)\]\)/)
+  assert.notEqual(match, null, '没有从协议源码里认出 TYPES（正则过期了？）')
+  const types = [...match[1].matchAll(/'([^']+)'/g)].map((m) => m[1])
+  assert.ok(types.length >= 10, `协议类型表看起来是空的：${JSON.stringify(types)}`)
+  const missing = types.filter((t) => !(t in BRIDGE_DEADLINES))
+  assert.deepEqual(missing, [], `这些命令没有期限，会立刻超时：${missing.join(', ')}`)
+  // 每一项都必须是正的有限数（`0` 与 `NaN` 同样是"立刻超时"）。
+  for (const [type, ms] of Object.entries(BRIDGE_DEADLINES)) {
+    assert.ok(Number.isFinite(ms) && ms > 0, `${type} 的期限是 ${ms}`)
+  }
+})
+
+test('★★ 后台的拒绝必须把它的中文说明带到用户面前', async () => {
+  // `desktop-bridge.mjs` 每个 `ok: false` 的 payload 里都有 `reason`，
+  // 而 `runtime.mjs` 原先只取 `code`、把那句话丢掉——用户看到的是一串
+  // 大写内部码，而写那句话的人本来是为了让他看懂。
+  //
+  //   > 一条被丢掉的错误解释，与一条从来没写过的错误解释，
+  //   > 在用户那一端是同一个东西。
+  const { child, sent } = fakeBridge()
+  const client = createBridgeClient(child, { deadlines: { status: 1000 } })
+  const promise = client.request('status', {})
+  // 让后台回一条拒绝（带中文 reason）。`child.stdout` 是客户端读的那一端，
+  // 所以往它**写**一行就是"后台回了一条消息"。
+  await new Promise((resolve) => setImmediate(resolve))
+  const request = sent.at(-1)
+  child.stdout.write(JSON.stringify({
+    version: 1, id: request.id, type: 'result', ok: false,
+    payload: { code: 'CLAIM_CONTROL_UNAVAILABLE', reason: '共享后台不由桌面端管理' },
+  }) + '\n')
+  await assert.rejects(promise, (error) => {
+    assert.equal(error.code, 'CLAIM_CONTROL_UNAVAILABLE')
+    assert.equal(error.reason, '共享后台不由桌面端管理')
+    assert.match(error.message, /共享后台不由桌面端管理/, '中文说明没有出现在错误信息里')
+    return true
+  })
 })
 
 test('port conflict help names the service and port and rejects untrusted detail', () => {

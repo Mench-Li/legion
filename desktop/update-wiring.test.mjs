@@ -30,7 +30,8 @@ import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { test } from 'node:test'
 
 import {
@@ -38,6 +39,7 @@ import {
   selfCheckWiringAsync,
 } from './update-wiring.mjs'
 import { migrationPlanDigest } from '../product/upgrade/migration.mjs'
+import { DESKTOP_PROTOCOL_VERSION, parseRequest } from '../product/launcher/desktop-protocol.mjs'
 import { createReleaseFixtureBundle, fakePackageBytes } from './update-wiring.testkit.mjs'
 
 const CURRENT_VERSION = '1.0.0'
@@ -376,8 +378,110 @@ test('★ `readPendingTasks` 三态：读到 / 空 / 读不到', async () => {
   assert.deepEqual([...empty], [])
 })
 
+test('★★ 停止/恢复认领走的是协议真有的类型（且 fake bridge 与真协议一致）', async (t) => {
+  // ★ 这条断言的是**接线层与协议的对齐**，而不是它的行为：
+  //
+  //   本文件的 `fakeBridge` 自己实现 `stop-claiming`／`resume-claiming`。
+  //   一旦真协议不认这两个类型，替身仍然会老老实实回答——于是用例全绿而
+  //   真实路径第三步就崩。所以这里额外确认**真协议**认得它们
+  //   （上面那条源码级判据已经在做），并且**接线层真的会发**它们。
+  const cell = scaffold(t)
+  const pkg = makePackage(cell.root)
+  const bridge = fakeBridge({ tasks: [] })
+  const release = createReleaseFixtureBundle({
+    productVersion: NEXT_VERSION, packageSha256: pkg.sha256, packageSizeBytes: pkg.sizeBytes,
+  }).release
+  const installer = buildDesktopInstaller({
+    bridge, installRoot: cell.installRoot, dataDir: cell.dataDir, cacheDir: cell.cacheDir,
+    helperEntry: join(cell.dataDir, 'helper-entry.mjs'), now: () => NOW_MS,
+    spawnImpl: () => ({ pid: 4242, unref() {} }),
+  })
+  const result = await installer.install({
+    identity: {
+      releaseId: release.releaseId, productVersion: NEXT_VERSION,
+      channel: 'stable', platform: 'win32', arch: 'x64', manifestSha256: 'f'.repeat(64),
+    },
+    release, packagePath: pkg.packagePath,
+  })
+  assert.equal(result.verdict, 'handed-off', `${result.code} ${result.reason}`)
+  const forwarded = bridge.calls.map((c) => c.type)
+  assert.ok(forwarded.includes('stop-claiming'), `没有停止认领：${forwarded.join(' → ')}`)
+  // ★ 正常路径（一路走到交接）**不该**发 `resume-claiming`：那时认领本就应该
+  //   停着，而服务马上就要被停掉。恢复只属于**中止**路径。
+  assert.equal(forwarded.includes('resume-claiming'), false,
+    '正常路径也在恢复认领：那会让备份之后仍有认领者（而服务马上要停）')
+  // 停止认领必须早于停服务。
+  assert.ok(forwarded.indexOf('stop-claiming') < forwarded.indexOf('stop'),
+    `顺序不对：${forwarded.join(' → ')}`)
+})
+
+test('★★★ 中止路径会把认领还回去（否则留下一个"再也领不到活"的 Legion）', async (t) => {
+  const cell = scaffold(t)
+  const pkg = makePackage(cell.root)
+  const bridge = fakeBridge({ tasks: [] })
+  const release = createReleaseFixtureBundle({
+    productVersion: NEXT_VERSION, packageSha256: pkg.sha256, packageSizeBytes: pkg.sizeBytes,
+  }).release
+  const installer = buildDesktopInstaller({
+    bridge, installRoot: cell.installRoot, dataDir: cell.dataDir, cacheDir: cell.cacheDir,
+    helperEntry: join(cell.dataDir, 'helper-entry.mjs'), now: () => NOW_MS,
+    // 备份失败 —— 一个"什么都没改"的中止路径（设计 §8 失败表第一行：
+    // 「当前版本继续运行；不改变活动指针」）。
+    spawnImpl: () => ({ pid: 4242, unref() {} }),
+    snapshotFactory: () => ({ ok: false, snapshot: null, reason: '快照被拒绝' }),
+  })
+  const result = await installer.install({
+    identity: {
+      releaseId: release.releaseId, productVersion: NEXT_VERSION,
+      channel: 'stable', platform: 'win32', arch: 'x64', manifestSha256: 'f'.repeat(64),
+    },
+    release, packagePath: pkg.packagePath,
+  })
+  assert.equal(result.ok, false)
+  assert.equal(result.reachedStep, 'backup')
+  const forwarded = bridge.calls.map((c) => c.type)
+  assert.ok(forwarded.includes('stop-claiming'), '没有停止认领')
+  assert.ok(forwarded.includes('resume-claiming'),
+    `中止之后没有恢复认领：${forwarded.join(' → ')}。用户会得到一个服务都在跑、`
+    + '但再也领不到活的 Legion，而界面上没有任何东西提示这件事')
+  assert.ok(forwarded.indexOf('stop-claiming') < forwarded.indexOf('resume-claiming'), '恢复早于停止')
+})
+
 test('模块自检全绿', async () => {
   assert.equal(WIRING_CHECKED.ok, true, JSON.stringify(WIRING_CHECKED.problems))
   const result = await selfCheckWiringAsync()
   assert.equal(result.ok, true, JSON.stringify(result.problems))
+})
+
+test('★★★ 接线层发给 Launcher 的每一条命令都是协议认得的', () => {
+  // ★ 这条判据是补一次**真实的线上故障**：
+  //
+  //   `update-wiring.mjs` 一直在发 `stop-claiming`，而
+  //   `desktop-protocol.mjs` 的 `TYPES` 里**没有**这个类型 ⇒ Launcher 以
+  //   `UNKNOWN_TYPE` 拒绝 ⇒ 桌面抛错 ⇒ 安装事务判 `install-services-refused`
+  //   并进维护态。**每一次真实安装都停在第三步。**
+  //
+  //   它没被发现，是因为本文件里的**替身 bridge 自己实现了** `stop-claiming`：
+  //   写替身的人（我）照着调用方的期望写，于是替身比真货更能干，缺口被完美
+  //   遮住。这与本批次那些"夹具替生产补上了缺失的入参"是同一件事，只是换成
+  //   了**跨模块的命令名**。
+  //
+  //   > 一个比真货更能干的替身，测出来的是替身，不是系统。
+  //
+  //   所以这条判据**不看替身**，它拿接线层的源码去问真实的协议校验器：
+  //   你认得这些类型吗？加一条新的 forward 命令而忘了加协议类型，这里就会红。
+  const source = readFileSync(join(dirname(fileURLToPath(import.meta.url)), 'update-wiring.mjs'), 'utf8')
+  const forwarded = [...new Set([...source.matchAll(/forward\('([^']+)'\)/g)].map((m) => m[1]))]
+  assert.ok(forwarded.length >= 3, `没有从源码里认出任何 forward 命令（正则过期了？）：${JSON.stringify(forwarded)}`)
+  for (const type of forwarded) {
+    assert.doesNotThrow(
+      () => parseRequest(JSON.stringify({ version: DESKTOP_PROTOCOL_VERSION, id: 'probe', type, payload: {} })),
+      `接线层会发 ${type}，而桌面协议不认得它：真实路径上会被 UNKNOWN_TYPE 拒掉`,
+    )
+  }
+  // 反向对照：一个真的不存在的类型必须被拒（否则上面那条判据恒真）。
+  assert.throws(
+    () => parseRequest(JSON.stringify({ version: DESKTOP_PROTOCOL_VERSION, id: 'probe', type: 'stop-claiming-typo', payload: {} })),
+    /UNKNOWN_TYPE|未知/,
+  )
 })

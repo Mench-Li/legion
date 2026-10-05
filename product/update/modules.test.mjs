@@ -24,6 +24,10 @@ const EXPECTED_MODULES = Object.freeze([
   'barrier', 'cache', 'canonical', 'client', 'closure', 'config', 'credential', 'envelope',
   'errors', 'extract', 'feed', 'health', 'helper', 'host', 'index', 'install', 'journal',
   'platform-build',
+  // ★ `recovery`（设计 §8 line 190 的数据备份恢复入口）在这个表里是**必须**的：
+  //   这张表守的是"每个模块都在，且都能在普通 Node 里载入"，
+  //   而"新加了一个模块但没人知道"正是它要拦的事。
+  'recovery',
   'release', 'schedule', 'semver', 'state', 'transport', 'zip',
 ])
 
@@ -51,6 +55,7 @@ const CHECKED_EXPORTS = Object.freeze({
   credential: 'CREDENTIAL_CHECKED',
   install: 'INSTALL_CHECKED',
   helper: 'HELPER_CHECKED',
+  recovery: 'RECOVERY_CHECKED',
 })
 
 test('每个更新模块都在，且都能在普通 Node 里载入', async () => {

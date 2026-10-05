@@ -521,6 +521,16 @@ async function stageTest() {
         'product/update/health.test.mjs',
         'product/update/platform-build.test.mjs',
         'product/update/install.test.mjs',
+        // ★ 数据备份恢复入口（设计 §8 line 190/192）：三档安全性 + 三条纪律
+        //   （要确认的没确认就**一个字节都不写** / refused 档确认也打不开 /
+        //   目标只能是快照自己的数据目录）。
+        'product/update/recovery.test.mjs',
+        // ★ 同一个入口在 **CLI 这一层**的判据：退出码 0/12/13、输出里那句
+        //   "本次没有写入任何文件"、以及**盘上有没有真的被改**。
+        //   单独一层的理由：设计要的是"提供…**入口**"，而一个判据齐全、
+        //   用例全绿、却没有任何人能敲出来的模块，与一个不存在的模块在部署上
+        //   是同一个东西——只不过前者的报告是绿的。
+        'product/launcher/cli-recovery.test.mjs',
         // ★ 全链路集成：发布 → 托管 → 检查 → 下载 → 安装事务 → helper → 提交。
         //   它不注入任何业务读数，所以是"六条判据都有生产方"的联合守卫。
         'product/update/integration.test.mjs',

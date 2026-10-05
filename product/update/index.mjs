@@ -1,4 +1,4 @@
-﻿// product/update/index.mjs
+// product/update/index.mjs
 // ============================================================================
 // 自动更新的公开面 —— 依据 docs/superpowers/specs/2026-10-02-legion-desktop-auto-update-design.md
 //
@@ -112,6 +112,15 @@ export {
   HEALTH_CODES, HEALTH_CHECKED, HEALTH_LIMITS, HEALTH_PROTOCOL, LOOPBACK_HOSTS, checkUrl, compareSubset,
   createHealthProbe, expandStrict, healthSpecFromProcesses, selfCheckHealth, validateHealthSpec,
 } from './health.mjs'
+// ★ 数据备份恢复入口（设计 §8 line 190/192）：三档安全性判定 + 显式确认的恢复。
+//   导出它是为了让"这个能力属于更新层"这件事在 index 上看得见——
+//   一个只能在深路径里 import 到的能力，与一个不导出的能力，
+//   在读 index 的人眼里是差不多的。
+export {
+  RECOVERY_CHECKED, RECOVERY_CODES, RECOVERY_FORMAT, RECOVERY_SAFETY,
+  barrierProvedBeforeBackup, classifySnapshotSafety, planRecoveryFromBackups,
+  readTransactionView, restoreFromBackup, selfCheckRecovery,
+} from './recovery.mjs'
 export {
   HELPER_CHECKED, HELPER_CODES, HELPER_PROTOCOL, clearTransactionFile, runHelper, runHelperProcess,
   selfCheckHelper, validateInvocation, writeTransactionFile,
@@ -161,6 +170,11 @@ export async function selfCheckAll() {
     layer('credential', await import('./credential.mjs')),
     layer('install', await import('./install.mjs')),
     layer('helper', await import('./helper.mjs')),
+    // ★ 恢复层也必须在汇总里。`modules.test.mjs` 是**逐个读这些结论**并要求
+    //   全绿的，所以"新加了一层自检但没加进这个列表"等于那一层没有自检——
+    //   而它的自检恰恰会红（本轮就红过一次：内联记录里的字段名写错了，
+    //   是这个列表把它报出来的）。
+    layer('recovery', await import('./recovery.mjs')),
   ])
   return Object.freeze({
     ok: results.every((item) => item.ok),

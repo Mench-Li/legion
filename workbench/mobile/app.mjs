@@ -623,16 +623,6 @@ function renderAuth() {
   $('auth-switch').textContent = canRegister ? '' : ''
 }
 
-async function loadAgents() {
-  const r = await api(`/api/agents?scope=${encodeURIComponent(state.scope)}`)
-  state.agents = r.agents ?? []
-  if (state.agents.length > 0 && !state.agents.some((a) => a.agentId === state.agentId)) {
-    state.agentId = state.agents[0].agentId
-    localStorage.setItem(LS_AGENT, state.agentId)
-  }
-  renderTargets()
-}
-
 async function selectAgent(agentId) {
   if (agentId === state.agentId) return
   state.agentId = agentId
@@ -644,7 +634,19 @@ async function selectAgent(agentId) {
 }
 
 async function openConversation() {
+  // ★ 守卫不只是 `agentId !== null`，还要问"它属于**当前**这个空间吗"。
+  //
+  // 实测踩过：localStorage 里存着上一个空间的 agentId，而当前空间（比如一个
+  // 刚建好、还没编队的）一个 Agent 都没有。那时 `refreshTasks` 的"修正 agentId"
+  // 那一步因为 `state.agents.length > 0` 的前提不成立而跳过，于是这里带着一个
+  // **别的空间的** id 去开会话——服务端正确地回「该空间不存在此 Agent」，
+  // 而界面只留下一行 console.warn，用户看到的是"聊天坏了"。
+  //
+  //   > 一个"带着上一个空间的 id 去请求"的界面，
+  //   > 与一个"这个空间还没有 Agent"的界面，在用户那边都表现为"空的"——
+  //   > 只不过前者在控制台里有一行没人看的警告。
   if (state.agentId === null) return
+  if (!state.agents.some((a) => a.agentId === state.agentId)) return
   const c = await api('/api/agent-conversations', { method: 'POST', body: { agentId: state.agentId, scope: state.scope, by: 'mobile' } })
   state.convId = c.convId
   await refreshTimeline()
@@ -671,12 +673,22 @@ async function refreshTimeline() {
  */
 async function refreshTasks() {
   if (state.scope === null) return
+  // ★ 用 `/api/agents?scope=` 一次拿全**这个空间里每个 Agent 的 tasks**，
+  //   而不是只问当前那一个（`/api/agent-detail`）。
+  //
+  //   为什么：`/api/board` 给的是空间里**所有**任务，但它不带 Attempt；
+  //   只补当前 Agent 的话，**别的岗位的任务在手机上看不出「等电脑领取」还是
+  //   「正在执行」**——而那正是最要紧的那条口径（把人送去做错决定的那种）。
+  //   `service.list()` 走的 `detail()` 里本来就带 `attempt`，所以覆盖全部 Agent
+  //   与覆盖一个 Agent 花的是**同样一次**请求。
   const board = await api(`/api/board?scope=${encodeURIComponent(state.scope)}`)
-  let detail = []
-  if (state.agentId !== null) {
-    const d = await api(`/api/agent-detail?agentId=${encodeURIComponent(state.agentId)}&scope=${encodeURIComponent(state.scope)}`).catch(() => null)
-    detail = d?.agent?.tasks ?? []
+  const agents = await api(`/api/agents?scope=${encodeURIComponent(state.scope)}`)
+  state.agents = agents.agents ?? []
+  if (state.agents.length > 0 && !state.agents.some((a) => a.agentId === state.agentId)) {
+    state.agentId = state.agents[0].agentId
+    localStorage.setItem(LS_AGENT, state.agentId)
   }
+  const detail = state.agents.flatMap((a) => a.tasks ?? [])
   state.tasks = mergeAttempts(Array.isArray(board) ? board : (board.tasks ?? []), detail)
   renderBoardViews()
   renderBoard()
@@ -702,6 +714,64 @@ async function refreshTasks() {
     nodeOnline: (presence.presence ?? []).length === 0 ? null : anyOnline,
     activeTaskState: active?.attempt?.state ?? null,
   })
+}
+
+/**
+ * 空间切换。
+ *
+ * 判据是 `/api/identity/me` 给的 `roles`——**用户在哪些空间里有角色**。
+ * 此前 `LS_SCOPE` 只在进入应用时设过一次，于是多空间用户在手机上只能用第一个
+ * 空间，而这一点在界面上**没有任何痕迹**：他看到的看板是对的，只是不是他想看的
+ * 那一个。
+ *
+ * 只有一个空间时渲染成一句纯文字（不给一个只有一个选项的下拉框——
+ * 那会让人以为别处还有得选）。
+ */
+async function refreshSpaces() {
+  const info = await api('/api/identity/me').catch(() => null)
+  const roles = info?.roles ?? []
+  if (roles.length === 0) {
+    $('board-scope').textContent = '还没有加入任何空间'
+    return
+  }
+  const spaces = roles.map((r) => ({ id: r.space, role: r.role }))
+  if (state.scope === null || !spaces.some((s) => s.id === state.scope)) {
+    state.scope = spaces[0].id
+    localStorage.setItem(LS_SCOPE, state.scope)
+  }
+  const host = $('board-scope')
+  if (spaces.length === 1) {
+    host.replaceChildren(document.createTextNode(`空间：${spaces[0].id}（${spaces[0].role}）`))
+    return
+  }
+  const sel = document.createElement('select')
+  for (const s of spaces) {
+    const o = document.createElement('option')
+    o.value = s.id
+    o.textContent = `${s.id}（${s.role}）`
+    if (s.id === state.scope) o.selected = true
+    sel.appendChild(o)
+  }
+  sel.addEventListener('change', () => { void switchScope(sel.value) })
+  host.replaceChildren(document.createTextNode('空间：'), sel)
+}
+
+/** 换空间要**重置一切与它绑定的东西**：Agent、会话、时间线、游标、事件流。 */
+async function switchScope(scope) {
+  state.scope = scope
+  localStorage.setItem(LS_SCOPE, scope)
+  state.agentId = null
+  state.convId = null
+  state.timeline = []
+  state.cursor = null
+  state.tasks = []
+  state.targetTaskId = null
+  if (state.sse !== null) { try { state.sse.close() } catch { /* 已关 */ } state.sse = null }
+  $('board-views').replaceChildren()
+  $('task-groups').replaceChildren()
+  await refreshSpaces()
+  await refreshTasks()               // 它会顺带刷新 state.agents
+  await openConversation()
 }
 
 // ── 发送 ────────────────────────────────────────────────────────────────────
@@ -841,19 +911,15 @@ async function enterApp(me) {
   $('main').classList.remove('hidden')
   $('composer').classList.remove('hidden')
   $('title').textContent = `Legion · ${me.name ?? ''}`
-  // 空间：优先用户自己上次选的，否则用他有权限的第一个。
-  if (state.scope === null) {
-    const info = await api('/api/identity/me')
-    state.scope = info.roles?.[0]?.space ?? 'default'
-    localStorage.setItem(LS_SCOPE, state.scope)
-  }
-  $('board-scope').textContent = `空间：${state.scope}`
+  // 空间：**由 refreshSpaces 统一解析**（它读 /api/identity/me 的 roles，
+  // 并在多于一个时渲染成可切换的下拉框）。原来在这里自己算一次，
+  // 于是"能换空间"这件事没有任何落点。
   setConnection({ hubReachable: true, nodeOnline: null })
   renderIntents()
   try {
-    await loadAgents()
-    await openConversation()
+    await refreshSpaces()
     await refreshTasks()
+    await openConversation()
   } catch (e) {
     // 空间没有 Agent 不是致命错误：界面照常显示，让用户去任务页看。
     console.warn('初始化失败', e)

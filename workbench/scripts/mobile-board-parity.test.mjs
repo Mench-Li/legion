@@ -103,3 +103,42 @@ describe('手机看板与指挥台任务中心同一轴', () => {
     assert.equal(applyView(tasks, 'all').length, 1)
   })
 })
+
+describe('手机端：空间与会话的绑定', () => {
+  const app = readFileSync(resolve(ROOT, 'workbench/mobile/app.mjs'), 'utf8')
+
+  test('★ 开会话前要问"这个 agentId 属于当前空间吗"，不只是"非空吗"', () => {
+    // 实测踩过：localStorage 里存着**上一个空间**的 agentId，而当前空间
+    // （刚建好、还没编队的）一个 Agent 都没有。那时 `refreshTasks` 里
+    // "修正 agentId" 那一步因 `state.agents.length > 0` 不成立而跳过，
+    // 于是带着别的空间的 id 去开会话——服务端正确回「该空间不存在此 Agent」，
+    // 而界面只留一行 console.warn，用户看到的是"聊天坏了"。
+    const fn = /async function openConversation\(\)[\s\S]*?\n}/.exec(app)?.[0] ?? ''
+    assert.ok(fn.length > 0, '找不到 openConversation')
+    assert.match(fn, /state\.agents\.some\(/)
+    assert.match(fn, /agentId === state\.agentId/)
+  })
+
+  test('切空间要重置一切与它绑定的东西', () => {
+    // 少重置任何一项，都会表现为"上一个空间的东西串到这个空间来"——
+    // 而那种错误**不报错**，只是显示错的内容。
+    const fn = /async function switchScope\(scope\)[\s\S]*?\n}/.exec(app)?.[0] ?? ''
+    assert.ok(fn.length > 0, '找不到 switchScope')
+    for (const [what, re] of [
+      ['Agent 选择', /state\.agentId = null/],
+      ['会话', /state\.convId = null/],
+      ['时间线', /state\.timeline = \[\]/],
+      ['事件游标', /state\.cursor = null/],
+      ['事件流', /state\.sse = null/],
+      ['任务列表', /state\.tasks = \[\]/],
+    ]) assert.match(fn, re, `切空间没有重置「${what}」——不重置不会报错，只会显示错的内容`)
+  })
+
+  test('空间列表来自 `/api/identity/me` 的 roles（用户在哪些空间有角色）', () => {
+    const fn = /async function refreshSpaces\(\)[\s\S]*?\n}/.exec(app)?.[0] ?? ''
+    assert.ok(fn.length > 0, '找不到 refreshSpaces')
+    assert.match(fn, /roles/)
+    // 只有一个空间时不给下拉框：那会让人以为别处还有得选。
+    assert.match(fn, /spaces\.length === 1/)
+  })
+})

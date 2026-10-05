@@ -96,7 +96,10 @@ footer textarea { resize:none; max-height:120px; }
 #intent-hint { font-size:12px; color:var(--muted); margin-bottom:6px; }
 #target-row { display:flex; gap:8px; margin-bottom:8px; }
 #target-row select { flex:1; min-height:38px; }
-.viewtitle { font-size:13px; color:var(--muted); margin:0 0 8px; }
+.viewtitle { font-size:13px; color:var(--muted); margin:0 0 8px; display:flex; align-items:center; gap:6px; }
+/* 空间切换：内联在标题行里，别顶出一个整行高的控件——它是个"换个视角看"的动作，
+   不是一个需要用户停下来填的表单。 */
+.viewtitle select { width:auto; min-height:32px; padding:2px 8px; font-size:13px; }
 </style>
 </head>
 <body>

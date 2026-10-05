@@ -165,9 +165,21 @@ export function classifyPreflightChecks(checks, { kinds = PREFLIGHT_VERDICT_KIND
 }
 
 export const PREFLIGHT_CODES = Object.freeze({
-  COMPATIBLE: 'preflight-compatible',
+  // ★ 这里原本有三个"成功"码（`COMPATIBLE` / `DISK_OK` / `TASKS_DRAINED`），
+  //   已删除。本模块的三态裁决是 **`verdict`**（`ok` / `blocked` / `unknown`），
+  //   而**成功时 `code` 是 `null`**（见下面的 `ok()`）——那是刻意的：
+  //   `code` 的用途是"出问题时给一个具名读数"，成功不需要。
+  //
+  //   ★ 一条"成功也发一个码"的设计会带来一个真实成本：调用方为了判断
+  //     "过了没有"，得去比对一个**字符串**，而不是读 `verdict`——
+  //     而字符串比对在有人改文案时会静默失效。见 `errors.test.mjs` 里
+  //     `NON_ERROR_CODES` 那张豁免名单：它存在的**唯一**原因就是
+  //     `feed-newer-available` 这一个"成功但有码"的例外，而它需要逐项写理由。
   /** N-1 窗口外（N-2、更旧或降级）。 */
-  WINDOW_VIOLATION: 'preflight-window-violation',
+  // ★ 这一条也是**故意**不用的：窗口判定只在 `manifest.mjs` 一处，
+  //   它的拒绝码由 `upgradeWindow()` 一并给出（`MANIFEST_CODES.*`），
+  //   而本模块把它原样带进 `reasons`。所以这里不需要再声明一个码——
+  //   声明了却不发出的码会让人以为本模块也会产出它。
   /** 通道不同。 */
   CHANNEL_MISMATCH: 'preflight-channel-mismatch',
   /** 产品 ID 不同（拿另一个产品的包来升）。 */
@@ -181,13 +193,11 @@ export const PREFLIGHT_CODES = Object.freeze({
   /** 清单本身不合法。 */
   MANIFEST_INVALID: 'preflight-manifest-invalid',
 
-  DISK_OK: 'preflight-disk-ok',
   /** 可用空间不足。 */
   DISK_INSUFFICIENT: 'preflight-disk-insufficient',
   /** 没有磁盘读数——**不是**"空间充足"。 */
   DISK_UNOBSERVED: 'preflight-disk-unobserved',
 
-  TASKS_DRAINED: 'preflight-tasks-drained',
   /** 仍有在途任务。 */
   TASKS_IN_FLIGHT: 'preflight-tasks-in-flight',
   /** 没有任务状态读数——**不是**"没有在途任务"。 */

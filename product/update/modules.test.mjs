@@ -127,3 +127,104 @@ test('更新模块不导入 Electron、不发起网络请求', async () => {
     assert.equal(/from 'electron'|require\('electron'\)/.test(code), false, `${name}.mjs 导入了 Electron`)
   }
 })
+
+// ---------------------------------------------------------------------------
+// ★★★ 每个**声明**的错误码都必须有**发出点**
+// ---------------------------------------------------------------------------
+
+/** 被扫描的目录：更新与升级两层（设计 §5–§9 的实现都在这里）。 */
+const CODE_SCAN_DIRS = Object.freeze(['product/update', 'product/upgrade', 'product/launcher'])
+
+/**
+ * 扫出"声明了却从来不会被返回"的错误码。
+ *
+ * 判据（对表 `X_CODES` 里的项 `NAME`）：在**非用例**的 `.mjs` 里出现过
+ * `X_CODES.NAME`（表定义本身写的是 `NAME: '字面量'`，所以任何 `X_CODES.NAME`
+ * 都是**使用**），或者那个字面量出现在定义文件**之外**。
+ *
+ * 为什么这条判据值得单独存在：
+ *
+ *   `transport.mjs` 里有一段注释记着上一个同类缺陷——
+ *   `BAD_HEADERS: 'net-bad-headers'`，**从来没有被任何分支返回过**。
+ *   当时的结论是：
+ *
+ *   > 声明了却不发出的错误码，与一条不存在的判据是同一回事：
+ *   > 读代码的人会以为"响应头有问题"这个情形被处理了。
+ *
+ *   ★ 而同一个缺陷在**隔壁的** `host.mjs` 里又躺了很久
+ *     （`BAD_LENGTH: 'host-bad-length'`），另外还有十处散在七个文件里。
+ *     一次机械扫描把它们全找了出来，每一处的判据其实都在——只是落在
+ *     **别的形态**上（一个布尔字段、一个 `verdict` 字符串、另一个模块的码、
+ *     或者干脆是 `code: null`）。所以每一处都是"删掉"，不是"补一条判据"。
+ *
+ *   > 教训在一个文件里学到了，而**隔壁那个文件**没有照做——
+ *   > 这类不一致比一次孤立的手误更值得用一条机械判据钉住。
+ */
+function findDeclaredButNeverEmitted(readFile, listDir) {
+  const files = []
+  const collect = (dir) => {
+    for (const entry of listDir(dir)) {
+      const rel = `${dir}/${entry.name}`
+      if (entry.isDirectory()) collect(rel)
+      else if (entry.name.endsWith('.mjs')) files.push(rel)
+    }
+  }
+  for (const dir of CODE_SCAN_DIRS) collect(dir)
+
+  // ★★ 发出点只在**生产**文件里找，**不能**把用例算进去。
+  //
+  //   这一条是我自己撞出来的：第一版把用例也当成了"提到这个码"的证据，
+  //   而本文件（`modules.test.mjs`）的注释里为了讲清这个缺陷，
+  //   **原样写出**了 `BAD_LENGTH: 'host-bad-length'`。于是：
+  //
+  //     · 我把 host-bad-length 加回 `HOST_CODES` 做变异测试；
+  //     · 守卫扫到"用例里提到过这个码" ⇒ 判定它有发出点 ⇒ **放行**。
+  //
+  //   也就是说**这条判据被它自己的说明文字弄瞎了**，而且只对它在注释里
+  //   点名的那几个码失灵——正是它最该盯住的那几个。
+  //
+  //   > 一条判据的**解释**不能让这条判据失效；
+  //   > 而"证据从哪来"这件事，比"判据怎么写"更容易出错。
+  //
+  //   原理上也站得住：**用例不可能"发出"一个错误码**——它只能断言。
+  //   所以把用例排除掉不是绕过误报，是把判据的定义改对。
+  const prod = files.filter((f) => !f.endsWith('.test.mjs'))
+  const text = new Map(files.map((f) => [f, readFile(f)]))
+
+  const dead = []
+  for (const file of prod) {
+    const src = text.get(file)
+    const tableRe = /export const ([A-Z][A-Z0-9_]*CODES)\s*=\s*Object\.freeze\(\{([\s\S]*?)\n\}\)/g
+    let table
+    while ((table = tableRe.exec(src)) !== null) {
+      const tableName = table[1]
+      const defStart = table.index
+      const defEnd = table.index + table[0].length
+      for (const item of table[2].matchAll(/^\s{2}([A-Z][A-Z0-9_]*):\s*'([a-z0-9][a-z0-9-]{3,})'/gm)) {
+        const [, name, code] = item
+        let used = false
+        // 只在**生产**文件里找证据（见上面那段注释）。
+        for (const other of prod) {
+          const otherText = text.get(other)
+          const hits = [...otherText.matchAll(new RegExp(`\\b${tableName}\\.${name}\\b`, 'g'))]
+          if (hits.some((h) => !(other === file && h.index > defStart && h.index < defEnd))) { used = true; break }
+          if (other !== file && (otherText.includes(`'${code}'`) || otherText.includes(`"${code}"`))) { used = true; break }
+        }
+        if (!used) dead.push(`${file} :: ${tableName}.${name} = ${code}`)
+      }
+    }
+  }
+  return dead
+}
+
+test('★★★ 每个声明的错误码都必须有发出点（"声明了却不发出"与"判据不存在"是一回事）', async () => {
+  const { readFileSync, readdirSync } = await import('node:fs')
+  const root = fileURLToPath(new URL('../../', import.meta.url))
+  const dead = findDeclaredButNeverEmitted(
+    (rel) => readFileSync(`${root}${rel}`, 'utf8'),
+    (rel) => readdirSync(`${root}${rel}`, { withFileTypes: true }),
+  )
+  assert.deepEqual(dead, [],
+    '这些错误码被声明了，但**没有任何分支会返回它们**。读代码的人会以为那个情形被处理了，'
+    + '所以要么补上发出点，要么把这个码删掉：\n' + dead.join('\n'))
+})

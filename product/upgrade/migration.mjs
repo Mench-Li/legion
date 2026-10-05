@@ -96,8 +96,12 @@ export const MIGRATION_CODES = Object.freeze({
   PLAN_INVALID: 'migration-plan-invalid',
   /** 没有可跑的迁移。 */
   NOTHING_TO_DO: 'migration-nothing-to-do',
-  /** 目标版本比当前 schema 旧，且没有降级迁移。 */
-  DOWNGRADE_UNSUPPORTED: 'migration-downgrade-unsupported',
+  // ★ 原本这里还有一个 `DOWNGRADE_UNSUPPORTED: 'migration-downgrade-unsupported'`，
+  //   已删除。"不许降级"这条判据在**两个**更早的地方各自有一个具名码，
+  //   而它们都会先于本模块拦下：
+  //     · `manifest.mjs` 的 `MANIFEST_CODES.DOWNGRADE`（版本窗口）
+  //     · `preflight.mjs` 的 `PREFLIGHT_CODES.SCHEMA_DOWNGRADE`（schema 只能向前）
+  //   所以这个码永远轮不到。
   /** `schema_migrations` 里出现了一个当前迁移集合里没有的版本。 */
   UNKNOWN_APPLIED_VERSION: 'migration-unknown-applied-version',
 })

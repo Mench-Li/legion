@@ -49,10 +49,15 @@ export const ACTIVE_FILENAME = 'active-transaction.json'
 
 export const JOURNAL_CODES = Object.freeze({
   NO_ACTIVE: 'journal-no-active',
-  TRUNCATED_TAIL: 'journal-truncated-tail',
   BAD_LINE: 'journal-bad-line',
   TORN_ACTIVE: 'journal-torn-active',
   WRITE_FAILED: 'journal-write-failed',
+  // ★ 原本这里还有一个 `TRUNCATED_TAIL: 'journal-truncated-tail'`，已删除。
+  //   "最后一行写了一半"这条判据**在**（`readRecords` 里的 `truncatedTail`），
+  //   只是它的结论是一个**布尔字段**而不是一个码 —— 那是对的，
+  //   因为"尾部被截断"是**可继续**的情形（只为最后一行），
+  //   而其余四个码表示的都是"读不下去了"。
+  //   声明了却不发出的码会让人以为这个情形有一个具名的拒绝读数。
 })
 
 /** 事务阶段。顺序即设计 §8 的第 1–9 步。 */

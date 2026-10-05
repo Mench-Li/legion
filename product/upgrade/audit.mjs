@@ -55,8 +55,11 @@ export const WINDOWS_CODES = Object.freeze({
   LONG_PATH: 'windows-long-path',
   /** 文件被占用（EBUSY / EPERM / ETXTBSY）。 */
   FILE_IN_USE: 'windows-file-in-use',
-  /** 被 Defender 之类的扫描器暂时挡住（延迟可恢复）。 */
-  SCANNER_DELAY: 'windows-scanner-delay',
+  // ★ 原本这里还有一个 `SCANNER_DELAY: 'windows-scanner-delay'`，已删除。
+  //   "被 Defender 之类的扫描器暂时挡住"这条**判据在**（`isScannerDelayError`），
+  //   但它是一个**布尔判定**（用来决定要不要重试），不是一个码；
+  //   重试耗尽之后落到的码是 `FILE_IN_USE` / `RELEASE_FAILED`。
+  //   声明了却不发出的码会让人以为"扫描器延迟"有一个具名的最终读数。
   /** 重试次数用完仍然被占用。 */
   RELEASE_FAILED: 'windows-release-failed',
   /** 子进程树里还有活着的进程。 */

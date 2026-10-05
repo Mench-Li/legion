@@ -85,7 +85,10 @@ export const INSTALL_STEPS = Object.freeze([
 export const INSTALL_CODES = Object.freeze({
   BAD_INPUT: 'install-bad-input',
   BUSY: 'install-busy',
-  LOCKED: 'install-locked',
+  // ★ 原本这里还有一个 `LOCKED: 'install-locked'`，已删除。
+  //   "已经有另一个升级事务在跑"这条判据**在**（第 ① 步取得事务锁之前那一次
+  //   屏障复查），它落到的码是 `BUSY`。声明了却不发出的码会让人以为
+  //   "锁被占用"与"事务进行中"是两个分开的读数，而实际上只有一个。
   RECHECK_FAILED: 'install-recheck-failed',
   /**
    * 发行清单声明的固定迁移计划与本次将要执行的集合不一致。

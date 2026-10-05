@@ -41,8 +41,23 @@ export const HOST_CODES = Object.freeze({
   CROSS_ORIGIN: 'host-cross-origin',
   BAD_STATUS: 'host-bad-status',
   BAD_CACHE: 'host-bad-cache',
-  BAD_LENGTH: 'host-bad-length',
   REDIRECT: 'host-redirect',
+  // ★ 这个表里原本还有一个"长度"码，已删除。它与 `transport.mjs` 里那个
+  //   `BAD_HEADERS: 'net-bad-headers'` 是**同一个缺陷**：声明了却
+  //   **从来没有被任何分支返回过**。读它的人会以为"响应长度不对"这个情形
+  //   在宿主这一层被处理了，而实际上没有——于是排查时会去找一条不存在的判据。
+  //
+  //   ★ 结构性原因：本模块核对响应的那个函数（`evaluateResponse`）只拿到
+  //     `{ status, headers }`，**拿不到正文**，所以它**在原理上**没法把
+  //     "声明的长度"与"实际读到的字节数"比一比。那条比对属于
+  //     `transport.mjs`（它有 `net-too-large` / `net-too-small`，而且是在
+  //     流式读取的过程中做的），内容再由签名清单里的摘要兜住。
+  //
+  //   > 与 transport 那次一样：这里缺的不是一条判据，
+  //   > 缺的是"这个码有意义"这件事——那就把码删掉。
+  //
+  //   ★ 这一类现在由 `modules.test.mjs` 里那条机械判据钉住
+  //     （"每个声明的错误码都必须有发出点"）。
 })
 
 function hostProblem(code, message) {

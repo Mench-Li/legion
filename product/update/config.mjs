@@ -39,10 +39,15 @@ export const UPDATE_TRUST_FILENAME = join('product', 'release', 'update-trust.js
 export const CONFIG_CODES = Object.freeze({
   MISSING_FILE: 'update-config-missing',
   BAD_FILE: 'update-config-bad',
-  NO_ORIGIN: 'update-config-no-origin',
   NO_TRUST: 'update-config-no-trust',
   BAD_ORIGIN: 'update-config-bad-origin',
   CHANNEL_NOT_CONFIGURED: 'update-config-channel-missing',
+  // ★ 原本这里还有一个 `NO_ORIGIN: 'update-config-no-origin'`，已删除。
+  //   它**从来没有被任何分支返回过**："这条通道没有配 origin"落到的码是
+  //   `CHANNEL_NOT_CONFIGURED`（读配置那一处把"条目不是对象"与"没有 origin"
+  //   合并成同一句"通道 X 没有配置 origin"）。
+  //   声明了却不发出的码会让人以为这条判据存在——见 `modules.test.mjs` 里
+  //   那条"每个声明的码都必须有发出点"的机械判据。
 })
 
 /**

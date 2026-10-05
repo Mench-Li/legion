@@ -48,8 +48,22 @@ export const CREDENTIAL_CODES = Object.freeze({
   EXPIRED: 'credential-expired',
   BAD_MAC: 'credential-bad-mac',
   TARGET_MISMATCH: 'credential-target-mismatch',
-  CONSUMED: 'credential-consumed',
   BAD_INPUT: 'credential-bad-input',
+  // ★ 原本这里还有一个 `CONSUMED: 'credential-consumed'`，已删除。
+  //
+  //   "这张凭据已经被用掉"**不会**产出这个码，因为"用掉"这个动作就是
+  //   `destroyCredential()` ——**把凭据文件删掉**。所以一次重放读到的文件
+  //   不存在，落到的码是 `MISSING`（"没有事务凭证"）。
+  //
+  //   ★ 与 ㉘ 里那个死分支是**同一个形状**，结论却相反，值得对照：
+  //     那里的终态动作（提交）也会把描述符删掉，于是"已提交"永远读不出来——
+  //     而**那是个 bug**，因为那条分支必须把"已提交"与"从未有过"分开
+  //     （前者恢复会丢新写入，要用户确认；后者可以自动恢复）。
+  //     这里两者落到同一个码是**对的**：重放与从未有过都该被拒，
+  //     分开它们不会让任何决定变得更安全。
+  //
+  //   > 同一个"终态动作不可逆"的形状，是 bug 还是设计，
+  //   > 取决于**下游需不需要把它们分开**。
 })
 
 export function credentialDir(dataDir) {

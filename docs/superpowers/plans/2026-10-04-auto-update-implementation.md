@@ -1540,7 +1540,43 @@ node --test desktop/scripts/shell-files.test.mjs
 node scripts/ci/run-ci.mjs
 ```
 
-### 7.1 全量 CI 的实际读数（`4e2728cd`，57.8 分钟）
+### 7.1 全量 CI 的实际读数（`b41a7a10`，52.5 分钟）
+
+★ 这一节的读数是**最新一次完整跑**。下面还留着上一次（`4e2728cd`）的读数，
+因为两次之间的差集本身是一条判据。
+
+```
+syntax PASS   env FAIL   boundary FAIL   deps PASS   build PASS
+test   FAIL   smoke PASS  stage PASS      doc PASS
+```
+
+**本分支自己的套件是全绿的**：
+
+```
+PASS product-update（自动更新：协议验签、下载缓存、状态机、事务与恢复）
+     exit=0 tests=462 pass=462 fail=0 skipped=0
+```
+
+★ 那 462 条与我在本地按**同一份文件清单**跑出来的数字**逐字相同**。这一点值得
+单独记：门禁跑的是它自己在 `run-ci.mjs` 里列的清单，而"我本地跑过了"通常指的
+是另一个集合。两个数字对上，才说明"我验证过的"与"门禁验证的"是同一件事。
+
+★★ **与上一次完整跑（`4e2728cd`）做差集：红灯清单 37 ↔ 37，`Compare-Object`
+判定**逐条严格相同**——零新增。** 而我这一轮碰过的三个判据在两次里都是绿的：
+
+| 判据 | 本次 | 上一次 |
+|---|---|---|
+| `declaration-mirrors` | 12 过 / 0 失败 | 12 过 / 0 失败（㊵ 修好之后） |
+| `suite-counts` | 13 过 / 0 失败 | 13 过 / 0 失败 |
+| `silent-declarations` | 2 过 / **1 失败** | 2 过 / **1 失败**（基点同样红，逐字相同） |
+
+> "零新增红灯"这句话的判据是：**先逐条在基点跑过**（§7.2 那 15 行表），
+> 再与上一次完整跑做严格差集。用其中任何一个单独下结论都会漏——
+> ㊵ 就是这么漏的。
+
+---
+
+#### 上一次完整跑（`4e2728cd`，57.8 分钟）——留作差集对照
 
 ```
 syntax PASS   env FAIL   boundary FAIL   deps PASS   build PASS

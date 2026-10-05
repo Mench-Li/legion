@@ -105,7 +105,15 @@ async function startHub({ claimResults = [], gatewayOptions = {}, deviceOptions 
   const pairing = deviceStore.createPairingCode({ userId: 'user-1', nodeName: 'pc' })
   const device = deviceStore.redeemPairingCode({ code: pairing.code, platform: 'win32' })
 
-  const gateway = createNodeGateway({ deviceStore, runStore, ...gatewayOptions })
+  // 上下文冻结在真实部署里由 `node-context.mjs` 提供，它有自己的一组用例。
+  // 这里给一个**记录调用的替身**：本文件要证明的是"网关在派发前**确实**冻结了
+  // 上下文、且冻结失败时不派发"，而不是"装配器算得对"。
+  const contextCalls = []
+  const prepareContext = gatewayOptions.prepareContext ?? (async (claimed) => {
+    contextCalls.push({ attemptId: claimed.attemptId, taskId: claimed.taskId, scope: claimed.scope })
+    return { snapshotHash: `hash:${claimed.attemptId}` }
+  })
+  const gateway = createNodeGateway({ deviceStore, runStore, prepareContext, ...gatewayOptions })
   const server = http.createServer((req, res) => { res.writeHead(404); res.end() })
   gateway.attach(server)
   server.listen(0, '127.0.0.1')
@@ -117,7 +125,7 @@ async function startHub({ claimResults = [], gatewayOptions = {}, deviceOptions 
     server.close()
     await once(server, 'close').catch(() => {})
   }
-  return { server, port, gateway, deviceStore, runStore, device, pairing, stop, url: `ws://127.0.0.1:${port}/node` }
+  return { server, port, gateway, deviceStore, runStore, device, pairing, stop, url: `ws://127.0.0.1:${port}/node`, contextCalls }
 }
 
 /** 连上并完成 hello。返回 `{ ws, frames, waitFor, close }`。 */
@@ -652,6 +660,63 @@ test('队列为空**不**报阻塞（空队列是正常状态，不是故障）'
     await sleep(250)
     assert.equal(warnings.filter((w) => w === 'NODE_CLAIM_BLOCKED').length, 0)
   } finally { await ctx.stop() }
+})
+
+test('派发**之前**必须冻结上下文', async () => {
+  // ★ 这条守的是"远端到不了 Running"那个缺陷。状态机要求
+  //   `BuildingContext → Running` 先有 `run_context_snapshots` 的一行，
+  //   所以快照必须先于派发存在——否则远端一旦开跑就注定报不出去。
+  const ctx = await startHub({
+    claimResults: [{ attemptId: 'att-1', taskId: 'T-1', scope: 'software', attemptNo: 1, leaseEpoch: 1, leaseExpiresAtMs: Date.now() + 60_000 }],
+    gatewayOptions: { dispatchPollMs: 30 },
+  })
+  try {
+    const c = await connect(ctx)
+    await c.waitFor(FRAME_TYPES.HELLO_ACK)
+    await c.waitFor(FRAME_TYPES.DISPATCH)
+    // 替身记录了它被调用过，且参数是这次认领的 attempt/task/scope。
+    assert.deepEqual(ctx.contextCalls, [{ attemptId: 'att-1', taskId: 'T-1', scope: 'software' }])
+    assert.equal(ctx.gateway.stats.contextsFrozen, 1)
+    c.ws.close()
+  } finally { await ctx.stop() }
+})
+
+test('上下文冻结失败时**不派发**，并把租约还回去', async () => {
+  // ★ 造一条注定完不成的 attempt 比不派发坏得多：它会烧掉重试额度，
+  //   而在界面上看起来只是"任务不动"，与队列为空长得一样。
+  const warnings = []
+  const ctx = await startHub({
+    claimResults: [{ attemptId: 'att-9', taskId: 'T-9', scope: 'software', attemptNo: 1, leaseEpoch: 3, leaseExpiresAtMs: Date.now() + 60_000 }],
+    gatewayOptions: {
+      dispatchPollMs: 30,
+      prepareContext: async () => { throw Object.assign(new Error('装配输入不可用'), { code: 'NODE_CONTEXT_TASK_UNAVAILABLE' }) },
+      onWarn: (code, detail) => warnings.push({ code, detail }),
+    },
+  })
+  try {
+    const c = await connect(ctx)
+    await c.waitFor(FRAME_TYPES.HELLO_ACK)
+    await sleep(200)
+    assert.equal(c.frames.some((f) => f.type === FRAME_TYPES.DISPATCH), false, '不应派发')
+    const released = ctx.runStore.calls.release.find((r) => r.attemptId === 'att-9')
+    assert.ok(released, '应把租约还回去')
+    assert.equal(released.reason, 'context-not-frozen')
+    const warned = warnings.filter((w) => w.code === 'NODE_CONTEXT_NOT_FROZEN')
+    assert.equal(warned.length, 1, `应只报一次，实际 ${warned.length}`)
+    assert.equal(warned[0].detail.code, 'NODE_CONTEXT_TASK_UNAVAILABLE')
+    assert.ok(ctx.gateway.stats.contextFailures >= 1)
+    c.ws.close()
+  } finally { await ctx.stop() }
+})
+
+test('缺少 prepareContext 时构造直接失败（不留"能跑但到不了 Running"的状态）', async () => {
+  const db = new DatabaseSync(':memory:')
+  const deviceStore = createDeviceStore({ db, withTx: (fn) => fn() })
+  const runStore = makeFakeRunStore({ claimResults: [] })
+  assert.throws(
+    () => createNodeGateway({ deviceStore, runStore }),
+    /需要 prepareContext/,
+  )
 })
 
 test('网关不缓存任务状态：每次派发都重新问 run-store', async () => {

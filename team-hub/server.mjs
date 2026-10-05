@@ -7533,6 +7533,7 @@ import { createMobileRoutes } from './routes/mobile.mjs'
 import { createUserStore } from './user-store.mjs'
 import { createDeviceStore } from './device-store.mjs'
 import { createNodeGateway } from './node-gateway.mjs'
+import { createNodeContextPreparer } from './node-context.mjs'
 import { PUBLIC_PATHS, decideRemoteAuth, extractBearer } from './remote-auth.mjs'
 
 /** 远程通道是否启用：配了身份签名密钥即启用。 */
@@ -7563,10 +7564,34 @@ function describeTaskForNode(taskId, scope) {
   } catch { return null }
 }
 
+/**
+ * 派发前冻结上下文。**必需**——没有它远端到不了 `Running`。
+ *
+ * 用的是 Hub 自己的库与它已有的装配器/仓储，所以装配与持久化都在真相源这一侧
+ * 完成（见 `node-context.mjs` 文件头：为什么不让电脑自己装配）。
+ *
+ * 这里包一层薄适配而不是直接传 `contextStore`：本文件里的 `contextStore`
+ * 是个**延迟构造的 getter 函数**（与 `modelStore` / `bindingStore` 同一形状），
+ * 传进去会得到"没有 record 方法"的构造期报错——而那句报错读起来像"少传了参数"，
+ * 真实原因是"传的是 getter 而不是实例"。同样的坑在本文件的 `audit` 适配那处
+ * 已经踩过一次（见 `contextStore()` 里的注释）。
+ */
+const nodeContextPreparer = REMOTE_AGENT_ENABLED
+  ? createNodeContextPreparer({
+    db,
+    contextStore: {
+      record: (snapshot, opts) => contextStore().record(snapshot, opts),
+    },
+  })
+  : null
+
 export const nodeGateway = REMOTE_AGENT_ENABLED
   ? createNodeGateway({
     deviceStore, runStore, audit,
     describeTask: describeTaskForNode,
+    // 派发前冻结上下文。没有它远端到不了 `Running`：状态机要求
+    // `BuildingContext → Running` 先有 `run_context_snapshots` 的一行。
+    prepareContext: nodeContextPreparer,
     claimScope: CFG.values.claimScope || null,
     onWarn: (code, detail) => console.warn(`[node-gateway] ${code}: ${JSON.stringify(detail)}`),
   })

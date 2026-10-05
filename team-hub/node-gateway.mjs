@@ -73,6 +73,8 @@ export const GATEWAY_CODES = Object.freeze({
   DISPATCH_ACK_TIMEOUT: 'NODE_DISPATCH_ACK_TIMEOUT',
   CLAIM_BLOCKED: 'NODE_CLAIM_BLOCKED',
   CLAIM_UNBLOCKED: 'NODE_CLAIM_UNBLOCKED',
+  CONTEXT_NOT_FROZEN: 'NODE_CONTEXT_NOT_FROZEN',
+  PUMP_FAILED: 'NODE_PUMP_FAILED',
 })
 
 const HEX = (b) => createHash('sha256').update(String(b)).digest('hex')
@@ -109,6 +111,18 @@ export function createNodeGateway({
   clock = Date.now,
   audit = null,
   describeTask = null,
+  /**
+   * **派发前冻结上下文**：`(claimed) => Promise<{snapshotHash}>`，失败要抛。
+   *
+   * `BuildingContext → Running` 要求 `run_context_snapshots` 里先有这次 attempt
+   * 的一行，所以没有它**远端永远到不了 `Running`**（实测过：任务卡在
+   * `BuildingContext`，执行器白跑一趟）。
+   *
+   * ★ 它是**必需**的，缺了在构造时就抛，而不是"没接就跳过"。
+   *   后者会把一次接线遗漏变成一批"注定完不成的 attempt"——而且它们在界面上
+   *   看起来只是"任务不动"，与队列为空长得一样。
+   */
+  prepareContext = null,
   onWarn = null,
   path = NODE_PATH,
   helloTimeoutMs = 10_000,
@@ -132,12 +146,19 @@ export function createNodeGateway({
   if (typeof runStore.claim !== 'function' || typeof runStore.transition !== 'function') {
     throw new TypeError('createNodeGateway 需要一个真的 run-store（缺 claim/transition）')
   }
+  if (typeof prepareContext !== 'function') {
+    throw new TypeError('createNodeGateway 需要 prepareContext(claimed)——没有它派发出去的尝试到不了 Running'
+      + '（`BuildingContext → Running` 要求先有上下文快照）。缺了它时正确做法是显式传一个，'
+      + '而不是让网关跳过这一步去造一批注定完不成的 attempt')
+  }
 
   /** 活连接：nodeId → connection。同一节点只保留最新一条，旧的那条会被关掉。 */
   const connections = new Map()
   let dispatchTimer = null
   let closed = false
-  const counters = { upgraded: 0, rejected: 0, dispatches: 0, progressFrames: 0, duplicateEvents: 0, unknownOutcomeFrames: 0, blockedClaims: 0 }
+  const counters = { upgraded: 0, rejected: 0, dispatches: 0, progressFrames: 0, duplicateEvents: 0, unknownOutcomeFrames: 0, blockedClaims: 0, contextsFrozen: 0, contextFailures: 0 }
+  /** pump 的互斥闸门。见 `pump()` 的注释：它现在是 async，重入会让并发上限失效。 */
+  let pumping = false
 
   const warn = (code, detail) => { if (typeof onWarn === 'function') { try { onWarn(code, detail) } catch { /* 诊断失败不影响主流程 */ } } }
   const record = (actor, scope, action, taskId, detail) => {
@@ -667,81 +688,152 @@ function recordInScope(frame, state, action, detail) {
    *
    * 由定时器与"上一次派发完成后"共同触发。`claim` 在**Hub 自己的事务里**执行，
    * 所以并发派发不会把同一条任务发给两个节点——这一点不需要网关做任何事。
+   *
+   * ## 为什么是 `async`，以及为什么必须有 `pumping` 闸门
+   *
+   * 派发前要**冻结上下文**（见下），那是一次真实的异步工作。而 `pump` 同时由
+   * 定时器与多个收帧路径触发，于是重入是可能的：两次 pump 交错会让并发上限
+   * 与 `inFlight` 记账失去意义（第一次还在 await，第二次已经看到 `inFlight` 是空的）。
+   *
+   * 所以用 `pumping` 做互斥：一次只跑一个 pump。后到的触发直接返回——
+   * 这不是丢工作，因为那个触发者本来也只是"提醒可以派了"，而下一次定时器
+   * （默认 3 秒）会再来。
+   */
+  /**
+   * 触发一次派发。**同步返回**，真正的活在 `pumpOnce` 里跑。
+   *
+   * 为什么要有这一层：`pumpOnce` 是 async，而它的调用点有七处（定时器、
+   * 收到 hello / ack / 心跳 / 终态等），全部是"顺手提醒一下可以派了"的语义。
+   * 让每处各自 `void pump().catch(...)` 意味着**七处都要记得写 catch**，
+   * 而漏掉一处就是一条未处理的 Promise 拒绝——它在 Node 里会终止进程，
+   * 表现为"Hub 莫名其妙重启了"，而日志里只有一句与派发无关的堆栈。
    */
   function pump() {
-    if (closed) return
-    for (const { state, send, close } of connections.values()) {
-      if (state.closed || state.phase !== 'ready') continue
-      if (!state.capabilities.has('task.run')) continue
-      if (state.inFlight.size >= maxConcurrentPerNode) continue
-      let claim
-      try {
-        claim = runStore.claim({ workerId: workerIdOf(state.nodeId), scope: claimScope, leaseTtlMs })
-      } catch (e) {
-        // 派发失败只记诊断：它不该影响这条连接的健康（下一个 tick 还会试）。
-        warn(GATEWAY_CODES.STORE_REJECTED, { nodeId: state.nodeId, phase: 'claim', code: e?.code, message: e?.message })
-        continue
-      }
-      if (claim?.claimed === null || claim?.claimed === undefined) {
-        // ★ 被拒的认领**必须**被看见。
-        //
-        // `claim` 在"有别的任务占着单写者位"时返回 `claimed: null` + `reason:
-        // 'file-contention'`，而它是**正常返回**、不是异常。原实现直接 `continue`，
-        // 于是"节点就绪、任务待办、但什么都不派发"这件事在日志、审计、读数里
-        // 全都没有痕迹——实测就是这样查了半小时。
-        //
-        // 处理方式与 `server.mjs` 里工具账收账那处同一个形状：**同一种坏法
-        // 只说一次**。每 3 秒重印同一条警告，与把警告关掉是同一个东西。
-        if (typeof claim?.reason === 'string' && claim.reason !== 'queue-empty') {
-          counters.blockedClaims += 1
-          const sig = `${claim.reason}:${claim.contention?.holderTaskId ?? '-'}`
-          if (state.lastContentionSignature !== sig) {
-            state.lastContentionSignature = sig
-            warn(GATEWAY_CODES.CLAIM_BLOCKED, {
-              nodeId: state.nodeId, reason: claim.reason,
-              holderTaskId: claim.contention?.holderTaskId ?? null,
-              code: claim.contention?.code ?? null,
-              detail: claim.contention?.reason ?? null,
-              note: '任务在排队但领不到；这不是节点故障',
-            })
-          }
-        } else if (state.lastContentionSignature !== null) {
-          state.lastContentionSignature = null
-          warn(GATEWAY_CODES.CLAIM_UNBLOCKED, { nodeId: state.nodeId, note: '认领已恢复' })
+    void pumpOnce().catch((e) => {
+      warn(GATEWAY_CODES.PUMP_FAILED, { message: e instanceof Error ? e.message : String(e) })
+    })
+  }
+
+  async function pumpOnce() {
+    if (closed || pumping) return
+    pumping = true
+    try {
+      for (const { state, send, close } of connections.values()) {
+        if (state.closed || state.phase !== 'ready') continue
+        if (!state.capabilities.has('task.run')) continue
+        if (state.inFlight.size >= maxConcurrentPerNode) continue
+        let claim
+        try {
+          claim = runStore.claim({ workerId: workerIdOf(state.nodeId), scope: claimScope, leaseTtlMs })
+        } catch (e) {
+          // 派发失败只记诊断：它不该影响这条连接的健康（下一个 tick 还会试）。
+          warn(GATEWAY_CODES.STORE_REJECTED, { nodeId: state.nodeId, phase: 'claim', code: e?.code, message: e?.message })
+          continue
         }
-        continue
+        if (claim?.claimed === null || claim?.claimed === undefined) {
+          // ★ 被拒的认领**必须**被看见。
+          //
+          // `claim` 在"有别的任务占着单写者位"时返回 `claimed: null` + `reason:
+          // 'file-contention'`，而它是**正常返回**、不是异常。原实现直接 `continue`，
+          // 于是"节点就绪、任务待办、但什么都不派发"这件事在日志、审计、读数里
+          // 全都没有痕迹——实测就是这样查了半小时。
+          //
+          // 处理方式与 `server.mjs` 里工具账收账那处同一个形状：**同一种坏法
+          // 只说一次**。每 3 秒重印同一条警告，与把警告关掉是同一个东西。
+          if (typeof claim?.reason === 'string' && claim.reason !== 'queue-empty') {
+            counters.blockedClaims += 1
+            const sig = `${claim.reason}:${claim.contention?.holderTaskId ?? '-'}`
+            if (state.lastContentionSignature !== sig) {
+              state.lastContentionSignature = sig
+              warn(GATEWAY_CODES.CLAIM_BLOCKED, {
+                nodeId: state.nodeId, reason: claim.reason,
+                holderTaskId: claim.contention?.holderTaskId ?? null,
+                code: claim.contention?.code ?? null,
+                detail: claim.contention?.reason ?? null,
+                note: '任务在排队但领不到；这不是节点故障',
+              })
+            }
+          } else if (state.lastContentionSignature !== null) {
+            state.lastContentionSignature = null
+            warn(GATEWAY_CODES.CLAIM_UNBLOCKED, { nodeId: state.nodeId, note: '认领已恢复' })
+          }
+          continue
+        }
+        const c = claim.claimed
+
+        // ── 冻结上下文（**必须在派发之前**）────────────────────────────────
+        //
+        // `BuildingContext → Running` 要求 `run_context_snapshots` 里已有这次
+        // attempt 的一行。没有快照时远端走到 `BuildingContext` 会被
+        // `EVIDENCE_MISSING` 拒掉，任务卡住，而执行器白跑一趟。
+        //
+        // 所以这里有两条纪律：
+        //   ① 快照**先于**派发存在 —— 远端不可能在一个还没冻结的上下文上开跑；
+        //   ② 冻结失败就**不派发**，并把租约还回去 —— 让任务回到队列
+        //      （而不是造出一条注定完不成的 attempt 去烧重试额度）。
+        try {
+          const prepared = await prepareContext(c)
+          counters.contextsFrozen += 1
+          record(state.nodeId, c.scope, 'node:context-frozen', c.taskId, {
+            attemptId: c.attemptId, snapshotHash: prepared?.snapshotHash ?? null,
+          })
+        } catch (e) {
+          counters.contextFailures += 1
+          warn(GATEWAY_CODES.CONTEXT_NOT_FROZEN, {
+            nodeId: state.nodeId, taskId: c.taskId, attemptId: c.attemptId,
+            code: e?.code ?? null, message: e instanceof Error ? e.message.slice(0, 300) : String(e),
+            note: '已收回租约、未派发；任务回到队列而不是造一条注定完不成的 attempt',
+          })
+          record(state.nodeId, c.scope, 'node:context-failed', c.taskId, {
+            attemptId: c.attemptId, code: e?.code ?? null,
+            message: e instanceof Error ? e.message.slice(0, 300) : String(e),
+          })
+          try {
+            runStore.release({
+              attemptId: c.attemptId, leaseEpoch: c.leaseEpoch,
+              workerId: workerIdOf(state.nodeId), reason: 'context-not-frozen',
+            })
+          } catch (releaseErr) {
+            // 还租约失败就让租约自然过期——那是一条既有的、有据可依的回收路径。
+            warn(GATEWAY_CODES.STORE_REJECTED, { attemptId: c.attemptId, phase: 'release-after-context-failure', code: releaseErr?.code })
+          }
+          continue
+        }
+        // ─────────────────────────────────────────────────────────────────
+
+        const task = typeof describeTask === 'function' ? describeTask(c.taskId, c.scope) : null
+        const ok = send(FRAME_TYPES.DISPATCH, {
+          nodeId: state.nodeId,
+          taskId: c.taskId,
+          attemptId: c.attemptId,
+          leaseEpoch: c.leaseEpoch,
+          leaseExpiresAtMs: c.leaseExpiresAtMs,
+          scope: c.scope,
+          attemptNo: c.attemptNo,
+          serverTimeMs: c.serverTimeMs,
+          task: task ?? null,
+          ...(c.allowedTools === undefined ? {} : { allowedTools: c.allowedTools, deniedTools: c.deniedTools ?? [], approvalPolicy: c.approvalPolicy ?? null }),
+        })
+        if (!ok) {
+          // 帧没发出去：把租约还回去，而不是让它烂在手上。
+          try { runStore.release({ attemptId: c.attemptId, leaseEpoch: c.leaseEpoch, workerId: workerIdOf(state.nodeId), reason: 'dispatch-write-failed' }) } catch { /* 由租约到期兜底 */ }
+          close(WS_CLOSE.NORMAL, 'write failed')
+          return
+        }
+        counters.dispatches += 1
+        // ★ **悲观**计入在途：派发那一刻就占住槽位，而不是等 ack。
+        //
+        // 等 ack 的写法有一个静默的窗口：从派发到 ack 之间 `inFlight` 是空的，
+        // 于是下一个 tick 会再派一条——并发上限形同虚设，而两台任务会同时写
+        // 同一个工作区。窗口很短（一次往返），所以这个 bug 在本地几乎看不出来，
+        // 只在网络慢或节点忙的时候出现。
+        state.inFlight.add(c.attemptId)
+        state.scopes.set(c.attemptId, c.scope)
+        armAckTimer(state, c.attemptId)
+        record(state.nodeId, c.scope, 'node:dispatch', c.taskId, { attemptId: c.attemptId, leaseEpoch: c.leaseEpoch })
       }
-      const c = claim.claimed
-      const task = typeof describeTask === 'function' ? describeTask(c.taskId, c.scope) : null
-      const ok = send(FRAME_TYPES.DISPATCH, {
-        nodeId: state.nodeId,
-        taskId: c.taskId,
-        attemptId: c.attemptId,
-        leaseEpoch: c.leaseEpoch,
-        leaseExpiresAtMs: c.leaseExpiresAtMs,
-        scope: c.scope,
-        attemptNo: c.attemptNo,
-        serverTimeMs: c.serverTimeMs,
-        task: task ?? null,
-        ...(c.allowedTools === undefined ? {} : { allowedTools: c.allowedTools, deniedTools: c.deniedTools ?? [], approvalPolicy: c.approvalPolicy ?? null }),
-      })
-      if (!ok) {
-        // 帧没发出去：把租约还回去，而不是让它烂在手上。
-        try { runStore.release({ attemptId: c.attemptId, leaseEpoch: c.leaseEpoch, workerId: workerIdOf(state.nodeId), reason: 'dispatch-write-failed' }) } catch { /* 由租约到期兜底 */ }
-        close(WS_CLOSE.NORMAL, 'write failed')
-        return
-      }
-      counters.dispatches += 1
-      // ★ **悲观**计入在途：派发那一刻就占住槽位，而不是等 ack。
-      //
-      // 等 ack 的写法有一个静默的窗口：从派发到 ack 之间 `inFlight` 是空的，
-      // 于是下一个 tick 会再派一条——并发上限形同虚设，而两台任务会同时写
-      // 同一个工作区。窗口很短（一次往返），所以这个 bug 在本地几乎看不出来，
-      // 只在网络慢或节点忙的时候出现。
-      state.inFlight.add(c.attemptId)
-      state.scopes.set(c.attemptId, c.scope)
-      armAckTimer(state, c.attemptId)
-      record(state.nodeId, c.scope, 'node:dispatch', c.taskId, { attemptId: c.attemptId, leaseEpoch: c.leaseEpoch })
+    } finally {
+      pumping = false
     }
   }
 

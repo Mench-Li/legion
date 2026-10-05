@@ -295,6 +295,51 @@ test('有空闲节点且有排队任务时派发，帧里带 attempt/epoch/租�
   } finally { await ctx.stop() }
 })
 
+test('并发上限在"已派发但未 ack"期间也成立', async () => {
+  // ★ 这条守的是一个很容易漏的窗口：如果只在收到 ack 时才把 attempt 记进
+  //   `inFlight`，那么从**派发**到 **ack 到达**之间 `inFlight` 是空的，
+  //   下一个 tick 就会再派一条——上限形同虚设，而这台电脑会同时跑多条任务，
+  //   它们共用同一个工作区。
+  const ctx = await startHub({
+    claimResults: [
+      { attemptId: 'att-1', taskId: 'T-1', scope: 's', attemptNo: 1, leaseEpoch: 1, leaseExpiresAtMs: Date.now() + 60_000 },
+      { attemptId: 'att-2', taskId: 'T-2', scope: 's', attemptNo: 1, leaseEpoch: 1, leaseExpiresAtMs: Date.now() + 60_000 },
+    ],
+    gatewayOptions: { dispatchPollMs: 20, maxConcurrentPerNode: 1 },
+  })
+  try {
+    const c = await connect(ctx)
+    await c.waitFor(FRAME_TYPES.HELLO_ACK)
+    await c.waitFor(FRAME_TYPES.DISPATCH)
+    // 故意**不**回 ack，让那个窗口一直开着。
+    await sleep(200)
+    const dispatches = c.frames.filter((f) => f.type === FRAME_TYPES.DISPATCH)
+    assert.equal(dispatches.length, 1, `未 ack 期间不应再派发；实际派了 ${dispatches.length} 条`)
+    c.ws.close()
+  } finally { await ctx.stop() }
+})
+
+test('已派发未 ack 的条目在超时后被放掉（否则节点会永久卡住）', async () => {
+  const ctx = await startHub({
+    claimResults: [
+      { attemptId: 'att-1', taskId: 'T-1', scope: 's', attemptNo: 1, leaseEpoch: 1, leaseExpiresAtMs: Date.now() + 60_000 },
+      { attemptId: 'att-2', taskId: 'T-2', scope: 's', attemptNo: 1, leaseEpoch: 1, leaseExpiresAtMs: Date.now() + 60_000 },
+    ],
+    // 派发确认窗口设得很短，便于观察"放掉之后能再派"。
+    gatewayOptions: { dispatchPollMs: 20, maxConcurrentPerNode: 1, dispatchAckTimeoutMs: 80 },
+  })
+  try {
+    const c = await connect(ctx)
+    await c.waitFor(FRAME_TYPES.HELLO_ACK)
+    await c.waitFor(FRAME_TYPES.DISPATCH)
+    // 窗口过后应当能再派下一条（那条任务由服务端的租约到期兜底回收）。
+    await sleep(300)
+    const dispatches = c.frames.filter((f) => f.type === FRAME_TYPES.DISPATCH)
+    assert.ok(dispatches.length >= 2, `超时后应放掉并继续派发；实际 ${dispatches.length} 条`)
+    c.ws.close()
+  } finally { await ctx.stop() }
+})
+
 test('ack 接受后该 attempt 计入在途；拒绝则把租约还回去', async () => {
   const ctx = await startHub({
     claimResults: [

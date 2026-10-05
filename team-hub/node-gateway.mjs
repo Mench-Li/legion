@@ -70,6 +70,7 @@ export const GATEWAY_CODES = Object.freeze({
   STORE_REJECTED: 'NODE_STORE_REJECTED',
   CAPABILITY_MISSING: 'NODE_CAPABILITY_MISSING',
   FRAME_BUILD_FAILED: 'NODE_FRAME_BUILD_FAILED',
+  DISPATCH_ACK_TIMEOUT: 'NODE_DISPATCH_ACK_TIMEOUT',
 })
 
 const HEX = (b) => createHash('sha256').update(String(b)).digest('hex')
@@ -113,6 +114,11 @@ export function createNodeGateway({
   leaseTtlMs = null,
   maxConcurrentPerNode = 1,
   dispatchPollMs = 3000,
+  /**
+   * 派发到收到 ack 的等待窗口。超时后放掉槽位（**不**判任务失败——
+   * 租约由服务端的到期规则回收）。见 `armAckTimer`。
+   */
+  dispatchAckTimeoutMs = 60_000,
   protocolVersion = PROTOCOL_VERSION,
   minVersion = PROTOCOL_MIN_VERSION,
   maxVersion = PROTOCOL_MAX_VERSION,
@@ -185,8 +191,9 @@ export function createNodeGateway({
       capabilities: new Set(auth.capabilities ?? []),
       phase: 'awaiting-hello',
       protocolVersion: null,
-      inFlight: new Set(),        // attemptId
+      inFlight: new Set(),        // attemptId（含**已派发但未 ack**的，见 pump）
       scopes: new Map(),          // attemptId → scope（审计要按空间过滤）
+      ackTimers: new Map(),       // attemptId → 派发确认的超时定时器
       closed: false,
       lastHeartbeatMs: clock(),
     }
@@ -225,6 +232,8 @@ export function createNodeGateway({
       if (state.closed) return
       state.closed = true
       clearTimeout(helloTimer)
+      for (const t of state.ackTimers.values()) clearTimeout(t)
+      state.ackTimers.clear()
       // presence 用 connectionId 栅栏清：迟到的 close 不会把新连接标成离线。
       try { deviceStore.markOffline({ nodeId: state.nodeId, connectionId: state.connectionId }) } catch { /* 清理失败下次 sweep 兜底 */ }
       if (connections.get(state.nodeId)?.state.connectionId === state.connectionId) connections.delete(state.nodeId)
@@ -387,7 +396,10 @@ export function createNodeGateway({
   }
 
   function onAck(frame, state, io) {
+    // 派发确认到了：不管接受还是拒绝，那条超时定时器都该取消。
+    clearAckTimer(state, frame.attemptId)
     if (frame.accepted === true) {
+      // 派发时已经**悲观**记入 inFlight（见 pump），这里只是确认。
       state.inFlight.add(frame.attemptId)
       record(state.nodeId, 'global', 'node:dispatch-ack', frame.taskId, { attemptId: frame.attemptId, leaseEpoch: frame.leaseEpoch })
       return
@@ -395,6 +407,7 @@ export function createNodeGateway({
     // 拒收：把租约**还回去**，而不是留在自己身上。留在身上会等到租约自然过期，
     // 期间这条任务既不在队列里也不在运行中——"卡住"的最难查的一种。
     state.inFlight.delete(frame.attemptId)
+    state.scopes.delete(frame.attemptId)
     try {
       runStore.release({ attemptId: frame.attemptId, leaseEpoch: frame.leaseEpoch, workerId: workerIdOf(state.nodeId), reason: `node-declined: ${frame.reason}` })
     } catch (e) {
@@ -402,6 +415,36 @@ export function createNodeGateway({
     }
     record(state.nodeId, 'global', 'node:dispatch-declined', frame.taskId, { attemptId: frame.attemptId, reason: frame.reason })
     pump()
+  }
+
+  /**
+   * 派发确认的超时。
+   *
+   * ★ 为什么必须有：`inFlight` 是**悲观**记账（派发即计入，见 pump），
+   *   好处是并发上限在"已派发未 ack"期间也成立。代价是——如果那条 ack 永远
+   *   不来（节点半死不活、帧丢了），这个槽位就永远占着，这台电脑再也领不到任务。
+   *   所以给一个窗口：到点就放掉。放掉**不等于**任务失败——租约仍在，由服务端
+   *   的租约到期规则回收，这是一条既有的、有据可依的路径。
+   */
+  function armAckTimer(state, attemptId) {
+    const t = setTimeout(() => {
+      if (state.closed) return
+      state.ackTimers.delete(attemptId)
+      if (!state.inFlight.has(attemptId)) return
+      state.inFlight.delete(attemptId)
+      state.scopes.delete(attemptId)
+      warn(GATEWAY_CODES.DISPATCH_ACK_TIMEOUT, { nodeId: state.nodeId, attemptId })
+      pump()
+    }, dispatchAckTimeoutMs)
+    if (typeof t.unref === 'function') t.unref()
+    state.ackTimers.set(attemptId, t)
+  }
+
+  function clearAckTimer(state, attemptId) {
+    const t = state.ackTimers.get(attemptId)
+    if (t === undefined) return
+    clearTimeout(t)
+    state.ackTimers.delete(attemptId)
   }
 
   /** 进展：写运行事件明细（权威）+ 记一条审计（经 SSE 广播到手机）。 */
@@ -595,7 +638,15 @@ function recordInScope(frame, state, action, detail) {
         return
       }
       counters.dispatches += 1
+      // ★ **悲观**计入在途：派发那一刻就占住槽位，而不是等 ack。
+      //
+      // 等 ack 的写法有一个静默的窗口：从派发到 ack 之间 `inFlight` 是空的，
+      // 于是下一个 tick 会再派一条——并发上限形同虚设，而两台任务会同时写
+      // 同一个工作区。窗口很短（一次往返），所以这个 bug 在本地几乎看不出来，
+      // 只在网络慢或节点忙的时候出现。
+      state.inFlight.add(c.attemptId)
       state.scopes.set(c.attemptId, c.scope)
+      armAckTimer(state, c.attemptId)
       record(state.nodeId, c.scope, 'node:dispatch', c.taskId, { attemptId: c.attemptId, leaseEpoch: c.leaseEpoch })
     }
   }

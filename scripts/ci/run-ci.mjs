@@ -1515,6 +1515,10 @@ async function stageTest() {
     { label: 'config-sanity（BUG-009-b：staleMinutes 与 workerTimeoutMs 的硬关系，启动时校正）', files: ['plugins/tests/config-sanity.test.mjs'], cwd: ROOT, nodeArgs: ['--experimental-strip-types'] },
     { label: 'file-domain-guard（BUG-009-a：声明域全是 gitignored ⇒ 拒绝建任务；探测不可知则放行）', files: ['team-hub/file-domain-guard.test.mjs'], cwd: ROOT },
     { label: 'in-review-releases-reservation（BUG-009-c：进 in_review 释放写入预约，且不放松"未确认停止"）', files: ['team-hub/in-review-releases-reservation.test.mjs'], cwd: ROOT },
+    // BUG-010：异常路径（文件域拦截）停在 in_review 之后，**只有推进 done 才会被"4. 流水线 done 补流转"
+    // 接回下一环**；闸门评论原先漏了这一步，于是人合入之后下游被静默跳过（T-178 的代码审查环）。
+    // 这组用例按源码钉住"恢复指引"与"停摆读数"不被删掉（手法同 model-config 的 routeAssemblySource）。
+    { label: 'pipeline-resume-guidance（BUG-010：异常停摆后的恢复指引与可见读数）', files: ['plugins/tests/pipeline-resume-guidance.test.mjs'], cwd: ROOT },
     { label: 'legacy-convergence（S6 唯一集成入口/模式收敛/回滚）', files: ['plugins/tests/legacy-convergence.test.mjs'], cwd: ROOT, nodeArgs: ['--experimental-strip-types'] },
     { label: 'delivery-ui（S7 交付/调度徽标前端纯函数）', files: ['workbench/scripts/delivery-ui.test.mjs'], cwd: ROOT, nodeArgs: ['--experimental-strip-types'] },
     // `dual-write-smoke` 守「两个进程同时启动、迁移同一新库」的**行为**，

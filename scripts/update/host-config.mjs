@@ -544,7 +544,10 @@ export function main(argv = process.argv.slice(2)) {
   process.stdout.write(`# 这棵树服务：${need.channels.join(' / ')}`
     + `；TLS ${need.required ? '必需' : '允许用 http（仅 internal）'}\n`)
   process.stdout.write(rendered.config)
-  if (args.get('files') === true) {
+  // ★ 布尔开关的比较是 `=== 'true'`（字符串），不是 `=== true`：
+  //   `parseArgs` 对"后面没有值的 `--flag`"存的是字符串 `'true'`。
+  //   写成 `=== true` 会让这个开关**永远不生效**——而它不报错。
+  if (args.get('files') === 'true') {
     process.stdout.write('\n# 需要存在的目录：\n')
     for (const dir of renderDirectoryPlan(parsed.tree)) process.stdout.write(`#   ${dir}\n`)
   }

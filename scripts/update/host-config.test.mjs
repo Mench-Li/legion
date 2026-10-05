@@ -29,7 +29,7 @@ import { test } from 'node:test'
 import { FEED_CACHE_CONTROL, HOST_CODES, RELEASE_CACHE_CONTROL, createHostConfig, evaluateResponse } from '../../product/update/host.mjs'
 import { CHANNEL_TARGETS, UPLOAD_TARGETS } from './publish.mjs'
 import {
-  HOST_CONFIG_PROBLEMS, OTHER_SITES, SITE_FILENAME, TREE_NAMES,
+  HOST_CONFIG_PROBLEMS, OTHER_SITES, SITE_FILENAME, TREE_NAMES, main,
   renderDirectoryPlan, renderServerBlock, tlsRequirement, treeOf,
 } from './host-config.mjs'
 
@@ -465,4 +465,37 @@ test('★★ 清单里的**每一条** HTTPS origin，客户端都接受（生�
       }
     }
   }
+})
+
+// ---------------------------------------------------------------------------
+// ⑦ CLI 的布尔开关必须**真的生效**（写成 `=== true` 会让它永远不生效）
+// ---------------------------------------------------------------------------
+
+test('★★★ CLI `--files` 真的会打印目录清单（布尔开关不能是哑的）', () => {
+  // ★ 这条来自一个真实的哑开关：本模块与 `verify-install.mjs` 里的布尔判断
+  //   原先都写成 `args.get('files') === true`，而 `parseArgs`（与
+  //   `verify-host.mjs` 逐字一致的那个实现）对"后面没有值的 `--flag`"
+  //   存的是**字符串** `'true'`。于是 `--files` 与 `--json` **永远不生效**——
+  //   而它们不报错，只会安静地走另一条分支。
+  //
+  //   > 一个"永远为假"的开关，与一个不存在的开关，在用户那边是同一个东西；
+  //   > 区别只在于前者会让人以为自己用对了。
+  //
+  //   抓住它的是"照手册敲那条命令"的用例（`verify-install.test.mjs` 里那条
+  //   退出码用例发现 `--json` 的输出不是 JSON）。这里把同一个形状钉在
+  //   `--files` 上。
+  const captures = (argv) => {
+    const chunks = []
+    const original = process.stdout.write.bind(process.stdout)
+    process.stdout.write = (chunk) => { chunks.push(String(chunk)); return true }
+    try { return { code: main(argv), text: chunks.join('') } } finally { process.stdout.write = original }
+  }
+  const withFlag = captures(['--tree', 'test', '--server-name', 'x.example', '--files'])
+  const without = captures(['--tree', 'test', '--server-name', 'x.example'])
+  assert.equal(withFlag.code, 0)
+  assert.match(withFlag.text, /需要存在的目录/, '--files 没有打印目录清单（开关是哑的）')
+  assert.match(withFlag.text, /\/srv\/legion-updates\/test\/legion\/feeds/)
+  assert.equal(/需要存在的目录/.test(without.text), false, '不带 --files 也打印了目录清单')
+  // 而且配置本体必须完全一致——`--files` 只是**附注**，不该改变生成物。
+  assert.equal(withFlag.text.split('\n# 需要存在的目录：')[0], without.text)
 })

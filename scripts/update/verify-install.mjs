@@ -530,7 +530,13 @@ export function main(argv = process.argv.slice(2)) {
     return INSTALL_VERIFY_EXIT.sourceProblem
   }
 
-  if (args.get('json') === true) process.stdout.write(`${JSON.stringify(report)}\n`)
+  // ★ 布尔开关的比较是 `=== 'true'`（**字符串**），不是 `=== true`。
+  //   `parseArgs` 用的是本仓既有的那个实现（与 `verify-host.mjs` /
+  //   `keygen.mjs` 逐字一致），它对"后面没有值的 `--flag`"存的是字符串
+  //   `'true'`。写成 `=== true` 的后果是**这个开关永远不生效**——
+  //   而它不报错，只会安静地走另一条分支。
+  //   （这一条是本轮"照手册敲那条命令"的用例抓出来的：`--json` 的输出不是 JSON。）
+  if (args.get('json') === 'true') process.stdout.write(`${JSON.stringify(report)}\n`)
   else process.stdout.write(renderInstallVerification(report))
 
   if (report.ok) return INSTALL_VERIFY_EXIT.ok

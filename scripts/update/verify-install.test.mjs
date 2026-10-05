@@ -25,6 +25,7 @@ import { artifactFromBytes, buildRelease } from '../../product/update/release.mj
 import { verifyExtractedTree } from '../../product/update/extract.mjs'
 import { closureFromDirectory } from '../../product/update/closure.mjs'
 import { packDirectory } from './publish.mjs'
+import { buildTrustTable, updateTrustPath, writeTrustTable as writeTable } from './trust-file.mjs'
 import {
   INSTALL_VERIFY_CODES, INSTALL_VERIFY_EXIT, compareInstalledTree, expectedClosureFromRelease,
   main, planInstallVerification, renderInstallVerification,
@@ -78,7 +79,7 @@ function makeRelease(t, payloadFiles) {
   const manifestBytes = Buffer.from(serializeEnvelope(signEnvelope(release, {
     privateKeyPem: keys.privateKeyPem, keyId: KEY_ID,
   })), 'utf8')
-  return { payloadRoot, packed, manifestBytes, packageBytes: packed.zipBytes, trustStore, release }
+  return { payloadRoot, packed, manifestBytes, packageBytes: packed.zipBytes, trustStore, release, publicKeyPem: keys.publicKeyPem }
 }
 
 const SAMPLE = Object.freeze({
@@ -361,6 +362,74 @@ test('★★ CLI：四个参数缺一个都拒绝（缺了就没有可信对照�
     assert.equal(main(argv), INSTALL_VERIFY_EXIT.badArgs, `缺参数却继续跑了：${argv.join(' ')}`)
   }
 })
+
+test('★★★★ CLI 的退出码就是手册里写的那几个（真文件、真签名清单、真信任表）', (t) => {
+  // ★ 运行手册（`docs/superpowers/plans/2026-10-06-stage-d-acceptance-runbook.md`）
+  //   让验收人**照着一条命令敲**，并写下"期望退出码"。所以那几个码必须被钉住——
+  //   否则手册里写的"不一致 → 3"会与实现对不上，而那种偏差只有人在真机上
+  //   照着敲时才会发现（那时手上正拿着一台刚装好的机器）。
+  //
+  //   ★ 这条用例走的是**完整的 CLI 路径**（`main()` + 真文件），
+  //     不是直接调库函数：手册里那一行是给人敲的，被测的必须是那一行。
+  const ctx = makeRelease(t, SAMPLE)
+  const dir = mkdtempSync(join(tmpdir(), 'legion-vi-'))
+  t.after(() => rmSync(dir, { recursive: true, force: true }))
+  const manifestPath = join(dir, 'manifest.json')
+  const packagePath = join(dir, 'package.zip')
+  writeFileSync(manifestPath, ctx.manifestBytes)
+  writeFileSync(packagePath, ctx.packageBytes)
+  const trustRoot = join(dir, 'trust-root')
+  mkdirSync(join(trustRoot, 'product', 'release'), { recursive: true })
+  const trustPath = updateTrustPath(trustRoot)
+  writeTable(trustPath, buildTrustTable({ keys: [{ keyId: KEY_ID, publicKeyPem: ctx.publicKeyPem }], sequence: 1 }))
+
+  const base = ['--install-root', ctx.payloadRoot, '--manifest', manifestPath,
+    '--package', packagePath, '--trust', trustPath]
+
+  // ① 一致 → 0
+  assert.equal(main(base), INSTALL_VERIFY_EXIT.ok, '一致的安装目录没有给 0')
+
+  // ② 多一个文件 → 3（树不一致）
+  const extraPath = join(ctx.payloadRoot, 'runtime.log')
+  writeFileSync(extraPath, 'x')
+  assert.equal(main(base), INSTALL_VERIFY_EXIT.treeMismatch, '多出条目没有给树不一致的码')
+  rmSync(extraPath)
+
+  // ③ 改一个字节 → 3，且**报告里点出是哪个文件**（手册要求抄那一行进记录）
+  writeFileSync(join(ctx.payloadRoot, 'legion', 'app.js'), Buffer.from('console.log(2)'))
+  const captured = captureStdout(() => main([...base, '--json']))
+  assert.equal(captured.returned, INSTALL_VERIFY_EXIT.treeMismatch)
+  const parsed = JSON.parse(captured.text.trim())
+  assert.equal(parsed.code, INSTALL_VERIFY_CODES.DIGEST)
+  assert.equal(parsed.tree.findings[0].path, 'legion/app.js')
+  writeFileSync(join(ctx.payloadRoot, 'legion', 'app.js'), SAMPLE['legion/app.js'])
+
+  // ④ 期望版本给定但读不出来 → 4（版本不一致，与树的差异分开）
+  assert.equal(main([...base, '--expect-version', '1.1.0']), INSTALL_VERIFY_EXIT.versionMismatch,
+    '"读不出已安装版本"没有被判成版本不一致')
+
+  // ⑤ 对照物本身不对（信任表里是别人的钥匙）→ 5（来源问题，不是树的问题）
+  const otherRoot = join(dir, 'other-trust')
+  mkdirSync(join(otherRoot, 'product', 'release'), { recursive: true })
+  const otherKeys = generateReleaseKeyPair({ keyId: KEY_ID })
+  const otherPath = updateTrustPath(otherRoot)
+  writeTable(otherPath, buildTrustTable({ keys: [{ keyId: KEY_ID, publicKeyPem: otherKeys.publicKeyPem }], sequence: 1 }))
+  assert.equal(main(['--install-root', ctx.payloadRoot, '--manifest', manifestPath,
+    '--package', packagePath, '--trust', otherPath]), INSTALL_VERIFY_EXIT.sourceProblem,
+  '清单验签不过没有给"来源问题"的码')
+})
+
+/** 把 `process.stdout.write` 截下来（CLI 的 `--json` 输出要能被机器读）。 */
+function captureStdout(fn) {
+  const chunks = []
+  const original = process.stdout.write.bind(process.stdout)
+  process.stdout.write = (chunk) => { chunks.push(String(chunk)); return true }
+  try {
+    return { returned: fn(), text: chunks.join('') }
+  } finally {
+    process.stdout.write = original
+  }
+}
 
 test('★ 渲染结果里有结论、计数与发行身份（验收记录直接抄它）', (t) => {
   const ctx = makeRelease(t, SAMPLE)

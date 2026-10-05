@@ -378,19 +378,42 @@ test('④ ★★★ 下载成功时**不**改名：就绪文件必须由验签�
   assert.equal(existsSync(result.partPath), false)
 })
 
-test('④ ★★ 流超上限（对方发得比清单说得多）⇒ TOO_LARGE，且不留 `.part`', async (t) => {
+test('④ ★★★ 流超上限 ⇒ TOO_LARGE + 不留 `.part` + **真的把请求掐掉**', async (t) => {
   const dir = cacheDirFor(t)
   const target = join(dir, 'pkg.zip')
   const chunks = Array.from({ length: 20 }, () => Buffer.alloc(100))   // 2000 字节
-  const transport = createTransport({
-    fetchImpl: makeFetch({ '/legion/pkg.zip': () => response(200, HEADERS(), bodyOf(chunks)) }),
-  })
+  let pulled = 0
+  const counted = async function* () {
+    for (const chunk of chunks) { pulled += 1; yield chunk }
+  }
+  const fetchImpl = makeFetch({ '/legion/pkg.zip': () => response(200, HEADERS(), counted()) })
+  const transport = createTransport({ fetchImpl })
   const result = await transport.downloadToFile(host(), `${ORIGIN}${PREFIX}/pkg.zip`, {
     targetPath: target, expectedSize: 500, expectedSha256: 'a'.repeat(64),
   })
   assert.equal(result.ok, false)
   assert.equal(result.code, TRANSPORT_CODES.TOO_LARGE, JSON.stringify(result))
   assert.equal(existsSync(`${target}.part`), false, '失败之后留下了半个包')
+
+  // ★★★ 而它必须**真的把请求掐掉**——这是"流式限制大小"那句话的另一半。
+  //
+  //   `transport.mjs` 在那一步的注释是：「超限即中止请求：继续收下去等于让对方
+  //   决定我们要写多少磁盘。」
+  //
+  //   ★ 这条断言是**变异测试逼出来的**：第一版只断言了码与清理，于是把调用点
+  //   改回 `() => deadline.signal`（那个坏掉的写法）时**用例照样全绿**——
+  //   因为 `TransformLimit` 已改成只调用一次回调，拿到信号对象丢掉也不会抛错，
+  //   `NET_TOO_LARGE` 仍然照常发出。**唯一失去的是"中止"这个动作。**
+  //
+  //   > 一条只断言"结果对不对"的用例，看不见"副作用有没有发生"——
+  //   > 而这次那个副作用（掐掉请求）正是设计原话要的东西。
+  const signal = fetchImpl.calls.at(-1)?.options?.signal
+  assert.ok(signal !== undefined && signal !== null, '替身没有拿到 signal')
+  assert.equal(signal.aborted, true,
+    '限长触发之后请求信号没有被中止 —— 对方可以继续把字节推过来')
+  // 而且源流必须**停在中途**（不是把 20 块全拉完再判）。
+  assert.ok(pulled < chunks.length,
+    `源流被拉完了（${pulled}/${chunks.length}）—— 说明没有在超限时停下`)
 })
 
 test('④ ★★ 收得比清单少 ⇒ TOO_SMALL（"少"与"大"是两条码）', async (t) => {

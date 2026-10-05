@@ -410,3 +410,74 @@ test('dispatch 的返回值可结构化克隆（不会把 Error 变成空对象�
   // 经 IPC 之后形状必须还原：JSON 往返一次仍然相等。
   assert.deepEqual(JSON.parse(JSON.stringify(result)), result)
 })
+
+// ---------------------------------------------------------------------------
+// ⑩ 面板是**单例**（设计 §10 第 4 行的"多个窗口"）
+// ---------------------------------------------------------------------------
+
+test('★★★ 面板是单例：再次打开复用同一个窗口，不新开一个（设计 §10 第 4 行）', async () => {
+  // ★ 设计 §10 第 4 行要求「重复点击、**多个窗口**、下载中发现新版 →
+  //   一次网络/安装事务；确认目标保持一致」。
+  //
+  //   这条守的是**三个子情形里的第二个**：
+  //     · 重复点击        → 已有用例（`client.test.mjs` 的"并发检查共享一次请求"）
+  //     · 下载中发现新版  → 已有用例（同文件的"下载期间候选变了"）
+  //     · **多个窗口**    → **此前一条用例都没有**（本用例）
+  //
+  //   实现是 `showPanel()` 开头那次复用：
+  //     `if (panel !== null && panel.isDestroyed?.() !== true) { panel.show(); ... }`
+  //   一个"总是新开窗口"的实现会让每个用例都照样绿——因为那些用例只调用
+  //   `showPanel()` **一次**。而后果是两个面板同时驱动**同一个** client：
+  //   用户在一个窗口点"安装"、在另一个窗口点"稍后"，而两者本应互斥。
+  //
+  //   > "同一个东西只该有一个"这条判据，只有在**第二次**调用时才看得见。
+  const contents = { mainFrame: { url: 'file:///C:/legion/desktop/update.html' }, id: 7, send() {} }
+  let created = 0
+  let shown = 0
+  const panel = {
+    webContents: contents, isDestroyed: () => false,
+    show() { shown += 1 }, focus() {}, on() {}, close() {},
+  }
+  const service = createUpdateService({
+    client: createFakeClient(),
+    desktopDir: 'C:\\legion\\desktop',
+    createPanel: () => { created += 1; return { window: panel, url: contents.mainFrame.url, ready: Promise.resolve() } },
+  })
+  const first = await service.showPanel()
+  const second = await service.showPanel()
+  assert.equal(created, 1, `面板被建了 ${created} 次——多个窗口会同时驱动同一个 client`)
+  assert.equal(first, second, '两次 showPanel 返回的不是同一个窗口')
+  assert.equal(second, panel)
+  // ★ 第二次必须是"把它**显示出来**"（而不是静默返回一个看不见的窗口）。
+  //   第一次**不**由 service 调 `show()`：窗口是 `createPanel` 建的，显示由工厂负责。
+  //   （我第一版把这里写成"期望 2 次"——那是我对分工的假设，不是实现的行为；
+  //     断言纠正过来之后它反而更精确地说明了"哪一次由谁负责显示"。）
+  assert.equal(shown, 1, `show() 被调了 ${shown} 次，期望 1 次（只有"复用"那一次）`)
+  assert.equal(service.panelOpen, true)
+})
+
+test('★ 面板关掉之后再打开会**真的**新建一个（单例不等于永远只有一个）', async () => {
+  // 上面那条的反向对照：如果"单例"被实现成"永远只建一次"，
+  // 那么用户关掉面板之后就再也打不开了——那是另一个方向的错。
+  const contents = { mainFrame: { url: 'file:///C:/legion/desktop/update.html' }, id: 8, send() {} }
+  let created = 0
+  let destroyed = false
+  const panel = {
+    webContents: contents,
+    isDestroyed: () => destroyed,
+    show() {}, focus() {}, on() {}, close() { destroyed = true },
+  }
+  const service = createUpdateService({
+    client: createFakeClient(),
+    desktopDir: 'C:\\legion\\desktop',
+    createPanel: () => { created += 1; return { window: panel, url: contents.mainFrame.url, ready: Promise.resolve() } },
+  })
+  await service.showPanel()
+  assert.equal(created, 1)
+  assert.equal(service.panelOpen, true)
+  service.close()
+  assert.equal(service.panelOpen, false, 'close() 之后仍然认为面板开着')
+  destroyed = true
+  await service.showPanel()
+  assert.equal(created, 2, '面板关掉之后再打开没有新建——用户会打不开面板')
+})

@@ -732,9 +732,9 @@ node scripts/update/verify-host.mjs --origin <生产 origin> --prefix /legion \
   > "有开关没接线"与"没要求所以没线"，在源码里长得一模一样，
   > 而它们该做的事相反：前者要接上，后者只需要被说出来。
 
-### 6.1.2 查过而**没有问题**的两处（写下来是为了下次不用再查）
+### 6.1.2 查过而**没有问题**的四处（写下来是为了下次不用再查）
 
-审计里有两处看起来像缺陷、逐条查过之后确认是好的。记在这里，免得下一个人
+审计里有四处看起来像缺陷、逐条查过之后确认是好的。记在这里，免得下一个人
 （包括我自己）再花一次时间：
 
 1. **桌面协议与 bridge 的覆盖是双向完整的。** 协议表里 12 个类型，bridge 逐个
@@ -748,6 +748,24 @@ node scripts/update/verify-host.mjs --origin <生产 origin> --prefix /legion \
    这一对，所以"同一个 sequence 原地换包"会被拒（`feed-sequence-conflict`，
    `feed.test.mjs` 有判据）。缺的是 `sequence` **前进时**的复用检测——而它的
    正确修法需要新读数，且**不能**写成"摘要不许变"（见 §6.1 与 §5 的 ㉖ 讨论）。
+3. **设计 §8 line 189 的限定词「仅在旧版本兼容性**已被证明**时自动回退程序」
+   是成立的**，而且是 fail-closed 的。这条我起初怀疑是 ㉗ 的同形（"丢限定词"）：
+   `planRollback` 只把 `compatibility === 'breaking'` 的迁移算进"不能只回退程序"
+   那一档，那么一份**根本没有声明** `compatibility` 的迁移会不会落进"全是
+   additive"那一档、从而被允许回退？
+   **不会**：`validateMigrationPlan` 在更早的地方就以
+   `if (!COMPATIBILITY.includes(m.compatibility)) → PLAN_INVALID` 把它拒了
+   （`migration.mjs` line 187，与 line 129 同一判据）。所以"没声明"既到不了
+   `planRollback`，也不会被读成 additive——这正是"必填字段"该有的样子。
+   ★ 这个方向值得学：**限定词的安全与否，取决于"缺失"落在哪一档**。
+   落进"允许"就是漏洞，落进"拒绝"就是判据。
+4. **设计 §8 line 192 的「用户工作空间**永远**不作为安装覆盖或自动恢复目标」
+   是结构性成立的**：切换目标是 `installRoot` 下的版本目录，恢复目标是
+   `DataDir`，而工作空间（`LEGION_WORKSPACE_DIR`）从来不是这两者任何一个的
+   参数。另外 `isOutsideSwitchTarget()` 还挡住"helper 落在待切换目录里"
+   （设计 §7 line 57），三个方向都有具名判据。
+   这不是"某处写了 if"，而是"**那个值根本没有流到那两个操作里**"——
+   对"永远不许"这类要求来说，这比一条 if 更强。
 
 ★ 另外记一条**前存**观察（不是本次改动引入的，也不是缺陷）：
 `product/launcher/desktop-protocol.mjs` 与 `desktop-bridge.mjs` 没有本仓约定的

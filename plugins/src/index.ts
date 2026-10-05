@@ -85,6 +85,7 @@ import { createHandoff, isSliceTesterTask } from './handoff.js'
 import { createSliceOrchestration } from './sliceOrchestration.js'
 import { decideProductionTool, type GrantedWrite } from './productionWriteGuard.js'
 import { planTimeoutSettlement, workerStoppedWithin, TIMEOUT_SETTLE_GRACE_MS } from './timeoutSettlement.js'
+import { branchOwnChangesRefspec } from './branchScope.js'
 import { parseExternalWorkerReport } from '../../runtime/adapters/dsh/external-agent.mjs'
 // PRT-108 棘轮：provider 目录读取与外部 Agent 接线一律经适配层，插件不再直接依赖执行面服务。
 // 见 runtime/adapters/dsh/subagent-client.mjs 的文件头（为什么这 5 个调用点必须下沉）。
@@ -1456,11 +1457,26 @@ function spaceWorker(ctx: AppContext, config: Config): void {
     }
   }
 
-  /** 任务分支 w/<id> 相对当前主分支改动的文件清单（merge 前越域校验用）。 */
+  /**
+   * 任务分支 w/<id> **自己改的**文件清单（merge 前越域校验用）。
+   *
+   * ★ BUG-008：这里必须用**三点** diff（`A...B` = merge-base(A,B)..B），不能用两点 `A..B`。
+   *
+   * 两点法是"两棵树当前的差异"，它会把**主分支在切片跑的过程中新增/修改的文件也算成切片的改动**。
+   * 实测（2026-10-05）：`w/T-178` 自己只改了 11 个文件（全在它声明的域内），但两点法给出 13 个 ——
+   * 多出来的 2 个是别人在切片飞行期间合进 main 的 `docs/bugs/BUG-006-*.md` / `BUG-006-live-ab.mjs`；
+   * 闸门据此判定"越域"，**把一次完全合规的交付拦在了门外**。`w/T-179` 更极端：它一个提交都没有
+   * （分支 HEAD 就是自己的基线），两点法却报出 14 个"越域文件" —— 全是 main 新增的。
+   *
+   * 为什么这个错误方向特别坏：它**随主分支的活动量增加而更容易触发**，即"越多人正常干活，
+   * 越容易有人被误拦"，而拦截的代价是交付停在 in_review 等人工。真实越域（切片自己改了域外文件）
+   * 三点法一样能抓到 —— 所以修它不会放过任何一个该拦的。
+   */
   async function changedFilesOfBranch(t: Task): Promise<string[]> {
     const root = workspace.repoRootFor()
     const headRef = (await runGit(root, ['rev-parse', '--abbrev-ref', 'HEAD'])).out.trim() || 'HEAD'
-    const diff = await runGit(root, ['diff', '--name-only', headRef, `w/${t.id}`])
+    // refspec 由 branchScope 决定（**三点**）——理由与实测见 ./branchScope.ts 的文件头。
+    const diff = await runGit(root, ['diff', '--name-only', branchOwnChangesRefspec(headRef, `w/${t.id}`)])
     return diff.out.split('\n').map(s => normRelPath(s)).filter(Boolean)
   }
 

@@ -1503,6 +1503,11 @@ async function stageTest() {
     { label: 'delivery-routes（S4 交付/集成/裁决 HTTP 契约）', files: ['team-hub/delivery-routes.test.mjs'], cwd: ROOT },
     { label: 'metrics（S4 指标只读聚合与不可读降级）', files: ['team-hub/metrics.test.mjs'], cwd: ROOT },
     { label: 'write-eligibility（S5 守护侧写入资格/RunRequest 冻结/等待视图）', files: ['plugins/tests/write-eligibility.test.mjs'], cwd: ROOT, nodeArgs: ['--experimental-strip-types'] },
+    // BUG-008：文件域闸门取"这条切片分支自己改了什么"的 refspec 必须是**三点**（`A...B`）。
+    // 用两点（`A..B`）会把主分支在切片飞行期间新增的文件算成切片的改动 —— 实测把一次完全合规的
+    // 交付（w/T-178，11 个域内文件）判成"越域"拦在 in_review。用例含真实 git 仓库的行为对照，
+    // 并断言"切片自己真改的域外文件仍然抓得到"（修判据不许把闸门改瞎）。
+    { label: 'branch-scope（BUG-008：域闸门只算分支自己的改动，三点 diff）', files: ['plugins/tests/branch-scope.test.mjs'], cwd: ROOT, nodeArgs: ['--experimental-strip-types'] },
     { label: 'legacy-convergence（S6 唯一集成入口/模式收敛/回滚）', files: ['plugins/tests/legacy-convergence.test.mjs'], cwd: ROOT, nodeArgs: ['--experimental-strip-types'] },
     { label: 'delivery-ui（S7 交付/调度徽标前端纯函数）', files: ['workbench/scripts/delivery-ui.test.mjs'], cwd: ROOT, nodeArgs: ['--experimental-strip-types'] },
     // `dual-write-smoke` 守「两个进程同时启动、迁移同一新库」的**行为**，

@@ -257,6 +257,20 @@ cloudflared service uninstall
   真正在用的是 `backup.mjs`（`VACUUM INTO` 一致快照 + 读回验证 + gpg 加密，
   `legion-hub-backup.timer` 每天 03:17），以及把它同步到异地的 `offsite.mjs`
   （`legion-hub-offsite.timer` 每天 03:47）——见 [BACKUP.md](BACKUP.md)。
+- **账号与注册**：默认**不开放自助注册**（`LEGION_REGISTRATION` 不设 = `closed`，
+  只能由管理员发邀请码）。要让用户在手机上自己注册，在 unit 的 `Environment=` 里设：
+
+  ```
+  LEGION_REGISTRATION=open        # 或 invite（需邀请码）
+  LEGION_DOWNLOAD_URL=https://…/legion-setup.exe   # 可选；不设则首页如实写"尚未发布"
+  LEGION_DESKTOP_VERSION=0.3.0    # 可选，只用于首页展示
+  ```
+
+  默认 `closed` 是有意的：没设策略的 Hub 不应该自动变成一个人人可注册的公开服务。
+- 门口：`GET /` 是产品首页（手机端入口 + 下载入口 + 注册说明），**免鉴权**。
+  在此之前它回的是 `{"error":"缺少访问令牌"}`——那是每个新用户看到的第一句话。
+- 验收：`node product/server/verify-phone.mjs <baseUrl>`（照手机端的顺序打一串
+  真实 HTTP，含"派任务真的可被电脑认领"那一条）。
 - 健康：`/api/identity/status`（免鉴权）；`systemctl status legion-hub`。
 - 日志：`journalctl -u legion-hub -f`。日志**不含**令牌与密钥原文。
 - 证书：Cloudflare 自动续期，服务器上没有需要续的证书。

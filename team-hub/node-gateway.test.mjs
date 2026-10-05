@@ -615,6 +615,45 @@ test('没有 task.run 能力的设备不会被派发', async () => {
   } finally { await ctx.stop() }
 })
 
+test('认领被阻塞时要被看见（同一种阻塞只说一次）', async () => {
+  // ★ 实测过这个坑：`claim` 在有别的任务占着单写者位时**正常返回**
+  //   `claimed:null, reason:'file-contention'`。原实现直接 continue，于是
+  //   "节点就绪、任务待办、但什么都不派发"在日志/审计/读数里全都没有痕迹。
+  const warnings = []
+  const ctx = await startHub({
+    claimResults: [],
+    gatewayOptions: { dispatchPollMs: 20, onWarn: (code, detail) => warnings.push({ code, detail }) },
+  })
+  // 让 claim 返回阻塞（而不是 queue-empty）。
+  ctx.runStore.claim = ({ workerId }) => {
+    ctx.runStore.calls.claim.push({ workerId })
+    return { ok: true, claimed: null, reason: 'file-contention', contention: { code: 'SINGLE_WRITER_REQUIRED', holderTaskId: 'T-9' } }
+  }
+  try {
+    const c = await connect(ctx)
+    await c.waitFor(FRAME_TYPES.HELLO_ACK)
+    await sleep(250)
+    const blocked = warnings.filter((w) => w.code === 'NODE_CLAIM_BLOCKED')
+    // 轮询了很多次，但只报一次：每 3 秒重印同一条警告与把警告关掉是同一个东西。
+    assert.equal(blocked.length, 1, `应只报一次，实际 ${blocked.length} 次`)
+    assert.equal(blocked[0].detail.holderTaskId, 'T-9')
+    assert.equal(blocked[0].detail.code, 'SINGLE_WRITER_REQUIRED')
+    assert.ok(ctx.gateway.stats.blockedClaims > 0, '计数器要能反映它')
+    c.ws.close()
+  } finally { await ctx.stop() }
+})
+
+test('队列为空**不**报阻塞（空队列是正常状态，不是故障）', async () => {
+  const warnings = []
+  const ctx = await startHub({ claimResults: [], gatewayOptions: { dispatchPollMs: 20, onWarn: (code) => warnings.push(code) } })
+  try {
+    const c = await connect(ctx)
+    await c.waitFor(FRAME_TYPES.HELLO_ACK)
+    await sleep(250)
+    assert.equal(warnings.filter((w) => w === 'NODE_CLAIM_BLOCKED').length, 0)
+  } finally { await ctx.stop() }
+})
+
 test('网关不缓存任务状态：每次派发都重新问 run-store', async () => {
   const ctx = await startHub({ gatewayOptions: { dispatchPollMs: 30, maxConcurrentPerNode: 0 } })
   try {

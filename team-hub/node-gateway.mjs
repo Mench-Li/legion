@@ -71,6 +71,8 @@ export const GATEWAY_CODES = Object.freeze({
   CAPABILITY_MISSING: 'NODE_CAPABILITY_MISSING',
   FRAME_BUILD_FAILED: 'NODE_FRAME_BUILD_FAILED',
   DISPATCH_ACK_TIMEOUT: 'NODE_DISPATCH_ACK_TIMEOUT',
+  CLAIM_BLOCKED: 'NODE_CLAIM_BLOCKED',
+  CLAIM_UNBLOCKED: 'NODE_CLAIM_UNBLOCKED',
 })
 
 const HEX = (b) => createHash('sha256').update(String(b)).digest('hex')
@@ -135,7 +137,7 @@ export function createNodeGateway({
   const connections = new Map()
   let dispatchTimer = null
   let closed = false
-  const counters = { upgraded: 0, rejected: 0, dispatches: 0, progressFrames: 0, duplicateEvents: 0, unknownOutcomeFrames: 0 }
+  const counters = { upgraded: 0, rejected: 0, dispatches: 0, progressFrames: 0, duplicateEvents: 0, unknownOutcomeFrames: 0, blockedClaims: 0 }
 
   const warn = (code, detail) => { if (typeof onWarn === 'function') { try { onWarn(code, detail) } catch { /* 诊断失败不影响主流程 */ } } }
   const record = (actor, scope, action, taskId, detail) => {
@@ -196,6 +198,9 @@ export function createNodeGateway({
       ackTimers: new Map(),       // attemptId → 派发确认的超时定时器
       closed: false,
       lastHeartbeatMs: clock(),
+      /** 上一次认领阻塞的签名。同一种阻塞**只说一次**——每 3 秒重印同一条警告，
+       *  与把警告关掉是同一个东西。 */
+      lastContentionSignature: null,
     }
 
     const decoder = createFrameDecoder({ maxBytes: maxMessageBytes, expectMasked: true })
@@ -667,7 +672,35 @@ function recordInScope(frame, state, action, detail) {
         warn(GATEWAY_CODES.STORE_REJECTED, { nodeId: state.nodeId, phase: 'claim', code: e?.code, message: e?.message })
         continue
       }
-      if (claim?.claimed === null || claim?.claimed === undefined) continue
+      if (claim?.claimed === null || claim?.claimed === undefined) {
+        // ★ 被拒的认领**必须**被看见。
+        //
+        // `claim` 在"有别的任务占着单写者位"时返回 `claimed: null` + `reason:
+        // 'file-contention'`，而它是**正常返回**、不是异常。原实现直接 `continue`，
+        // 于是"节点就绪、任务待办、但什么都不派发"这件事在日志、审计、读数里
+        // 全都没有痕迹——实测就是这样查了半小时。
+        //
+        // 处理方式与 `server.mjs` 里工具账收账那处同一个形状：**同一种坏法
+        // 只说一次**。每 3 秒重印同一条警告，与把警告关掉是同一个东西。
+        if (typeof claim?.reason === 'string' && claim.reason !== 'queue-empty') {
+          counters.blockedClaims += 1
+          const sig = `${claim.reason}:${claim.contention?.holderTaskId ?? '-'}`
+          if (state.lastContentionSignature !== sig) {
+            state.lastContentionSignature = sig
+            warn(GATEWAY_CODES.CLAIM_BLOCKED, {
+              nodeId: state.nodeId, reason: claim.reason,
+              holderTaskId: claim.contention?.holderTaskId ?? null,
+              code: claim.contention?.code ?? null,
+              detail: claim.contention?.reason ?? null,
+              note: '任务在排队但领不到；这不是节点故障',
+            })
+          }
+        } else if (state.lastContentionSignature !== null) {
+          state.lastContentionSignature = null
+          warn(GATEWAY_CODES.CLAIM_UNBLOCKED, { nodeId: state.nodeId, note: '认领已恢复' })
+        }
+        continue
+      }
       const c = claim.claimed
       const task = typeof describeTask === 'function' ? describeTask(c.taskId, c.scope) : null
       const ok = send(FRAME_TYPES.DISPATCH, {

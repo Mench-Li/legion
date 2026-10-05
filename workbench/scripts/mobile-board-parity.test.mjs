@@ -142,3 +142,46 @@ describe('手机端：空间与会话的绑定', () => {
     assert.match(fn, /spaces\.length === 1/)
   })
 })
+
+describe('手机端：竞态与请求合并', () => {
+  const app = readFileSync(resolve(ROOT, 'workbench/mobile/app.mjs'), 'utf8')
+
+  /**
+   * 取一个顶层 `async function name(...)` 的**函数体**（到第一个顶格 `}` 为止）。
+   *
+   * 不用 `new RegExp` 拼：模板串里的 `\(` 会被解析成一个普通的 `(`、
+   * `\s` 会被解析成 `s`（未知转义就取字符本身），于是拼出来的是一个
+   * **未闭合的组**——而报出来的是 `SyntaxError` 或一句"找不到这个函数"，
+   * 读起来像"源码改了"，其实是**测试自己写错了**。同样的坑在这个文件里
+   * 已经踩过两次（一次在 `TC_VIEWS` 的块提取上）。
+   */
+  function bodyOf(name) {
+    const start = app.indexOf(`async function ${name}(`)
+    assert.ok(start >= 0, `找不到 ${name}`)
+    const end = app.indexOf('\n}', start)
+    assert.ok(end > start, `${name} 没有以顶格 } 收尾——它的形状变了`)
+    return app.slice(start, end + 2)
+  }
+
+  test('★ 切空间会让"在飞"的刷新作废（不然旧空间的数据会写回新空间）', () => {
+    // 竞态：切空间时，上一个空间那次还在飞的请求返回了，把已经属于另一个空间的
+    // 数据写进 state.tasks。它只在切得够快时出现，所以更像个幽灵。
+    assert.match(bodyOf('switchScope'), /state\.scopeGen \+= 1/, '切空间必须先加代际')
+    for (const fn of ['refreshTasks', 'refreshTimeline']) {
+      const body = bodyOf(fn)
+      assert.match(body, /const gen = state\.scopeGen/, `${fn} 要在开始时记下代际`)
+      assert.match(body, /gen !== state\.scopeGen/, `${fn} 要在写回前比一次代际`)
+    }
+  })
+
+  test('SSE 每帧不直接打请求，而是交给合并器', () => {
+    // 一帧 = 4 个请求（时间线 1 + 看板 3），而进展事件是连着来的。
+    const stream = /function connectStream\(\)[\s\S]*?\n}/.exec(app)?.[0] ?? ''
+    assert.ok(stream.length > 0, '找不到 connectStream')
+    assert.match(stream, /refreshLoop\.request\(\)/)
+    assert.doesNotMatch(stream, /void refreshTimeline\(\)/, 'SSE 里不该直接调 refreshTimeline')
+    assert.doesNotMatch(stream, /void refreshTasks\(\)/, 'SSE 里不该直接调 refreshTasks')
+    // 合并器只该有一个：两个就是两套计时器与两份"在飞"记账，合并失效。
+    assert.equal((app.match(/createRefresher\(/g) ?? []).length, 1)
+  })
+})

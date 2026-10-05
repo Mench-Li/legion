@@ -46,6 +46,7 @@ import {
   mergeTimeline,
   timelineEntry,
 } from './timeline.mjs'
+import { createRefresher } from './refresh-loop.mjs'
 
 const $ = (id) => document.getElementById(id)
 const LS_REFRESH = 'legion.mobile.refresh'
@@ -76,6 +77,18 @@ const state = {
   intent: DEFAULT_INTENT,
   /** 任务视角（与指挥台任务中心同一条轴）。 */
   boardView: DEFAULT_VIEW,
+  /**
+   * 空间代际。**每切一次空间加一**。
+   *
+   * 异步刷新在开始时记下它、写回前再比一次：不相等就把结果**丢掉**。
+   * 挡的是这个竞态——切空间时，上一个空间那次还在飞的请求返回了，
+   * 把已经属于**另一个空间**的数据写进 `state.tasks`。
+   *
+   *   > 一个"旧空间的响应写进新空间"的界面，
+   *   > 与一个"数据本来就是错的"的界面，在用户那边是同一个东西——
+   *   > 只不过前者只在切得够快时出现，所以它更像个幽灵。
+   */
+  scopeGen: 0,
   /** 「追加要求」针对的任务 id；由看板卡片按钮或下拉框选择。 */
   targetTaskId: null,
   /** 能力发现的结果。决定登录页显示"登录"还是"注册+登录"。 */
@@ -655,8 +668,12 @@ async function openConversation() {
 
 async function refreshTimeline() {
   if (state.convId === null) return
+  const gen = state.scopeGen
+  const conv = state.convId
   // 读当前投影（**不是**从事件流拼出来）：事件只是通知，真相在 Hub。
-  const r = await api(`/api/chat/messages?conv=${state.convId}&scope=${encodeURIComponent(state.scope)}&limit=200`)
+  const r = await api(`/api/chat/messages?conv=${conv}&scope=${encodeURIComponent(state.scope)}&limit=200`)
+  // 同上：切了空间或换了会话，这批消息就不该往界面上写。
+  if (gen !== state.scopeGen || conv !== state.convId) return
   const entries = (r.messages ?? []).map(timelineEntry)
   const merged = mergeTimeline(state.timeline, entries)
   state.timeline = merged.entries
@@ -673,6 +690,7 @@ async function refreshTimeline() {
  */
 async function refreshTasks() {
   if (state.scope === null) return
+  const gen = state.scopeGen
   // ★ 用 `/api/agents?scope=` 一次拿全**这个空间里每个 Agent 的 tasks**，
   //   而不是只问当前那一个（`/api/agent-detail`）。
   //
@@ -683,6 +701,8 @@ async function refreshTasks() {
   //   与覆盖一个 Agent 花的是**同样一次**请求。
   const board = await api(`/api/board?scope=${encodeURIComponent(state.scope)}`)
   const agents = await api(`/api/agents?scope=${encodeURIComponent(state.scope)}`)
+  // ★ 空间在这一段里被切走了 → 这批数据已经不属于当前界面，丢掉。
+  if (gen !== state.scopeGen) return
   state.agents = agents.agents ?? []
   if (state.agents.length > 0 && !state.agents.some((a) => a.agentId === state.agentId)) {
     state.agentId = state.agents[0].agentId
@@ -758,6 +778,8 @@ async function refreshSpaces() {
 
 /** 换空间要**重置一切与它绑定的东西**：Agent、会话、时间线、游标、事件流。 */
 async function switchScope(scope) {
+  // 先加代际：此后所有**已经在飞**的刷新写回时都会被丢掉。见 `state.scopeGen`。
+  state.scopeGen += 1
   state.scope = scope
   localStorage.setItem(LS_SCOPE, scope)
   state.agentId = null
@@ -830,6 +852,18 @@ function notice(message) {
 
 // ── 事件流 ──────────────────────────────────────────────────────────────────
 
+/**
+ * 合并刷新。**在模块里建一次**，不是每次连流都建一个——
+ * 两个 refresher 就是两套计时器与两份"在飞"记账，合并就失效了
+ * （而它失效的样子是"请求数没降下来"，不是报错）。
+ */
+const refreshLoop = createRefresher({
+  run: async () => {
+    await refreshTimeline()
+    await refreshTasks()
+  },
+})
+
 function connectStream() {
   if (state.sse !== null) { try { state.sse.close() } catch { /* 已关 */ } }
   const params = new URLSearchParams({ scope: state.scope, kind: 'mobile' })
@@ -842,8 +876,11 @@ function connectStream() {
   es.onmessage = () => {
     // ★ 事件帧只当通知：内容一律回 Hub 读。这样"事件丢了"最多是晚一会儿看到，
     //   而不是界面上一段缺失。
-    void refreshTimeline().catch(() => { })
-    void refreshTasks().catch(() => { })
+    //
+    // 但**不能每一帧都去读一遍**：一帧 = 4 个请求（时间线 1 + 看板 3），
+    // 而一条任务在跑时进展事件是连着来的。交给 `refreshLoop` 合并成
+    // 静默期内一次，并保证**结尾那一次一定跑**。见 `refresh-loop.mjs`。
+    refreshLoop.request()
   }
   es.onerror = () => {
     // EventSource 自带重连；这里只更新状态显示，不去手工重连（两套重连会互相打断）。
@@ -946,7 +983,8 @@ function bind() {
     renderAuth()
   })
   $('btn-logout').addEventListener('click', doLogout)
-  $('btn-refresh').addEventListener('click', () => { void refreshTimeline(); void refreshTasks() })
+  // 用户显式点：立刻跑，不走去抖（他在等结果，不该再等 400ms）。
+  $('btn-refresh').addEventListener('click', () => { refreshLoop.now() })
   $('btn-send').addEventListener('click', () => { void send($('composer-input').value) })
   $('composer-input').addEventListener('keydown', (e) => {
     if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); void send($('composer-input').value) }

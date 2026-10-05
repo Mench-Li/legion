@@ -510,6 +510,12 @@ async function stageTest() {
       files: [
         'product/update/client.test.mjs',
         'product/update/errors.test.mjs',
+        // ★ 通道 sequence 高水位的判据：回退拒绝、**续签接受**、同 sequence
+        //   换摘要/换 releaseId 拒绝、高水位按 channel/platform/arch 分键。
+        //   续签那一条是**防止一个看起来很自然的错误修法**：给
+        //   `releaseId → manifestSha256` 加一条"绑定并不许变"的判据，
+        //   会把每一次正常续签判成攻击（续签必然改签发时间 ⇒ 字节必然变）。
+        'product/update/feed.test.mjs',
         'product/update/extract.test.mjs',
         'product/update/zip.test.mjs',
         'product/update/health.test.mjs',

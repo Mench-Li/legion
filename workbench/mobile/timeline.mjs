@@ -30,6 +30,7 @@ export const SOURCES = Object.freeze(['user', 'agent', 'progress', 'command'])
 
 export const TIMELINE_CODES = Object.freeze({
   HUB_UNREACHABLE: 'HUB_UNREACHABLE',
+  NOT_SIGNED_IN: 'NOT_SIGNED_IN',
   NODE_OFFLINE: 'NODE_OFFLINE',
   RUNTIME_UNAVAILABLE: 'RUNTIME_UNAVAILABLE',
   TASK_RUNNING: 'TASK_RUNNING',
@@ -44,12 +45,23 @@ export const TIMELINE_CODES = Object.freeze({
  * 优先级是刻意的：先判 Hub 可达性（它决定"看到的任何东西是不是最新的"），
  * 再判电脑，最后判 runtime。反过来的顺序会在 Hub 掉线时显示"HUB 正常"——
  * 因为最后更新的那次快照里它确实正常。
+ *
+ * `signedIn: false` 与 `hubReachable: false` 是**两件事**，不能合并：
+ * 前者是"你还没登录"（Hub 好好的），后者是"服务端连不上"。
+ * 实测踩过：未登录时界面显示"Hub 不可达"——而那正是把用户送去查网络的
+ * 那种错话。他看到"服务器挂了"会去重启服务器，而其实只需要登录。
  */
-export function deriveConnectionState({ hubReachable = false, nodeOnline = null, runtimeHealthy = null, activeTaskState = null } = {}) {
+export function deriveConnectionState({ hubReachable = false, signedIn = true, nodeOnline = null, runtimeHealthy = null, activeTaskState = null } = {}) {
   if (hubReachable !== true) {
     return Object.freeze({
       code: TIMELINE_CODES.HUB_UNREACHABLE, tone: 'error',
       label: 'Hub 不可达', detail: '读到的内容可能不是最新的；恢复后会按游标补齐',
+    })
+  }
+  if (signedIn !== true) {
+    return Object.freeze({
+      code: TIMELINE_CODES.NOT_SIGNED_IN, tone: 'muted',
+      label: '未登录', detail: 'Hub 正常；登录后即可查看 Agent 与任务',
     })
   }
   if (nodeOnline === false) {

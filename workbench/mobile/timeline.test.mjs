@@ -90,6 +90,27 @@ test('Hub 不可达优先于其它一切（它决定"看到的是不是最新的
   assert.equal(s.tone, 'error')
 })
 
+test('未登录与 Hub 不可达是**两件事**（不能合并）', () => {
+  // ★ 实测踩过：未登录时界面显示"Hub 不可达"——而 `refreshStatus()` 刚刚成功。
+  //   用户看到"服务器挂了"会去重启服务器，而其实只需要登录。
+  const notSignedIn = deriveConnectionState({ hubReachable: true, signedIn: false })
+  assert.equal(notSignedIn.code, TIMELINE_CODES.NOT_SIGNED_IN)
+  // 措辞必须是"未登录"这一侧，且**不能**说服务器有问题。
+  assert.match(notSignedIn.label, /未登录/)
+  assert.ok(!/不可达|连不上|挂了/.test(notSignedIn.label), `不该说服务端有问题：${notSignedIn.label}`)
+  assert.match(notSignedIn.detail, /Hub 正常/)
+  assert.notEqual(notSignedIn.tone, 'error', '未登录不是错误态')
+
+  const unreachable = deriveConnectionState({ hubReachable: false, signedIn: false })
+  assert.equal(unreachable.code, TIMELINE_CODES.HUB_UNREACHABLE, 'Hub 真的不可达时仍要报不可达')
+  assert.equal(unreachable.tone, 'error')
+})
+
+test('signedIn 默认 true（既有调用方不必改）', () => {
+  const s = deriveConnectionState({ hubReachable: true, nodeOnline: true })
+  assert.equal(s.code, TIMELINE_CODES.IDLE)
+})
+
 test('电脑离线明确说明"排队等待"而不是"执行中"', () => {
   const s = deriveConnectionState({ hubReachable: true, nodeOnline: false, activeTaskState: 'Running' })
   assert.equal(s.code, TIMELINE_CODES.NODE_OFFLINE)

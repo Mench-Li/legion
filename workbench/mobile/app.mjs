@@ -256,7 +256,14 @@ async function refreshStatus() {
   try {
     const s = await api('/api/identity/status', { auth: false })
     if (s.bootstrapped === false) $('bootstrap-hint').hidden = false
-  } catch { /* 连不上时登录页自己会报 */ }
+    return true
+  } catch {
+    // **不吞**：返回值决定界面说"Hub 不可达"还是"未登录"。
+    // 原来这里 `catch { /* 登录页自己会报 */ }` 把结果丢了，于是 main() 在末尾
+    // 一律报"Hub 不可达"——即使刚刚这条请求是成功的。
+    // 用户看到"服务器挂了"会去重启服务器，而其实只需要登录。
+    return false
+  }
 }
 
 async function loadAgents() {
@@ -449,7 +456,7 @@ function registerServiceWorker() {
 async function main() {
   bind()
   registerServiceWorker()
-  await refreshStatus()
+  const reachable = await refreshStatus()
   if (state.access !== null) {
     // 已有会话：直接进（令牌可能过期，`api` 会自动刷新一次）。
     try {
@@ -465,7 +472,9 @@ async function main() {
       return
     } catch { clearSession() }
   }
-  setConnection({ hubReachable: false })
+  // ★ 没登录 ≠ Hub 不可达。用 `refreshStatus()` 的真实结果决定措辞——
+  //   一个把"你还没登录"说成"服务器连不上"的界面，会把用户送去查网络。
+  setConnection(reachable ? { hubReachable: true, signedIn: false } : { hubReachable: false })
 }
 
 if (typeof document !== 'undefined' && document.getElementById('screen-login') !== null) {

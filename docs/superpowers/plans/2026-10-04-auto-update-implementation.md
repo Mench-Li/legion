@@ -1115,6 +1115,26 @@ node scripts/update/verify-host.mjs --origin <生产 origin> --prefix /legion \
   `feed-sequence-conflict`（同号不同摘要）或 `feed-sequence-regression`
   （号更小）被客户端拒——**不会**产生"半个通道"，因为通道清单是**单对象替换**。
   所以缺的是"两次发布互相踩"的效率问题，不是数据完整性问题。
+- **本仓没有通用的 `desktop` 套件，于是 `desktop/` 下有几个用例文件没人跑**
+  （前存缺口，不是本次引入的）。CI 里那条"套件清单不完备"的判据会报它们，
+  上一次完整跑报 **33** 个；本次 ㊲ 把其中**属于本目标**的那个登记进了
+  `product-update`（`desktop/main.test.mjs`），剩 **32** 个。
+
+  剩下的 32 个里，与 `desktop/`、`product/launcher/` 相邻的是这三个：
+
+  | 文件 | 与自动更新有关吗 |
+  |---|---|
+  | `desktop/scripts/platform-filter.test.mjs` | 无关（打包平台的过滤） |
+  | `product/launcher/desktop-bridge.test.mjs` | 无关（里面提到 `update` 的 3 处都是 `credentialUpdatedAt`） |
+  | `product/launcher/desktop-protocol.test.mjs` | **无关**（`update`/`升级` 关键字出现 **0** 次） |
+
+  ★ 它们**没有**被登记进 `product-update`，这是刻意的：
+
+  > 为了减少那个计数而登记，正是那条判据最不该被对付的方式。
+
+  而它们该归的套件（一个通用的 `desktop` 套件）**不存在**。所以这一条不是
+  "我漏了"，而是"本仓缺一个归属"——记在这里是为了下一次有人看到那张 32 个的
+  名单时，能直接分辨"哪些是没人管的、哪些只是没配 DSH_CHECKOUT"。
 - **`releaseId` 被复用没有专门的读数**。设计 §5 line 78：「`releaseId` 唯一且
   不可覆盖；同版本不同字节也必须使用不同 `releaseId`，并**禁止客户端把它当成
   常规同版本更新**」。客户端持久化的只有**通道 sequence** 高水位

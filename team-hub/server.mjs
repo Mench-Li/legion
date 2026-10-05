@@ -570,13 +570,12 @@ const runStore = createRunStore({
     if (binding.error) return { ok: false, code: 'REPO_UNBOUND', reason: binding.error }
       const intent = writeIntentStore.getIntent(taskId)
       if (intent && (intent.repoId !== binding.repoId || intent.targetRef !== binding.targetRef)) return { ok: false, code: 'REPO_BINDING_CHANGED', reason: '任务写入意图指向过期仓库或目标分支绑定' }
-      const domain = db.prepare('SELECT fileDomain FROM tasks WHERE id=?').get(taskId)?.fileDomain
-      const fallback = parseJson(domain, [])
-      const paths = intent?.paths ?? (Array.isArray(fallback) ? fallback.map((path) => typeof path === 'string' ? { path, type: 'dir' } : path) : [])
+      // BUG-006：路径取法与诊断端点共用同一个函数（见 store.resolvePlannedPaths 的注释）。
+      const { paths, from } = writeIntentStore.resolvePlannedPaths(taskId, { intent })
     return writeIntentStore.reserve({
       repoId: binding.repoId, taskId, attemptId, epoch, paths,
       exclusive: paths.length === 0, capability: binding.capability,
-        targetRef: binding.targetRef, leaseMs, source: intent ? 'runtime-claim' : paths.length ? 'file-domain-fallback' : 'unplanned-exclusive',
+        targetRef: binding.targetRef, leaseMs, source: from === 'intent' ? 'runtime-claim' : from,
     })
   },
   onWriteContention: ({ taskId, conflict }) => {
@@ -5870,10 +5869,10 @@ function claimTask(id, soldier, ifVersion, force, round, requestId, ttlMinutes, 
     const expires = ttl !== null && ttl !== undefined ? new Date(new Date(at).getTime() + ttl * 60_000).toISOString() : null
     const binding = resolveDeliveryBinding(t.scope)
     if (binding.error) throw Object.assign(new Error(binding.error), { code: 'REPO_UNBOUND', statusCode: 409 })
-    const intent = writeIntentStore.getIntent(id)
-    if (intent && (intent.repoId !== binding.repoId || intent.targetRef !== binding.targetRef)) throw Object.assign(new Error('任务写入意图指向了过期的仓库或目标分支绑定，请重新规划范围'), { code: 'REPO_BINDING_CHANGED', statusCode: 409 })
-    const fallback = parseJson(db.prepare('SELECT fileDomain FROM tasks WHERE id=?').get(id)?.fileDomain, [])
-    const plannedPaths = intent?.paths ?? (Array.isArray(fallback) ? fallback.map((path) => typeof path === 'string' ? { path, type: 'dir' } : path) : [])
+    const fallbackIntent = writeIntentStore.getIntent(id)
+    if (fallbackIntent && (fallbackIntent.repoId !== binding.repoId || fallbackIntent.targetRef !== binding.targetRef)) throw Object.assign(new Error('任务写入意图指向了过期的仓库或目标分支绑定，请重新规划范围'), { code: 'REPO_BINDING_CHANGED', statusCode: 409 })
+    // BUG-006：路径取法与诊断端点共用同一个函数。
+    const { paths: plannedPaths, from: plannedFrom } = writeIntentStore.resolvePlannedPaths(id, { intent: fallbackIntent })
     const old = writeIntentStore.listActiveReservations(binding.repoId).find((r) => r.taskId === id)
     const leaseEpoch = Math.max(t.version + 1, (old?.leaseEpoch ?? 0) + 1)
     const attemptId = `legacy:${id}:${leaseEpoch}`
@@ -5883,7 +5882,7 @@ function claimTask(id, soldier, ifVersion, force, round, requestId, ttlMinutes, 
         repoId: binding.repoId, taskId: id, attemptId,
         epoch: leaseEpoch, paths: plannedPaths, exclusive: plannedPaths.length === 0,
         targetRef: binding.targetRef, capability: binding.capability,
-        leaseMs: ttl ? ttl * 60_000 : null, source: intent ? 'claim' : plannedPaths.length ? 'file-domain-fallback' : 'unplanned-exclusive',
+        leaseMs: ttl ? ttl * 60_000 : null, source: plannedFrom === 'intent' ? 'claim' : plannedFrom,
       })
     if (!reserved.ok) {
       if (reserved.code === 'FILE_CONTENTION' || reserved.code === 'SINGLE_WRITER_REQUIRED') {
@@ -5950,13 +5949,13 @@ function transitionTask(id, to, by, ifVersion, force, confirmedStopped = false) 
       const active = writeIntentStore.listActiveReservations(binding.repoId).find((r) => r.taskId === id)
       if (active?.state === 'reconciling') return { blocked: { code: 'RESERVATION_RECONCILING', reason: '上一次写入尚未确认停止' } }
       if (!active) {
-        const fallback = parseJson(db.prepare('SELECT fileDomain FROM tasks WHERE id=?').get(id)?.fileDomain, [])
-        const paths = intent?.paths ?? (Array.isArray(fallback) ? fallback.map((path) => typeof path === 'string' ? { path, type: 'dir' } : path) : [])
+        // BUG-006：路径取法与诊断端点共用同一个函数。
+        const { paths, from } = writeIntentStore.resolvePlannedPaths(id, { intent })
         const reserved = writeIntentStore.reserve({
           repoId: binding.repoId, taskId: id, attemptId: `legacy:${id}:${t.version + 1}`,
           epoch: t.version + 1, paths, exclusive: paths.length === 0,
           targetRef: binding.targetRef, capability: binding.capability,
-          source: intent ? 'transition' : paths.length ? 'file-domain-fallback' : 'unplanned-exclusive',
+          source: from === 'intent' ? 'transition' : from,
         })
         if (!reserved.ok) {
           if (reserved.code === 'FILE_CONTENTION' || reserved.code === 'SINGLE_WRITER_REQUIRED') {

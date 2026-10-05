@@ -1496,6 +1496,10 @@ async function stageTest() {
     { label: 'delivery-submit（真实 HTTP 交付）', files: ['team-hub/delivery-submit.e2e.test.mjs'], cwd: ROOT },
     { label: 'verify-config（仓库验证命令配置）', files: ['team-hub/verify-config.test.mjs'], cwd: ROOT },
     { label: 'write-intent-routes（S4 写入资格/预约 HTTP 契约）', files: ['team-hub/write-intent-routes.test.mjs'], cwd: ROOT },
+    // BUG-006：`GET /api/tasks/:id/contention` 曾与认领路径**各写一套**文件域取法（诊断不看
+    // `tasks.fileDomain`），于是同一个任务在诊断里被当成整仓独占、在认领路径上却正常认领 ——
+    // 读数与事实不一致，排障的人会去修不存在的问题。这一套守"四处共用同一个取法"（四方向对照）。
+    { label: 'contention-paths（BUG-006：诊断端点与认领路径共用同一套文件域取法）', files: ['team-hub/contention-paths.test.mjs'], cwd: ROOT },
     { label: 'delivery-routes（S4 交付/集成/裁决 HTTP 契约）', files: ['team-hub/delivery-routes.test.mjs'], cwd: ROOT },
     { label: 'metrics（S4 指标只读聚合与不可读降级）', files: ['team-hub/metrics.test.mjs'], cwd: ROOT },
     { label: 'write-eligibility（S5 守护侧写入资格/RunRequest 冻结/等待视图）', files: ['plugins/tests/write-eligibility.test.mjs'], cwd: ROOT, nodeArgs: ['--experimental-strip-types'] },

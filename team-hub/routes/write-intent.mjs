@@ -194,9 +194,12 @@ export function createWriteIntentRoutes({
     const binding = resolveRepoBinding(task.scope)
     if (binding.error) { json(res, 409, { ok: false, code: 'REPO_UNBOUND', message: binding.error }); return }
     const intent = writeIntentStore.getIntent(task.id)
-    const paths = intent?.paths ?? []
+    // ★ BUG-006：这里曾经是 `intent?.paths ?? []` —— **不看 fileDomain**，于是"声明了文件域、
+    //   未申报 write-intent"的任务在诊断里被当成整仓独占，而它在认领路径上其实能正常认领。
+    //   现在与认领/预约/过渡共用 store 里的同一个取法（`resolvePlannedPaths`）。
+    const { paths, from } = writeIntentStore.resolvePlannedPaths(task.id, { intent })
     const conflict = writeIntentStore.inspectContention({ repoId: binding.repoId, taskId: task.id, paths, exclusive: paths.length === 0 })
-    json(res, 200, { ...conflict, repoId: binding.repoId, schedulingState: task.scheduling_state ?? 'unplanned', integrationMode: process.env.LEGION_INTEGRATION_MODE === 'integration' })
+    json(res, 200, { ...conflict, pathsFrom: from, repoId: binding.repoId, schedulingState: task.scheduling_state ?? 'unplanned', integrationMode: process.env.LEGION_INTEGRATION_MODE === 'integration' })
   })
 
   // GET /api/repositories/:id/contention —— 只读视图（不写库、不改派工）

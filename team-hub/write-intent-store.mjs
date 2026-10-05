@@ -247,6 +247,48 @@ export function createWriteIntentStore(db, { now = () => Date.now(), caseInsensi
     },
 
     getIntent(taskId) { return toIntent(intentRow(taskId)) },
+
+    /**
+     * 「这个任务打算写哪些路径」的**唯一**取法 —— 认领 / 预约 / 过渡 / 诊断**四处共用**。
+     *
+     * 优先级（既有语义，本次不改）：active write-intent 优先于 `tasks.fileDomain`；
+     * 两者都没有 ⇒ 空数组，调用方据此按**整仓独占**处理（`exclusive: paths.length === 0`）。
+     *
+     * ★ 为什么必须是一个函数而不是各写一遍（这是 BUG-006 的根因）：
+     *   诊断端点 `GET /api/tasks/:id/contention` 曾经自己写成 `intent?.paths ?? []` —— **不看
+     *   fileDomain**。于是同一个任务在诊断里被当成"未申报 ⇒ 整仓独占"，而认领路径却用它自己的
+     *   fileDomain 正常认领。实测（2026-10-05）：T-178 声明了 5 个目录、确实在跑，诊断却报
+     *   「文件被任务 T-177 占用：(whole repository)」—— 将军据此去查了一个**不存在的文件冲突**
+     *   （真相是它只是排在并发槽位后面）。
+     *   这正是该端点注释里写的 "no duplicate UI path algorithm" 要防的事：同一件事两处各解释一次，
+     *   迟早漂移；而漂移出来的是**读数**，比缺一个功能更贵 —— 它会让排障的人修不存在的问题。
+     *
+     * `from` 让调用方不必再自己判断一遍"路径是哪来的"（原先每个调用点各写一次三元表达式，
+     * 那也是同一类分叉的温床）；调用方只需把 'intent' 映射成自己的 source 文案。
+     *
+     * @param {string} taskId
+     * @param {{ intent?: object|null }} [pre] 调用方**已经读过**的 intent（避免二次读库导致两次判断不一致）
+     * @returns {{ paths: ReadonlyArray<unknown>, from: 'intent'|'file-domain-fallback'|'unplanned-exclusive' }}
+     *   `from === 'intent'` 时 `paths` 是 intent 里**原样**的条目（`upsertIntent` 写入时已归一化成
+     *   `{ok,path,type}`；历史行可能是裸字符串）。这与修改前各调用点的行为一致
+     *   （`intent?.paths ?? …` 不做二次规范化），`reserve()`/`inspectContention()` 自己会再归一。
+     *   本次只统一**取法**，不顺手改形状。
+     *   `from === 'file-domain-fallback'` 时是 `{path,type:'dir'}`（因为列里存的是字符串）。
+     */
+    resolvePlannedPaths(taskId, pre = {}) {
+      const intent = pre.intent === undefined ? toIntent(intentRow(taskId)) : pre.intent
+      const asDirEntries = (list) => (Array.isArray(list)
+        ? list.map((p) => (typeof p === 'string' ? { path: p, type: 'dir' } : p))
+        : [])
+      // 与原来逐字一致的取法：intent?.paths ?? fileDomain（注意 `??` 只在 null/undefined 时回落，
+      // intent 存在但 paths 为 [] 时**不**回落 —— 那是"申报了零个路径"的显式意图，不是没申报）。
+      const fallback = asDirEntries(parsePaths(db.prepare('SELECT fileDomain FROM tasks WHERE id=?').get(taskId)?.fileDomain))
+      const paths = intent?.paths ?? fallback
+      return Object.freeze({
+        paths: Object.freeze(paths),
+        from: intent ? 'intent' : paths.length > 0 ? 'file-domain-fallback' : 'unplanned-exclusive',
+      })
+    },
     listActiveReservations(repoId) { return Object.freeze(activeRows(repoId).map(toReservation)) },
     inspectContention({ repoId, taskId, paths = [], exclusive = false }) {
       const set = toEntryList(paths, opts)

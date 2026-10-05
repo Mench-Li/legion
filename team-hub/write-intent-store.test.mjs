@@ -248,3 +248,68 @@ test('活跃预约只允许原样重放，不能缩小范围或改写 epoch', ()
   assert.deepEqual(store.listActiveReservations('r1')[0].paths, first.reservation.paths)
   assert.equal(store.reserve({ repoId: 'r1', taskId: 't2', attemptId: 'a2', epoch: 1, paths: ['b.mjs'] }).code, 'FILE_CONTENTION')
 })
+
+// ── BUG-006：`resolvePlannedPaths` 是「这个任务打算写哪些路径」的**唯一**取法 ──────────
+//
+// HTTP 面的四方向对照（诊断 vs 认领）在 team-hub/contention-paths.test.mjs；
+// 这一条守的是**取法本身**的两个易错点：
+//   · `??` 只在 null/undefined 时回落 ⇒ intent 的 paths 为**空数组**时**不**回落 fileDomain。
+//     那是"显式申报了零个路径"，不是"没申报"；写成 `||`（或先判 length）就把这两件事混成一件事，
+//     而后者的后果是"整仓独占"这个安全方向被悄悄放宽。
+//   · fileDomain 是历史列、用户可能手改过 ⇒ 脏数据（不是数组）必须当空处理且**不抛**。
+test('BUG-006 resolvePlannedPaths：intent 优先、空数组不回落、脏 fileDomain 不抛', () => {
+  const { dbA: db, dbB } = pair()
+  db.exec('CREATE TABLE IF NOT EXISTS tasks (id TEXT PRIMARY KEY, fileDomain TEXT)')
+  const store = createWriteIntentStore(db)
+  const addTask = (id, fileDomain = null) => db.prepare('INSERT INTO tasks (id, fileDomain) VALUES (?,?)').run(id, fileDomain)
+
+  // ① 无 intent、有 fileDomain ⇒ 用 fileDomain（字符串规范成 {path,type:'dir'}）
+  addTask('t-dom', JSON.stringify(['a/', 'b/']))
+  assert.deepEqual(store.resolvePlannedPaths('t-dom'), {
+    paths: [{ path: 'a/', type: 'dir' }, { path: 'b/', type: 'dir' }],
+    from: 'file-domain-fallback',
+  })
+
+  // ② 无 intent、无 fileDomain ⇒ 空数组 + unplanned-exclusive（调用方据此 exclusive:true）
+  addTask('t-none')
+  assert.deepEqual(store.resolvePlannedPaths('t-none'), { paths: [], from: 'unplanned-exclusive' })
+
+  // ③ 有 intent ⇒ 一律以 intent 为准，**即使它申报的是零个路径**
+  //
+  //  这里守的是"没有 intent"与"intent 申报了零个路径"**不是同一件事**。两者都必须走 intent 分支：
+  //  前者表现为"不该有 intent 却回落到 fileDomain"，后者表现为"零个路径被 fileDomain 顶替"。
+  //  ★ 一句如实的说明：`??` 与 `||` 在这条上**恰好不可区分**（空数组在 JS 里是 truthy，
+  //    `[] || fb` 仍是 `[]`）。所以真正要防的不是"写成 `||`"，而是把判断写成**长度**形态
+  //    （`paths.length ? paths : fb` 或 `if (!paths.length)`）—— 那才会把这两件事混成一件。
+  addTask('t-empty-intent', JSON.stringify(['z/']))
+  assert.equal(store.upsertIntent({ repoId: 'r1', taskId: 't-empty-intent', attemptId: 'a1', targetRef: null, paths: [] }).ok, true)
+  const emptyIntent = store.resolvePlannedPaths('t-empty-intent')
+  assert.equal(emptyIntent.from, 'intent',
+    'intent 存在时不许走 fileDomain 分支（判断若写成"路径数为 0 就回落"会在这里错）')
+  assert.deepEqual(emptyIntent.paths, [], 'intent 申报零个路径就是零个，不许拿 fileDomain 顶替')
+
+  // ④ 有 intent 且 fileDomain 是另一个目录 ⇒ 仍以 intent 为准（intent 优先的既有语义）
+  addTask('t-wins', JSON.stringify(['other/']))
+  assert.equal(store.upsertIntent({ repoId: 'r1', taskId: 't-wins', attemptId: 'a2', targetRef: null, paths: ['picked/'] }).ok, true)
+  const wins = store.resolvePlannedPaths('t-wins')
+  assert.equal(wins.from, 'intent')
+  // intent 里存的是 upsertIntent **归一化过**的条目（去掉尾斜杠、type 默认 file），
+  // 与 fileDomain 回落分支的 `{path,type:'dir'}` 形状不同 —— 这是既有行为，本次只统一取法，不改形状。
+  assert.deepEqual([...wins.paths], [{ ok: true, path: 'picked', type: 'file' }])
+
+  // ⑤ 脏 fileDomain ⇒ 当空处理，不抛。两种脏都要覆盖：
+  //    · 合法 JSON 但不是数组（列被手改成对象）
+  //    · **根本不是 JSON**（列被手改成随便一段文本）—— 这一种只有真正的 try/catch 兜底才过得去
+  addTask('t-dirty', '{"not":"an array"}')
+  assert.deepEqual(store.resolvePlannedPaths('t-dirty'), { paths: [], from: 'unplanned-exclusive' })
+  addTask('t-broken', 'not json at all')
+  assert.deepEqual(store.resolvePlannedPaths('t-broken'), { paths: [], from: 'unplanned-exclusive' })
+
+  // ⑥ 调用方已读过的 intent 可以传入（避免二次读库导致两次判断不一致）
+  const pre = store.getIntent('t-wins')
+  assert.equal(store.resolvePlannedPaths('t-wins', { intent: pre }).from, 'intent')
+  assert.deepEqual(store.resolvePlannedPaths('t-wins', { intent: null }), {
+    paths: [{ path: 'other/', type: 'dir' }], from: 'file-domain-fallback',
+  }, '显式传 null 表示"确实没有 intent" ⇒ 应当回落 fileDomain')
+  db.close(); dbB.close()
+})

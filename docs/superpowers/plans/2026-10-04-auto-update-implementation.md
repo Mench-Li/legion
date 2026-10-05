@@ -1672,7 +1672,7 @@ node scripts/update/verify-host.mjs --origin <生产 origin> --prefix /legion \
 # ★ 下面这份清单与 CI 的 `product-update` 套件**不是**同一份，两者都要跑：
 #   这里多跑了 `launcher.test.mjs` / `desktop-bridge.test.mjs` 等接线层，
 #   而 CI 那份多跑了 `errors` / `integration` / `envelope` 等（见 §7.1）。
-#   两个数字应当各自对得上——`product-update` 是 **476**。
+#   两个数字应当各自对得上——`product-update` 是 **477**。
 #
 # ★ 清单里必须包含 `product/launcher/cli-recovery.test.mjs`：它是恢复入口
 #   （设计 §8 line 190）的 9 条用例。**先前这一行漏了它**，于是按本文档
@@ -1686,7 +1686,7 @@ node --test product/update/*.test.mjs product/upgrade/*.test.mjs \
   product/launcher/cli-recovery.test.mjs \
   desktop/scripts/shell-files.test.mjs desktop/scripts/update-payload.test.mjs
 
-# CI 的 `product-update` 套件那一份（**476 条**）。两份都与上面同一棵树上跑过。
+# CI 的 `product-update` 套件那一份（**477 条**）。两份都与上面同一棵树上跑过。
 #
 # ★ 与 §7.1 里那次全量 CI 的读数（406）不同，差的是三次之后才加的东西：
 #   `modules.test.mjs` 的"selfCheckAll() 必须覆盖每一个有自检的模块"、
@@ -1729,7 +1729,7 @@ node --test desktop/scripts/shell-files.test.mjs
 node scripts/ci/run-ci.mjs
 ```
 
-### 7.1 全量 CI 的实际读数（`01ee3c9e`，52.6 分钟）
+### 7.1 全量 CI 的实际读数（`17f97627`，52.8 分钟）
 
 ★ 这一节的读数是**最新一次完整跑**。下面还留着前两次（`b41a7a10` / `4e2728cd`）的读数，
 因为两次之间的差集本身是一条判据。
@@ -1743,15 +1743,36 @@ test   FAIL   smoke PASS  stage PASS      doc PASS
 
 ```
 PASS product-update（自动更新：协议验签、下载缓存、状态机、事务与恢复）
-     exit=0 tests=476 pass=476 fail=0 skipped=0
+     exit=0 tests=477 pass=477 fail=0 skipped=0
 PASS desktop-payload-packaging（升级载荷的身份：签名清单描述的东西 =
      x64 安装器交付的东西；载荷里的 dsh 家族必须钉死版本）
      exit=0 tests=3 pass=3 fail=0 skipped=0
 ```
 
-★ 那 476 条与我在本地按**同一份文件清单**跑出来的数字**逐字相同**。这一点值得
+★ 那 477 条与我在本地按**同一份文件清单**跑出来的数字**逐字相同**。这一点值得
 单独记：门禁跑的是它自己在 `run-ci.mjs` 里列的清单，而"我本地跑过了"通常指的
 是另一个集合。两个数字对上，才说明"我验证过的"与"门禁验证的"是同一件事。
+
+★★ **与上一次完整跑（`01ee3c9e`）做差集：红灯清单 37 ↔ 37，`Compare-Object`
+判定**逐条完全一致**——连"未登记用例数"那一行都没再动（㊸ 只加了用例与文档，
+没有增删任何套件登记）。
+
+---
+
+#### 上一次完整跑（`01ee3c9e`，52.6 分钟）——留作差集对照
+
+```
+syntax PASS   env FAIL   boundary FAIL   deps PASS   build PASS
+test   FAIL   smoke PASS  stage PASS      doc PASS
+```
+
+```
+PASS product-update（自动更新：协议验签、下载缓存、状态机、事务与恢复）
+     exit=0 tests=476 pass=476 fail=0 skipped=0
+PASS desktop-payload-packaging（升级载荷的身份：签名清单描述的东西 =
+     x64 安装器交付的东西；载荷里的 dsh 家族必须钉死版本）
+     exit=0 tests=3 pass=3 fail=0 skipped=0
+```
 
 ★★ **与上一次完整跑（`b41a7a10`）做差集：红灯清单 37 ↔ 37，唯一的变化就是
 本行自己**：
@@ -1761,10 +1782,10 @@ PASS desktop-payload-packaging（升级载荷的身份：签名清单描述的�
 | `套件清单不完备：32 个` → **`28 个`** | ㊷ 登记了四个文件（未登记数 32 → 28） |
 | `desktop-payload-packaging` 出现 | 新增套件，3 条全过 |
 
-> 判据清单里**唯一**变动的一行，是"未登记用例数"那一行——也就是说这一轮的改动
+> 判据清单里**唯一**变动的一行，是"未登记用例数"那一行——也就是说那一次的改动
 > **只把那条判据往好的方向推了 4 个**，没有碰到任何别的判据。
 
-★ 这一轮碰过的判据在两次里都是绿的：`declaration-mirrors` 12/0、
+★ 那一次碰过的判据在两次里都是绿的：`declaration-mirrors` 12/0、
 `suite-counts` 13/0，而 `silent-declarations` 2/**1** 是**基点就有**的红
 （§7.2 那张表里逐字比对过失败理由）。
 

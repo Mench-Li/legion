@@ -85,7 +85,7 @@ export {
 
 // —— 事务层 ——
 export {
-  PROTECTED_STATES, RETRYABLE_STATES, STATE_CHECKED, STATE_LABELS, TERMINAL_STATES, UPDATE_CHAIN,
+  PROTECTED_STATES, RETRYABLE_STATES, STATE_CHECKED, TERMINAL_STATES, UPDATE_CHAIN,
   UPDATE_EVENTS, UPDATE_OFFCHAIN, UPDATE_STATES, canCancelDownload, canDownload, canInstall, selfCheckState, transition,
 } from './state.mjs'
 export { CHECK_OUTCOMES as CLIENT_CHECK_OUTCOMES, MAX_NOTES_BYTES, createUpdateClient, decodePlainText } from './client.mjs'

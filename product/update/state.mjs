@@ -235,28 +235,23 @@ export function transition(currentState, event) {
   return Object.freeze({ ok: true, state: next, changed: true, code: 'update-state-changed', reason: `${currentState} → ${next}` })
 }
 
-/** 状态的可读标签（界面文案；错误码不在这里）。 */
-export const STATE_LABELS = Object.freeze({
-  idle: '待检查',
-  checking: '正在检查更新',
-  available: '发现新版本',
-  downloading: '正在下载',
-  verifying: '正在验证更新',
-  ready: '更新已就绪',
-  'waiting-for-tasks': '等待在途任务结束',
-  preparing: '正在准备更新',
-  installing: '正在安装',
-  validating: '正在验证新版本',
-  committed: '升级完成',
-  'up-to-date': '已是最新版本',
-  'source-unsupported': '这个版本不支持从你的版本升级',
-  'check-failed': '检查更新失败',
-  'download-failed': '下载失败',
-  cancelled: '已取消下载',
-  'install-blocked': '安装被阻止',
-  'rolled-back': '已回退到旧版本',
-  'recovery-required': '需要人工恢复',
-})
+// ★★★ 这里原先有一张 `STATE_LABELS`（"状态的可读标签（界面文案）"）。
+//   已删除。理由：**全仓没有任何界面读它**——它只出现在自己的自检与
+//   `index.mjs` 的再导出里。用户真正看到的那句话在
+//   `desktop/update-panel.mjs` 的 `STATE_TEXT` 里（由 `projectView` → `render`
+//   消费），而那才是"改了文案用户会不会看到"这个问题的答案。
+//
+//   ★ 这不是理论风险：本轮加 `source-unsupported` 时，**我先把文案加进了
+//     这张表**，以为那就是用户文案——直到去查"谁读它"才发现没有任何人读。
+//
+//   > 一张名字叫"界面文案"、注释也写着"界面文案"的表，
+//   > 与一张界面真的会读的表，在"改了文案用户会不会看到"上不是同一个东西。
+//
+//   覆盖率那一条判据**没有丢**，它搬到了真正的表所在的地方：
+//   `desktop/update-panel.test.mjs` 里有一条跨模块接缝判据
+//   （`UPDATE_STATES` 与 `STATE_TEXT` 必须逐个对齐，两个方向都查）。
+//   搬到那边比留在这里更强：留在这里只能保证"两张表都覆盖了词汇表"，
+//   而搬过去之后保证的是"**用户看到的**那张覆盖了词汇表"。
 
 /** 该状态是否允许用户发起"下载更新"（设计 §7 line 146）。 */
 export function canDownload(state) {
@@ -357,9 +352,17 @@ export function selfCheckState() {
   if (transition('validating', 'rollback').state !== 'rolled-back') problems.push('回退落点不可达')
   if (transition('validating', 'recovery-required').state !== 'recovery-required') problems.push('人工恢复落点不可达')
 
-  // ⑤ 每个状态都有标签；每个事件都在表里有一条入口。
-  const missingLabels = UPDATE_STATES.filter((state) => typeof STATE_LABELS[state] !== 'string')
-  if (missingLabels.length > 0) problems.push(`这些状态没有标签：${missingLabels.join('/')}`)
+  // ⑤ 每个事件都在表里有一条入口。
+  //
+  //   ★ 这里原先还有一条"每个状态都有标签"（查 `STATE_LABELS` 的覆盖）。
+  //     那张表已删除（见上面的注释），于是这条判据搬到了**真正会被渲染的
+  //     那张表**所在的地方：`desktop/update-panel.test.mjs` 里有一条跨模块
+  //     接缝判据，断言 `UPDATE_STATES` 与面板的 `STATE_TEXT` 逐个对齐。
+  //
+  //     > 覆盖率的判据应当挂在**用户真的会看到**的那张表上；
+  //     > 挂在一张没人读的表上，它保证的是一句与界面无关的话。
+  //
+  //     ★ 留在这里的那半（词汇表本身自洽）由下面 ⑥ 与 ②b 承担。
   const missingEvents = UPDATE_EVENTS.filter((event) => T[event] === undefined)
   if (missingEvents.length > 0) problems.push(`这些事件没有转移表：${missingEvents.join('/')}`)
 

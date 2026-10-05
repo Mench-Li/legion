@@ -115,6 +115,20 @@ function createDeadline({ idleMs, overallMs = null, signal = null }) {
     signal: controller.signal,
     /** 每收到一块就调用：重新武装空闲计时。 */
     touch: armIdle,
+    /**
+     * ★ 主动中止这次取件（流式限长超出时用）。
+     *
+     *   `transformLimit` 超限时的注释是「继续收下去等于让对方决定我们要写多少
+     *   磁盘」，所以要**真的把请求掐掉**。而原先调用点给的是 `() => deadline.signal`
+     *   ——那是一个**信号对象**，不是"中止"这个动作：调用它得到的是
+     *   `AbortSignal`，再对它加 `?.()` 就抛 `TypeError`。
+     *
+     *   后果不是"少停一次"：那条 TypeError **顶替**了设计好的
+     *   `NET_TOO_LARGE`，于是上层把它归到 `net-offline`（"网络不可达"），
+     *   而理由里泄露一句内部实现错误。见 `transport.test.mjs` 里那条
+     *   "对方发得比清单说得多"的用例。
+     */
+    abort() { controller.abort() },
     stop() {
       clear()
       if (signal !== null) signal.removeEventListener('abort', onExternalAbort)
@@ -325,7 +339,7 @@ export function createTransport({
           try { onProgress(received, expectedSize) } catch { /* 界面回调不该影响下载 */ }
         }
       })
-      const limit = new TransformLimit(expectedSize, () => deadline.signal)
+      const limit = new TransformLimit(expectedSize, () => deadline.abort())
       const sink = createWriteStream(partPath, { flags: 'w' })
       try {
         await pipeline(source, limit, sink)
@@ -441,7 +455,17 @@ class TransformLimit extends Transform {
     this.#seen += chunk.length
     if (this.#seen > this.#limit) {
       // ★ 超限即中止请求：继续收下去等于让对方决定我们要写多少磁盘。
-      this.#onTrip()?.()
+      //
+      //   ★ `#onTrip?.()` 只调用**一次**（回调本身）。原先写的是
+      //   `this.#onTrip()?.()`——那会去调用回调的**返回值**。调用点给的是
+      //   `() => deadline.abort()`（返回 undefined），于是 `?.()` 恰好是空操作，
+      //   看起来"没坏"；但调用点一旦给一个**返回可调用物**的回调（例如原先把
+      //   信号对象当动作传），它就会在超限这条路径上抛 TypeError，把
+      //   `NET_TOO_LARGE` 顶掉。
+      //
+      //   > 一个"恰好是空操作"的 `?.()`，与一个真正的空操作，
+      //   > 只在回调返回什么的那一天才看得出区别——而那天正好是限长生效的那天。
+      this.#onTrip?.()
       const error = new Error(`NET_TOO_LARGE:${this.#seen}`)
       error.code = 'NET_TOO_LARGE'
       callback(error)

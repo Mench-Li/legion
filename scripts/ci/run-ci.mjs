@@ -551,6 +551,16 @@ async function stageTest() {
         'desktop/update-service.test.mjs',
         'desktop/update-wiring.test.mjs',
         'desktop/update-panel.test.mjs',
+        // ★ 这个文件此前**没有被任何套件登记**（CI 那条"套件清单不完备"的判据
+        //   报的就是它）。它与自动更新的关系是**桌面那一半的门禁展示**：
+        //   `desktop/main.mjs` 在一次中断的升级进行中必须挡住正常启动，
+        //   并且要对用户说「正在升级」而不是「无法启动」——设计 §8 要求
+        //   「新旧 Launcher 均识别未完成事务，在恢复结束前禁止正常业务启动」。
+        //
+        //   ★ 那条判据的形状值得记：Launcher 那一半（`update-gate.test.mjs`）
+        //     在 CI 里跑着，而**桌面这一半从来没有**。于是"挡住了启动"有人守，
+        //     "挡住之后对用户说了什么"没人守——而后者才是用户真正看到的东西。
+        'desktop/main.test.mjs',
         'desktop/scripts/shell-files.test.mjs',
         'desktop/scripts/update-payload.test.mjs',
         'scripts/update/publish.test.mjs',

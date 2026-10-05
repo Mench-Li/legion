@@ -96,7 +96,7 @@
 
 写下来是因为它们的形状比"改对了"更值得留下来。
 
-一共三十五条。①～⑩ 是各层实现里的具体错误（错读一个头、前缀不一致、跨不过
+一共三十六条。①～⑩ 是各层实现里的具体错误（错读一个头、前缀不一致、跨不过
 进程边界、手写清单漏了文件……）；**⑪～㉓ 属于同一类**，它们不是"某个函数
 写错了"，而是**判据/承诺与它的输入之间那条线从来没有接上**——⑪～⑱ 与
 ⑲～㉓ 都是这一类，区别只在于**被谁发现**：⑪～⑯ 是全链路用例与接线层用例
@@ -885,7 +885,50 @@ internal + http + 显式允许  → ok
 §11 那个"生产 HTTPS 入口"的决定。本轮做完的是"生成器**能**产出客户端接受的形态"，
 **不是**"生产入口已经配好"。
 
-### 5.2 ⑲～㊱ 是怎么找到的：**逐条对照设计**
+**㊲ 桌面那一半的门禁展示从来没有被 CI 跑过——而我一直在声称它通过了。**
+
+CI 里有一条判据会报"哪些 `*.test.mjs` 不会被任何套件执行"（上一次完整跑报 33 个）。
+我把那一整张名单逐条对过，确认**我新加的文件一个都不在里面**——然后就停在那里了。
+
+★ 停在那里是错的。我把那份名单里**我一直在跑的**文件挑出来看了一眼：
+
+```
+desktop/main.test.mjs                       ← 在名单里
+desktop/scripts/platform-filter.test.mjs    ← 在名单里
+product/launcher/desktop-bridge.test.mjs    ← 在名单里
+product/launcher/desktop-protocol.test.mjs  ← 在名单里
+```
+
+而我的 §7 复现命令**一直在跑它们**，于是我的报告里那几十条"通过"里包含
+**CI 永远不会跑**的用例。也就是说：我只回答了"我新加的文件登记了吗"，
+没有回答"**我引用的证据里有没有根本没进 CI 的**"。
+
+> "我新加的没漏登记"与"我引用的证据都在 CI 里"是两个问题；
+> 只查前者，报告里就会混进后者。
+
+其中 `desktop/main.test.mjs` 是**真的属于本目标**的：13 行与升级/屏障相关，
+包含那条「升级期间被挡下的启动：说『正在升级』，不说『无法启动』」。
+
+它暴露的是一个**半边接线**的形状：
+
+| 半边 | 判据在哪 | CI 跑不跑 |
+|---|---|---|
+| Launcher 挡住启动 | `product/launcher/update-gate.test.mjs` | **跑** |
+| 桌面挡住之后**对用户说了什么** | `desktop/main.test.mjs` | **不跑** |
+
+> "挡住了启动"有人守，"挡住之后对用户说了什么"没人守——
+> 而后者才是用户真正看到的东西。
+
+修法：把它登记进 `product-update` 套件（16 条、0.9 秒、不需要 DSH 检出/网络，
+所以登记是安全的）。套件从 424 条变成 **440** 条。
+
+★ 另外三个（`platform-filter` / `desktop-bridge` / `desktop-protocol`）**没有**登记：
+它们与自动更新无关（`desktop-protocol.test.mjs` 里 `update`/`升级` 关键字出现 **0** 次），
+把它们塞进 `product-update` 会是**为了减少那个计数**而登记——而那正是那条判据
+（"套件清单不完备"）最不该被对付的方式。它们该归的套件（一个通用的 `desktop` 套件）
+**目前不存在**，这是本仓前存的覆盖缺口，已如实记在 §6.1。
+
+### 5.2 ⑲～㊲ 是怎么找到的：**逐条对照设计**
 ⑪～⑱ 是被用例逼出来的（写用例 → 发现生产缺东西）。⑲～㉗ 不全是——它们是**拿着
 设计文档一行一行核对实现**找出来的。两种方法各有盲区：
 
@@ -897,9 +940,9 @@ internal + http + 显式允许  → ok
 ⑲ 与 ⑳ 落在第一张表的右边：**没有任何用例会去测一个谁都没实现的要求**。
 所以下一步的验证方式也必须是"对照文档"，而不只是"再写点用例"。
 
-## 5.0 一个反复出现的模式（二十个缺陷同源）
+## 5.0 一个反复出现的模式（二十一个缺陷同源）
 
-⑪ 到 ㉟ 里的二十一个是同一个模式：**一个判据（或一个承诺）需要一个读数，
+⑪ 到 ㊲ 里的二十二个是同一个模式：**一个判据（或一个承诺）需要一个读数，
 而那个读数在真实链路上不存在。**（⑧ 的 `{teamHubPort}` 未展开是它的变体。）
 
 | # | 判据 / 承诺 | 缺的读数 | 症状 | 方向 |
@@ -1214,7 +1257,7 @@ node scripts/update/verify-host.mjs --origin <生产 origin> --prefix /legion \
 # ★ 下面这份清单与 CI 的 `product-update` 套件**不是**同一份，两者都要跑：
 #   这里多跑了 `launcher.test.mjs` / `desktop-bridge.test.mjs` 等接线层，
 #   而 CI 那份多跑了 `errors` / `integration` / `envelope` 等（见 §7.1）。
-#   两个数字应当各自对得上——`product-update` 是 **424**。
+#   两个数字应当各自对得上——`product-update` 是 **440**。
 #
 # ★ 清单里必须包含 `product/launcher/cli-recovery.test.mjs`：它是恢复入口
 #   （设计 §8 line 190）的 9 条用例。**先前这一行漏了它**，于是按本文档
@@ -1228,7 +1271,7 @@ node --test product/update/*.test.mjs product/upgrade/*.test.mjs \
   product/launcher/cli-recovery.test.mjs \
   desktop/scripts/shell-files.test.mjs desktop/scripts/update-payload.test.mjs
 
-# CI 的 `product-update` 套件那一份（**424 条**）。两份都与上面同一棵树上跑过。
+# CI 的 `product-update` 套件那一份（**440 条**）。两份都与上面同一棵树上跑过。
 #
 # ★ 与 §7.1 里那次全量 CI 的读数（406）不同，差的是三次之后才加的东西：
 #   `modules.test.mjs` 的"selfCheckAll() 必须覆盖每一个有自检的模块"、
@@ -1244,6 +1287,7 @@ node --test product/update/client.test.mjs product/update/errors.test.mjs \
   product/upgrade/task-readings.test.mjs product/upgrade/preflight.test.mjs \
   product/launcher/update-gate.test.mjs desktop/update-service.test.mjs \
   desktop/update-wiring.test.mjs desktop/update-panel.test.mjs \
+  desktop/main.test.mjs \
   desktop/scripts/shell-files.test.mjs desktop/scripts/update-payload.test.mjs \
   scripts/update/publish.test.mjs scripts/update/rotation.test.mjs \
   scripts/update/host-config.test.mjs

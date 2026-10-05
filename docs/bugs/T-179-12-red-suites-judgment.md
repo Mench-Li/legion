@@ -1,10 +1,22 @@
-<!-- 来源说明（非原文，由将军 2026-10-05 指示补加；正文一字未改） -->
+<!-- 来源说明（非原文，由将军 2026-10-05 指示补加；正文除下述一处转义外一字未改） -->
 > **这份判定报告的正文由 T-179（tester 角色）在隔离工作树 `w/T-179` 里写成，
 > 原文位于 `scratch/t179/JUDGMENT.md`——而 `scratch/` 在 `.gitignore` 里，
 > 所以它一直无法进入版本库（分支 `w/T-179` 的提交数为 0）。**
 >
 > 搬运原因与保全方式：将军裁定"把它落到被跟踪的路径"，本文件即为该裁定的产物；
-> 正文**未作任何修改**，命令、读数、结论一律保持原样，便于按 §7 独立复跑核对。
+> 正文**只做了一处转义**（见下），命令、读数、结论一律保持原样，便于按 §7 独立复跑核对。
+>
+> **那一处转义是什么、为什么非改不可**（S02 那一行；原文第 51 行 =
+> 搬运时本文件的第 68 行 —— 其后本说明被扩写，行号会平移，故以「S02 那一行」为准）：
+> 原文在表格单元格里写了未转义的竖线 —— `entr(?:y|ies)` —— 而 markdown 表格把裸 `|`
+> 当**分列符**，于是那一行被算成 7 列（表头 6 列）。这不是排版洁癖：
+> `scripts/prt/doc-table-integrity.test.mjs` 的 ⑤ 是**全仓棘轮**（基线 27 处，`REPO_WIDE_BASELINE`），
+> 而该测试**明文禁止**调高基线（"只许减少"）。搬运这份报告把它从 27 顶到 28 ⇒
+> `run-ci` 的 test 阶段从此常红。故按该测试自己给的排除法提示改为 `\|`。
+>
+> **可自行核对**：`\|` 在 markdown 里渲染出来仍是 `|`，所以**读到的内容一字未变**；
+> 原文仍在 `.legion-worktrees/T-179/scratch/t179/JUDGMENT.md`（23321 B，LF），
+> 与本文件正文逐行相等（仅 CRLF 与这一处转义之差）。
 >
 > ⚠️ 同时记下**任务配置缺陷**（不属于本报告内容，属于派工面）：
 > T-179 声明的文件域是 `["scratch/"]`，而 `scratch/` 被 gitignore ——
@@ -65,7 +77,7 @@
 | # | 套件 | 前置条件（缺哪个环境事实/构建产物/桩能力） | 判定 | 原始证据（命令 + 输出片段 + exit + 耗时） | 本轮动作 |
 |---|---|---|---|---|---|
 | S01 | runtime/dsh-composition/run-floor-dsh-process.test.mjs | 检出+CLI（满足）；桩 llm 引擎需声明自检要求的必需能力；生产端口 startRun 需能起 Run | 真缺陷（红非环境缺失；直接成因=自检拒绝，红未携带 code/error） | 本会话 node scratch/t179/run-one.mjs runtime/dsh-composition/run-floor-dsh-process.test.mjs → exit=1, tests 6 / pass 1 / fail 5 / duration_ms 8653.6；子进程 exit={"code":0,"signal":null} ms=8603；phases=services,stub-registered,port-built,parent-created,run-start-failed:denied,run-start-failed:absent,run-start-failed:control,done。将军普通终端：0/6（53s） | 不改代码；最小修复写进 §6 |
-| S02 | runtime/dsh-composition/plugins/runtime-host-row-dsh-process.test.mjs | 检出+CLI（满足）；补丁行 legion-enforcement-runtime-host-registrar 必须真的激活（依赖服务齐） | 真缺陷 | 本会话（上一轮同法日志 logs/S02-runtime-host-row.txt）tests 10 / pass 8 / fail 2 / 93433ms；C 失败于 runtime-host-row-dsh-process.test.mjs:642 assert.match(r.stderr, /warning: [0-9]+ entr(?:y|ies) did not activate/)，实际 stderr 无该 warning，而是 SVCCODE RUNTIME_HOST_ROW_SELF_CHECK_INCOMPATIBLE + SVCCHECKS（composition-patch-layer ok=false）。将军：8/2（47s） | 不改代码；最小修复见 §6 |
+| S02 | runtime/dsh-composition/plugins/runtime-host-row-dsh-process.test.mjs | 检出+CLI（满足）；补丁行 legion-enforcement-runtime-host-registrar 必须真的激活（依赖服务齐） | 真缺陷 | 本会话（上一轮同法日志 logs/S02-runtime-host-row.txt）tests 10 / pass 8 / fail 2 / 93433ms；C 失败于 runtime-host-row-dsh-process.test.mjs:642 assert.match(r.stderr, /warning: [0-9]+ entr(?:y\|ies) did not activate/)，实际 stderr 无该 warning，而是 SVCCODE RUNTIME_HOST_ROW_SELF_CHECK_INCOMPATIBLE + SVCCHECKS（composition-patch-layer ok=false）。将军：8/2（47s） | 不改代码；最小修复见 §6 |
 | S03 | runtime/dsh-composition/plugins/runtime-host-registrar-row-dsh-process.test.mjs | 检出+CLI（满足）；被禁行/依赖行之间必须能结算（不能有永久 pending 行） | 真缺陷（卡死形态） | 本会话 logs/S03-registrar.txt：tests 6 / pass 4 / fail 2 / 201241ms；✖ N 场景 180069.66ms → AssertionError: actual 'spawnSync D:/software/nodejs/node.exe ETIMEDOUT' expected null；N 的 stderr 只有 4 行停在 SERVICES-TOOLS-GUARD-REGISTERED count=1（无 exit、无拒绝码）。将军：4/2（失败 180031ms） | 不改代码；根因定位见 §6 |
 | S04 | runtime/dsh-composition/plugins/runtime-host-binding-unblocked-dsh-process.test.mjs | 同 S03（行必须结算） | 真缺陷（卡死形态，含连带红） | 本会话 logs/S04-binding-unblocked.txt：tests 7 / pass 2 / fail 5 / 388943ms；✖① 180103.4ms ETIMEDOUT；✖④ 180067.6ms ETIMEDOUT；✖②⑥ 因读数为 null 连带 TypeError: Cannot read properties of null (reading 'code')；✖★汇总。将军：被 300s 看守杀 | 不改代码；根因同 S03 |
 | S05 | orchestrator/worker/runtime-contract-cross-process.test.mjs | 检出+CLI（满足）；两个真 DSH 进程 + stdin 协议；契约行 subagents 服务来源 | 真缺陷（正常终端已复现 7/12）；本会话不可忠实复跑 | 将军普通终端：7 pass / 12 fail。本会话替身：tests 19 / pass 7 / fail 12，但子进程 stderr 每条为 pending (waiting for service: subagents) + CONTRACTSVC ok=absent + PROBE-EXIT stdin-closed——替身把 stdin 变成立即 EOF（§1b），不可采信 | 不改代码；需普通终端定位逐条根因（命令见 §7） |

@@ -3378,7 +3378,7 @@ function spaceWorker(ctx: AppContext, config: Config): void {
           outputSchema: CHAT_REPLY_SCHEMA,
           agentOptions: { provider: chosenProvider, model: chosenModel },
         })
-        const result = await new Promise<{ stopReason: string; structured?: unknown } | null>((resolve) => {
+        const result = await new Promise<{ stopReason: string; structured?: unknown; output?: readonly { type?: string; text?: string }[] } | null>((resolve) => {
           const t = setTimeout(() => { controller.abort(); resolve(null) }, budgetMs)
           void run.result.then(
             r => { clearTimeout(t); resolve(r) },
@@ -3386,18 +3386,34 @@ function spaceWorker(ctx: AppContext, config: Config): void {
           )
         })
         await run.dispose().catch(() => undefined)
-        if (result === null || result.stopReason !== 'completed' || result.structured === undefined) {
-          // S1（R-1/A1）：失败原因经分类器生成可行动文案回写（原笼统子代理未完成文案已废弃）
+        // ① 首选结构化结果（请求带了 outputSchema）。
+        const structuredReply = result !== null && result.stopReason === 'completed' && result.structured !== undefined
+          ? String((result.structured as { reply?: unknown }).reply ?? '').trim()
+          : ''
+        // ② **回落到模型输出的文本**（BUG-005 现场）。
+        //
+        //    为什么必须回落：DSH 的 in-process 结构化运行时在"没有捕获到结构化结果"时会把
+        //    `stopReason: completed` **改写成 `error`** 并丢掉 structured
+        //    （`@deepseek-ai/dsh-subagent-in-process-driver` 的 readResult：
+        //     `if (structured.captured === undefined && stopReason === 'completed') return { output, stopReason: 'error' }`）。
+        //    而回复提示词本身要求"以纯文本输出"，模型确实经常直接给文本、不走结构化工具。
+        //    实测：`llmMs=5341 / decodeTokens=1011 / lastTurnCompleted=true`、正文是一份完整的进展汇报，
+        //    却因为"structured === undefined"被整条丢掉，只留一句「原因暂不可识别」——
+        //    **把一份已经拿到的答案当成失败扔掉**。文本就在这里（result.output），用它才对。
+        const outputText = result !== null && Array.isArray(result.output)
+          ? result.output.filter(b => b?.type === 'text' && typeof b.text === 'string').map(b => b.text).join('').trim()
+          : ''
+        const answer = structuredReply.length > 0 ? structuredReply : outputText
+        if (answer.length === 0) {
           const why = result === null
             ? { stopReason: 'aborted' }
             : { stopReason: result.stopReason, error: (result as { error?: unknown }).error }
           await markChatFailed(msg.id, msg.scope, identity, classifyChatError(why).message)
           return
         }
-        const answer = String((result.structured as { reply?: unknown }).reply ?? '').trim()
-        if (answer.length === 0) {
-          await markChatFailed(msg.id, msg.scope, identity, '回复子代理返回空内容')
-          return
+        if (structuredReply.length === 0) {
+          // 回落是有代价的（没有 reply 字段的约束），所以它必须**可见**：日志里留一行。
+          log(`chat-responder：消息 ${msg.id} 未拿到结构化结果（stopReason=${result?.stopReason ?? 'null'}），已回落用文本输出作答（${answer.length} 字）`)
         }
         // 5) 服务器 CAS 回写：awaiting→replied；并发/重复轮 skipped → 不重复回复（TC-S10-03）
         const out = await hubPost('/api/chat/replies/answer', { msgId: msg.id, body: answer, by: identity, model: chosenModel })

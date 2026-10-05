@@ -106,8 +106,9 @@ const AGENT_MSG = {
   },
 }
 
-/** 起一次带假中枢的扫单，返回这一轮里守护做过的所有出站调用。 */
-async function runSweep({ messages, settings = { enabled: true, model: null, identity: null, systemHint: null } }) {
+/** 起一次带假中枢的扫单，返回这一轮里守护做过的所有出站调用。
+ *  `runResult` 覆盖子代理返回的终态（默认：结构化成功）。 */
+async function runSweep({ messages, settings = { enabled: true, model: null, identity: null, systemHint: null }, runResult = null }) {
   const root = await mkdtemp(join(tmpdir(), 'scrum-worker-chat-reply-'))
   const originalFetch = globalThis.fetch
   const restoreTasks = protectTasksFile(root)
@@ -135,7 +136,7 @@ async function runSweep({ messages, settings = { enabled: true, model: null, ide
     prompts.push({ providerName, options })
     return {
       id: 'chat-run-1',
-      result: Promise.resolve({ stopReason: 'completed', structured: { reply: 'T-42 还在待办，尚未开始实现。' } }),
+      result: Promise.resolve(runResult ?? { stopReason: 'completed', structured: { reply: 'T-42 还在待办，尚未开始实现。' } }),
       dispose: async () => {},
     }
   })
@@ -182,6 +183,33 @@ test('岗位置信来自服务端载荷：客户端自报的字段不改变回�
   const { posts, prompts } = await runSweep({ messages: [spoofed] })
   assert.equal(posts.find(p => p.kind === 'answer').body.by, 'agent:software:coder')
   assert.match(prompts[0].options.prompt[0].text, /编码工程师/)
+})
+
+test('★ 结构化结果缺失时回落到文本输出，而不是把已拿到的答案判失败（BUG-005）', async () => {
+  // 现场：DSH 的 in-process 结构化运行时在"没捕获到结构化结果"时会把 stopReason: completed
+  // **改写成 error** 并丢掉 structured（readResult），而回复提示词本身要求"以纯文本输出"——
+  // 模型直接给文本是常态。实测那次 llmMs=5341 / decodeTokens=1011、正文是一份完整的进展汇报，
+  // 却因为 structured === undefined 被整条丢掉，只留一句「原因暂不可识别」。
+  const TEXT = '根据当前可见的任务记录，最近完成 3 项：T-174 配置面门禁、T-175 边界棘轮、T-176 metrics 口径。'
+  const { posts, prompts } = await runSweep({
+    messages: [AGENT_MSG],
+    runResult: { stopReason: 'error', structured: undefined, output: [{ type: 'text', text: TEXT }] },
+  })
+  assert.equal(prompts.length, 1)
+  const answer = posts.find(p => p.kind === 'answer')
+  assert.ok(answer, '结构化结果缺失但文本存在时，必须把文本当作回答回写，而不是标记失败')
+  assert.equal(answer.body.body, TEXT, '回写正文应当就是模型输出的文本')
+  assert.equal(answer.body.by, 'agent:software:coder', '回落路径的身份不许变')
+  assert.equal(posts.some(p => p.kind === 'fail'), false, '不许同时写一条失败（那会让界面既显示回答又显示失败）')
+})
+
+test('结构化结果缺失且文本也为空时，仍然判失败（回落不是万能兜底）', async () => {
+  const { posts } = await runSweep({
+    messages: [AGENT_MSG],
+    runResult: { stopReason: 'error', structured: undefined, output: [] },
+  })
+  assert.equal(posts.some(p => p.kind === 'answer'), false, '没有任何可用输出时不许回写空回答')
+  assert.ok(posts.some(p => p.kind === 'fail'), '没有任何可用输出时必须判失败，不能把消息挂在 awaiting')
 })
 
 test('岗位身份也用于失败回写：答不出来时 by 与应答身份同名', async () => {

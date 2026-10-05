@@ -57,8 +57,8 @@
 //   node scripts/update/host-config.mjs --tree test --files    # 附带目录清单
 // ============================================================================
 
-import { UPLOAD_TARGETS } from './publish.mjs'
-import { FEED_CACHE_CONTROL, RELEASE_CACHE_CONTROL } from '../../product/update/host.mjs'
+import { CHANNEL_TARGETS, UPLOAD_TARGETS } from './publish.mjs'
+import { FEED_CACHE_CONTROL, HOST_CODES, RELEASE_CACHE_CONTROL, createHostConfig } from '../../product/update/host.mjs'
 
 /** 生成物的格式名（与其余协议一样带版本）。 */
 export const HOST_CONFIG_FORMAT = 'legion/update-host-config@1'
@@ -85,6 +85,10 @@ export const HOST_CONFIG_PROBLEMS = Object.freeze({
   BAD_PREFIX: 'host-config-bad-prefix',
   BAD_SERVER_NAME: 'host-config-bad-server-name',
   CLAIMS_OTHER_SITE: 'host-config-claims-other-site',
+  // ★ 这棵树服务非 internal 通道，而客户端对它们要求 HTTPS——
+  //   不给 `--tls-cert` / `--tls-key` 就不渲染。见 `tlsRequirement()`。
+  TLS_REQUIRED: 'host-config-tls-required',
+  BAD_TLS_PARAM: 'host-config-bad-tls-param',
 })
 
 function problem(code, message) {
@@ -146,18 +150,41 @@ export function treeOf(name) {
  * ★ 缓存头的值**直接来自** `host.mjs` 的两个常量，而不是抄一遍字面量——
  *   抄一遍的话，`host.mjs` 改了而这里没改，客户端与发布端自检就会对同一份
  *   部署给出相反结论（一个说"缓存策略错了"，一个说没问题）。
+ *
+ * ★★ TLS 不是可选项，而是**由客户端自己的规则推出来的**（见 `tlsRequirement`）。
+ *    生产那棵树服务 `canary` / `stable`，而 `host.mjs` 的 `createHostConfig()`
+ *    对它们**要求 HTTPS**（`http://` 且未显式允许 ⇒ `host-insecure-origin`）。
+ *    于是一份"只监听 80"的生产配置是**客户端会拒绝使用**的配置——
+ *    那种配置能通过 `nginx -t`、能 200、能通过我上一轮那五条判据，
+ *    而客户端连一次检查都做不成。
+ *
+ *    > 一份"能起来、能 200、而客户端不肯用"的配置，
+ *    > 与一份 404 的配置在部署上是同一个东西——只不过前者更难看出来。
+ *
+ *    `tls` 给出证书与私钥路径时渲染成两个块（443 服务内容、80 只做跳转）；
+ *    生产树没给 `tls` 时**具名拒绝**，而不是渲染一份用不了的配置。
  */
-export function renderServerBlock({ tree, listen = 80, serverName, healthText = 'legion-update-host: ready' }) {
+export function renderServerBlock({
+  tree, listen = 80, tlsListen = 443, serverName, healthText = 'legion-update-host: ready', tls = null,
+}) {
   const nameCheck = serverNameCheck(serverName)
   if (!nameCheck.ok) return Object.freeze({ ok: false, code: nameCheck.code, reason: nameCheck.reason, config: null })
 
+  const needTls = tlsRequirement(tree.name)
+  if (needTls.required && tls === null) {
+    return Object.freeze({
+      ok: false, code: HOST_CONFIG_PROBLEMS.TLS_REQUIRED, reason: needTls.reason, config: null,
+    })
+  }
+  if (tls !== null) {
+    const tlsCheck = tlsCheckOf(tls)
+    if (!tlsCheck.ok) return Object.freeze({ ok: false, code: tlsCheck.code, reason: tlsCheck.reason, config: null })
+  }
+
   const p = tree.urlPrefix
-  const lines = [
-    'server {',
-    `    listen ${listen};`,
-    `    server_name ${serverName};`,
-    `    root ${tree.root};`,
-    '',
+  // 内容部分的 location 块：HTTP（测试树）与 HTTPS（生产树）共用同一份，
+  // 避免"两种形态各写一遍而只改了一处"。
+  const content = [
     '    # 目录索引关闭、不发版本号（引导计划第 4 步）。',
     '    autoindex off;',
     '    server_tokens off;',
@@ -191,9 +218,120 @@ export function renderServerBlock({ tree, listen = 80, serverName, healthText = 
     '',
     '    # 其余一律 404：既关掉目录遍历，也避免把"路径写错"变成一次成功取件。',
     '    location / { return 404; }',
+  ]
+
+  if (tls !== null) {
+    // HTTPS 服务内容 + HTTP 只做跳转。两条都不能少：只加 443 的话，
+    // 一次 http:// 的请求会落到默认 server 上（拿到别的站点的页面或 404），
+    // 而不是被明确地导向 https。
+    const https = [
+      'server {',
+      `    listen ${tlsListen} ssl http2;`,
+      `    server_name ${serverName};`,
+      `    root ${tree.root};`,
+      '',
+      `    ssl_certificate     ${tls.cert};`,
+      `    ssl_certificate_key ${tls.key};`,
+      '    # 只留 TLS 1.2/1.3（旧版本协议在 1.24 上默认已关，这里写明是为了不留歧义）。',
+      '    ssl_protocols TLSv1.2 TLSv1.3;',
+      '    ssl_session_cache shared:legion_updates:1m;',
+      '    ssl_session_timeout 10m;',
+      '',
+      ...content,
+      '}',
+    ]
+    const redirect = [
+      'server {',
+      `    listen ${listen};`,
+      `    server_name ${serverName};`,
+      '',
+      '    # 80 上**不服务任何内容**：只把请求明确导向 https。',
+      '    # 留一个 404 兜底是错的——那会让"用 http 发布出去的地址"看起来是坏的，',
+      '    # 而实际原因是协议不对。',
+      '    return 301 https://$host$request_uri;',
+      '}',
+    ]
+    return Object.freeze({
+      ok: true, code: null, reason: null, tls: true,
+      config: `${[...https, '', ...redirect].join('\n')}\n`,
+    })
+  }
+
+  const lines = [
+    'server {',
+    `    listen ${listen};`,
+    `    server_name ${serverName};`,
+    `    root ${tree.root};`,
+    '',
+    ...content,
     '}',
   ]
-  return Object.freeze({ ok: true, code: null, reason: null, config: `${lines.join('\n')}\n` })
+  return Object.freeze({ ok: true, code: null, reason: null, tls: false, config: `${lines.join('\n')}\n` })
+}
+
+/**
+ * 这棵树需不需要 TLS——**从客户端的规则推**，不是从我的偏好推。
+ *
+ * `publish.mjs` 的 `CHANNEL_TARGETS` 说哪些通道进哪棵树；`host.mjs` 的
+ * `createHostConfig()` 说哪些通道必须 HTTPS（`internal` 可以显式用 http，
+ * 见仓库里的 `update-config.example.json`）。两处都引用，所以这里不需要
+ * 第三个"哪些通道要 TLS"的清单。
+ */
+export function tlsRequirement(treeName) {
+  const channels = Object.entries(CHANNEL_TARGETS)
+    .filter(([, target]) => target === treeName)
+    .map(([channel]) => channel)
+  if (channels.length === 0) {
+    return Object.freeze({ required: false, channels: Object.freeze([]), reason: '这棵树不对应任何通道' })
+  }
+  // 客户端只对 `internal` 放宽（而且要显式声明）。所以只要这棵树里有**任何一个**
+  // 非 internal 的通道，它就必须 HTTPS。
+  const mustTls = channels.filter((channel) => channel !== 'internal')
+  // ★ 用客户端的判据自己验一遍，而不是靠上面那句"我觉得"：这就是"单一来源"。
+  const probe = createHostConfig({ origin: 'http://updates.invalid', channel: mustTls[0] ?? 'internal' })
+  const clientRefusesHttp = mustTls.length > 0 && probe.ok !== true && probe.code === HOST_CODES.INSECURE_ORIGIN
+  if (mustTls.length > 0 && !clientRefusesHttp) {
+    // 客户端的规则变了（http 不再被拒），那么这条判据的前提就没了。
+    return Object.freeze({
+      required: false, channels: Object.freeze(channels),
+      reason: `客户端的 HTTPS 判据已经变了（${probe.code}），生成器这条推断需要重新确认`,
+    })
+  }
+  return Object.freeze({
+    required: mustTls.length > 0,
+    channels: Object.freeze(channels),
+    reason: mustTls.length > 0
+      ? `这棵树服务 ${mustTls.join('/')}，而客户端对它们要求 HTTPS`
+        + '（`http://` 且未显式允许 ⇒ `host-insecure-origin`）：'
+        + '一份只监听 80 的配置能通过 nginx -t、能返回 200，而客户端连一次检查都做不成'
+      : '',
+  })
+}
+
+/** `tls` 参数的形状判据：两个路径都必须显式给出且不能相同。 */
+function tlsCheckOf(tls) {
+  for (const field of ['cert', 'key']) {
+    const value = tls[field]
+    if (typeof value !== 'string' || value.trim() === '') {
+      return Object.freeze({
+        ok: false, code: HOST_CONFIG_PROBLEMS.BAD_TLS_PARAM,
+        reason: `--tls-${field} 必须是非空路径（证书与私钥都要显式给出，没有默认值）`,
+      })
+    }
+    if (/\s/.test(value)) {
+      return Object.freeze({
+        ok: false, code: HOST_CONFIG_PROBLEMS.BAD_TLS_PARAM,
+        reason: `--tls-${field} 里有空白字符：${JSON.stringify(value)}`,
+      })
+    }
+  }
+  if (tls.cert === tls.key) {
+    return Object.freeze({
+      ok: false, code: HOST_CONFIG_PROBLEMS.BAD_TLS_PARAM,
+      reason: '证书与私钥不能是同一个文件',
+    })
+  }
+  return Object.freeze({ ok: true, code: null, reason: null })
 }
 
 /** `server_name` 的判据：不许空、不许空白字符、不许写成别的站点名。 */
@@ -282,6 +420,45 @@ export function selfCheckHostConfig() {
   }
   if (treeOf('没有这棵树').ok) problems.push('不存在的树被接受了')
 
+  // ── TLS：从客户端规则推出的结论，逐棵树验一遍 ──
+  const testReq = tlsRequirement('test')
+  if (testReq.required) problems.push('测试树被判为需要 TLS——internal 通道按设计可以显式用 http')
+  const prodReq = tlsRequirement('production')
+  if (!prodReq.required) problems.push(`生产树**没有**被判为需要 TLS：${prodReq.reason}`)
+  if (prodReq.required) {
+    const prod = treeOf('production')
+    // 不给 TLS 参数必须**具名拒绝**，而不是渲染一份客户端用不了的配置。
+    const noTls = renderServerBlock({ tree: prod.tree, serverName: 'updates.example.com' })
+    if (noTls.ok) problems.push('生产树在没给 TLS 参数时被渲染出来了（客户端会拒绝那份部署）')
+    else if (noTls.code !== HOST_CONFIG_PROBLEMS.TLS_REQUIRED) {
+      problems.push(`生产树缺 TLS 时的拒绝码是 ${noTls.code}，期望 ${HOST_CONFIG_PROBLEMS.TLS_REQUIRED}`)
+    }
+    // 给了 TLS 参数：必须两个块，且**内容位置只在 443 那个块里**。
+    const withTls = renderServerBlock({
+      tree: prod.tree, serverName: 'updates.example.com',
+      tls: { cert: '/etc/ssl/legion/fullchain.pem', key: '/etc/ssl/legion/privkey.pem' },
+    })
+    if (!withTls.ok) problems.push(`生产树给了 TLS 参数却渲染失败：${withTls.reason}`)
+    else {
+      for (const marker of ['listen 443 ssl http2;', 'ssl_certificate ', 'ssl_certificate_key ', 'ssl_protocols TLSv1.2 TLSv1.3;']) {
+        if (!withTls.config.includes(marker)) problems.push(`TLS 渲染结果里没有 ${marker}`)
+      }
+      // 80 那个块只能跳转，**不许**服务内容（否则 http 上也能取到清单）。
+      const httpBlock = withTls.config.slice(withTls.config.lastIndexOf('server {'))
+      if (!httpBlock.includes('return 301 https://$host$request_uri;')) problems.push('80 那个块没有跳转到 https')
+      if (httpBlock.includes('location ~')) problems.push('80 那个块里出现了内容 location——http 上会取到清单')
+      // 内容位置必须仍然在（在 443 那个块里）。
+      if (!withTls.config.includes('limit_except GET { deny all; }')) problems.push('TLS 渲染结果里没有方法限制')
+      if (!withTls.config.includes('location / { return 404; }')) problems.push('TLS 渲染结果里没有兜底 404')
+    }
+    // TLS 参数自身的判据：缺一个、同一个文件，都要拒。
+    for (const badTls of [{ cert: '', key: '/k' }, { cert: '/c', key: '' }, { cert: '/same', key: '/same' }]) {
+      const r = renderServerBlock({ tree: prod.tree, serverName: 'updates.example.com', tls: badTls })
+      if (r.ok) problems.push(`非法 TLS 参数被接受了：${JSON.stringify(badTls)}`)
+      else if (r.code !== HOST_CONFIG_PROBLEMS.BAD_TLS_PARAM) problems.push(`非法 TLS 参数的拒绝码是 ${r.code}`)
+    }
+  }
+
   return Object.freeze({
     ok: problems.length === 0,
     problems: Object.freeze(problems),
@@ -342,7 +519,20 @@ export function main(argv = process.argv.slice(2)) {
       + '而"用默认值兜住"正是会覆盖别的站点的那条路\n')
     return 2
   }
-  const rendered = renderServerBlock({ tree: parsed.tree, serverName })
+  // TLS 参数：给了证书就要求也给私钥（两个都缺 = 没开 TLS）。
+  const cert = typeof args.get('tls-cert') === 'string' ? args.get('tls-cert') : null
+  const key = typeof args.get('tls-key') === 'string' ? args.get('tls-key') : null
+  if ((cert === null) !== (key === null)) {
+    process.stderr.write('host-config 的 --tls-cert 与 --tls-key 必须**同时**给出'
+      + `（现在只给了 ${cert === null ? '--tls-key' : '--tls-cert'}）\n`)
+    return 2
+  }
+  const tls = cert === null ? null : { cert, key }
+  const rendered = renderServerBlock({
+    tree: parsed.tree, serverName, tls,
+    listen: typeof args.get('listen') === 'string' ? Number(args.get('listen')) : 80,
+    tlsListen: typeof args.get('tls-listen') === 'string' ? Number(args.get('tls-listen')) : 443,
+  })
   if (!rendered.ok) {
     process.stderr.write(`${rendered.code}: ${rendered.reason}\n`)
     return 2
@@ -350,6 +540,9 @@ export function main(argv = process.argv.slice(2)) {
   process.stdout.write(`# ${SITE_FILENAME} —— 由 scripts/update/host-config.mjs 生成（${HOST_CONFIG_FORMAT}）\n`)
   process.stdout.write(`# 内容根：${parsed.tree.diskRoot}（URL 前缀 ${parsed.tree.urlPrefix}）\n`)
   process.stdout.write('# 落盘位置：/etc/nginx/sites-available/' + SITE_FILENAME + '\n')
+  const need = tlsRequirement(parsed.tree.name)
+  process.stdout.write(`# 这棵树服务：${need.channels.join(' / ')}`
+    + `；TLS ${need.required ? '必需' : '允许用 http（仅 internal）'}\n`)
   process.stdout.write(rendered.config)
   if (args.get('files') === true) {
     process.stdout.write('\n# 需要存在的目录：\n')

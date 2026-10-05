@@ -391,8 +391,15 @@ export const UPLOAD_TARGETS = Object.freeze({
   production: Object.freeze({ remoteRoot: 'root@117.72.146.36:/srv/legion-updates/production/legion', prefix: '/legion' }),
 })
 
-/** 通道 → 它该去的那棵树。**这是判据，不是提示**（见 `renderUploadPlan` 的说明）。 */
-const CHANNEL_TARGETS = Object.freeze({ internal: 'test', canary: 'production', stable: 'production' })
+/**
+ * 通道 → 它该去的那棵树。**这是判据，不是提示**（见 `renderUploadPlan` 的说明）。
+ *
+ * ★ 导出它，是因为 `host-config.mjs` 需要**同一份**映射来回答"这棵树服务哪些
+ *   通道"，从而推出"这棵树要不要 HTTPS"（`canary`/`stable` 必须 HTTPS，
+ *   `internal` 可以显式用 http）。让第二处再写一份映射，就是又造了一个会各自
+ *   漂移的真相来源——而本轮 ㉜ 找的正是"两处各自都对、接缝处对不上"。
+ */
+export const CHANNEL_TARGETS = Object.freeze({ internal: 'test', canary: 'production', stable: 'production' })
 
 /**
  * 渲染上传计划。

@@ -26,11 +26,11 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
 
-import { FEED_CACHE_CONTROL, RELEASE_CACHE_CONTROL, evaluateResponse } from '../../product/update/host.mjs'
-import { UPLOAD_TARGETS } from './publish.mjs'
+import { FEED_CACHE_CONTROL, HOST_CODES, RELEASE_CACHE_CONTROL, createHostConfig, evaluateResponse } from '../../product/update/host.mjs'
+import { CHANNEL_TARGETS, UPLOAD_TARGETS } from './publish.mjs'
 import {
   HOST_CONFIG_PROBLEMS, OTHER_SITES, SITE_FILENAME, TREE_NAMES,
-  renderDirectoryPlan, renderServerBlock, treeOf,
+  renderDirectoryPlan, renderServerBlock, tlsRequirement, treeOf,
 } from './host-config.mjs'
 
 /** 从渲染结果里取某个 location 块声明的 `Cache-Control`。 */
@@ -41,6 +41,26 @@ function cacheControlIn(config, locationPattern) {
   const match = block.match(/add_header Cache-Control "([^"]+)"/)
   assert.ok(match !== null, `location ${locationPattern} 里没有声明 Cache-Control：\n${block}`)
   return match[1]
+}
+
+/**
+ * 把一棵树渲染成**它该被部署的那种形态**。
+ *
+ * ★ 这个助手本身就是一条判据：生产树必须 TLS，所以"渲染生产树"这件事
+ *   不可能不带上证书。用它而不是各处手写 `renderServerBlock`，
+ *   是为了让"每种形态都渲染得出、且缓存头都对"那几条用例**同时覆盖两棵树**——
+ *   直接写 `renderServerBlock` 的话，生产树那几处会因为缺 TLS 而拒，
+ *   于是那些用例会安静地只覆盖测试树（我改 TLS 时就是这样红了三条）。
+ */
+function renderForDeployment(name, serverName = 'updates.example.com') {
+  const tree = treeOf(name).tree
+  const req = tlsRequirement(name)
+  return renderServerBlock({
+    tree, serverName,
+    ...(req.required
+      ? { tls: { cert: '/etc/ssl/legion/fullchain.pem', key: '/etc/ssl/legion/privkey.pem' } }
+      : {}),
+  })
 }
 
 // ---------------------------------------------------------------------------
@@ -59,7 +79,7 @@ test('★★★ `UPLOAD_TARGETS` 里的**每一棵**树都必须渲染得出配�
   for (const name of TREE_NAMES) {
     const parsed = treeOf(name)
     assert.equal(parsed.ok, true, `树 ${name} 推不出配置：${parsed.code} ${parsed.reason}`)
-    const rendered = renderServerBlock({ tree: parsed.tree, serverName: 'updates.example.com' })
+    const rendered = renderForDeployment(name)
     assert.equal(rendered.ok, true, `树 ${name} 渲染失败：${rendered.reason}`)
     // 前缀必须真的出现在 location 里——否则那份配置服务不了这棵树。
     assert.ok(rendered.config.includes(`location ~ ^${parsed.tree.urlPrefix}/feeds/`),
@@ -92,7 +112,7 @@ test('★★★★ 渲染出的 Cache-Control 必须让 `evaluateResponse` 判�
   for (const name of TREE_NAMES) {
     const parsed = treeOf(name)
     assert.equal(parsed.ok, true, parsed.reason)
-    const rendered = renderServerBlock({ tree: parsed.tree, serverName: 'updates.example.com' })
+    const rendered = renderForDeployment(name)
     assert.equal(rendered.ok, true, rendered.reason)
     const { urlPrefix } = parsed.tree
 
@@ -308,8 +328,10 @@ test('★★ `/healthz` 也必须声明 no-store（`evaluateResponse` 覆盖不�
   //     一条"只在真实机器上验过一次、代码里没人守"的性质，
   //     会在下一次改配置时安静地消失。
   for (const name of TREE_NAMES) {
-    const tree = treeOf(name).tree
-    const config = renderServerBlock({ tree, serverName: '117.72.146.36' }).config
+    // ★ 用 `renderForDeployment`（而不是裸的 `renderServerBlock`）：生产树
+    //   在没给 TLS 时会**具名拒**，于是裸调用会让这条用例只覆盖测试树——
+    //   而"只覆盖了一半"正是 ㉞ 那个坑的形状。
+    const config = renderForDeployment(name, '117.72.146.36').config
     const start = config.indexOf('location = /healthz {')
     assert.ok(start >= 0, `${name}：没有健康检查块`)
     const block = config.slice(start, config.indexOf('\n    }', start))
@@ -318,5 +340,129 @@ test('★★ `/healthz` 也必须声明 no-store（`evaluateResponse` 覆盖不�
     // 而且它**不许**是别的缓存头（比如发行文件那条 immutable）。
     assert.equal(block.includes(RELEASE_CACHE_CONTROL), false,
       `${name}：/healthz 声明了发行文件那条缓存头`)
+  }
+})
+
+// ---------------------------------------------------------------------------
+// ⑥ TLS：**从客户端的规则推**，而不是从我的偏好推
+// ---------------------------------------------------------------------------
+
+test('★★★★ 生产树必须 TLS —— 因为它服务的通道被**客户端自己**要求 HTTPS', () => {
+  // ★ 这条是 ㉟ 的机械形式，而且它把"为什么"钉在**客户端的判据**上：
+  //
+  //   我上一轮交付的生成器只渲染 `listen 80`。而 `production` 那棵树服务
+  //   `canary` / `stable`，`host.mjs` 的 `createHostConfig()` 对它们要求 HTTPS。
+  //   于是一份"只监听 80"的生产配置是**客户端会拒绝使用**的配置——
+  //   它能通过 `nginx -t`、能返回 200、能通过我上一轮那五条判据，
+  //   而客户端连一次检查都做不成。
+  //
+  //   > 一份"能起来、能 200、而客户端不肯用"的配置，
+  //   > 与一份 404 的配置在部署上是同一个东西——只不过前者更难看出来。
+  //
+  //   ★ 关键在最后两条断言：它们**用客户端自己的函数**验证这条推断的前提，
+  //     而不是靠生成器里那句"我觉得 canary/stable 要 HTTPS"。
+  //     客户的规则一变（http 不再被拒），这条用例就会红——那正是我们要的：
+  //     那时生成器那条推断需要重新确认。
+  const prodChannels = Object.entries(CHANNEL_TARGETS).filter(([, t]) => t === 'production').map(([c]) => c)
+  assert.ok(prodChannels.length > 0, '没有通道映射到生产树——这条用例的前提不成立')
+  for (const channel of prodChannels) {
+    const overHttp = createHostConfig({ origin: 'http://updates.example.com', channel })
+    assert.equal(overHttp.ok, false, `客户端居然接受了 ${channel} 走 http`)
+    assert.equal(overHttp.code, HOST_CODES.INSECURE_ORIGIN,
+      `${channel} 走 http 的拒绝码是 ${overHttp.code}，期望 ${HOST_CODES.INSECURE_ORIGIN}`)
+    // 而 https 必须通过——否则"要 TLS"这条推断就没有意义（什么都过不去）。
+    assert.equal(createHostConfig({ origin: 'https://updates.example.com', channel }).ok, true,
+      `${channel} 走 https 竟然不通过`)
+  }
+  assert.equal(tlsRequirement('production').required, true)
+  // internal 那棵树按设计**允许**显式用 http（仓库里的 update-config.example.json 就是这么配的）。
+  assert.equal(tlsRequirement('test').required, false)
+  const internalOverHttp = createHostConfig({
+    origin: 'http://117.72.146.36', prefix: '/test/legion', channel: 'internal', allowInsecureHttp: true,
+  })
+  assert.equal(internalOverHttp.ok, true, 'internal 显式允许 http 时被拒了')
+})
+
+test('★★★ 生产树不给 TLS 参数 → **具名拒绝**，而不是渲染一份用不了的配置', () => {
+  const tree = treeOf('production').tree
+  const r = renderServerBlock({ tree, serverName: 'updates.example.com' })
+  assert.equal(r.ok, false, '生产树在没给 TLS 参数时被渲染出来了')
+  assert.equal(r.code, HOST_CONFIG_PROBLEMS.TLS_REQUIRED)
+  assert.equal(r.config, null, '拒绝时不该给出配置')
+  assert.match(r.reason, /canary|stable/, `拒绝理由应当点出是哪几个通道：${r.reason}`)
+  // 对照：测试树不给 TLS 参数**必须**能渲染（否则上面那条只是"什么都拒"）。
+  const testTree = treeOf('test').tree
+  assert.equal(renderServerBlock({ tree: testTree, serverName: '117.72.146.36' }).ok, true)
+})
+
+test('★★★★ 给了 TLS：内容位置**只**在 443 那个块里，80 只做跳转', () => {
+  const tree = treeOf('production').tree
+  const r = renderServerBlock({
+    tree, serverName: 'updates.example.com',
+    tls: { cert: '/etc/ssl/legion/fullchain.pem', key: '/etc/ssl/legion/privkey.pem' },
+  })
+  assert.equal(r.ok, true, r.reason)
+  assert.equal(r.tls, true)
+  // 两处 `listen`，两个 `server {`。
+  assert.equal((r.config.match(/^server \{/gm) ?? []).length, 2, '应当是两个 server 块')
+  assert.equal((r.config.match(/listen 443 ssl http2;/g) ?? []).length, 1)
+  assert.equal((r.config.match(/listen 80;/g) ?? []).length, 1)
+  // TLS 材料与协议。
+  for (const marker of [
+    'ssl_certificate     /etc/ssl/legion/fullchain.pem;',
+    'ssl_certificate_key /etc/ssl/legion/privkey.pem;',
+    'ssl_protocols TLSv1.2 TLSv1.3;',
+  ]) {
+    assert.ok(r.config.includes(marker), `渲染结果里没有 ${marker}`)
+  }
+  // ★ 80 那个块**只能**跳转：里面有内容 location 的话，http 上也能取到清单。
+  const httpBlock = r.config.slice(r.config.lastIndexOf('server {'))
+  assert.ok(httpBlock.includes('return 301 https://$host$request_uri;'), '80 那个块没有跳转')
+  assert.equal(/location\s/.test(httpBlock), false,
+    `80 那个块里出现了 location——http 上会取到内容：\n${httpBlock}`)
+  // 内容位置必须仍然在（在 443 那个块里）。
+  assert.ok(r.config.indexOf('location ~ ^/legion/feeds/') < r.config.lastIndexOf('server {'),
+    '内容位置落在了 80 那个块之后')
+  assert.ok(r.config.includes('limit_except GET { deny all; }'), 'TLS 渲染结果里没有方法限制')
+  assert.ok(r.config.includes('location / { return 404; }'), 'TLS 渲染结果里没有兜底 404')
+  // ★ 缓存头仍然是那两个常量（TLS 路径不许把它抄成字面量）。
+  assert.equal(cacheControlIn(r.config, '^/legion/feeds/'), FEED_CACHE_CONTROL)
+  assert.equal(cacheControlIn(r.config, '^/legion/releases/'), RELEASE_CACHE_CONTROL)
+})
+
+test('★★ TLS 参数自身的判据：缺一个、同一个文件、带空白，都要拒', () => {
+  const tree = treeOf('production').tree
+  for (const badTls of [
+    { cert: '', key: '/k' },
+    { cert: '/c', key: '' },
+    { cert: '/same', key: '/same' },
+    { cert: '/a b', key: '/k' },
+  ]) {
+    const r = renderServerBlock({ tree, serverName: 'updates.example.com', tls: badTls })
+    assert.equal(r.ok, false, `非法 TLS 参数被接受了：${JSON.stringify(badTls)}`)
+    assert.equal(r.code, HOST_CONFIG_PROBLEMS.BAD_TLS_PARAM,
+      `期望 BAD_TLS_PARAM，实际 ${r.code}：${r.reason}`)
+  }
+})
+
+test('★★ 清单里的**每一条** HTTPS origin，客户端都接受（生成器给出的形态可用）', () => {
+  // 把上面几条收成一句可核的话：生成器为某棵树给出的形态（http 或 https）
+  // 必须是客户端**接受**的形态。这条不依赖我给的是不是 "https"，
+  // 而是问客户端本人。
+  for (const name of TREE_NAMES) {
+    const req = tlsRequirement(name)
+    for (const [channel, target] of Object.entries(CHANNEL_TARGETS)) {
+      if (target !== name) continue
+      // 客户端能接受的 origin 形态 = 这棵树该走的形态。
+      const https = createHostConfig({ origin: 'https://updates.example.com', channel }).ok
+      const http = createHostConfig({ origin: 'http://updates.example.com', channel, allowInsecureHttp: true }).ok
+      assert.equal(https, true, `${channel} 走 https 竟然不通`)
+      if (req.required) {
+        assert.equal(http, true, `${channel} 显式允许 http 时被拒——那么"必需 TLS"的措辞要改`)
+        // 但**不允许**的 http 必须被拒，这才是"必需"的含义。
+        assert.equal(createHostConfig({ origin: 'http://updates.example.com', channel }).ok, false,
+          `${channel} 未显式允许的 http 被接受了`)
+      }
+    }
   }
 })

@@ -243,8 +243,10 @@
   - [x] 云入口改用**公网 IP + 自签 CA**（只开 443）：手机页面公网 200、证书链 OpenSSL 验签 OK
   - [x] 首次初始化（系统管理员）与**电脑配对**（公网 HTTPS 兑换配对码）
   - [x] Node 出站连接、派发、进展回报、阶段上报、出境策略在真实链路上生效
-  - [ ] **上下文快照**：远端路径接上下文组装，才能合法进入 `Running`（见下）
-  - [ ] 远端 Node 参与**写入预约**生命周期（见下）
+  - [x] **上下文快照**：Hub 侧派发前冻结（远端已能合法进入 `Running`，见下）
+  - [x] 租约回收与预约结清（否则一条旧尝试能把整个队列堵死）
+  - [x] 完整闭环实机验证：建任务 → 4 秒内到 `in_review`，150s 后不变
+  - [ ] 远端 Node 参与**写入预约**生命周期（目前由 Hub 侧结清）
   - [ ] 备份与恢复演练
 
 ## 6.1 部署实录（2026-10-04/05）
@@ -303,38 +305,73 @@
 | 阶段上报 | ✅ `node:phase PreparingWorkspace` / `BuildingContext` 已入库 |
 | 失败与对账路径 | ✅ 租约过期 → `UnknownOutcome`（不自动重跑）；人工对账 → `RetryableFailure` → 新尝试入队 |
 
-### 尚未打通：上下文快照（阻塞 `Running`）
+### 已打通的完整闭环（2026-10-05）
 
-远端尝试目前**到不了 `Running`**。状态机为 `BuildingContext → Running` 声明了
-`requiresPersist: ['attempt','contextSnapshot']`，而 `run-store` 的 `EVIDENCE_CHECKS`
-**真的核验**它（`run_context_snapshots` 里该 attempt 至少一行）。远端 Node 没有走
-上下文组装流程，因此没有快照，Hub 以 `EVIDENCE_MISSING: contextSnapshot` 拒绝。
+一条自建任务从手机侧建起到等验收，全链在**公网 + 真机**上跑通：
 
-这不是"绕过一下就好"的事：那张快照有 23 列（含 `final_text`、`snapshot_hash`、
-token 计数、候选/纳入/排除计数、`payload_json`），**伪造一行等于把"没人组装过上下文"
-写成"组装过了"**——正是本方案一路在避免的那种绿灯。
+```text
+建任务(todo) → Hub 冻结上下文 → 派发 → 电脑执行 → 进展上报 → 终态 → Validating / in_review
+```
 
-所以远端路径要接的是**真正的上下文组装**（`assembleContext` / `contextStore` /
-来源收集 / 分词器）。已做的两件相关的事：
+实测读数（`T-017`）：建任务后 **4 秒内**到达 `in_review`，并在**超过租约 TTL（120s）
+的 150 秒里保持 `in_review` / `Validating` 不变**。审计里能看到完整链路：
 
-- **不再死锁**：阶段被 Hub 拒绝时本机**停手**并按 `cancelled` 收尾
-  （`BuildingContext → Cancelled` 是合法边）。原实现会照旧跑完执行器，
-  而结果永远上报不出去（`BuildingContext → Validating` 没有边），
-  于是任务卡住、执行器白跑、副作用已经发生。
-- **拒绝在 Hub 侧可见**：网关把被拒的帧写进审计（`node:frame-rejected`），
-  此前它只回给 Node，Hub 侧完全看不到。
+```text
+node:context-frozen   {snapshotHash: sha256:af499168…}   ← Hub 侧冻结（真快照：3 候选 / 纳入 1）
+node:dispatch → node:dispatch-ack
+node:phase            PreparingWorkspace → BuildingContext → Running
+node:progress         seq 1..4（其一被出境策略拦成 [已拦下：包含私钥块]）
+node:transition       {outcome: completed}
+```
 
-另外还记录两个已修的接线缺口：
+`Validating` 是这条链的**合法终点**：`Completed` 需要一条验收记录
+（`requiresPersist: ['attempt','validation']`），而"执行完成不等于交付被接受"
+正是 Legion 的模型。所以任务停在 `in_review` 等人验收，是对的。
 
-- **写入预约未结清**：`finishTaskReservationInTx` 只在**看板迁移**
-  （`in_review`/`done`/`canceled`）时被调用，而 `run-store` 的 `projectToTask` 是
-  直接 `UPDATE tasks.status`。于是远端尝试走到终态、看板被投影成 `in_review` 时，
-  预约没被结清，下一条任务一直看到 `SINGLE_WRITER_REQUIRED`。
-  远端 Node 目前**没有参与预约生命周期**——这是下一件要接的事。
-- **认领被阻塞时不可见**：`claim` 在有别的任务占着单写者位时**正常返回**
-  `claimed:null, reason:'file-contention'`，原实现直接 `continue`，于是
-  "节点就绪、任务待办、但什么都不派发"在日志/审计/读数里全都没有痕迹。
-  现在会记 `blockedClaims` 并 warn 一次（同一种阻塞只说一次）。
+### 三个曾经挡住它的缺口（都已修）
+
+**① 远端路径进不了 `Running`（上下文快照）。**
+`BuildingContext → Running` 要求 `run_context_snapshots` 里先有这次 attempt 的一行。
+而装配器、来源、仓储全都交付了却**没有生产调用方**——本仓自己的
+`scripts/prt/entry-point-reachability.mjs` 把 `createContextStage` 判为 `dead`。
+所以这不是远端路径引入的缺口，而是「零件齐全、从没人接线」。
+
+修法：`team-hub/node-context.mjs` 在 **Hub 侧**装配并落库（装配要的数据都在 Hub 的库里），
+只收集 Hub 确实有的五类来源（任务 / 目标 / 评论 / 用户反馈 / 产物）；缺席的来源
+**不静默消失**（`collectCandidates` 产出"缺失候选"，快照里能读到"本该看团队计划、
+但系统里没有"）。三条纪律：快照**先于**派发存在；冻结失败就**不派发**并把租约还回去
+（造一条注定完不成的 attempt 比不派发坏得多）；**已冻结过就复用**，不重新装配
+（重算会因 `frozenAtMs` 不同得到新哈希，被仓储以 `CONTEXT_SNAPSHOT_CONFLICT` 拒掉）。
+
+**② 一条旧尝试能把整个队列堵死（没有回收器）。**
+本机 worker 会自己回收自己的租约——它是长驻进程。**远程节点不是**：它断线/关机后
+没有任何人收拾它留下的租约，而那条租约占着**单写者位**，于是所有新任务都领不到
+（`claim` 返回 `file-contention`，界面上只是"任务不动"）。实测就是这么卡住的。
+
+修法：`team-hub/node-recovery.mjs` + Hub 侧 30s 后台作业（unref）。一律判成
+**"未知结局"**（逾期的远端尝试可能已经推了远端/删了文件/付了款，两条出口里
+「可重试」会重复执行）；只结清**确定没人持有**的预约。
+
+**③ 回收器把"已完成待验收"改写成"结果待确认"。**
+`IN_FLIGHT_ATTEMPT_STATES` 里既有"正在执行"，也有"执行已结束、在等人"
+（`Validating` 等验收、`HandingOff` 等交接、`AwaitingApproval` 等批准）。
+对后者而言租约过期**不等于**结果不明——`runResult` 早落库了。而
+`recoveryDecision` 在租约过期时一律给 `mark-unknown-outcome`，于是实测中一次
+**成功完成**的任务从 `in_review` 掉进了 `blocked`。
+
+一个**已知结果被标成未知**，与未知被标成已知是同一类错误，方向相反而已。
+修法：`recoverExpired` 新增**可选** `states` 收窄（默认 `null` = 沿用完整集合，
+既有调用方行为一字不变；空数组报错而不是静默"成功地什么都没做"——`IN ()` 在
+SQLite 里恒为假），后台回收器只扫真正可能还在电脑上跑的那四个状态。
+
+### 闭环里仍然成立的限制（不是缺陷，是设计）
+
+- **队列按验收串行**：一条交付验收前一直持有写入位，所以下一个任务要等。
+  这是"单写者 + 交付需验收"的直接后果，不是排队坏了。
+- **远端仍不参与写入预约的生命周期**：预约由 Hub 的看板迁移与上述回收器结清。
+  远端自己申请/续期/释放预约属于后续工作。
+- **上下文来源只有五类**：`teamPlan` / `employeeManifest` / 技能与文档没有接，
+  它们在快照里以"缺失候选"出现。
 
 ## 7. 未决
 

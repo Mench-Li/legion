@@ -59,6 +59,25 @@ export const FEED_CODES = Object.freeze({
  * `manifestPath` / `manifestSha256` 这一对是设计 §5 的核心：
  * **路径决定取哪个文件，摘要把那个文件钉死**。只有路径时，托管可以换成
  * 另一份签名合法的发行清单；只有摘要时，客户端不知道该去取什么。
+ *
+ * ★★ 这张表**必须被遍历**，否则它就是装饰。本仓有一条判据
+ *    （`scripts/prt/declaration-mirrors.test.mjs`）专门抓这种形状，
+ *    而它抓到的正是这里：
+ *
+ *    > `FEED_FIELDS` 声明了却**没有任何遍历点**，而同文件里把它的成员手写
+ *    > 复述了 11 次——这张表是装饰，照它的注释加一项会被静默丢掉。
+ *
+ *    它说得对。本模块里那 9 条判据是**手写**的（而且形状各异：查枚举、
+ *    查正则、查数值范围），另外 `issuedAt`/`expiresAt` 由 `envelope.mjs`
+ *    的有效期窗口负责——于是这张表当时只被用来读 `.length`。
+ *    "往表里加一个字段"**不会**改变任何行为，而读它的人会以为会。
+ *
+ *    修法见下面 `validateFeedPayload` 里那条**存在性判据**：它遍历这张表。
+ *    逐字段的**类型**判据仍然手写（"`sequence` 必须是正整数"没法从名单推出来），
+ *    但"这 11 个字段一个都不能少"现在由这张表说了算。
+ *
+ *    > 一份"照它加一项会被静默丢掉"的名单，与没有这份名单的区别只是
+ *    > **它让人以为加了就会生效**。
  */
 export const FEED_FIELDS = Object.freeze([
   'format', 'channel', 'platform', 'arch', 'sequence',
@@ -133,6 +152,24 @@ export function validateFeedPayload(payload, {
     && !payload.manifestPath.startsWith(`releases/${payload.releaseId}/`)) {
     problems.push(feedProblem(FEED_CODES.BAD_PATH,
       `manifestPath=${payload.manifestPath} 不在 releases/${payload.releaseId}/ 之下`, 'manifestPath'))
+  }
+
+  // ★★ 存在性判据：遍历 `FEED_FIELDS`（这就是那张表存在的理由，见它的注释）。
+  //
+  //   放在**逐字段的类型判据之后**，所以上面那些更具体的结论仍然先报出来
+  //   （一条"`sequence` 必须是正整数"比一句"少了 sequence"有用）。
+  //   这一条补的是它们盖不到的地方：
+  //     · `issuedAt` / `expiresAt` 的类型判据在 `envelope.mjs` 里，本模块看不见；
+  //     · 以及**将来往表里加的字段**——从今往后，加一项就真的会生效。
+  //
+  //   ★ 只查"在不在"（`undefined` / `null` 都算缺），**不查真假**：
+  //     `sequence: 0` 与非空字符串 `''` 都是"存在但非法"，那是类型判据的事。
+  //     把"缺失"与"非法"混成一条，会让报告里少掉"到底是哪一种"这个信息。
+  for (const field of FEED_FIELDS) {
+    if (payload[field] !== undefined && payload[field] !== null) continue
+    // 上面已经报过同一个字段的，不重复报（免得一条清单缺 5 个字段时刷 10 行）。
+    if (problems.some((p) => p.field === field)) continue
+    problems.push(feedProblem(FEED_CODES.BAD_FIELD, `通道清单缺少字段 ${field}`, field))
   }
 
   if (problems.length > 0) {

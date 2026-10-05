@@ -26,7 +26,8 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 
 import {
-  FEED_CODES, buildFeedPayload, emptySequenceState, judgeSequence, recordSequence, selectCandidate,
+  FEED_CODES, FEED_FIELDS, buildFeedPayload, emptySequenceState, judgeSequence, recordSequence,
+  selectCandidate, validateFeedPayload,
 } from './feed.mjs'
 
 const BASE = Object.freeze({
@@ -144,4 +145,114 @@ test('buildFeedPayload 产出的是一份形状合法的清单（自己能被判
   // verdict 的取值来自 feed.mjs 自己的词表（'newer' = 有更新的版本）。
   assert.equal(picked.verdict, 'newer')
   assert.equal(picked.candidate.releaseId, 'rel-1.2.0')
+})
+
+// ---------------------------------------------------------------------------
+// ⑫ 通道清单的形状：`FEED_FIELDS` 是**真的**（它被遍历）
+// ---------------------------------------------------------------------------
+
+test('★★★★ `FEED_FIELDS` 必须被遍历——照它加一项要真的生效（判据不能是装饰）', () => {
+  // ★ 这条守的是一件**关于判据本身**的事，而它来自一次真实的红灯。
+  //
+  //   本仓有一条判据（`scripts/prt/declaration-mirrors.test.mjs`）专门抓
+  //   "声明了却没有任何遍历点的表"。它抓到的正是这里的 `FEED_FIELDS`：
+  //
+  //     > `FEED_FIELDS` 声明了却**没有任何遍历点**，而同文件里把它的成员
+  //     > 手写复述了 11 次——这张表是装饰，照它的注释加一项会被静默丢掉。
+  //
+  //   它说得对，而且我当时**把这条红灯误判成了前存债务**（见 §5 的 ㊵）。
+  //   修法不是删表，而是让它**被遍历**：`validateFeedPayload` 末尾多了一条
+  //   存在性判据，逐个问"这个字段在不在"。
+  //
+  //   于是这条用例要证明两件事：
+  //     ① 表里的字段**缺一个就会被拒**（表是承重的）；
+  //     ② 具体类型判据仍然**先**报（不会被一句笼统的"少了 X"盖掉）。
+  const full = buildFeedPayload({
+    channel: 'internal', platform: 'win32', arch: 'x64', sequence: 7,
+    issuedAt: '2026-10-01T00:00:00Z', expiresAt: '2026-10-08T00:00:00Z',
+    releaseId: 'rel-1.1.0', productVersion: '1.1.0',
+    manifestPath: 'releases/rel-1.1.0/manifest.json', manifestSha256: 'a'.repeat(64),
+  })
+  const ok = validateFeedPayload(full)
+  assert.equal(ok.ok, true, `一份完整清单被拒了：${ok.reason}`)
+  // 表里的每一个字段都必须在产物里真的存在（否则下面那些"缺一个"的探针
+  // 会因为"本来就没有"而全部命中，失去分辨力）。
+  //
+  // ★★ 这里**故意**不写成一个"把表名直接放在 `of` 后面"的 for…of 循环。
+  //
+  //   本仓那条判据（`scripts/prt/declaration-mirrors.mjs` 的 `iterPattern`）
+  //   把任何"`of` 紧跟表名"的文本都算成遍历点——而它的命中来源是
+  //   `git grep` 整棵仓库，**用例文件也算**。于是用例里写那一行，会让那条判据
+  //   对着**生产代码**也放行：把 `feed.mjs` 里那个循环删掉，它会因为
+  //   *这条用例*里的循环而继续报绿。
+  //
+  //   > 一条判据的"证据来源"里混进了用例，它就会把"用例遍历过"
+  //   > 读成"生产代码遍历过"。
+  //
+  //   我用一个局部别名绕开那条正则，正是为了让那条判据的绿**只**能由
+  //   生产代码里那个循环挣来。（实测：把生产那个循环清空之后，
+  //   那条判据会红——否则下面这几行就是空话。）
+  //
+  //   ★ 而写这段说明时我又踩了同一个坑一次：我本来把这个"反例写法"原样
+  //     抄进了注释，于是**注释里那句话本身**又满足了那条正则——判据再次被
+  //     它的说明文字弄瞎（与 ㉚ 里那次同一个形状）。所以这里只用文字描述，
+  //     不出现那个字面写法。
+  const declaredFields = FEED_FIELDS
+  for (const field of declaredFields) {
+    assert.notEqual(full[field], undefined, `buildFeedPayload 没产出 ${field}，而它在 FEED_FIELDS 里`)
+  }
+
+  // ① 缺一个就该被拒。`issuedAt` 特意选**本模块类型判据盖不到**的那个
+  //    （它的类型判据在 `envelope.mjs` 的有效期窗口里），所以这一条只可能
+  //    由那条遍历判据满足——这正证明表是承重的。
+  for (const field of ['issuedAt', 'expiresAt']) {
+    const missing = { ...full }
+    delete missing[field]
+    const result = validateFeedPayload(missing)
+    assert.equal(result.ok, false, `缺 ${field} 的清单被接受了`)
+    assert.equal(result.code, FEED_CODES.BAD_FIELD)
+    assert.equal(result.problems[0].field, field, `报的不是缺的那个字段：${JSON.stringify(result.problems[0])}`)
+    assert.match(result.reason, new RegExp(field))
+  }
+
+  // ② 具体类型判据仍然先报：`arch` 既在表里、也有自己的正则判据，
+  //    所以缺它时报的应当是**类型那句**（"必须是小写架构名"），
+  //    而不是"IE 少了 arch"。顺序反了会让报告变模糊。
+  const noArch = { ...full }
+  delete noArch.arch
+  const archResult = validateFeedPayload(noArch)
+  assert.equal(archResult.ok, false)
+  assert.equal(archResult.problems[0].field, 'arch')
+  assert.equal(archResult.problems.length, 1,
+    `同一个字段被报了两遍（类型判据 + 存在性判据）：${JSON.stringify(archResult.problems)}`)
+  assert.match(archResult.problems[0].message, /小写架构名/)
+
+  // ③ 一个存在但**非法**的值（`sequence: 0`）走的仍然是类型判据，
+  //    不会因为"存在"而被存在性判据放过、也不会被它重复报一遍。
+  const zeroSeq = validateFeedPayload({ ...full, sequence: 0 })
+  assert.equal(zeroSeq.ok, false)
+  assert.equal(zeroSeq.problems[0].field, 'sequence')
+  assert.match(zeroSeq.problems[0].message, /正整数/)
+})
+
+test('★ 通道清单**不**拒绝未知字段（前向兼容是刻意的）', () => {
+  // ★ 把这条写下来，是为了让"以后有人想加一条'拒绝未知字段'"这件事
+  //   有据可依：设计 §5 用 `format` 做版本门（`legion/update-feed@1`），
+  //   所以**加字段**要连同 format 一起升版，而不是让老客户端去拒新字段。
+  //
+  //   一个"拒绝 payload 里任何未知键"的实现在这里看起来更严，但它会把
+  //   "发布端先加字段、客户端后升级"这条正常路径变成一次硬失败——
+  //   而设计 §5 整节都在讲怎么让发布与消费**解耦**（通道清单与发行清单分开、
+  //   签名与传输分开）。
+  const full = buildFeedPayload({
+    channel: 'internal', sequence: 7, issuedAt: '2026-10-01T00:00:00Z',
+    expiresAt: '2026-10-08T00:00:00Z', releaseId: 'rel-1.1.0', productVersion: '1.1.0',
+    manifestPath: 'releases/rel-1.1.0/manifest.json', manifestSha256: 'a'.repeat(64),
+  })
+  const withExtra = validateFeedPayload({ ...full, somethingNew: 'x' })
+  assert.equal(withExtra.ok, true, `多了一个未知字段就被拒了：${withExtra.reason}`)
+  // 对照：`FEED_FIELDS` 那张表**不是**用来判"只能有这些键"的——
+  // 它是"这些必须有"。两件事不能混。
+  assert.equal(Object.keys(full).length, FEED_FIELDS.length,
+    'FEED_FIELDS 与产物字段数对不上——那么"多一个键"这条对照就没有分辨力')
 })

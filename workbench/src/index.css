@@ -3556,3 +3556,88 @@ body {
 .snapshot-view .snap-note.err { background: rgba(248,81,73,.14); border-left-color: #f85149; }
 .snapshot-view table th { font-weight: 500; padding: 4px 8px 4px 0; }
 .snapshot-view table td { padding: 4px 8px 4px 0; vertical-align: top; }
+
+/* ── 登录 / 注册屏（指挥台的账号会话） ──────────────────────────────────────
+ *
+ * 它出现的条件是**窄的**：只有 Hub 要求远程鉴权、且本地没有会话时才渲染。
+ * 本机单机部署（`LEGION_REMOTE_AUTH` 没开）时这些样式永远不生效。
+ *
+ * 一屏一件事，所以整页居中、不要侧栏与指挥台外壳——把登录框放进那个外壳里，
+ * 用户会以为自己已经进去了，只是"某个面板空了"。
+ */
+.login-screen {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 100vh;
+  padding: 24px;
+  background: var(--bg);
+}
+.login-card {
+  width: 100%;
+  max-width: 380px;
+  background: var(--panel);
+  border: 1px solid var(--line, #1e293b);
+  border-radius: 12px;
+  padding: 28px 24px;
+}
+.login-card h1 { margin: 0 0 6px; font-size: 24px; letter-spacing: .5px; }
+.login-tagline { margin: 0 0 20px; color: var(--muted, #94a3b8); font-size: 13px; line-height: 1.6; }
+.login-field { display: block; margin-bottom: 14px; }
+.login-field span { display: block; font-size: 12px; color: var(--muted, #94a3b8); margin-bottom: 6px; }
+.login-field input {
+  width: 100%;
+  padding: 10px 12px;
+  background: var(--panel-2);
+  border: 1px solid var(--line, #1e293b);
+  border-radius: 8px;
+  color: inherit;
+  font: inherit;
+}
+.login-field input:focus { outline: none; border-color: var(--accent); }
+.login-submit {
+  width: 100%;
+  margin-top: 6px;
+  padding: 11px 14px;
+  border: 1px solid var(--accent);
+  border-radius: 8px;
+  background: var(--accent);
+  color: #0b1020;
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+}
+.login-submit[disabled] { opacity: .5; cursor: default; }
+.login-switch {
+  width: 100%;
+  margin-top: 10px;
+  padding: 9px 14px;
+  border: 1px solid var(--line, #1e293b);
+  border-radius: 8px;
+  background: transparent;
+  color: var(--muted, #94a3b8);
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+}
+.login-hint { margin: 0 0 12px; font-size: 12px; color: var(--muted, #94a3b8); }
+/* 错误与提示各用一种颜色，不共用一套底：把"口令不对"与"注册成功"画成同一个
+ * 灰框，用户就得逐字去读——而这两种状态要触发的是完全不同的动作。 */
+.login-error {
+  margin-top: 14px;
+  padding: 9px 12px;
+  border-radius: 8px;
+  border-left: 3px solid #f85149;
+  background: rgba(248, 81, 73, .14);
+  color: #f85149;
+  font-size: 13px;
+}
+.login-notice {
+  margin-top: 14px;
+  padding: 9px 12px;
+  border-radius: 8px;
+  border-left: 3px solid #2ea043;
+  background: rgba(46, 160, 67, .12);
+  color: #2ea043;
+  font-size: 13px;
+}

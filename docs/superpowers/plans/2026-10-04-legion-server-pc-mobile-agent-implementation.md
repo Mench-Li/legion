@@ -231,12 +231,42 @@
 - [x] 基线核对与接口清单（§1）
 - [x] 计划文档定稿（本文件）
 - [x] 阶段 A 帧编解码纯模块（`packages/shared/src/ws-frames.mjs`，27 项用例通过）
-- [ ] 阶段 B 用户 / 会话 / 设备身份
+- [x] 阶段 B 用户 / 会话 / 设备身份（`user-store.mjs` 28 例 + `device-store.mjs` 22 例 + `remote-auth.mjs`）
 - [x] 阶段 C Node 协议契约（`packages/shared/src/node-protocol.mjs`，22 项用例通过）
-- [ ] 阶段 D Hub 侧 Node 网关
-- [ ] 阶段 E 电脑侧 Node 客户端
-- [ ] 阶段 F 手机 PWA
+- [x] 阶段 D Hub 侧 Node 网关（`node-gateway.mjs` 22 例；接线测试 13 例）
+- [x] 阶段 E 电脑侧 Node 客户端（`product/node/`：agent 端到端 9 例 + 出境 14 + 账本 11 + 执行器 12）
+- [x] 阶段 F 手机 PWA（`workbench/mobile/`：时间线 14 例 + 静态路由 9 例；含 SW 与图标）
 - [ ] 阶段 G 服务器真机部署
+  - [x] Node 运行时（v24.21.0）、系统用户、数据目录、密钥、systemd 单元
+  - [x] Hub 上线并绑回环；`/api/identity/status` 200；无令牌读端点 401；机器令牌 200
+  - [x] 云厂商拦截的实测与规避（见下「部署实录」）
+  - [x] Cloudflare 隧道连接器上线（4 条连接，lax）——**服务器主动出站**
+  - [ ] Cloudflare 侧 Public Hostname（需在面板操作，见 `product/server/README.md`）
+  - [ ] 公网端到端验收（手机登录、电脑配对、一次真实任务）
+  - [ ] 备份与恢复演练
+
+## 6.1 部署实录（2026-10-04/05）
+
+服务器 `117.72.146.36`（Ubuntu 24.04.2，2 vCPU / 3.9 GB）。
+
+- **Node**：官方 apt 源里没有满足 `node:sqlite` 的版本，改用 NodeSource 装到 v24.21.0。
+- **证书签发的两次失败与根因**（这是本次部署最有价值的一条发现）：
+  - Certbot HTTP-01 失败：CA 从公网访问 `http://117.72.146.36.sslip.io/.well-known/...`
+    得到 **403**，响应头 `Server: JDTP`，正文是"网页禁止访问"的跳转脚本。
+  - 同一路径从服务器本机带同样 Host 请求，nginx 正常 200；同一时刻用裸 IP 作 Host
+    请求 80 端口也正常。→ 拦截条件是「80 端口 + 未备案域名的 Host」。
+  - 改用 acme.sh 的 **TLS-ALPN-01**（走 443）：CA 回报 `Connection reset by peer`。
+  - 为进一步定位，在服务器上临时起监听并从公网对比：
+    裸 TCP 连接正常；普通 TLS 握手（带域名 SNI）**成功**；
+    带 `-alpn acme-tls/1` 的握手**被重置**。→ 443 上针对性拦了 ACME 校验。
+  - 结论：**未备案域名在这台服务器上拿不到 Let's Encrypt 证书**（两种校验都被拦）。
+- **规避**：改用 **Cloudflare Tunnel**（服务器主动出站连 Cloudflare，公网入口在
+  Cloudflare 侧，证书由 Cloudflare 提供）。实测 `pkg.cloudflare.com` 在该网络下超时，
+  故 cloudflared 走 GitHub release 静态二进制（`/usr/local/bin`）。
+- **必须如实记录的边界**：`sslip.io` 类域名无法完成 ICP 备案，而境内服务器的网站需
+  备案是运营者的合规义务。隧道只是让技术链路在**当前**拦截策略下可用，不改变合规状态。
+  长期方案是自有已备案域名，或把入口移到境外节点。
+
 
 ## 7. 未决
 

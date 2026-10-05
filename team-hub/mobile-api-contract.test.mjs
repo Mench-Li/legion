@@ -338,6 +338,59 @@ describe('手机端接口契约（照 app.mjs 的顺序）', () => {
     assert.equal(viaMachine.status, 200, `机器令牌应放行，实际 ${viaMachine.status}：${viaMachine.text.slice(0, 160)}`)
   })
 
+  it('⑯ 手机「创建任务」建出的任务**真的可被认领**（不是躺在 backlog 里）', async () => {
+    // ★ 这条守的是整个产品的主标题动作。实测踩过：手机发 intent=create_task →
+    //   时间线里出现"已创建任务 T-001，等待调度"→ 任务**永远停在 `backlog`**，
+    //   Node 领不到它。因为 `createTask` 的默认状态是 `backlog`（看板的"未排期"），
+    //   而认领闸门要求 `status = 'todo'`。
+    //
+    //   失败的样子特别安静：不报错、时间线里那条回执看着也挺对、
+    //   只是任务永远不动。所以断言必须是**可认领性**，不是"任务行存在"。
+    const before = await call('GET', `/api/board?scope=${ctx.scope}`, { token: ctx.access })
+    const idsBefore = new Set((Array.isArray(before.json) ? before.json : before.json.tasks ?? []).map((t) => t.id))
+
+    const sent = await call('POST', '/api/agent-messages', {
+      body: {
+        conv: ctx.convId, scope: ctx.scope, by: 'mobile',
+        body: '端到端契约：请把这个做完', intent: 'create_task',
+        clientRequestId: `contract-create-${Date.now()}`,
+      },
+      token: ctx.access,
+    })
+    assert.equal(sent.status, 200, sent.text.slice(0, 200))
+    const taskId = sent.json.taskId
+    assert.equal(typeof taskId, 'string', 'create_task 应回一个新任务 id')
+
+    const board = await call('GET', `/api/board?scope=${ctx.scope}`, { token: ctx.access })
+    const list = Array.isArray(board.json) ? board.json : board.json.tasks ?? []
+    const created = list.find((t) => t.id === taskId)
+    assert.ok(created, `新任务 ${taskId} 应出现在看板上`)
+    assert.ok(!idsBefore.has(taskId), '它必须是新建的')
+
+    // 核心断言：状态必须是可派发的 `todo`，**不是** `backlog`。
+    assert.equal(created.status, 'todo',
+      `手机建的任务必须可被认领（todo），实际 ${created.status}——` +
+      '`backlog` 不报错、不进队列、也不在任何人的待办里，从界面看只是"没反应"')
+
+    // 更硬的一条：**走真实的运行时认领路由**认一次——闸门全过才算真的可认领。
+    // 只看 `status` 字段会让"状态对了但其它闸门不对"（写预约、hold、退避闸门…）漏过去。
+    // 用 HTTP 而不是直接调 store：路由才是执行面真正会走的那条路。
+    const claimed = await call('POST', '/api/runtime/claim', {
+      body: { workerId: 'contract-probe', scope: ctx.scope }, token: ctx.access,
+    })
+    assert.equal(claimed.status, 200, claimed.text.slice(0, 200))
+    assert.equal(claimed.json.claimed?.taskId, taskId,
+      `新任务应真的可被认领；拿到 ${JSON.stringify(claimed.json.claimed)}，reason=${claimed.json.reason}`)
+    // 还回去，别影响后面的用例。
+    await call('POST', '/api/runtime/release', {
+      body: {
+        attemptId: claimed.json.claimed.attemptId, leaseEpoch: claimed.json.claimed.leaseEpoch,
+        workerId: 'contract-probe', reason: 'contract-probe-release',
+      },
+      token: ctx.access,
+    })
+  })
+
   it('⑫ 刷新凭据能换新令牌（手机会话过 15 分钟靠它）', async () => {
     const r = await call('POST', '/api/identity/refresh', { body: { refreshToken: ctx.refresh } })
     assert.equal(r.status, 200)

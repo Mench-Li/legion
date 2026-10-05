@@ -1,0 +1,83 @@
+#!/usr/bin/env bash
+# 设计文档 §1 的**核心体验**端到端验收：
+#
+#   在**同一个 Agent 详情**里汇合三类信息——
+#   用户与 Agent 的对话、Agent 正在做的任务、可追溯的进展和结果。
+#
+# 走**手机那条路**：手机发一条 intent=create_task 的消息 →
+# Hub 建任务 → 派给电脑 Node → 电脑执行 → 进展与终态回到**同一条时间线**。
+#
+# 与之前几次验收的分工：之前是"Hub 直接建任务 + 看 Node 执行"，
+# 这次多了**手机消息那一段**——它才是用户真正会做的动作。
+# 关键断言不是"任务完成了"，而是**Agent 的进展出现在手机正在读的那条会话里**。
+set -uo pipefail
+
+SSH="ssh -i /c/Users/11150/.ssh/legion.pem -o BatchMode=yes root@117.72.146.36"
+NODE_DIR=/tmp/legion-node
+ENTRY=/d/project/DSH/legion/.claude/worktrees/legion-remote-agent/product/node/entry.mjs
+phone() { $SSH "set -a; . /etc/legion-hub.env; set +a; node /srv/legion-hub/_phone-act.mjs $*" 2>&1; }
+
+cleanup() { [ -n "${PID:-}" ] && kill "$PID" 2>/dev/null; }
+trap cleanup EXIT
+
+echo "===== ① 起电脑 Node（出站 WSS 到可信域名）====="
+cd "$NODE_DIR" || exit 1
+rm -f node.log
+node "$ENTRY" run --config node-config.json > node.log 2>&1 &
+PID=$!
+sleep 12
+sed 's/^/  /' node.log
+
+echo
+echo "===== ② 手机发一条「创建任务」消息（intent=create_task）====="
+OUT="$(phone create "端到端验收：请写一个 greet 函数并跑一次测试")"
+echo "$OUT" | sed 's/^/  /'
+
+echo
+echo "===== ③ 观察（每 4 秒，最多 100 秒）====="
+reached=""
+for i in $(seq 1 25); do
+  sleep 4
+  line=$(phone timeline | node -e '
+    let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{
+      try{const a=JSON.parse(s);const last=a[a.length-1];
+        console.log(`${a.length} 条 | 末条 source=${last?.source} type=${last?.semanticType} body=${String(last?.body??"").slice(0,60)}`)
+      }catch(e){console.log("(解析失败)")}})')
+  echo "    ${i}: $line"
+  case "$line" in *"progress"*) reached=1 ;; esac
+  case "$line" in *"task_status"*) break ;; esac
+done
+
+echo
+echo "===== ④ 手机读到的**完整时间线** ====="
+phone timeline | node -e '
+  let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{
+    const a=JSON.parse(s)
+    for (const m of a) {
+      console.log(`   #${String(m.id).padStart(3)} [${m.source ?? "?"}/${m.semanticType ?? "-"}]${m.taskId ? " ("+m.taskId+")" : ""} ${m.body}`)
+    }
+    const sources = [...new Set(a.map((x)=>x.source))]
+    console.log()
+    console.log("   来源分布:", sources.join(", "))
+    console.log("   含任务关联的消息:", a.filter((x)=>x.taskId).length, "条")
+  })'
+
+echo
+echo "===== ⑤ 任务与尝试的最终状态 ====="
+TID=$(phone timeline | node -e '
+  let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{
+    const a=JSON.parse(s);const m=a.find((x)=>x.taskId);console.log(m?m.taskId:"")})')
+if [ -n "$TID" ]; then
+  phone task "$TID" | sed 's/^/  /'
+else
+  echo "  （时间线里没有带任务关联的消息）"
+fi
+
+echo
+echo "===== ⑥ 出境策略仍在生效（含私钥块的那条进展应被拦下）====="
+phone timeline | grep -o '已拦下：包含私钥块' | head -1 | sed 's/^/   见到：/' || echo "   （本次时间线里没有该条）"
+
+echo
+echo "  node.log 全文:"
+sed 's/^/  /' node.log
+echo "===== 完成 ====="

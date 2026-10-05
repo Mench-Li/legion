@@ -44,6 +44,10 @@ import {
 import { artifactUrl, feedUrl, releaseManifestUrl } from './host.mjs'
 import { ENVELOPE_FORMATS, verifyEnvelope } from './envelope.mjs'
 import { transition, UPDATE_CHAIN } from './state.mjs'
+// ★ 发行方声明的升级窗口的成员判定（设计 §5）。`feed.mjs` 的注释把这件事
+//   指给了「release 的 supportedFromVersions 和 preflight」，而客户端这一层是
+//   "要不要把这个候选显示给用户"的那一半（预检那一半在 `install.mjs`）。
+import { isSupportedFrom } from './semver.mjs'
 
 /**
  * 本机内核版本字符串（`os.release()` 的形状，如 `10.0.19045`）。
@@ -376,6 +380,47 @@ export function createUpdateClient({
       atMs: now(), trigger, outcome: 'ok', code: selected.code, reason: selected.reason,
       feedSequence: feed.sequence, releaseId: feed.releaseId, productVersion: feed.productVersion,
     })
+
+    // ★★ 通道上**有**更新，但发行方声明不支持从本机这个版本升（设计 §5 的
+    //    `supportedFromVersions`）。
+    //
+    //    ★ 位置就是判据：它必须在 `newer` 分支**之内、构造候选之前**。
+    //      第一版我把它写在 `newer` 分支**之后**——那段代码永远不可达
+    //      （`newer` 分支一定会 return），而两条新用例当场就红了。
+    //      这是"一段没人执行得着的判据与不存在的判据是同一个东西"的又一次现身，
+    //      只不过这次是我自己写的。
+    //
+    //    这一段的用途是**体验**：不要在界面上给出一个装不上的候选。
+    //    安全那一半不在这里——它在预检里（`install.mjs` 把
+    //    `release.supportedFromVersions` 递给了 `runPreflight`，那才是
+    //    "动程序之前的最后一道门"）。两半都要有：
+    //      · 只有预检那一半 ⇒ 用户白下载一次，然后在安装时被拦住；
+    //      · 只有客户端这一半 ⇒ 一个绕过界面直接调 `install()` 的调用方
+    //        （或一次界面状态错乱）就能从没验过的版本升上来。
+    //
+    //    `feed.mjs` 的 `selectCandidate()` 注释早就写着这一条该由谁负责：
+    //    「这一层只回答'有没有更新的版本'，不回答'能不能升'（那是 release 的
+    //    `supportedFromVersions` 和 preflight 的事）」。在写这一段之前，
+    //    那两处**都没有**做这件事。
+    if (selected.verdict === 'newer'
+      && Array.isArray(validatedRelease.release.supportedFromVersions)
+      && !isSupportedFrom(currentVersion, validatedRelease.release.supportedFromVersions)) {
+      candidate = null
+      release = null
+      releaseNotes = null
+      const from = validatedRelease.release.supportedFromVersions.join(' / ')
+      setState('check-source-unsupported', {})
+      publish()
+      return Object.freeze({
+        outcome: 'source-unsupported',
+        code: UPDATE_CODES_CLIENT.SOURCE_VERSION_UNSUPPORTED,
+        // 理由里带上"先升到哪个版本"——否则用户唯一的下一步就是反复点检查。
+        reason: `${describeError(UPDATE_CODES_CLIENT.SOURCE_VERSION_UNSUPPORTED)}`
+          + `（本机 ${currentVersion}，这份发行支持从 ${from} 升级）`,
+        verdict: selected.verdict,
+        supportedFromVersions: Object.freeze([...validatedRelease.release.supportedFromVersions]),
+      })
+    }
 
     if (selected.verdict === 'newer') {
       candidate = Object.freeze({

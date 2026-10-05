@@ -435,3 +435,46 @@ test('formatBytes 的边界', () => {
   assert.equal(formatBytes(-1), '0 B')
   assert.equal(formatBytes(Number.NaN), '0 B')
 })
+
+// ---------------------------------------------------------------------------
+// ★★★ 两个声明必须一致：面板文案 ↔ 状态机词汇表
+// ---------------------------------------------------------------------------
+
+test('★★★★ 状态机里的**每一个**状态都必须在面板里有文案（否则界面显示空白）', async () => {
+  // ★ 这条守的是一个**跨模块的接缝**。状态机在 `product/update/state.mjs`，
+  //   而用户真正看到的那句话在 `desktop/update-panel.mjs` 的 `STATE_TEXT` 里。
+  //   两处各自演进没问题——**但不能对同一个状态给出"一个有一个没有"**。
+  //
+  //   在加这条判据之前，`STATE_TEXT` 少一个状态时的症状是：界面那一格
+  //   **空白**（`STATE_TEXT[state] ?? ''`），而所有用例照样绿。本次新增
+  //   `source-unsupported` 时就是踩在这个形状上发现的：`state.mjs` 里那句
+  //   `STATE_LABELS` 看起来是用户文案，其实**没有任何界面读它**
+  //   （全仓只有它自己的自检与 index 的再导出），真正生效的是这一张。
+  //
+  //   > 一份"看起来是用户文案"的表，与一张"界面真的会读"的表，
+  //   > 在"改了文案用户会不会看到"这个问题上不是同一个东西。
+  const { UPDATE_STATES } = await import('../product/update/state.mjs')
+  const { STATE_TEXT } = await import('./update-panel.mjs')
+  const missing = UPDATE_STATES.filter((state) => typeof STATE_TEXT[state] !== 'string' || STATE_TEXT[state] === '')
+  assert.deepEqual(missing, [],
+    `这些状态在面板里没有文案（界面会显示空白）：${missing.join(' / ')}`)
+  // 反向：面板里**多出**的状态名也要被拒——那多半是改名之后漏改了一处，
+  // 而"多出来"的那条永远不会被显示（同样是一个没人读的声明）。
+  const extra = Object.keys(STATE_TEXT).filter((state) => !UPDATE_STATES.includes(state))
+  assert.deepEqual(extra, [], `面板里有状态机不认识的状态名：${extra.join(' / ')}`)
+})
+
+test('★★★ `source-unsupported` 与 `up-to-date` 的文案必须不同（用户该做的事相反）', async () => {
+  const { STATE_TEXT, describeLastCheck } = await import('./update-panel.mjs')
+  assert.notEqual(STATE_TEXT['source-unsupported'], STATE_TEXT['up-to-date'],
+    '"有一个你装不上的新版"与"没有新版"被说成了同一句话')
+  assert.match(STATE_TEXT['source-unsupported'], /不支持/)
+  // ★ 也**不是**失败：归到失败会让用户去点重试，而重试得到同一个答案。
+  assert.equal(
+    describeLastCheck({ lastCheck: { atMs: Date.UTC(2026, 9, 6, 12), outcome: 'source-unsupported' } }),
+    describeLastCheck({ lastCheck: { atMs: Date.UTC(2026, 9, 6, 12), outcome: 'source-unsupported' } }),
+  )
+  const line = describeLastCheck({ lastCheck: { atMs: Date.UTC(2026, 9, 6, 12), outcome: 'source-unsupported' } })
+  assert.match(line, /不支持/, `上次检查那一行没有说明原因：${line}`)
+  assert.equal(/失败/.test(line), false, `把"装不上"说成了"失败"：${line}`)
+})

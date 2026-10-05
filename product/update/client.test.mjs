@@ -1081,3 +1081,61 @@ test('★ checkOnStartup 开启（默认）时照常安排首次检查', async (
   // 首次延迟落在设计 §6 line 132 的 30～90 秒里。
   assert.ok(scheduled[0].ms >= 30_000 && scheduled[0].ms <= 90_000, `首次延迟 ${scheduled[0].ms} 越界`)
 })
+// ---------------------------------------------------------------------------
+// ★★★ 发行方声明的升级窗口（设计 §5 的 supportedFromVersions）
+// ---------------------------------------------------------------------------
+
+test('★★★★ 本机版本不在发行声明的窗口里 → 不给出候选，且不是"已是最新版本"', async (t) => {
+  // ★ 这条守的是"那份声明终于有人读"的**客户端那一半**。
+  //
+  //   背景（本次会话实测出来的空洞）：`release.mjs` 把 `supportedFromVersions`
+  //   的形状验得很细，而**没有任何代码拿本机版本去问"我在这个集合里吗"**。
+  //   于是本机 1.0.0、而发行声明只支持从 0.9.0 升时，客户端照样会给出候选，
+  //   用户下载、点安装，然后在预检那里被拦——白下载一次。
+  //
+  //   ★ 两半的分工：这一半决定**要不要把候选显示给用户**（体验），
+  //     预检那一半决定**能不能真的换程序**（安全，在 `install.test.mjs`）。
+  //     两道都要有——只有预检的话用户白下载；只有客户端的话，
+  //     一个绕过界面直接调 `install()` 的调用方就能从没验过的版本升上来。
+  const ctx = setup({ releaseOverrides: { supportedFromVersions: ['0.9.0'] } })
+  t.after(() => rmSync(ctx.cacheDir, { recursive: true, force: true }))
+  const client = makeClient(ctx)
+
+  const result = await client.check({ trigger: 'manual' })
+  assert.equal(result.outcome, 'source-unsupported', `结论错了：${JSON.stringify(result)}`)
+  assert.equal(result.code, 'update-source-version-unsupported')
+  // ★ 必须与"已是最新版本"分开：用户该做的事相反。
+  assert.notEqual(result.outcome, 'up-to-date')
+  // 没有候选——界面不该给出一个装不上的版本。
+  assert.equal(client.snapshot().available ?? null, null)
+  assert.equal(client.state(), 'source-unsupported')
+  // 定时器/状态：它不该像失败那样进退避。
+  assert.notEqual(client.state(), 'check-failed')
+  // ★ 理由里要带"先升到哪个版本"，否则用户唯一的下一步就是反复点检查。
+  assert.match(result.reason, /0\.9\.0/, `理由里没有说该升到哪个版本：${result.reason}`)
+  assert.match(result.reason, /1\.0\.0/, `理由里没有说本机是哪个版本：${result.reason}`)
+  // 声明本身要如实带出来（界面可以据此给出"先升到 X"的指引）。
+  assert.deepEqual([...result.supportedFromVersions], ['0.9.0'])
+  // 高水位仍然推进了：清单本身是**合法**的，"本机版本不在窗口里"不是发布端的事故。
+  // （一个把合法清单判成事故的实现会让 CDN 送回旧清单时也被接受——那是另一条判据。）
+  assert.equal(ctx.fetchImpl.requests.some((r) => r.url.includes('feeds/stable')), true)
+})
+
+test('★★★ 对照：本机版本**在**声明的窗口里 → 照常给出候选', async (t) => {
+  // 没有这一条，上面那条的"绿"可能只是因为别的判据把候选拦掉了。
+  const ctx = setup({ releaseOverrides: { supportedFromVersions: [CURRENT] } })
+  t.after(() => rmSync(ctx.cacheDir, { recursive: true, force: true }))
+  const client = makeClient(ctx)
+  const result = await client.check({ trigger: 'manual' })
+  assert.equal(result.outcome, 'available', `声明里含本机版本却被拒了：${result.reason}`)
+  assert.equal(client.state(), 'available')
+})
+
+test('★★ 多个来源版本时按**集合**判，不是"任意版本都行"', async (t) => {
+  const ctx = setup({ releaseOverrides: { supportedFromVersions: ['0.8.0', '0.9.0'] } })
+  t.after(() => rmSync(ctx.cacheDir, { recursive: true, force: true }))
+  const client = makeClient(ctx)
+  const result = await client.check({ trigger: 'manual' })
+  // 本机 1.0.0 不在 ['0.8.0','0.9.0'] 里。
+  assert.equal(result.outcome, 'source-unsupported', `集合里没有本机版本，却给出了候选：${JSON.stringify(result)}`)
+})

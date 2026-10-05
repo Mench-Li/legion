@@ -54,6 +54,25 @@ export const UPDATE_CHAIN = Object.freeze([
 export const UPDATE_OFFCHAIN = Object.freeze([
   'up-to-date', 'check-failed', 'download-failed', 'cancelled',
   'install-blocked', 'rolled-back', 'recovery-required',
+  /**
+   * ★ 通道上**有**更新的版本，但发行方声明它不支持从**本机这个版本**升
+   *   （设计 §5 的 `supportedFromVersions`）。
+   *
+   *   它与 `up-to-date` **必须分开**，因为用户该做的事完全相反：
+   *
+   *   | 状态 | 用户看到 | 用户该做什么 |
+   *   |---|---|---|
+   *   | `up-to-date` | 已是最新版本 | 什么都不用做 |
+   *   | 这一条 | 这个版本不支持从你的版本升级 | 先升到声明的那个版本 |
+   *
+   *   > 把"有一个你装不上的新版"显示成"已是最新版本"，
+   *   > 与把"没有新版"显示成"检查失败"，是同一类错误：
+   *   > 两种情形的**下一步动作**不同，而界面把它们说成了同一件事。
+   *
+   *   ★ 它同时也**不是** `check-failed`：没有失败。检查成功、结论明确。
+   *     用失败去表达它会让用户去点"重试"，而重试会得到同一个答案。
+   */
+  'source-unsupported',
 ])
 
 export const UPDATE_STATES = Object.freeze([...UPDATE_CHAIN, ...UPDATE_OFFCHAIN])
@@ -62,7 +81,13 @@ export const UPDATE_STATES = Object.freeze([...UPDATE_CHAIN, ...UPDATE_OFFCHAIN]
 export const RETRYABLE_STATES = Object.freeze(['check-failed', 'download-failed', 'install-blocked'])
 
 /** 终态：不再自动变化。 */
-export const TERMINAL_STATES = Object.freeze(['up-to-date', 'committed', 'rolled-back', 'recovery-required'])
+export const TERMINAL_STATES = Object.freeze([
+  'up-to-date', 'committed', 'rolled-back', 'recovery-required',
+  // ★ 与 `up-to-date` 同档：这个结论不会自己变。它会因为一次**新的检查**
+  //   （`check-started`）离开，而不是因为等待——"终态"说的是"不再自动变化"，
+  //   不是"不能再检查"。
+  'source-unsupported',
+])
 
 /**
  * 处于这些状态时，**检查的结论不许覆盖主状态**（设计 §8 line 166 那句话）。
@@ -79,6 +104,14 @@ export const UPDATE_EVENTS = Object.freeze([
   'check-started',
   'check-available',
   'check-up-to-date',
+  /**
+   * 通道上有新版，但**发行方声明不支持从本机版本升**（设计 §5 的
+   * `supportedFromVersions`）。
+   *
+   * ★ 它与 `check-up-to-date` 是两条事件而不是一条带参数的事件：
+   *   落点状态不同，而落点决定用户在界面上看到什么、下一步该做什么。
+   */
+  'check-source-unsupported',
   'check-failed',
   'download-started',
   'download-complete',
@@ -111,6 +144,9 @@ export const UPDATE_EVENTS = Object.freeze([
 const T = Object.freeze({
   'check-started': Object.freeze({
     idle: 'checking', 'up-to-date': 'checking', 'check-failed': 'checking',
+    // ★ 与 `up-to-date` 同档：一个"没有可安装候选"的终态，重新检查当然要能离开它
+    //   （用户可能刚手动升到了声明的那个版本，于是下一次检查就该给出候选）。
+    'source-unsupported': 'checking',
     // ★ 有候选时的重复检查**不改变状态**：界面不该从"发现 1.2.0"退回"正在检查"。
     available: 'available', downloading: 'downloading', verifying: 'verifying',
     ready: 'ready', 'waiting-for-tasks': 'waiting-for-tasks', preparing: 'preparing',
@@ -118,11 +154,18 @@ const T = Object.freeze({
   }),
   'check-available': Object.freeze({ checking: 'available' }),
   'check-up-to-date': Object.freeze({ checking: 'up-to-date', idle: 'up-to-date' }),
+  // 与 `check-up-to-date` 同形：只在"没有候选"的状态上成立。
+  // ★ 它**不**从 `available` 迁移——一个有候选的状态不该被一个"装不上"的结论
+  //   覆盖掉（那会丢掉用户已经看到的那条候选）。与 PROTECTED_STATES 同一条纪律。
+  'check-source-unsupported': Object.freeze({
+    checking: 'source-unsupported', idle: 'source-unsupported', 'up-to-date': 'source-unsupported',
+  }),
   'check-failed': Object.freeze({
     checking: 'check-failed',
     idle: 'check-failed',
     // 这两条也允许：把一个"没有候选的终态"换成"检查失败"是信息量的提升。
     'up-to-date': 'check-failed',
+    'source-unsupported': 'check-failed',
     // ★ PROTECTED_STATES 里的任何状态都不在这里 —— 缺省即"保持不变"。
     //   这不是省略，是设计 §8 line 166 那条约束的**唯一**落点。
   }),
@@ -206,6 +249,7 @@ export const STATE_LABELS = Object.freeze({
   validating: '正在验证新版本',
   committed: '升级完成',
   'up-to-date': '已是最新版本',
+  'source-unsupported': '这个版本不支持从你的版本升级',
   'check-failed': '检查更新失败',
   'download-failed': '下载失败',
   cancelled: '已取消下载',
@@ -266,6 +310,33 @@ export function selfCheckState() {
   ]) {
     const result = transition(from, event)
     if (result.state !== expected) problems.push(`${from} --${event}--> 期望 ${expected}，实际 ${result.state}`)
+  }
+
+  // ②b ★★ 新增的落点必须**可达**，而且必须真的与 `up-to-date` 分开。
+  //
+  //   ★ 为什么这一条要单独写：`UPDATE_OFFCHAIN` 里加一个名字、`STATE_LABELS`
+  //     里加一句文案，这两件事都**不会**让那个状态变得可达——它照样是一个
+  //     "声明了、有文案、但没有任何迁移指向它"的状态，而那正是本次会话反复
+  //     遇到的那一类（声明了没人读）。所以可达性要有一条判据。
+  {
+    const reachable = transition('checking', 'check-source-unsupported')
+    if (reachable.state !== 'source-unsupported') {
+      problems.push(`source-unsupported 不可达：checking --check-source-unsupported--> ${reachable.state}`)
+    }
+    if (reachable.state === transition('checking', 'check-up-to-date').state) {
+      problems.push('source-unsupported 与 up-to-date 落到了同一个状态——两者的用户文案不同，不该合并')
+    }
+    // 重新检查必须能离开它（用户可能刚手动升到了声明的那个版本）。
+    if (transition('source-unsupported', 'check-started').state !== 'checking') {
+      problems.push('source-unsupported 无法通过重新检查离开')
+    }
+    // 而它不该被一个"检查失败"以外的任何东西悄悄顶掉。
+    for (const event of ['check-available']) {
+      const r = transition('source-unsupported', event)
+      if (r.state !== 'source-unsupported') {
+        problems.push(`source-unsupported 被 ${event} 改变了：${r.state}`)
+      }
+    }
   }
 
   // ③ ★ 设计 §8 line 166：检查失败不能覆盖已经准备好的更新状态。

@@ -46,6 +46,9 @@ export const STATE_TEXT = Object.freeze({
   validating: '正在验证新版本…',
   committed: '升级已完成。',
   'up-to-date': '当前已是最新版本。',
+  // ★ 与上一行**必须分开**：用户该做的事相反（一个什么都不用做，
+  //   一个要先升到声明的版本）。合成一句会让用户以为已经是最高版本了。
+  'source-unsupported': '通道上有更新版本，但它不支持从你当前的版本直接升级。请先升级到发行说明里支持的版本。',
   'check-failed': '检查更新失败。',
   'download-failed': '下载失败。',
   'cancelled': '已取消下载。',
@@ -69,6 +72,10 @@ export function describeLastCheck(state, { formatTime = defaultFormatTime } = {}
   switch (last.outcome) {
     case 'ok':
       return last.productVersion ? `${when}（通道版本 ${last.productVersion}）` : `${when}`
+    // ★ 这一条**不是失败**：检查本身成功了，结论是"这个候选装不上"。
+    //   归到 `failed` 里会让用户去点重试，而重试会得到同一个答案。
+    case 'source-unsupported':
+      return `${when}（这个版本不支持从当前版本升级）`
     case 'failed':
     case 'error':
       return `${when}（失败）`

@@ -43,6 +43,16 @@ export const UPDATE_CODES_CLIENT = Object.freeze({
   /** 目标版本不支持本机的 Windows build（或读不出本机 build）。 */
   UNSUPPORTED_PLATFORM: 'update-unsupported-platform',
   /**
+   * 通道上**有**更新的版本，但发行方声明它不支持从**本机这个版本**升
+   * （设计 §5 的 `supportedFromVersions`）。
+   *
+   * ★ 与 `UNSUPPORTED_PLATFORM` 是两条而不是一条笼统的"不支持"：
+   *   那一条说的是**这台机器**不行（等适配版本），这一条说的是
+   *   **这个来源版本**不行（先升到声明的那个版本就能继续）。
+   *   用户该做的事不同，所以码、文案与状态都不同。
+   */
+  SOURCE_VERSION_UNSUPPORTED: 'update-source-version-unsupported',
+  /**
    * 目标版本已不在通道上（被撤回、或被更新版本取代）——设计 §9 line 204。
    *
    * 与 `RECALL_UNVERIFIED` 分开：这一条是"确认了，而且确认到的是**不能装**"，
@@ -158,6 +168,10 @@ export const ERROR_TEXT = Object.freeze({
    *   停得对，后者让用户知道该做什么。
    */
   'update-unsupported-platform': '这个更新需要更高版本的 Windows，本机当前版本不支持。请先更新系统，或联系管理员获取适配版本。',
+  // ★ 文案里**必须**带上"先升到哪个版本"这个动作，否则用户唯一的下一步
+  //   就是反复点检查（而每次都会得到同一个结论）。
+  //   具体的来源版本列表由 `client.check()` 的 `reason` 拼进去。
+  'update-source-version-unsupported': '这个版本不支持从你的版本升级。请先升级到发行说明里支持的版本，再检查更新。',
   'json-too-large': '更新清单过大，已拒绝。',
   'json-duplicate-key': '更新清单格式不正确（重复字段），已拒绝。请联系管理员。',
   'json-malformed': '更新清单格式不正确，已拒绝。请联系管理员。',

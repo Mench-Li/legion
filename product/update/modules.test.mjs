@@ -156,6 +156,171 @@ test('更新模块不导入 Electron、不发起网络请求', async () => {
 })
 
 // ---------------------------------------------------------------------------
+// ★★★ 没有任何生产代码**关闭 TLS 证书校验**
+// ---------------------------------------------------------------------------
+
+/**
+ * 被检查的目录：不只是 `product/update`，而是**整个更新链路**。
+ *
+ * ★ 为什么要把 `desktop/` 与 `scripts/update/` 也算进来：这条纪律最可能被
+ *   破坏的地方**不是**协议层，而是**排查现场**——有人在真机上遇到证书问题时，
+ *   最快的"修法"就是加一句关闭校验的代码或环境变量。而那句话一旦提交，
+ *   它就同时关掉了所有人的校验。
+ */
+const TLS_SCAN_DIRS = Object.freeze(['product/update', 'product/launcher', 'desktop', 'scripts/update'])
+
+/**
+ * 找出**关闭证书校验**的写法。
+ *
+ * 依据是本目标第二份文档（`2026-10-04-update-host-bootstrap.md`）最后一段的原话：
+ *
+ * > HTTP 测试不授权正式更新；正式环境必须使用可信 HTTPS。
+ * > **没有域名时不把自签证书或关闭证书验证作为正式方案。**
+ *
+ * ★ 这是一条**否定式**的判据——"没有任何地方这么做"。否定式的判据最容易
+ *   退化成空话（比如扫错目录、或正则写得太窄于是永远匹配不上），
+ *   所以下面第 ③ 组探针**先证明它抓得到**：拿几段真实的错误写法喂进去，
+ *   要求每一个都被认出来。**没有这一组，这条用例的绿什么也不说明。**
+ *
+ * ★ 为什么不用"扫全仓"：`node_modules` 与测试替身里会有合法的出现
+ *   （例如用例故意构造一个 `rejectUnauthorized: false` 来验证**别的**判据）。
+ *   这条判据问的是"**我们自己的生产代码**有没有这么做"。
+ */
+const TLS_OFF_PATTERNS = Object.freeze([
+  // Node 的显式关闭（https.request 选项 / fetch 的 dispatcher 选项）。
+  { name: 'rejectUnauthorized: false', re: /rejectUnauthorized\s*:\s*false/ },
+  { name: 'NODE_TLS_REJECT_UNAUTHORIZED 被赋值', re: /\bNODE_TLS_REJECT_UNAUTHORIZED\b\s*[:=]\s*['"]?0/ },
+  { name: 'process.env.NODE_TLS_REJECT_UNAUTHORIZED 赋值', re: /process\.env\.NODE_TLS_REJECT_UNAUTHORIZED\s*=/ },
+  { name: 'checkServerIdentity 被替换成放行', re: /checkServerIdentity\s*:\s*(\(\)\s*=>|function\s*\(\s*\)\s*\{?\s*\}?\s*$)/ },
+  { name: 'strictSSL: false', re: /strictSSL\s*:\s*false/ },
+  { name: 'Agent({ rejectUnauthorized: false })', re: /new\s+(https\.)?Agent\s*\(\s*\{[^}]*rejectUnauthorized\s*:\s*false/ },
+  // ★ `NODE_EXTRA_CA_CERTS` 只在**被设置**时算（赋值 / export / 放进 env 对象）。
+  //
+  //   ⚠️ 第一版把它写成 `/NODE_EXTRA_CA_CERTS/`（只要出现就算），于是真仓里
+  //   `product/launcher/allowlist.mjs` 立刻报红——而那一处是**白名单里的一项
+  //   字符串**（决定哪些操作系统环境变量透传给子进程），不是"我们把校验指到
+  //   自签证书上"。那个文件自己的注释写着这些键"应当被审阅而不是被继承"，
+  //   说明它们是**被审阅过的**透传项。
+  //
+  //   > 一条"只要提到这个词就算违规"的规则，会把**讨论这件事的地方**
+  //   > 判成**做了这件事的地方**——而前者恰恰是我们最希望存在的。
+  //
+  //   所以规则收窄到"设置"形态（`X = ...` / `X: ...` / `export X`）。
+  //   ★ 收窄必须配一条**新的**正对照（见下面的 mustBeCaught），
+  //     否则"收窄"与"为了让它变绿而把它删掉"在读数上是一样的。
+  { name: 'NODE_EXTRA_CA_CERTS 被赋值', re: /NODE_EXTRA_CA_CERTS\s*[:=]|export\s+NODE_EXTRA_CA_CERTS/ },
+])
+
+/** 去掉注释再匹配：注释里**提到**这些写法是允许的（尤其本文件的说明）。 */
+function stripComments(source) {
+  return source
+    .replace(/\/\*[\s\S]*?\*\//g, '')
+    .replace(/(^|[^:])\/\/.*$/gm, '$1')
+}
+
+function findTlsVerificationOff(readFile, listDir) {
+  const findings = []
+  const walk = (relDir) => {
+    for (const entry of listDir(relDir)) {
+      const relPath = `${relDir}/${entry.name}`
+      if (entry.isDirectory()) { walk(relPath); continue }
+      if (!entry.name.endsWith('.mjs') && !entry.name.endsWith('.cjs') && !entry.name.endsWith('.js')) continue
+      // 用例文件不算"生产代码"：它们可以（也必须）构造这些写法来验证别的判据。
+      if (/\.test\.mjs$/.test(entry.name) || /\.testkit\.mjs$/.test(entry.name)) continue
+      const code = stripComments(readFile(relPath))
+      for (const pattern of TLS_OFF_PATTERNS) {
+        if (pattern.re.test(code)) findings.push(Object.freeze({ file: relPath, pattern: pattern.name }))
+      }
+    }
+  }
+  for (const dir of TLS_SCAN_DIRS) walk(dir)
+  return findings
+}
+
+test('★★★ 没有任何生产代码关闭 TLS 证书校验（否定式判据，先用探针证明它抓得到）', async () => {
+  const { readFileSync, readdirSync } = await import('node:fs')
+  const root = fileURLToPath(new URL('../../', import.meta.url))
+
+  // ── ① 定义本身就是对的（否则后面全是空话）──
+  assert.ok(TLS_OFF_PATTERNS.length >= 6, 'TLS_OFF_PATTERNS 太短，这条判据的覆盖面可疑')
+
+  // ── ② ★ 正对照：每一段**真实**的错误写法都必须被抓到 ──
+  //
+  //   ★★ 这一组是这条用例的**全部价值所在**。一条"扫描没发现任何东西"的判据，
+  //      与一条"正则写错了所以永远匹配不上"的判据，读数完全一样。
+  const mustBeCaught = [
+    'const opts = { rejectUnauthorized: false }',
+    'process.env.NODE_TLS_REJECT_UNAUTHORIZED = "0"',
+    'export NODE_TLS_REJECT_UNAUTHORIZED=0',
+    'https.request(url, { checkServerIdentity: () => undefined })',
+    'const agent = new https.Agent({ keepAlive: true, rejectUnauthorized: false })',
+    'agent = new Agent({ rejectUnauthorized: false })',
+    'strictSSL: false',
+    // ★ 收窄 `NODE_EXTRA_CA_CERTS` 之后**新加**的这一条：证明"设置"形态仍然被抓到。
+    //   没有它，那次收窄就与"把这条规则删掉"无法区分。
+    'process.env.NODE_EXTRA_CA_CERTS = "/etc/legion/self-signed.pem"',
+    'env: { NODE_EXTRA_CA_CERTS: caPath }',
+  ]
+  for (const code of mustBeCaught) {
+    const caught = TLS_OFF_PATTERNS.some((p) => p.re.test(code))
+    assert.equal(caught, true, `这段关闭校验的写法没有被任何一条规则抓到（这条判据是瞎的）：${code}`)
+  }
+
+  // ── ③ 反对照：**合法的**写法不许被误报（否则有人会为了让 CI 变绿而删掉正确代码）──
+  const mustNotBeCaught = [
+    "import { request } from 'node:https'",
+    'rejectUnauthorized: true',
+    "origin: 'https://updates.example.com'",
+    "const insecure = entry.allowInsecureHttp === true",   // http 只用于测试的显式开关
+    'checkServerIdentity: (host, cert) => tls.checkServerIdentity(host, cert)',
+    // ★ 真仓里 `product/launcher/allowlist.mjs` 的那一处：它是**白名单里的
+    //   一项字符串**（哪些环境变量透传给子进程），不是"设置校验"。
+    "'NODE_OPTIONS', 'NODE_ENV', 'NODE_EXTRA_CA_CERTS',",
+  ]
+  for (const code of mustNotBeCaught) {
+    const caught = TLS_OFF_PATTERNS.some((p) => p.re.test(code))
+    assert.equal(caught, false, `合法写法被误报成"关闭校验"：${code}`)
+  }
+
+  // ── ③b ★ 把真仓里那一处**明写出来**，并断言它属于"白名单"而不是"设置" ──
+  //
+  //   ★ 这一段的用途：下一个读到这里的人不该只看到"规则被我收窄了"，
+  //     而该看到**收窄是为了哪一处、那一处凭什么不算**。一条被悄悄收窄的规则
+  //     与一条被悄悄删掉的规则，在"它今天还拦得住什么"上是同一个东西。
+  {
+    const allowlist = readFileSync(`${root}product/launcher/allowlist.mjs`, 'utf8')
+    assert.match(allowlist, /NODE_EXTRA_CA_CERTS/,
+      'allowlist.mjs 里已经没有 NODE_EXTRA_CA_CERTS 了——那么上面那条反对照应当重新审视')
+    const allowlistCode = stripComments(allowlist)
+    assert.equal(TLS_OFF_PATTERNS.some((p) => p.re.test(allowlistCode)), false,
+      'allowlist.mjs 现在命中了"关闭校验"的规则（它从"透传白名单"变成了"设置校验"？）')
+    // 它在那里是一个**带引号的字符串**（一份名字清单里的一项），
+    // 而不是一次赋值的目标。这就是它不算"设置校验"的机械理由。
+    assert.match(allowlistCode, /['"]NODE_EXTRA_CA_CERTS['"]/,
+      'NODE_EXTRA_CA_CERTS 在 allowlist.mjs 里不再是一个带引号的字符串了——'
+      + '那说明它从"白名单里的一项"变成了别的形态，请重新判定它算不算"关闭校验"')
+    assert.match(allowlistCode, /OS_ESSENTIAL_ENV\s*=\s*Object\.freeze\(\[[\s\S]*?NODE_EXTRA_CA_CERTS/,
+      'NODE_EXTRA_CA_CERTS 不再位于 OS_ESSENTIAL_ENV 这张白名单里了')
+  }
+
+  // ── ④ 注释里的**说明**不算（本模块的注释里就写着那些反例）──
+  assert.equal(
+    /rejectUnauthorized\s*:\s*false/.test(stripComments('// 不要写 rejectUnauthorized: false')),
+    false, '去掉注释之后仍然匹配到了注释里的写法',
+  )
+
+  // ── ⑤ 真仓：一条都不许有 ──
+  const findings = findTlsVerificationOff(
+    (rel) => readFileSync(`${root}${rel}`, 'utf8'),
+    (rel) => readdirSync(`${root}${rel}`, { withFileTypes: true }),
+  )
+  assert.deepEqual(findings, [],
+    `更新链路上有关闭 TLS 校验的代码：${JSON.stringify(findings, null, 1)}\n`
+    + '依据：更新托管部署计划最后一段「没有域名时不把自签证书或关闭证书验证作为正式方案」。'
+    + '正式环境必须用可信 HTTPS；本地/测试需要绕开时，用 `allowInsecureHttp`（只对 internal 通道有效）。')
+})
+
+// ---------------------------------------------------------------------------
 // ★★★ 每个**声明**的错误码都必须有**发出点**
 // ---------------------------------------------------------------------------
 

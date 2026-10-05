@@ -113,3 +113,33 @@ describe('指挥台账号会话', () => {
     assert.match(view, /canRegister &&/)
   })
 })
+
+describe('账号面板（「连接与令牌」里那一节）', () => {
+  const panel = read('workbench/src/components/AccountPanel.tsx')
+
+  test('⑦ 只在真的在用账号体系时渲染：本机单机部署整块不出现', () => {
+    // 判据是"手上有没有用户会话"。本机用的是机器令牌，这里恒为空 ⇒ 整块不渲染。
+    // 本机用户不该看到一个"退出登录"按钮——按下去只会让他以为自己把
+    // 本机 Legion 登出了。
+    assert.match(panel, /const active = hasSession\(\)/)
+    assert.match(panel, /if \(!active && loaded\) return null/)
+  })
+
+  test('⑧ 四件事都在：退出 / 改口令 / 会话列表 / 邀请码', () => {
+    for (const fn of ['signOut', 'submitPassword', 'revoke', 'makeInvite']) {
+      // 用 indexOf 而不是正则：函数名拼进正则要转义括号，而模板里 `\(`
+      // 会被解析成一个普通的 `(`，得到一个「未闭合的组」——报出来是
+      // SyntaxError，读起来却像"这条断言没通过"。
+      assert.ok(panel.includes(`function ${fn}(`), `账号面板缺 ${fn}`)
+    }
+    // 邀请入口只给系统管理员：对普通成员显示一个必然 403 的按钮更坏。
+    assert.match(panel, /me\?\.systemRole === 'admin' &&/)
+  })
+
+  test('⑨ 当前会话不给"撤销"按钮，只标注"这台（现在）"', () => {
+    // 一个点了就把自己踢掉的按钮，用户按下去只会以为出错了。
+    // 要离开请用「退出登录」——那是另一件事。
+    assert.match(panel, /s\.sessionId === sessions\.currentId/)
+    assert.match(panel, /这台（现在）/)
+  })
+})

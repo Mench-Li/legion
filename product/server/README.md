@@ -109,6 +109,42 @@ curl -X POST -H "Authorization: Bearer $TEAM_HUB_TOKEN" -H 'content-type: applic
 之后所有账号都通过**邀请**产生（在设计文档里这叫多用户/邀请制）。
 普通用户不能自助注册。
 
+### ④′ 两步必须做，否则手机上是空的
+
+**这两步都不是可选的**，而它们的缺失表现为"登录成功但什么都没有"——
+用户会以为是网络或 App 的问题。
+
+**（a）给账号一个空间角色。** 引导出来的管理员是**系统管理员**，
+而系统角色管的是"造邀请 / 停用账号"，**不是**"看所有数据"：
+
+```bash
+T=<登录拿到的访问令牌>
+U=<你的 userId>
+curl -X POST -H "Authorization: Bearer $T" -H 'content-type: application/json' \
+  -d "{\"userId\":\"$U\",\"space\":\"default\",\"role\":\"owner\"}" \
+  http://127.0.0.1:8787/api/identity/roles/grant
+```
+
+不做这一步，读任何空间都会拿到 `403 SPACE_FORBIDDEN`。
+
+**（b）装一个流程包，让空间里**有 Agent**。** 新库里 `roster` 与 `spaces` 都是空的，
+而手机端"选择 Agent"那一列读的正是 `roster` 同步出来的 `agent_registry`：
+
+```bash
+# 仓库里带了一份最小可用包（需求澄清 → 编码实现 → 代码审查）
+node -e 'const fs=require("fs");const pack=JSON.parse(fs.readFileSync("/srv/legion-hub/first-space.pack.json","utf8"));fs.writeFileSync("/tmp/pack.json",JSON.stringify({by:"general",pack}))'
+curl -X POST -H "Authorization: Bearer $T" -H 'content-type: application/json' \
+  -d @/tmp/pack.json http://127.0.0.1:8787/api/workflow-packs/preview   # 先看它要改什么
+curl -X POST -H "Authorization: Bearer $T" -H 'content-type: application/json' \
+  -d @/tmp/pack.json http://127.0.0.1:8787/api/workflow-packs/install
+```
+
+装包会**原子地**建出空间、编队（`roster`）与流水线阶段；3 秒内的对账周期把
+`roster` 同步进 `agent_registry`，手机端随即看到 Agent。
+
+> 装包的请求体是 `{ by, pack }` 的**包装**，不是把 `by` 塞进包里——
+> 包里多一个键会被 `WORKFLOW_PACK_MANIFEST_INVALID` 拒掉（校验是白名单）。
+
 ### ⑤ 电脑配对
 
 在手机上登录 → 设备页生成配对码 → 在电脑上：

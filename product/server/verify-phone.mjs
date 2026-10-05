@@ -14,7 +14,10 @@
 import { readFileSync } from 'node:fs'
 
 const BASE = process.argv[2] ?? 'https://legion-si.online'
-const PW_FILE = process.env.LEGION_PW_FILE ?? '/var/lib/legion-hub/first-admin-password.txt'
+// 口令文件由 bootstrap 步骤写入 `/etc/legion-hub/`（那目录是 0700 root，
+// 而本脚本按设计以 root 跑）。**不**放在数据目录里：数据目录属于 legion-hub，
+// 而这是一次性的引导凭据，不该长期留在服务账号能读到的地方。
+const PW_FILE = process.env.LEGION_PW_FILE ?? '/etc/legion-hub/first-admin-password.txt'
 const USER = process.env.LEGION_ADMIN_NAME ?? 'legion'
 const SPACE = process.env.LEGION_SPACE ?? 'default'
 

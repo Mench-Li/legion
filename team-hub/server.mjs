@@ -7577,6 +7577,7 @@ if (REMOTE_AGENT_ENABLED) {
   router.families.unshift(createIdentityRoutes({
     json, readBody, authorized, requireString,
     userStore, deviceStore, remoteAuthEnabled: REMOTE_AUTH_ENABLED,
+    gateway: nodeGateway,
   }))
   router.list.push(
     { family: 'identity', method: 'GET', path: '/api/identity/status' },

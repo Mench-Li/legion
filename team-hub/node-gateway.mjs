@@ -734,6 +734,27 @@ function recordInScope(frame, state, action, detail) {
   const api = {
     attach, handleUpgrade, pump, close, sendCancel,
     connections,
+    /**
+     * 每条连接的**只读投影**（诊断用）。
+     *
+     * 为什么不直接暴露 `connections`：它是个 Map，值里握着 socket 与闭包。
+     * 让调用方自己 `[...map.values()].map(...)` 会诱使下一处诊断代码去读更深的
+     * 内部字段（`socket`、`ackTimers`），于是"内部结构"事实上变成了公开面，
+     * 而改内部时没有任何东西会红。这里只吐**排查真正需要的那几个**。
+     */
+    connectionViews() {
+      return [...connections.values()].map(({ state }) => Object.freeze({
+        nodeId: state.nodeId,
+        connectionId: state.connectionId,
+        phase: state.phase,
+        protocolVersion: state.protocolVersion,
+        capabilities: Object.freeze([...state.capabilities]),
+        inFlight: Object.freeze([...state.inFlight]),
+        pendingAcks: Object.freeze([...state.ackTimers.keys()]),
+        closed: state.closed,
+        lastHeartbeatAtMs: state.lastHeartbeatMs,
+      }))
+    },
     get stats() {
       return Object.freeze({
         ...counters,
@@ -744,6 +765,10 @@ function recordInScope(frame, state, action, detail) {
     },
     get path() { return path },
     get helloTimeoutMs() { return helloTimeoutMs },
+    get claimScope() { return claimScope },
+    get dispatchPollMs() { return dispatchPollMs },
+    /** 派发定时器是否真的在跑。诊断"连上了但不派发"时第一个要看的东西。 */
+    get dispatching() { return dispatchTimer !== null },
   }
   return api
 }

@@ -29,7 +29,7 @@ function errorResponse(store, e) {
 
 export function createIdentityRoutes({
   json, readBody, authorized, requireString,
-  userStore, deviceStore, remoteAuthEnabled = false,
+  userStore, deviceStore, remoteAuthEnabled = false, gateway = undefined,
 }) {
   for (const [name, fn] of Object.entries({ json, readBody, authorized, requireString })) {
     if (typeof fn !== 'function') throw new TypeError(`createIdentityRoutes 缺注入项：${name}`)
@@ -37,6 +37,10 @@ export function createIdentityRoutes({
   for (const [name, dep] of Object.entries({ userStore, deviceStore })) {
     if (dep === null || dep === undefined) throw new TypeError(`createIdentityRoutes 缺注入项：${name}`)
   }
+  // `gateway` 允许为 null（远程通道未启用时），但**必须**在注入项里出现：
+  // 一个"忘了注入"与一个"确实没有网关"在运行时长得一样，而前者会让诊断端点
+  // 永远报 `enabled:false`，把一次接线遗漏伪装成一次正常读数。
+  if (gateway === undefined) throw new TypeError('createIdentityRoutes 缺注入项：gateway（允许 null，但不能不传）')
 
   /** 取用户令牌并校验。返回 `{ ok, ... }`，不抛。 */
   function currentUser(req, url) {
@@ -268,6 +272,32 @@ export function createIdentityRoutes({
       path: '/api/devices/presence',
       async run(req, res, { url }) {
         await withUser(req, res, url, () => ({ presence: deviceStore.listPresence() }))
+      },
+    },
+    {
+      method: 'GET',
+      path: '/api/devices/gateway',
+      async run(req, res, { url }) {
+        // Node 网关的**运行时读数**。
+        //
+        // 为什么要有这个端点：网关内部状态（有没有就绪连接、在途几条、各个计数器）
+        // 在别处**完全不可见**。没有它时，"节点连上了但任务不派发"只能靠加日志
+        // 再重启来查——而重启会把要查的那个状态（内存里的连接表）清掉。
+        // 这是运维面，所以要登录；不需要管理员（每个用户看的是自己 Hub 的读数）。
+        await withUser(req, res, url, () => {
+          if (gateway === null) return { enabled: false }
+          return {
+            enabled: true,
+            ...gateway.stats,
+            // 每条连接的关键相位：`phase` 不是 `ready` 时不会被派发，
+            // 而"为什么不是 ready"是排查的第一个问题。
+            connections: gateway.connectionViews(),
+            // 「连上了但不派发」的第一个要看的读数：定时器到底有没有起。
+            dispatching: gateway.dispatching === true,
+            claimScope: gateway.claimScope ?? null,
+            dispatchPollMs: gateway.dispatchPollMs ?? null,
+          }
+        })
       },
     },
     {

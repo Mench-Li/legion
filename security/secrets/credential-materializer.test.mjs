@@ -760,18 +760,39 @@ test('⑥ ★★ 映射目标名来自 DSH 自己的声明，而不是本模块�
   //   改成扫目录之后，断言仍然要求**标识符与字符串字面量**同时出现在 DSH 自己的
   //   源码里（改名或删掉照样红），但不再对"文件被拆开/搬走"敏感。
   //   加 `^…$` 行锚：否则一句注释或字符串里提到它也能满足。
-  const providerSrc = join(checkout, 'packages', 'llm', 'llm-deepseek', 'src')
-  if (!existsSync(patchFile) || !existsSync(providerSrc)) {
+  // ★ 2026-10-05（T-178）：声明**又搬了一次家**，而且这次换了形态 ——
+  //   旧形态 `const DEFAULT_API_KEY_ENV = 'DEEPSEEK_API_KEY'` 现在只剩在
+  //   `packages/web/web-search-deepseek/src/index.ts:46`（那是 **web 搜索** 的 provider，
+  //   不是模型 provider）；模型这一侧改由 schemastery 的 `apiKeyEnv` 声明给出：
+  //
+  //     packages/llm/llm-deepseek-api-key/src/config.ts:16
+  //       apiKeyEnv: z.string().role('credential-ref').default('DEEPSEEK_API_KEY').volatile(),
+  //
+  //   这与本用例上面那段注释说的**是同一件事的第二次发生**：
+  //   「一条钉死'声明住哪个文件/哪种写法'的断言，守的不是'这个名字是 DSH 声明的'」。
+  //   所以扫的包从 1 个扩到 2 个（模型协议 + 凭据引用），断言的形态从'某一个常量名'
+  //   放宽到'两种**代码形态**之一'：
+  //     · 旧：行锚的 `const DEFAULT_API_KEY_ENV = '...'`；
+  //     · 新：`apiKeyEnv:` 声明行上的 `.default('DEEPSEEK_API_KEY')`。
+  //   两条都要求**标识符 + 逐字字面量**同时出现在同一行 —— 注释里提一句仍然不满足。
+  const providerSrcs = [
+    join(checkout, 'packages', 'llm', 'llm-deepseek', 'src'),
+    join(checkout, 'packages', 'llm', 'llm-deepseek-api-key', 'src'),
+  ].filter((p) => existsSync(p))
+  if (!existsSync(patchFile) || providerSrcs.length === 0) {
     return t.skip('DSH_CHECKOUT 可达，但这两处声明文件不在预期路径上——那本身是个值得报的漂移')
   }
   // 行配置那一侧：`apiKeyEnv: DEEPSEEK_API_KEY`
   assert.match(readFileSync(patchFile, 'utf8'), /apiKeyEnv: DEEPSEEK_API_KEY/)
-  // 适配器那一侧：`DEFAULT_API_KEY_ENV = 'DEEPSEEK_API_KEY'`
-  const providerCode = readdirSync(providerSrc, { recursive: true })
+  // 适配器那一侧：DSH 自己声明这个凭据引用的默认名
+  const providerCode = providerSrcs.flatMap((dir) => readdirSync(dir, { recursive: true })
     .filter((rel) => rel.endsWith('.ts'))
-    .map((rel) => readFileSync(join(providerSrc, rel), 'utf8'))
+    .map((rel) => readFileSync(join(dir, rel), 'utf8')))
     .join('\n')
-  assert.match(providerCode, /^const DEFAULT_API_KEY_ENV = 'DEEPSEEK_API_KEY'$/m)
+  assert.match(providerCode,
+    /(?:^const DEFAULT_API_KEY_ENV = 'DEEPSEEK_API_KEY'$|apiKeyEnv:[^\n]*\.default\('DEEPSEEK_API_KEY'\))/m,
+    'DSH 的模型/凭据引用源码里必须有一行同时写着 apiKeyEnv（或旧常量名）与 DEEPSEEK_API_KEY —— '
+    + '只在一句注释里提到不算；也**不**对文件名/常量名敏感（它们搬过两次家）')
   // 而本套件喂给 materializeRunCredentials 的映射目标就是这个名字。
   assert.equal(DSH_MODEL_NAME, 'DEEPSEEK_API_KEY')
   return undefined

@@ -72,9 +72,30 @@ import { defaultRequestFor, deriveRunFloorCarrier } from './executor.mjs'
 import { RUN_REQUEST_REQUIRED } from '../../runtime/contracts/run.mjs'
 import { RUN_FLOOR_STATES } from '../../runtime/contracts/run-floor.mjs'
 
-/** 真 claim 回来的那 9 个键（**带顺序无关的整体比较**，不是"包含"）。 */
+/**
+ * 真 claim 回来的那 9 个键（**带顺序无关的整体比较**，不是"包含"）。
+ *
+ * ★ 2026-10-05（T-178）：成员集按**当前契约**订正过一次 ——
+ *   `workerId` 不在认领响应里，`agentSelectionSnapshot` 在。
+ *
+ *   契约（唯一权威）是 `team-hub/run-store.mjs:1553-1583` 那个 `claimed:` 对象，
+ *   逐个键是：attemptId / taskId / scope / attemptNo / leaseEpoch /
+ *   leaseExpiresAtMs / state / agentSelectionSnapshot / serverTimeMs（+ 接线时
+ *   追加的三个档位键）。旧清单里写的 `workerId` **从来不在**这个对象上
+ *   （认领是 *请求* 里的字段，不是 *响应* 里的），而
+ *   `agentSelectionSnapshot`（F-16 / 跨 Agent 选择快照）接上之后没有同步过来。
+ *
+ *   > 一个把"请求字段"当成"响应字段"的期望清单，
+ *   > 与一个"响应上真的多了一个键"的期望清单，在 red 的输出上是同一行
+ *   > ——多一个、少一个都被 `deepEqual` 报成"键集变了"。
+ *
+ *   这里**不是**把断言放宽成"包含"：仍然是整体比较，多一个键就红。
+ *   真正承重的两条没动：① 的 `AUTHORITY_LOOKING` 零命中，
+ *   以及 ⑤ 的"接线后**恰好**多这三个键"。
+ */
 const CLAIMED_LEASE_KEYS = Object.freeze([
-  'attemptId', 'attemptNo', 'leaseEpoch', 'leaseExpiresAtMs', 'scope', 'serverTimeMs', 'state', 'taskId', 'workerId',
+  'agentSelectionSnapshot', 'attemptId', 'attemptNo', 'leaseEpoch', 'leaseExpiresAtMs',
+  'scope', 'serverTimeMs', 'state', 'taskId',
 ])
 
 const AUTHORITY_LOOKING = /read|auth|grant|permit|acl|visib/i

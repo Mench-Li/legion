@@ -97,8 +97,26 @@ export function createDeliveryRoutes({ json, readBody, authorized, deliveryStore
     json(res, 200, { ok: true, delivery: created.delivery })
   })
 
-  // GET /api/deliveries/:id 或 /api/deliveries?taskId=
-  on('GET', /^\/api\/deliveries(?:\/([^/]+))?$/, async (req, res, m) => {
+  // GET /api/deliveries?taskId= —— 按任务查
+  // GET /api/deliveries/:id     —— 按 id 查
+  //
+  // ★ 2026-10-05（T-178）：这两条**拆成两个 on()**（而不是一条带可选段的正则）。
+  //   分派行为逐字不变 —— `(?:\/([^/]+))?` 本来就是把两种形态交给同一个处理函数。
+  //   拆开是因为平台契约的**唯一权威** `platformHttpRoutes()`
+  //   （`scripts/prt/baseline-snapshot.mjs`）的 `regexPath()` 处理不了
+  //   「可选段里再嵌捕获组」（`(?:\/([^/]+))?`）：那条正则声明的端点在
+  //   `httpRoutes` 里**一条都不出现**。于是 workbench 那条真实的
+  //   `GET /api/deliveries?taskId=…` 会被交叉校验报成
+  //   「前端写了个不存在的端点，用户只会看到一个 404」—— 而它存在。
+  //
+  //   > 一个「抽取器看不见」的端点，与一个「不存在」的端点，
+  //   > 在交叉校验的输出上是同一行。
+  //
+  //   拆成两条之后两种形态都能被逐条抽出（`GET /api/deliveries` 与
+  //   `GET /api/deliveries/:param`）。真正该修的其实是 `regexPath()` 里那个
+  //   可选段正则（嵌套的 `)` 让它匹配失败），但它在 `scripts/prt/` 下
+  //   （T-177 的范围），本任务不动它。
+  const getDelivery = async (req, res, m) => {
     if (!authorized(req)) { json(res, 401, { ok: false, code: 'UNAUTHORIZED' }); return }
     if (m[1]) {
       const d = deliveryStore.getDelivery(m[1])
@@ -111,7 +129,12 @@ export function createDeliveryRoutes({ json, readBody, authorized, deliveryStore
     const d = deliveryStore.getDeliveryByTask(taskId)
     if (!d) { json(res, 404, { ok: false, code: 'NOT_FOUND' }); return }
     json(res, 200, { ok: true, delivery: d, events: deliveryStore.listIntegrationEvents({ deliveryId: d.id }) })
-  })
+  }
+  //   注意：第三个参数写成**内联 async 函数**（而不是直接引用 `getDelivery`）——
+  //   平台契约的路由抽取器认的是 `on('<M>', /re/, async (` 这个形态（见
+  //   `extractDeclaredRoutes` 的 `ON_RE`）；传函数引用会让它看不见这两条。
+  on('GET', /^\/api\/deliveries$/, async (req, res, m) => getDelivery(req, res, m))
+  on('GET', /^\/api\/deliveries\/([^/]+)$/, async (req, res, m) => getDelivery(req, res, m))
 
   // POST /api/integration/claim —— 同仓库同 target ref 至多一个活跃 job
   on('POST', /^\/api\/integration\/claim$/, async (req, res) => {

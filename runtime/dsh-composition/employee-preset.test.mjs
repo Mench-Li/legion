@@ -515,10 +515,35 @@ describe('PRT-214 员工 agent preset', () => {
 
   guardedDsh('★★★ 引擎产出的包名与 `standard` preset 里用的**逐字相同**', async () => {
     // 不能凭记忆写包名。`standard` 是随部署分发的那一份，拿它当基准。
-    const standard = readFileSync(join(DSH, 'packages', 'preset', 'agent-presets', 'presets', 'standard', 'agent.cordis.yml'), 'utf8')
+    //
+    // ★ 2026-10-05（T-178）：DSH 检出里那份 preset **搬过家** ——
+    //   旧路径 `packages/preset/agent-presets/presets/standard/agent.cordis.yml`
+    //   在现检出里已经不存在（只剩子代理测试夹具里两份 `agent.cordis.yml`），
+    //   随部署分发的那一份现在是 `packages/bundle/web-app/presets/standard.patch.yml`。
+    //   从前硬编码单一旧路径，于是 `readFileSync` 抛 ENOENT —— 一条"拿基准对包名"
+    //   的判据，在基准搬家后报的是"文件打不开"，与"包名写错了"毫无关系。
+    //
+    //   > 一个把"基准的路径"写死的交叉校验，
+    //   > 与一个"基准搬家之后什么都没校验到"的交叉校验，在红/绿上是同一个东西。
+    //
+    //   这里按**候选表 + 目录扫描**找基准：找不到仍然**失败**（不静默 SKIP、
+    //   也不退回"凭记忆写包名"）——失败信息里逐条列出找过的路径。
+    const { globSync } = await import('node:fs')
+    const candidates = [
+      join(DSH, 'packages', 'bundle', 'web-app', 'presets', 'standard.patch.yml'),
+      join(DSH, 'packages', 'preset', 'agent-presets', 'presets', 'standard', 'agent.cordis.yml'),
+    ]
+    const scanned = globSync('packages/**/presets/standard*.yml', { cwd: DSH })
+      .map((rel) => join(DSH, rel))
+    const standardFile = [...candidates, ...scanned].find((p) => existsSync(p)) ?? null
+    assert.ok(standardFile !== null,
+      'DSH 检出里找不到随部署分发的 standard preset（逐条找过：' +
+      `${[...candidates, ...scanned].join(' / ')}）——基准不在了就地失败，` +
+      '不要退回"凭记忆写包名"，那等于把这条交叉校验删掉')
+    const standard = readFileSync(standardFile, 'utf8')
     for (const spec of Object.values(DSH_PRESET_ROWS)) {
       assert.ok(standard.includes(`'${spec.pkg}'`),
-        `我们在用 ${spec.pkg}，但随部署分发的 standard preset 里没有它——` +
+        `我们在用 ${spec.pkg}，但随部署分发的 standard preset（${standardFile}）里没有它——` +
         '要么包名写错了，要么这个包不是 DSH 随部署提供的那一套')
     }
   })

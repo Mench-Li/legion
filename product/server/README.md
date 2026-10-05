@@ -138,6 +138,43 @@ node product/node/entry.mjs run   --config node-config.json
 > 而其中一台没有 Hub，表现为**间歇性 502**。要移除多余的连接器：
 > `cloudflared service uninstall`。
 
+### 排障：公网**间歇性** 404 / 502
+
+**症状**：同一个 URL 有时 200、有时 404，且 404 的响应体是 Hub 的
+`{"error":"not found: /api/..."}`。最容易误导人的一点是**部分端点一直是好的**
+（例如 `/api/board`），于是"服务挂了"被排除，而问题其实在"有两个不同的服务在答"。
+
+**根因**：隧道有**两个连接器**，Cloudflare 按请求轮流送到两边。其中一台的
+`127.0.0.1:<port>` 后面是**另一个 Hub**（通常是开发机上那份旧构建），
+它没有新加的端点 → 那些请求 404，而老端点照常 200。
+
+实测踩过：运营者按早期步骤在自己电脑上跑了
+`cloudflared.exe service install <token>`，于是 PC 与服务端各有一个连接器；
+PC 上恰好也跑着一个 Legion Hub（旧构建），于是
+`/api/identity/*` 与 `/mobile/` 间歇 404，而 `/api/board` 一直正常。
+
+**判别方法**（一条命令就能定性）：
+
+```bash
+# 两台机器上分别跑，比较同一路径的状态码
+curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:8787/api/identity/status
+```
+
+两边不一致（例如服务器 200、电脑 404）就说明**公网上有两个 origin 在答**。
+
+**修法**：只保留**一台**连接器。留服务端那台，把多余的卸掉：
+
+```bash
+# Windows（需管理员）
+cloudflared.exe service uninstall
+
+# Linux
+cloudflared service uninstall
+```
+
+> 连接器必须跑在**Hub 所在的那台机器**上——它转发到 `127.0.0.1:8787`，
+> 而那个端口在别的机器上指的是别的东西（或什么都没有）。
+
 ## 验证清单
 
 | 项 | 命令 | 期望 |

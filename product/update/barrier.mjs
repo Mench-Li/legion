@@ -45,6 +45,30 @@ export const BARRIER_CODES = Object.freeze({
   // 解除时没说明是哪个事务。它与 FOREIGN（说的是"你不是持有者"）分开，
   // 因为处置不同：FOREIGN 要去问持有者，NO_TXN_ID 是自己把参数补上。
   NO_TXN_ID: 'barrier-no-txn-id',
+  /**
+   * ★★ 启动闸门的**事务那一维**没有被接上（调用方没给 `planRecovery`）。
+   *
+   * 这个码存在的理由与上一条注释里那句"两者的代价不对称，所以默认是挡"
+   * 是同一个：闸门有两个维度，而它们的**默认方向原先相反**——
+   *
+   *   | 维度 | 读不出来时 | 方向 |
+   *   |---|---|---|
+   *   | 维护屏障 | `blocked = true` | **挡**（fail-closed） |
+   *   | 未完成事务 | `unfinished = false`（缺省不查） | **放**（fail-open） |
+   *
+   * 而设计 §8 line 182 要求的是「新旧 Launcher **均**识别未完成事务，在恢复
+   * 结束前禁止正常业务启动」——这一条的代价结构与屏障那一维是同一个：
+   * 把"判不出来"当成"没有未完成事务"，后果是在一个**半迁移**的数据库上
+   * 放行正常业务写入；反过来多挡一次的后果是用户多等一会儿。
+   *
+   * > 同一个闸门里，一个维度 fail-closed、另一个 fail-open，
+   * > 那条"代价不对称"的论证只写在其中一个上。
+   *
+   * 生产路径（`launcher.mjs` 的 `defaultUpdateGate`）一直是传 `planRecovery` 的，
+   * 所以这条判据抓的是**下一个**调用方：一处忘了接线的闸门，此前会静默变成
+   * "只查屏障、不查事务"。
+   */
+  PLAN_UNWIRED: 'barrier-plan-unwired',
 })
 
 /** 维护屏障的固定位置（与事务日志同目录，helper 与各服务都要找得到）。 */
@@ -210,10 +234,39 @@ export function canAcceptWrites(dataDir) {
  *
  * 输入是磁盘状态；输出是"能不能正常启动业务"，以及不能时的原因与建议动作。
  * Launcher 在拿到单实例锁之后、跑 preflight 之前调用它。
+ *
+ * ## ★★ 两个维度的默认方向必须**一致**（都是"挡"）
+ *
+ * 闸门查两件事：**维护屏障在不在**、**有没有未完成的事务**。两者的安全方向
+ * 是同一个（多挡一次的代价是用户多等一会儿；少挡一次的代价是在半迁移的数据
+ * 库上放行写入），所以：
+ *
+ *   · 屏障读不出来 ⇒ `blocked`（原本就是这样）；
+ *   · **事务那一维没接线 ⇒ 也挡**（`BARRIER_CODES.PLAN_UNWIRED`）。
+ *
+ * ★ 第二半是这一版补的。此前 `planRecovery` 缺省时 `recovery === null`，
+ * 于是 `unfinished` 恒为 `false`——**"判不出来"被当成了"没有未完成事务"**，
+ * 而这是本模块头部那段"两者的代价不对称，所以默认是挡"只覆盖了其中一个维度。
+ *
+ * ★ 生产路径一直是对的（`launcher.mjs` 的 `defaultUpdateGate` 传了
+ * `planRecovery`）。这条判据抓的是**下一个调用方**，以及那个恰好把
+ * `planRecovery` 省略掉的测试替身——它让"事务那一维"在门禁里从未被驱动过。
  */
-export function startupGate({ dataDir, planRecovery }) {
+export function startupGate({ dataDir, planRecovery = null } = {}) {
   const barrier = readBarrier(dataDir)
-  const recovery = typeof planRecovery === 'function' ? planRecovery({ dataDir }) : null
+  // ★ 没接线 ⇒ 明确具名拒绝，而不是"当成没有未完成事务"。
+  if (typeof planRecovery !== 'function') {
+    return Object.freeze({
+      allowed: false,
+      code: BARRIER_CODES.PLAN_UNWIRED,
+      reason: '启动闸门没有被接上事务日志读数：无法判断是否有未完成的升级事务，'
+        + '因此不允许正常业务启动（把"判不出来"当成"没有未完成事务"会在半迁移的数据库上放行写入）',
+      recoveryVerdict: null,
+      barrierCode: barrier.code,
+      advice: adviceFor(null),
+    })
+  }
+  const recovery = planRecovery({ dataDir })
   const unfinished = recovery !== null && recovery.verdict !== 'nothing-to-do' && recovery.verdict !== 'finalize-record'
   if (!barrier.blocked && !unfinished) {
     return Object.freeze({
@@ -262,8 +315,21 @@ export function selfCheckBarrier() {
   const missing = acquireBarrier({})
   if (missing.ok) problems.push('缺 dataDir 时立起了屏障')
   // 启动闸门：没有任何状态时允许启动。
-  const gate = startupGate({ dataDir: join(process.cwd(), '.no-such-legion-dir') })
+  //
+  // ★ 必须**显式**给一个 `planRecovery`——这正是这一版改掉的东西：
+  //   省略它不再意味着"没有未完成事务"，而是"判不出来"（⇒ 挡）。
+  //   这里给一个诚实的读数替身："这个目录里没有事务"。
+  const noTxn = () => ({ verdict: 'nothing-to-do', reason: null })
+  const gate = startupGate({ dataDir: join(process.cwd(), '.no-such-legion-dir'), planRecovery: noTxn })
   if (gate.allowed !== true) problems.push('没有事务与屏障时启动被拦住了')
+  // ★★ 而**省略** `planRecovery` 必须被挡，并且要有一个具名的码。
+  //   这条是本次补的判据：闸门有两个维度，它们的默认方向必须都是"挡"。
+  const unwired = startupGate({ dataDir: join(process.cwd(), '.no-such-legion-dir') })
+  if (unwired.allowed !== false) {
+    problems.push('没接事务日志读数的闸门放行了启动（"判不出来"被当成了"没有未完成事务"）')
+  } else if (unwired.code !== BARRIER_CODES.PLAN_UNWIRED) {
+    problems.push(`没接读数的闸门给了 ${unwired.code}，期望 ${BARRIER_CODES.PLAN_UNWIRED}`)
+  }
   // ★ 读不出来时 `blocked` 必须是 true。
   const state = readBarrier(join(process.cwd(), '.no-such-legion-dir'))
   if (state.blocked !== false) problems.push('不存在的屏障被判为 blocked')

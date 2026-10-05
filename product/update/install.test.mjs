@@ -499,15 +499,58 @@ test('★★ 屏障：**读不出来**时同样拒绝不带身份的解除（那
 
 test('屏障：启动闸门在没有事务时放行，有事务时拦住并给建议', async (t) => {
   const ctx = setup(t)
-  assert.equal(startupGate({ dataDir: ctx.dataDir }).allowed, true)
+  // ★ 必须**显式**给 `planRecovery`：省略它不再意味着"没有未完成事务"，
+  //   而是"判不出来"⇒ 挡（见 `barrier.mjs` 的 `PLAN_UNWIRED`）。
+  //   生产路径（`launcher.mjs` 的 `defaultUpdateGate`）一直是这样传的，
+  //   所以这里照它写才是**忠实的**替身。
+  const wired = { dataDir: ctx.dataDir, planRecovery: (args) => planRecovery(args) }
+  assert.equal(startupGate(wired).allowed, true)
+  // ★★ 而**没接线**的闸门必须是挡（这是本次补的第二个维度：
+  //   闸门两个维度的默认方向都必须是"挡"）。
+  const unwired = startupGate({ dataDir: ctx.dataDir })
+  assert.equal(unwired.allowed, false, '没接事务读数的闸门放行了启动')
+  assert.equal(unwired.code, 'barrier-plan-unwired')
+
   const journal = createJournal({ dataDir: ctx.dataDir, txnId: 'ut-gate', now: () => NOW })
   journal.begin({ fromVersion: CURRENT_VERSION, toVersion: NEXT_VERSION, phase: 'barrier' })
   acquireBarrier({ dataDir: ctx.dataDir, txnId: 'ut-gate', now: () => NOW })
-  const gate = startupGate({ dataDir: ctx.dataDir, planRecovery: (args) => planRecovery(args) })
+  const gate = startupGate(wired)
   assert.equal(gate.allowed, false)
   assert.equal(gate.code, 'UPDATE_TRANSACTION_UNFINISHED')
   // 建议必须可行动：告诉用户该等、该重试，还是该找管理员。
   assert.match(gate.advice, /管理员|重试|维护|退回|备份/)
+})
+
+test('★★★★ 断电形状：屏障文件**丢了**（rename 没落盘）+ 未完成事务 ⇒ 仍必须挡住启动', async (t) => {
+  // ★ 这条守的是"安全不依赖屏障文件的耐久性"。
+  //
+  //   `barrier.mjs` 的写入是**原子**的（临时文件 + rename），但**不是耐久**的：
+  //   它没有 fsync（设计 §8 line 182 说"建立屏障并**刷新数据**"，而实现里
+  //   只有 `journal.mjs` 每行 fsync）。断电之后完全可能出现：
+  //
+  //     · 日志（每行 fsync）      → 事务的意图与结果都在
+  //     · 屏障文件（无 fsync）    → rename 没落盘 ⇒ 文件不见了
+  //
+  //   此时 `readBarrier` 给出 `blocked = false`（**不存在**的屏障与**损坏**的
+  //   屏障是两回事：前者是"没有屏障"，后者才是"读不出来"），于是闸门只能靠
+  //   **事务那一维**挡住启动。
+  //
+  //   > 一个把安全建立在"屏障文件一定落盘"上的实现，
+  //   > 在断电那一次恰好会让业务在半迁移的数据库上开始写。
+  const ctx = setup(t)
+  const journal = createJournal({ dataDir: ctx.dataDir, txnId: 'ut-power', now: () => NOW })
+  journal.begin({ fromVersion: CURRENT_VERSION, toVersion: NEXT_VERSION, phase: 'switch' })
+  acquireBarrier({ dataDir: ctx.dataDir, txnId: 'ut-power', now: () => NOW })
+
+  // 模拟"屏障的 rename 没落盘"：文件消失。
+  rmSync(join(ctx.dataDir, 'update', 'maintenance.json'), { force: true })
+  assert.equal(readBarrier(ctx.dataDir).blocked, false,
+    '屏障文件不存在时被判成了 blocked —— 那么这条用例测的就不是"事务那一维兜住"了')
+
+  const gate = startupGate({ dataDir: ctx.dataDir, planRecovery: (args) => planRecovery(args) })
+  assert.equal(gate.allowed, false, '屏障文件丢了、事务也没做完，启动却被放行了')
+  assert.equal(gate.code, 'UPDATE_TRANSACTION_UNFINISHED',
+    '不是被"未完成事务"挡下的 —— 那说明挡住它的是别的东西（这条用例就没有分辨力了）')
 })
 
 // ---------------------------------------------------------------------------

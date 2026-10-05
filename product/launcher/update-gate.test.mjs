@@ -23,7 +23,7 @@ import { fileURLToPath } from 'node:url'
 import { resolveLayout } from '../paths.mjs'
 import { createLauncher } from './launcher.mjs'
 import { acquireBarrier, startupGate } from '../update/barrier.mjs'
-import { createJournal } from '../update/journal.mjs'
+import { createJournal, planRecovery } from '../update/journal.mjs'
 
 const REPO_ROOT = fileURLToPath(new URL('../../', import.meta.url))
 
@@ -91,7 +91,14 @@ test('没有未完成事务：闸门放行，preflight 照常往下走', async (
   let gateCalls = 0
   const L = createLauncher({
     layout,
-    updateGate: (args) => { gateCalls += 1; return startupGate({ dataDir: args.dataDir }) },
+    // ★ 忠实于生产：`launcher.mjs` 的 `defaultUpdateGate` 是**传** `planRecovery` 的。
+    //   这个替身此前省掉了它，于是它测的是一个"没接事务读数"的闸门——
+    //   而那种闸门在这一版之前会**放行**（"判不出来"被当成"没有未完成事务"）。
+    //   省掉它还会让"事务那一维"在门禁里从未被驱动过。
+    updateGate: (args) => {
+      gateCalls += 1
+      return startupGate({ dataDir: args.dataDir, planRecovery: (a) => planRecovery(a) })
+    },
   })
   const pre = await L.preflight()
   assert.equal(gateCalls, 1, '闸门没有被调用到')

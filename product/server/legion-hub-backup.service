@@ -1,0 +1,24 @@
+[Unit]
+Description=Legion Hub 一致备份（VACUUM INTO + 读回验证 + gpg 加密）
+Documentation=file:///srv/legion-hub/app/product/server/BACKUP.md
+After=legion-hub.service
+
+[Service]
+Type=oneshot
+# 不需要 root：备份只读库、写到自己的目录。
+# 用 legion-hub 用户是为了"备份进程读不到它不需要的东西"。
+User=legion-hub
+Group=legion-hub
+WorkingDirectory=/srv/legion-hub/app
+ExecStart=/usr/bin/node /srv/legion-hub/app/product/server/backup.mjs \
+  --db /var/lib/legion-hub/team.db \
+  --out /var/lib/legion-hub/backups \
+  --passphrase-file /etc/legion-hub/backup.passphrase \
+  --keep 7
+# 失败要留痕：备份失败却报"成功"，与没有备份是同一个东西。
+# `Type=oneshot` + 非零退出码会让 `systemctl --failed` 看得见它。
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/legion-hub
+PrivateTmp=true
+NoNewPrivileges=true

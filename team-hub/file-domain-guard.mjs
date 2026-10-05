@@ -1,4 +1,4 @@
-/**
+﻿/**
  * team-hub/file-domain-guard.mjs — 建任务时的**文件域可交付性**护栏（BUG-009-a）。
  *
  * 现场（T-179）：一条切片的 `fileDomain` 声明成 `["scratch/"]`，而 `scratch/` 在 `.gitignore` 里。
@@ -57,29 +57,45 @@ export function judgeFileDomain(domain, ignoredEntries) {
 }
 
 /**
- * 用真实 git 探出「域条目里哪些被忽略」。
+ * 用真实 git 探出「域条目里哪些**装不下新交付物**」。
  *
  * @param {(args: string[], cwd: string) => { status: number|null, error: string|null }} runGit
  *   注入式 git 调用器 —— **形状对齐 `team-hub/git-plumbing.mjs` 的 `runGit`**
  *   （`{ status, error, stdout, stderr, ok }`；本模块只用 status/error）。
  * @param {string} repoDir 该空间绑定的本地仓库目录
  * @param {string[]} entries 域名目
- * @returns {string[]|null} 被忽略的条目；**探测失败返回 null**（调用方据此跳过校验，不拦人）
+ * @returns {string[]|null} 装不下新文件的条目；**探测失败返回 null**（调用方据此跳过校验，不拦人）
  */
 export function ignoredFileDomainEntries(runGit, repoDir, entries) {
   if (typeof repoDir !== 'string' || repoDir.length === 0) return null
   if (!Array.isArray(entries) || entries.length === 0) return []
   try {
-    // `git check-ignore -q <path>` 的退出码：0 = 被忽略，1 = 未被忽略，其它 = 出错。
-    // 逐个问而不是一次问多个：一次传多个路径时，只要有一个没被忽略退出码就不同，
-    // 解析 stdout 比逐个问更容易出错；域条目通常只有个位数。
+    // ★ 问的**不是**"这个路径本身是否被忽略"，而是"**往这个域里新写一个文件会不会被忽略**"。
+    //   两者在生产上会给出相反答案，实测踩到过：`scratch/` 在 `.gitignore:65` 里，但它下面
+    //   **已经有 447 个被跟踪的文件**，而 git 的规则是「已跟踪路径永不被忽略」
+    //   ⇒ `git check-ignore scratch/` 返回 **1（未忽略）**，第一版探测器因此把 `scratch/`
+    //   判成"可交付"，护栏在最该拦的那一刻没响（活体验证时它真的建出了任务）。
+    //   改问假想子路径 `scratch/__legion_domain_probe__` 就对了 —— git 回答它被忽略。
+    //   这不是措辞差别：「域本身没被忽略」与「域装不下新文件」在交付上是两件事，
+    //   而要防的恰恰是后者（worker 写进去、git add 带不上、分支永远 0 提交）。
+    const probesOf = (entry) => {
+      const bare = entry.replace(/[/\\]+$/, '')
+      return bare.length > 0 ? [entry, `${bare}/__legion_domain_probe__`] : [entry]
+    }
+    // `git check-ignore --quiet <path>` 的退出码：0 = 被忽略，1 = 未被忽略，其它 = 出错。
+    // 逐个条目问：一次传多个路径时"哪些命中"要从 stdout 解析，比逐个问更容易出错；
+    // 域条目通常只有个位数。
     const ignored = []
     let sawError = false
     for (const entry of entries) {
-      const r = runGit(['check-ignore', '--quiet', '--', entry], repoDir)
-      if (r?.error) { sawError = true; continue }
-      if (r?.status === 0) ignored.push(entry)
-      else if (r?.status !== 1) sawError = true
+      let hit = false
+      for (const probe of probesOf(entry)) {
+        const r = runGit(['check-ignore', '--quiet', '--', probe], repoDir)
+        if (r?.error) { sawError = true; continue }
+        if (r?.status === 0) { hit = true; break }
+        if (r?.status !== 1) sawError = true
+      }
+      if (hit) ignored.push(entry)
     }
     // 有任何一个条目**问不出结果**（不是"未忽略"，是命令本身出错）⇒ 整体视为不可知。
     if (sawError) return null

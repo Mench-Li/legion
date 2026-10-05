@@ -141,7 +141,12 @@ export function createReclamation(deps: ReclamationDeps): Reclamation {
         ? await hubPost('/api/release-stale', { by: config.role, scope, olderThan: config.staleMinutes }) as { released?: string[]; quarantined?: string[] }
         : await runTaskctl(config.scrumDir, ['release-stale', '--older-than', String(config.staleMinutes), '--by', config.role, '--scope', scope]) as { released?: string[]; quarantined?: string[] }
       for (const id of res.released ?? []) {
-        activity('released', id, `距最近进展超过 ${config.staleMinutes} 分钟或过 TTL，自动释放回 todo`)
+        // ★ 文案必须与效果一致：超龄/TTL 释放只把任务放回 todo，而 Hub 会把它的
+        //   **写入资格冻结**成 reconciling（因为"很久没进展"不能证明执行者已停止）。
+        //   因此下一步不是"自动认领"，而是等将军确认执行者已停止。
+        //   从前这里写的是"自动释放回 todo"，与紧随其后的
+        //   `T-xxx 认领失败：上一轮执行尚未确认停止` 直接矛盾（实测把任务卡死过三轮）。
+        activity('released', id, `距最近进展超过 ${config.staleMinutes} 分钟或过 TTL，已回到 todo；写入资格冻结，需确认执行者已停止后才能重新认领`)
         const t = byId.get(id)
         if (t) { t.status = 'todo'; t.soldier = null; t.claimedAt = null }
       }

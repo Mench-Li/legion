@@ -155,8 +155,8 @@ test('★ 释放后同步本轮快照：status/soldier/claimedAt 三个字段都
   assert.equal(t3.claimedAt, '2026-01-01T00:00:00Z')
   // activity 的顺序与文本逐字断言（看板事件流是对外可见的）
   assert.deepEqual(h.activities, [
-    { kind: 'released', id: 'T-1', text: '距最近进展超过 40 分钟或过 TTL，自动释放回 todo' },
-    { kind: 'released', id: 'T-2', text: '距最近进展超过 40 分钟或过 TTL，自动释放回 todo' },
+    { kind: 'released', id: 'T-1', text: '距最近进展超过 40 分钟或过 TTL，已回到 todo；写入资格冻结，需确认执行者已停止后才能重新认领' },
+    { kind: 'released', id: 'T-2', text: '距最近进展超过 40 分钟或过 TTL，已回到 todo；写入资格冻结，需确认执行者已停止后才能重新认领' },
   ])
 })
 
@@ -201,7 +201,7 @@ test('本地 taskctl 不支持按任务排除工作流时，stale 与启动回�
 test('释放列表里的 id 不在本轮快照里 → 照样记事件，不得抛（activity 在查表之前）', async () => {
   const h = harness({ useHub: true, hubResult: { released: ['T-404'] } })
   await h.r.reclaimStaleLeases(new Map()) // 空快照
-  assert.deepEqual(h.activities, [{ kind: 'released', id: 'T-404', text: '距最近进展超过 40 分钟或过 TTL，自动释放回 todo' }])
+  assert.deepEqual(h.activities, [{ kind: 'released', id: 'T-404', text: '距最近进展超过 40 分钟或过 TTL，已回到 todo；写入资格冻结，需确认执行者已停止后才能重新认领' }])
 })
 
 test('hub 不返回 released 字段（或返回空）→ 什么都不改、不记事件', async () => {

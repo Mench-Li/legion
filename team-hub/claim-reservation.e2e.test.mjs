@@ -121,6 +121,49 @@ test('真实任务认领与文件预约同事务：撞车等待，释放后才�
     assert.equal((await post('/api/claim', { id: 'T-domain-a', by: 'worker', scope: 'default' })).status, 200)
     assert.equal((await post('/api/claim', { id: 'T-domain-b', by: 'worker', scope: 'default' })).status, 200)
     assert.equal(hub.db.prepare("SELECT source FROM task_write_intents WHERE task_id='T-domain-a'").get().source, 'file-domain-fallback')
+
+    // ── ⑯ 守护重启孤儿：**必须真的释放**写入资格，否则"自动重新认领"是空话 ──────────
+    //
+    // 这一条钉的是一个把任务卡死过三轮的真缺陷（T-173 线、T-174、T-177）：
+    // `releaseStaleTasks` 的「显式 ids」分支（= 守护在自己的进程刚重启、确认上一轮 worker
+    // 已随进程消失之后发来的孤儿名单）把任务置回 todo，却在同一事务里把写入预约
+    // **冻结**成 `reconciling`（`cancelled: true`）。于是任务看起来可以重新认领，
+    // 实际每一次 claim 都以 `RECONCILING`（"上一轮执行尚未确认停止"）被拒，
+    // 只能靠人工调 confirm-stopped 解开——而它的评论写的是"自动释放回 todo 重新认领续做"。
+    //
+    // 判据分两半，缺一不可：
+    //   ① 孤儿释放后，**立即** claim 必须成功（不需要任何人工确认）；
+    //   ② 与它对照：同样置回 todo 的**超龄**路径必须仍是冻结（执行者可能还活着，
+    //      放开就会出现两个写者）——「重启孤儿已确认消失」与「很久没进展」不是一回事。
+    ins.run('T-boot-orphan', 'boot orphan', 'todo', 'default', 0)
+    await post('/api/tasks/T-boot-orphan/write-intent', { by: 'planner', scope: 'default', paths: ['src/orphan.mjs'] })
+    assert.equal((await post('/api/claim', { id: 'T-boot-orphan', by: 'worker', scope: 'default' })).status, 200)
+    const orphanRelease = await post('/api/release-stale', { by: 'general', scope: 'default', olderThan: 1, ids: ['T-boot-orphan'] })
+    assert.equal(orphanRelease.status, 200)
+    assert.deepEqual(orphanRelease.body.task?.released ?? orphanRelease.body.released, ['T-boot-orphan'])
+    assert.equal(hub.db.prepare("SELECT status FROM tasks WHERE id='T-boot-orphan'").get().status, 'todo')
+    // ① 关键断言：写入资格是 released（不是 reconciling），且**不需要人工确认**就能再认领
+    assert.equal(hub.db.prepare("SELECT state FROM write_reservations WHERE task_id='T-boot-orphan' ORDER BY id DESC LIMIT 1").get().state, 'released',
+      '守护重启孤儿的解锁必须是 released：它已经确认执行者随进程消失，冻结会让任务永久认领不了')
+    const reclaimOrphan = await post('/api/claim', { id: 'T-boot-orphan', by: 'worker', scope: 'default' })
+    assert.equal(reclaimOrphan.status, 200,
+      '孤儿释放后必须能立即重新认领（从前这里 409 RECONCILING："上一轮执行尚未确认停止"）')
+
+    // ② 对照：超龄释放仍然冻结（安全的那个方向不许被"顺手"改掉）
+    ins.run('T-stale-frozen', 'stale frozen', 'todo', 'default', 0)
+    await post('/api/tasks/T-stale-frozen/write-intent', { by: 'planner', scope: 'default', paths: ['src/stale.mjs'] })
+    assert.equal((await post('/api/claim', { id: 'T-stale-frozen', by: 'worker', scope: 'default' })).status, 200)
+    // 把认领时间推老到超过 olderThan，再不带 ids 调一次（= 超龄路径）
+    hub.db.prepare("UPDATE tasks SET claimedAt=? WHERE id='T-stale-frozen'").run(new Date(Date.now() - 3600_000).toISOString())
+    const staleRelease = await post('/api/release-stale', { by: 'general', scope: 'default', olderThan: 1 })
+    assert.equal(staleRelease.status, 200)
+    assert.ok((staleRelease.body.task?.released ?? staleRelease.body.released ?? []).includes('T-stale-frozen'))
+    assert.equal(hub.db.prepare("SELECT state FROM write_reservations WHERE task_id='T-stale-frozen' ORDER BY id DESC LIMIT 1").get().state, 'reconciling',
+      '超龄释放仍须冻结：它证明不了执行者已停止，放开就会出现两个写者')
+    assert.equal((await post('/api/claim', { id: 'T-stale-frozen', by: 'worker', scope: 'default' })).status, 409)
+    // 而它回到 todo 的意义正在这里：人工确认那条恢复路径可用
+    assert.equal((await post('/api/tasks/T-stale-frozen/reservation/confirm-stopped', { by: 'general', scope: 'default', confirm: 'stopped:T-stale-frozen' })).status, 200)
+    assert.equal((await post('/api/claim', { id: 'T-stale-frozen', by: 'worker', scope: 'default' })).status, 200)
   } finally {
     hub.server.closeAllConnections?.()
     hub.server.close()

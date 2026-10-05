@@ -6082,7 +6082,23 @@ function releaseStaleTasks(olderThanMinutes, by, ids) {
         const reason = `守护重启检测到孤儿在办任务（worker 已随进程消失），自动释放回 todo 重新认领续做`
         const comments = parseJson(t.comments, [])
         comments.push({ by, at: now(), text: reason })
-        finishTaskReservationInTx(r.id, { cancelled: true })
+        // ★ 这里必须**释放**预约（`cancelled: false`），不能冻结成 `reconciling`。
+        //
+        // 这条分支只在**显式 ids** 下走到，而 ids 是守护在**自己的进程刚重启**之后才发来的：
+        // 它在第一轮扫单里看到「status=in_progress 且 soldier 是自己」的任务，据此断言
+        // 上一轮 worker 已随进程消失（见 plugins/src/reclamation.ts 的 reclaimBootOrphans）。
+        // 既然执行者已确定不在，写入资格就该真的交回去。
+        //
+        // 冻结会与这句评论**自相矛盾**：任务确实回到 todo，但下一次 claim 会撞
+        // `RECONCILING`（「上一轮执行尚未确认停止」）而永久卡死——"自动重新认领续做"成了一句空话。
+        // 实测代价：同一形态在本仓把三个任务卡死过（T-173 线、T-174、T-177），
+        // 每一次都要人工调 `/api/tasks/:id/reservation/confirm-stopped` 才能解开。
+        //
+        // 与上面 quarantine 分支的分工（那一条必须冻结）：工作流阶段的结果**未知**，
+        // 可能已经发生了外部副作用，重复派发不安全；而这里的孤儿是"普通任务 + 执行者已消失"，
+        // 没有未知副作用需要冻结。★ 注意「超龄/TTL 已过」那条（下面那个分支）也**不**走这里：
+        // 它的执行者可能还活着，冻结是对的，但它回的评论必须说实话。
+        finishTaskReservationInTx(r.id, { cancelled: false })
         db.prepare('UPDATE tasks SET status=\'todo\', soldier=NULL, claimedAt=NULL, claimedRound=NULL, ttlMinutes=NULL, expiresAt=NULL, claimRequestId=NULL, comments=?, version=version+1, updatedAt=? WHERE id=?')
           .run(JSON.stringify(comments), now(), r.id)
         released.push(r.id)
@@ -6104,9 +6120,21 @@ function releaseStaleTasks(olderThanMinutes, by, ids) {
         quarantineWorkflowTask(task)
         continue
       }
+      // ★ 这一条与上面「守护重启孤儿」**故意不同**：超龄/TTL 只能证明"很久没进展"，
+      // 不能证明执行者已经停止（慢 worker 完全可能还在写）。因此写入资格**冻结**成
+      // `reconciling` 是对的——否则放开的下一秒就可能出现两个写者（T-170 的核心不变量）。
+      // 但它回给任务的评论必须**说实话**：任务回到 todo 只是为了让
+      // `POST /api/tasks/:id/reservation/confirm-stopped` 这条人工恢复路径可用
+      // （该路由要求任务处于 todo/blocked/canceled），**不是**"会自动重新认领"。
+      // 从前这里写的是"自动释放回 todo"，而实际效果是永久认领失败——
+      // 一句话把"等人工确认"说成了"会自动继续"，正是它让这个缺陷连续三轮没有被看见。
       const reason = staleByTtl
-        ? `守护检测到任务已过 TTL（expiresAt=${r.expiresAt}），自动释放回 todo`
-        : `守护检测到认领超过 ${olderThanMinutes} 分钟无进展，自动释放回 todo`
+        ? `守护检测到任务已过 TTL（expiresAt=${r.expiresAt}）：已回到 todo，但**写入资格被冻结**——`
+          + `必须先由将军确认执行者已停止（POST /api/tasks/${r.id}/reservation/confirm-stopped，`
+          + `confirm=stopped:${r.id}），否则认领会一直以 RECONCILING 被拒`
+        : `守护检测到认领超过 ${olderThanMinutes} 分钟无进展：已回到 todo，但**写入资格被冻结**——`
+          + `必须先由将军确认执行者已停止（POST /api/tasks/${r.id}/reservation/confirm-stopped，`
+          + `confirm=stopped:${r.id}），否则认领会一直以 RECONCILING 被拒`
       const comments = parseJson(task.comments, [])
       comments.push({ by, at: now(), text: reason })
       finishTaskReservationInTx(r.id, { cancelled: true })

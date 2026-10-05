@@ -102,15 +102,27 @@ describe('远程 Agent 通道接线', () => {
     assert.ok(login.json.accessToken)
     state.access = login.json.accessToken
     state.refresh = login.json.refreshToken
+    state.ownerId = login.json.userId
 
     const me = await get('/api/identity/me', { token: state.access })
     assert.equal(me.status, 200)
     assert.equal(me.json.user.name, 'owner')
     assert.equal(me.json.systemRole, 'admin')
 
-    // 业务端点现在也放行了。
+    // ★ 业务端点要求**两件事**：门禁认得出这个用户，且他在那个空间里有角色。
+    //   引导出来的系统管理员**不是任何空间的成员**（见 `user-store.mjs` 里
+    //   `SYSTEM_ROLES` 那段：系统角色管的是"造邀请/停用账号"，不是"看所有数据"）。
+    //   所以这里先授权，再断言 200——不授权时它会（正确地）403。
+    await post('/api/identity/roles/grant', { userId: state.ownerId, space: 'software', role: 'owner' }, { token: state.access })
+
     const board = await get('/api/board?scope=software', { token: state.access })
-    assert.equal(board.status, 200)
+    assert.equal(board.status, 200, `已授权的空间应放行，实际 ${board.status}`)
+  })
+
+  it('没有空间角色的用户读业务端点被 403（空间级授权，§13）', async () => {
+    const board = await get('/api/board?scope=other-space', { token: state.access })
+    assert.equal(board.status, 403)
+    assert.equal(board.json.code, 'SPACE_FORBIDDEN')
   })
 
   it('伪造/过期令牌被具名拒绝（前端据此决定刷新还是重新登录）', async () => {

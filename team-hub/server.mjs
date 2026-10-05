@@ -6357,6 +6357,17 @@ function readBody(req) {
  * ?token= 供浏览器 EventSource 等无法自定 header 的读面订阅使用（token 未配置时恒放行）。
  */
 function authorized(req) {
+  // ★ 远程门禁已用**用户会话**认过这个请求（见 `remote-auth.mjs` 与下面的网关）。
+  //
+  // 这一句是必需的，不是便利：下面那一串只认**机器令牌**，而远程部署下的调用方
+  // 是**登录用户**。少了它，手机上每一个 `/api/agent-*` 都会 401——
+  // 门禁放行了、路由又把它挡回去，而两处都"各自看起来是对的"。
+  // 实测就是这么发现的：手机端契约用例一跑，`/api/agents` 直接 401。
+  //
+  // 它**不放宽**任何东西：标记只由网关在"用户令牌已验证 + 该用户在那个空间里有角色"
+  // 之后才打上（见 `remote-auth.mjs` 的 `SPACE_FORBIDDEN`）。没有远程通道时
+  // `__legionUser` 永远是 `undefined`，既有行为一字不变。
+  if (req.__legionUser !== undefined) return true
   if (TOKEN === '') return true
   const header = (req.headers.authorization ?? '').replace(/^Bearer\s+/i, '')
   const custom = req.headers['x-dsh-token'] ?? ''
@@ -7640,7 +7651,39 @@ if (REMOTE_AGENT_ENABLED) {
           legacyAuthorized: authorized(req),
           verifyAccessToken: (t) => userStore.verifyAccessToken(t),
         })
-        if (decision.allow === true) return false
+        if (decision.allow === true) {
+          // ── 用户会话通过之后的两件事 ────────────────────────────────────
+          //
+          // ① 打标记让路由层的 `authorized(req)` 认得他。
+          //    路由层那一串只认机器令牌，而远程调用方是登录用户；
+          //    不打这个标记时手机端每个 `/api/agent-*` 都会 401。
+          //
+          // ② **空间级授权**：URL 上能看见 `scope` 的请求，先验这个用户在不在那个空间里。
+          //    没有它，任何登录用户只要把 `?scope=` 换成别人的空间就能读到——
+          //    而设计文档 §13 明确要求「一个项目的 Agent 无权读取未授权项目」。
+          //
+          //    ★ 已知边界：`scope` 在 **POST 请求体**里时不在这里检查
+          //      （门禁读不到 body，读了就把流消耗掉、路由再也拿不到）。
+          //      写路径的空间授权需要在路由层或权限引擎里补，属于**未完成的接线**，
+          //      不是"已经安全了"。这条注释就是它的台账。
+          if (decision.actor?.kind === 'user') {
+            const scope = ctx.url.searchParams.get('scope')
+            if (scope !== null && scope.length > 0
+              && userStore.hasRoleAtLeast(decision.actor.userId, scope, 'viewer') !== true) {
+              json(res, 403, {
+                error: `无权访问空间「${scope}」`,
+                code: 'SPACE_FORBIDDEN',
+              })
+              return true
+            }
+            req.__legionUser = Object.freeze({
+              userId: decision.actor.userId,
+              sessionId: decision.actor.sessionId ?? null,
+              name: decision.actor.name ?? null,
+            })
+          }
+          return false
+        }
         if (decision.headers) for (const [k, v] of Object.entries(decision.headers)) res.setHeader(k, v)
         json(res, decision.status, { error: decision.message, code: decision.code })
         return true

@@ -93,3 +93,41 @@ test('⑦ 探测不可知的两个来源都返回 null（不是"未忽略"）', 
 test('⑧ 注入的 runGit 抛异常也不炸（返回不可知）', () => {
   assert.equal(ignoredFileDomainEntries(() => { throw new Error('spawn failed') }, '/tmp/x', ['a/']), null)
 })
+
+// ★★ 这条是生产上的真实形态，也是第一版**没覆盖到**的那一种 —— 它让护栏在最该拦时没响。
+//
+//   生产实测：`scratch/` 在 `.gitignore:65` 里，但它下面**已经有 447 个被跟踪的文件**。
+//   而 git 的规则是「已跟踪路径永不被忽略」⇒ `git check-ignore scratch/` 返回 **1（未忽略）**。
+//   第一版探测器问的就是这一句，于是把 `scratch/` 判成"可交付"，活体验证时它真的建出了任务。
+//   正确的问题是"**往这个域里新写一个文件会不会被忽略**"（假想子路径），git 回答它被忽略。
+test('⑨ 域本身"没被忽略"但装不下新文件（目录里有已跟踪文件）⇒ 仍须判为不可交付', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'legion-domain-tracked-'))
+  try {
+    execFileSync('git', ['init', '-q'], { cwd: dir })
+    execFileSync('git', ['config', 'user.email', 't@example.com'], { cwd: dir })
+    execFileSync('git', ['config', 'user.name', 't'], { cwd: dir })
+    // 目录里先放一个**已跟踪**文件，再把它忽略（这正是生产的形状）
+    mkdirSync(join(dir, 'scratch'), { recursive: true })
+    writeFileSync(join(dir, 'scratch', 'legacy.mjs'), 'x', 'utf8')
+    execFileSync('git', ['add', '-A'], { cwd: dir })
+    execFileSync('git', ['commit', '-qm', 'legacy'], { cwd: dir })
+    writeFileSync(join(dir, '.gitignore'), 'scratch/\n', 'utf8')
+    execFileSync('git', ['add', '-A'], { cwd: dir })
+    execFileSync('git', ['commit', '-qm', 'ignore scratch'], { cwd: dir })
+
+    const run = (args, cwd) => runGit(args, cwd)
+    // 陷阱本身：问那个目录，git 说"未忽略"（因为里面有跟踪文件）
+    assert.equal(run(['check-ignore', '--quiet', '--', 'scratch/'], dir).status, 1,
+      '前置：目录本身确实"未被忽略"（已跟踪路径永不被忽略）—— 这正是第一版被绊倒的地方')
+    // 而问"新文件"就对了
+    assert.equal(run(['check-ignore', '--quiet', '--', 'scratch/new-file.mjs'], dir).status, 0,
+      '前置：往它里面新写的文件是被忽略的')
+
+    // 探测器必须给出"装不下新文件"的结论（否则护栏形同不存在）
+    const ignored = ignoredFileDomainEntries(run, dir, ['scratch/'])
+    assert.deepEqual(ignored, ['scratch/'],
+      '域里有已跟踪文件 ≠ 这个域能交付新产出；判定要问"新文件会不会被忽略"')
+    assert.equal(judgeFileDomain(['scratch/'], ignored).ok, false)
+    assert.equal(judgeFileDomain(['scratch/'], ignored).code, 'DOMAIN_ALL_IGNORED')
+  } finally { rmSync(dir, { recursive: true, force: true }) }
+})

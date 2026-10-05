@@ -31,8 +31,8 @@
 
 ## 1. 验收口径逐条核对
 
-| # | 口径（TASK_BREAKDOWN S1..S8 机器行 / REQUIREMENTS AC / TEST_CASES） | 结论 | 依据 |
-| --- | --- | --- | --- |
+| # / 口径（TASK_BREAKDOWN S1..S8 机器行 / REQUIREMENTS AC / TEST_CASES） | 结论 | 依据 |
+| --- | --- | --- |
 | S1 / AC-R1-1,5（岗位文档契约数据模型） | 通过（1 项注记 → O7） | roles.json 七文档岗各含 stage.docs（requirement→docs/REQUIREMENTS.md … reviewer→docs/review/{taskId}-REVIEW.md … devops→docs/DEPLOY.md），coder 无 docs；git diff 确认 **仅新增 docs 字段**，prompt/gate/artifact/next 原文逐字节不动（roles.json.diff 4 hunks 全为追加）；stageContractDocs/resolveStageDocPaths 纯函数：docs 数组优先、缺省回退 artifact、{taskId} 模板展开、路径规范化、空/非法项过滤、未知角色空数组不报错（doc-contract.test 断言面）；fileDigest sha256 |
 | S2 / AC-R1-2..5、AC-R2-3、G-R2（结算自动登记 + 缺失软门禁） | **2 项必须修改（M1/M2）**，主体逻辑通过 | registerContractDocs（plugins:1169）：done 结算在 commitWorktree 后、autoPromote 前登记仓库相对路径 + kind=file + by=守护 + sha256 digest；hub 可用 POST /api/artifact 双写否则走 taskctl（与 recordArtifact 双路径惯例一致）；幂等（同 path 上一条 digest 相同则跳过）支撑 AC-R2-3 多轮倒序数据源（artifact-register.test 第 7 例：v1/v2 两次登记两条、字节未变不重复）；缺失文档停 in_review + 明确评论（AC-R1-4），补全重跑照常流转（第 6 例）；coder 无契约登记、worker 自填 artifact 不回退（第 7 例）。**问题**：M1 registerContractDocs 路径不感知目标级 docsDir（与同函数 gate 校验 goalDocPath 语义分裂，docsDir 目标必误停）；M2 登记写入失败被并入 missing → 误停 in_review 且评论归因错误 |
 | S3 / AC-R3-1..7、K5-A、K9、K10（hub 内容端点） | 通过（2 项健壮性注记 → O1/O2） | GET /api/artifact/content 只取任务登记记录 + i 序号（查询串无 path 参数，AC-R3-3）；resolveArtifactReadTarget：段级防越权路径段（含 .git 不分大小写、盘符、跨任务 worktree：.legion-worktrees 首段必须本任务 id）+ realpath 复检防符号链接逃逸（server.mjs:1764-1766）+ worktree 目录优先/主仓兜底 + 存量绝对路径剥前缀（K10，不跑迁移）；512KB 截断 + NUL/非法 UTF-8 → previewable=false（AC-R3-6）；错误码 400/403/404 可区分（K9）；实测 16/16 绿。**注记**：读取先整文件进内存再截断（O1）；i 非法值静默取最新与 serve/board-plugin 的 400 不一致（O2） |

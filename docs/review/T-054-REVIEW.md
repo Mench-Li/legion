@@ -51,8 +51,8 @@ Node 语义探针（最小复现，判断下载流错误处理分支的真实行
 | S3 AC4 | 二进制与超大文件 read：扩展名/内容拒绝预览或截断，响应体受控 | ✅ 通过 | TC-S3-06/07 绿（MAX_READ 截断、BINARY_EXT+NUL 检测） |
 | S3 AC5 | 零新增依赖（node:fs/path/http） | ✅ 通过 | diff 未改 package.json；新增 createReadStream 为 node:fs 既有导入 |
 | P0-2 | 下载不再整文件同步读内存；Content-Length 精确；客户端断连清理 | ✅ 通过（代码级+实测） | 路由仅剩 openDownloadStream→pipe（serve.mjs:761-778），readFileBytes 路由零引用；16MB TTFB 72ms、256MB 证据 21ms；abort 后服务存活（§0）。**注记 R2**：错误处理分支语义失效（§2.1） |
-| 仅回环 + .git 保护（I2/TC-S3-12，防凭证外泄） | ⚠️ 部分通过（R1） | 根级 .git/config 403；**嵌套 .git 可达**：`vendor/sub-repo/.git/config` read 与 download 均 200（实测泄露内容）——与 assertNotGitInternal JSDoc「含 .git 下任意层级一律拒绝」不符 |
-| 文档同步（改行为同步更新文档） | ⚠️ 部分通过 | readFileBytes/openDownloadStream JSDoc 已改为真实语义 ✅；**TC-S3-08b 未登记 docs/TEST_CASES.md**（见 §2.2-P2-A） |
+| — | 仅回环 + .git 保护（I2/TC-S3-12，防凭证外泄） | ⚠️ 部分通过（R1） | 根级 .git/config 403；**嵌套 .git 可达**：`vendor/sub-repo/.git/config` read 与 download 均 200（实测泄露内容）——与 assertNotGitInternal JSDoc「含 .git 下任意层级一律拒绝」不符 |
+| — | 文档同步（改行为同步更新文档） | ⚠️ 部分通过 | readFileBytes/openDownloadStream JSDoc 已改为真实语义 ✅；**TC-S3-08b 未登记 docs/TEST_CASES.md**（见 §2.2-P2-A） |
 
 **结论：本切片三端点功能正确、P0-2 修复真实成立（代码 + 契约 + 真 HTTP 三层证据一致），无 P0 级缺陷；安全面有一处承诺失实（R1 嵌套 .git）与一处新增错误处理死代码（R2）。**
 

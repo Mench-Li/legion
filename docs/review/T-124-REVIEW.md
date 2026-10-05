@@ -29,8 +29,8 @@
 
 ## 1. 验收口径逐条核对（结论均有代码/测试依据）
 
-| # | 口径（REQUIREMENTS / TASK_BREAKDOWN / TEST_CASES） | 结论 | 依据 |
-| --- | --- | --- | --- |
+| # / 口径（REQUIREMENTS / TASK_BREAKDOWN / TEST_CASES） | 结论 | 依据 |
+| --- | --- | --- |
 | S1 / AC-R1-3（失败可行动化） | ✅ 通过（语义注记 → M2/S1） | chatErrorClassifier.ts 五类别 + 每类含恢复指引 + ≤500 契约 + error/undefined 负例兜底；index.ts 两处失败路径（非 completed、catch 吞错）与 foreman-down 分支均改经分类器回写。独立复跑 4/4。静态：生产路径无裸「回复子代理未完成（」 |
 | S2 / AC-R1-3 后端（health/心跳/daemon 状态） | ⚠️ **M1/M2（必须修改，见 §2）** | chatHealth 聚合四输入 + 诚实标注 + 只读零写入（TC-S2-07 断言 audit/表零变化）；60s 窗判定与 GET /api/members 口径一致；members.model 迁移幂等；hubHeartbeat 每轮上报 + daemon.json chat 字段随 writeDaemonStatus 写出。**缺陷**：在线判定/daemon 模型回退全局取行忽略 scope；lastFail 不随后续成功消除 → 健康点恒红（详见 M1/M2） |
 | S3 / AC-R3-1/3/5、AC-R4-2/3/4/6 后端（附件数据面） | ✅ 通过（注记 → S3/S5） | chat_attachments 建表幂等零迁移 + uploads 与库同基；PUT 上传（Content-Length 预检/黑名单/非法 UTF-8/大小上限/sha1 原子落盘）+ GET content（会话归属校验 403/404 语义 + realpath 防逃逸）+ postMessage 事务内 validate/绑定（悬空/跨 scope/重复绑定拒绝且零落库，TC-S3-10）+ 孤儿 24h/sent 7 天 TTL + audit chat:attachment:*。body/meta 仅存引用（TC-S3-07/15 断言）；独立复跑 S3 12 例全绿。**注记**：同名 sha1 去重文件被 TTL 删除可能留下他行悬空（S3 建议） |

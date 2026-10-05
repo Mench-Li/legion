@@ -38,7 +38,7 @@
 | 域 | 端点 | 宿主 | 边界 |
 | --- | --- | --- | --- |
 | 对话中心 | POST/GET /api/chat/conversations、POST/GET /api/chat/messages | team-hub :8787（前端经 serve.mjs /hub/* 代理） | scope 分区；写 by 必填 + author=by 防冒名；正文 ≤8000；审计 chat:* + SSE |
-| 文件中心 | GET /api/files/list|read|download、PUT /api/files/upload、POST /api/files/mkdir|rename|delete | workbench serve.mjs :5173 | 仅回环；写需 --token/DSH_WORKBENCH_TOKEN；越界/嵌套 .git 任意层段 + realpath 复检 → 403；覆盖 overwrite=1；删除 confirm=yes |
+| 文件中心 | GET /api/files/{list,read,download}、PUT /api/files/upload、POST /api/files/{mkdir,rename,delete} | workbench serve.mjs :5173 | 仅回环；写需 --token/DSH_WORKBENCH_TOKEN；越界/嵌套 .git 任意层段 + realpath 复检 → 403；覆盖 overwrite=1；删除 confirm=yes |
 | 浏览器助手 | POST /api/web/fetch | workbench serve.mjs :5173 | 仅回环；SSRF 逐跳防护（私网/回环/混淆/重定向链）；共享 deadline 整链超时；限长 2MiB；审计 web-audit.jsonl（静态 ROOT 之外，容量轮转） |
 | 日程日历 | GET/POST /api/calendar/events、POST /api/calendar/events/delete | team-hub :8787 | scope 过滤 + 日期窗闭区间；写 by 必填；audit calendar:* + SSE |
 | 通知 | 前端 NotifyView（由 /api/activity 审计派生） | workbench :5173 | 已读游标 localStorage per scope（R-15） |

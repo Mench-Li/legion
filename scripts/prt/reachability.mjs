@@ -140,6 +140,28 @@ export const PROCESS_ENTRIES = Object.freeze([
   //  它们**不可能**出现在任何 import 图里，而它们确实在跑。
   'scrum/taskctl.mjs',
   'scrum/render.mjs',
+  // ★★ 第 119 轮：**桌面壳**按路径 spawn 的两个子进程。
+  //
+  //   与上面两个**同一个形状**（"它们不可能出现在任何 import 图里，
+  //   而它们确实在跑"），所以处置也必须相同：登记成入口，而不是把它们
+  //   记成"到不了生产"。
+  //
+  //   两处**源码证据**（不是猜的）：
+  //     · `desktop/main.mjs:13,113` —— `bridgePath = join(installRoot, 'product',
+  //       'launcher', 'desktop-bridge.mjs')` 之后 `spawn(nodePath, [bridgePath])`；
+  //       而打包期的**闭包检查器**把它逐字列进
+  //       `desktop/scripts/verify-closure.mjs:40` 的 `entrypoints` 数组
+  //       （与 `team-hub/server.mjs` 同一张表）——即"打包的人一直知道
+  //       它是要按路径跑的那个文件"。
+  //     · `product/launcher/bundled-runtime.mjs:59-60` ——
+  //       `fileURLToPath(new URL('./bundle-extract-worker.mjs', import.meta.url))`
+  //       之后 `spawn(process.execPath, [extractor, …])`；
+  //       `desktop/scripts/verify-closure.mjs:24` 同样按路径 exec 它。
+  //
+  //   漏登记的后果与 `scrum/serve.mjs` 那次**逐字相同**：把在跑的东西报成死代码，
+  //   而读的人会去查那个东西。
+  'product/launcher/desktop-bridge.mjs',
+  'product/launcher/bundle-extract-worker.mjs',
 ])
 
 /** 三种 import 写法都要认：`from '…'`、`import('…')`、纯副作用的 `import '…'`。 */
@@ -164,6 +186,10 @@ const SPEC = /\bfrom\s*['"]([^'"]+)['"]|\bimport\s*\(\s*['"]([^'"]+)['"]|\bimpor
  *   > 一个「只认一种路径写法」的探针，
  *   > 与一个「那些模块真的没人加载」的探针，在输出上是同一个东西。
  */
+const WORKER_PATTERNS = Object.freeze([
+  /new\s+Worker\s*\(\s*new\s+URL\s*\(\s*['"]([^'"]+\.mjs)['"]\s*,\s*import\.meta\.url\s*\)/g,
+])
+
 const MANIFEST_PATTERNS = Object.freeze([
   /runtimeModule:\s*'([^']+\.mjs)'/g,
   /\bmodule:\s*'([^']+\.mjs)'/g,        // patch-layer.mjs 的 PATCH_LAYER_ROWS
@@ -329,6 +355,16 @@ export function findEntries(files, src) {
     }
   }
 
+  // ★ worker 线程：`new Worker(new URL('…', import.meta.url))` 按 URL 加载，import 图里看不见。
+  for (const [f, text] of src) {
+    for (const re of WORKER_PATTERNS) {
+      for (const m of text.matchAll(new RegExp(re.source, 'g'))) {
+        const cand = resolveSpec(f, m[1], known)
+        if (cand && !entries.has(cand)) entries.set(cand, `worker 线程（${f}）`)
+      }
+    }
+  }
+
   // ★ 清单声明：这些文件由**字符串**加载，import 图里看不见。
   //   两种路径写法都要认（见 MANIFEST_PATTERNS 的注释）。
   for (const [f, text] of src) {
@@ -340,6 +376,30 @@ export function findEntries(files, src) {
           : (known.has(raw.replace(/^\.\//, '')) ? raw.replace(/^\.\//, '') : null) // 仓库相对
         if (cand && !entries.has(cand)) entries.set(cand, `清单声明（${f}）`)
       }
+    }
+  }
+
+  // ★★ 第 119 轮：**跨文件类型的入口源** —— `.ts` 入口 import 的 `.mjs` 同样是生产依赖。
+  //
+  //   探针的图只收 `SCAN_DIRS` 下的 `.mjs`（`collectFiles`），所以一个 `.ts` 入口
+  //   本身**不在图里**、它的 import 边也就看不见。后果与上面两种漏法**逐字相同**：
+  //   把在跑的模块报成"到不了生产"。
+  //
+  //   这条不是推测：`plugins/src/index.ts` 是 DSH 宿主插件的**真入口**
+  //   （`plugins/package.json` 的 `main` = `./lib/index.js`，由它构建），
+  //   而它逐字 import 着 `runtime/adapters/dsh/*.mjs` 与 `runtime/contracts/*.mjs`。
+  //
+  //   ★ 只认**以 `.mjs` 结尾**的说明符：那才是探针扫描面内的文件。
+  //     `.ts`/`./x.js` 那些留给构建产物（`lib/`，未跟踪）——不在这里猜。
+  const EXTERNAL_ENTRY_SOURCES = Object.freeze(['plugins/src/index.ts'])
+  for (const rel of EXTERNAL_ENTRY_SOURCES) {
+    const p = join(REPO, rel)
+    if (!existsSync(p)) continue
+    for (const m of readFileSync(p, 'utf8').matchAll(SPEC)) {
+      const spec = m[1] ?? m[2] ?? m[3]
+      if (typeof spec !== 'string' || !spec.endsWith('.mjs')) continue
+      const cand = resolveSpec(rel, spec, known)
+      if (cand && !entries.has(cand)) entries.set(cand, `跨文件类型入口（${rel}）的 .mjs import`)
     }
   }
   return entries

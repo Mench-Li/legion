@@ -57,7 +57,7 @@
 | PUT /api/chat/attachments?scope=&by=&fileName= | team-hub :8787 | 附件上传（raw UTF-8 文本 → staged；护栏：单附件 ≤10MB、每消息 ≤3、黑名单扩展名、非法 UTF-8 拒绝） |
 | GET /api/chat/attachments/content?id=&conv=&scope= | team-hub :8787 | 附件内容取回（按会话归属校验，跨会话/跨 scope 403） |
 | GET/POST /api/chat/reply-settings | team-hub :8787 | 每空间 AI 回复开关（默认开）/模型/身份/systemHint，写走统一纪律（by 必填 + audit + SSE） |
-| GET /api/chat/replies?scope=&sinceMsgId= ｜ POST /api/chat/replies/answer|retry|fail | team-hub :8787 | 回复队列/回写（CAS awaiting→replied/failed，幂等；超龄自动 failed 带超时文案） |
+| GET /api/chat/replies?scope=&sinceMsgId= ｜ POST /api/chat/replies/{answer,retry,fail} | team-hub :8787 | 回复队列/回写（CAS awaiting→replied/failed，幂等；超龄自动 failed 带超时文案） |
 | POST /api/heartbeat | team-hub :8787 | 守护心跳上报（kind=worker，携带当前选用模型，供 health 聚合；既有接口扩展） |
 
 - **数据影响**：team-hub SQLite 启动幂等建表/补列——新增 `chat_reply_settings`、`chat_attachments` 两张表（CREATE TABLE IF NOT EXISTS + 索引），`members` 表补 `model` 列（ensureColumn 幂等 ALTER）；存量 team.db 无损升级，无需手工迁移脚本（chat.test 41 含旧库路径用例）。

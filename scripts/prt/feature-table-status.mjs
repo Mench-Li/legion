@@ -125,11 +125,13 @@ export function parseFeatureRows(text) {
 export function checkFeatureTable({ text }) {
   const { rows, skipped } = parseFeatureRows(text)
   const violations = []
+  const constrainedIds = []
   let checked = 0
   let exempt = 0
   for (const r of rows) {
     if (r.end === DONE || r.end.startsWith(PAUSED)) { exempt += 1; continue }
     checked += 1
+    constrainedIds.push(r.id)
     if (isEmptyGap(r.gap)) {
       violations.push({
         line: r.line,
@@ -147,6 +149,10 @@ export function checkFeatureTable({ text }) {
   return {
     ok: violations.length === 0,
     checked, exempt, skipped,
+    // ★ 第 119 轮：把"受约束的是**哪几行**"一并给出。
+    //   只报条数时，"功能真的做完了"（好事）与"规则被架空"（坏事）
+    //   在数字下降上是同一个读数 —— 点名之后两者分得开。
+    constrainedIds,
     rows: rows.length,
     violations,
   }

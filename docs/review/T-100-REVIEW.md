@@ -39,8 +39,8 @@
 
 ## 1. 验收口径逐条核对
 
-| # | 口径（T-095 §5 / TASK_BREAKDOWN S1..S12 / TEST_CASES） | 结论 | 依据 |
-| --- | --- | --- | --- |
+| # / 口径（T-095 §5 / TASK_BREAKDOWN S1..S12 / TEST_CASES） | 结论 | 依据 |
+| --- | --- | --- |
 | S1 / AC-R1-1..4,6,7（后端共享语义） | ✅ 通过（1 项语义注记 → M2） | 代码 + skills.test 20/20：grant scope:B 后 scope=B（member 省略/单值两形态）含 S 且 prompt 全、C 不含（TC-S1-01/02/10）；revoke 即不可见 + 幂等（TC-S1-03/04）；非 general 调 review/grant/revoke → 400 文案含 general、register 不门禁（TC-S1-05）；审计 detail 含 skillScope + 目标、audit.scope=归属空间（TC-S1-06）；include=pending 仅 member=general（TC-S1-07/08）；删除源空间级联无悬空（TC-S1-09）；非法入参矩阵（TC-S1-11）。**注记**：改版（register 内容变化→pending）时 grants 保留，scope=B&member=general&include=pending 视图会带出 A 的待审草稿 → M2 |
 | S2 / AC-R1-8（前端共享视图） | ✅ 通过（代码/静态；L2 待勾选） | SkillsPanel：共享条目「来自空间 X」来源标注 + 只读（isOwn/isShared 分支）+ prompt details 全文；授权目标空间复选框（grantableSpaces）+ 成员输入 + 行内撤销 ✕（chip-x）；全部空间视图不带 include=pending；纯文本渲染（I-5）；非 general 错误透传 toast 由既有模式覆盖。CSS 缺失见 O1（观感） |
 | S3 / AC-R1-5（指纹刷新） | ✅ 通过 | skillsCache.ts 纯函数按 id 排序 (id:version:contentHash) 序列；fetchSkills 由长度比较改 skillsChanged；skills 列表 API 返回含 version/contentHash 全列 → 指纹真实有效；同量改版刷新/同指纹不刷/移除与新增刷（TC-S3-01..04）；拉取失败保留旧缓存（TC-S3-05）；顺序 shuffle 不刷（TC-S3-06）——6/6 单测绿 + 代码核对 |

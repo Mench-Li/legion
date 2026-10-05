@@ -190,6 +190,17 @@ const SCHEMA_SOURCES = [
   //   这条性质在 schema 上只体现为"没有状态列、没有 UPDATE 路径"，
   //   正是那种"改坏了也看不出来"的契约，所以必须钉住。
   'connectorStore',
+  // ★★ 第 119 轮：**建表却漏登记的六份**。
+  //
+  //   本门禁自己报出来的：它们建了表，而表对平台契约基线**完全不可见** ——
+  //   也就是"这六张表可以随便改列，而 --check 会说无漂移"。
+  //   ⇒ 修法只能是**补登记**（覆盖面变大），不是把它们从扫描面移走。
+  'agentConversations',   // team-hub/agent-conversations.mjs
+  'channelStore',         // team-hub/channel-store.mjs
+  'deliveryStore',        // team-hub/delivery-store.mjs
+  'harnessStore',         // team-hub/harness-store.mjs
+  'writeIntentStore',     // team-hub/write-intent-store.mjs
+  'workflowPackStore',    // product/workflow-packs/pack.mjs
 ]
 
 // 这些模块也一并纳入 sources 哈希：它们变了，基线里的表清单就可能过期。
@@ -214,6 +225,13 @@ SOURCES.compactionStore = join(ROOT, 'team-hub', 'compaction-store.mjs')
 SOURCES.packFacts = join(ROOT, 'team-hub', 'pack-facts.mjs')
 SOURCES.connectorStore = join(ROOT, 'team-hub', 'connector-store.mjs')
 SOURCES.rolePackStore = join(ROOT, 'team-hub', 'role-pack-store.mjs')
+// ★★ 第 119 轮：上面 SCHEMA_SOURCES 新增的六份，路径逐条登记。
+SOURCES.agentConversations = join(ROOT, 'team-hub', 'agent-conversations.mjs')
+SOURCES.channelStore = join(ROOT, 'team-hub', 'channel-store.mjs')
+SOURCES.deliveryStore = join(ROOT, 'team-hub', 'delivery-store.mjs')
+SOURCES.harnessStore = join(ROOT, 'team-hub', 'harness-store.mjs')
+SOURCES.writeIntentStore = join(ROOT, 'team-hub', 'write-intent-store.mjs')
+SOURCES.workflowPackStore = join(ROOT, 'product', 'workflow-packs', 'pack.mjs')
 
 // ── PRT-316：已从 `handle()` 提取出去的路由族 ────────────────────────────────
 //
@@ -288,9 +306,30 @@ SOURCES.routesGoalSlices = join(ROOT, 'team-hub', 'routes', 'goal-slices.mjs')
 SOURCES.routesRunBudgetMaySwitchModel = join(ROOT, 'team-hub', 'routes', 'run-budget-may-switch-model.mjs')
 SOURCES.routesActivity = join(ROOT, 'team-hub', 'routes', 'activity.mjs')
 SOURCES.routesArtifactContent = join(ROOT, 'team-hub', 'routes', 'artifact-content.mjs')
+// ★★ T-177 归零：下面 8 个路由族是 `server.mjs` 的 `createRouter([...])` 里**真的在装配**的，
+//   而原先既没登记进 `ROUTE_FAMILY_SOURCES`、也没有 `SOURCES.*` 路径 ⇒ `SOURCES[module]` 是
+//   `undefined`（`platformHttpRoutes()` 直接 `readFileSync(undefined)` 抛 ERR_INVALID_ARG_TYPE）。
+SOURCES.routesWorkflowPacks = join(ROOT, 'team-hub', 'routes', 'workflow-packs.mjs')
+SOURCES.routesAgents = join(ROOT, 'team-hub', 'routes', 'agents.mjs')
+SOURCES.routesWriteIntent = join(ROOT, 'team-hub', 'routes', 'write-intent.mjs')
+SOURCES.routesDelivery = join(ROOT, 'team-hub', 'routes', 'delivery.mjs')
+SOURCES.routesMetrics = join(ROOT, 'team-hub', 'routes', 'metrics.mjs')
+SOURCES.routesChannels = join(ROOT, 'team-hub', 'routes', 'channels.mjs')
+SOURCES.routesHarness = join(ROOT, 'team-hub', 'routes', 'harness.mjs')
+SOURCES.routesAgentWorkflow = join(ROOT, 'team-hub', 'routes', 'agent-workflow.mjs')
 
 /** 已提取出去的路由族模块（值 = 该文件里**声明式**路由的归属名）。 */
 export const ROUTE_FAMILY_SOURCES = Object.freeze([
+  // ★★ 第 119 轮 + T-177 归零：**装配了却没登记的八个路由族**（同一道门禁自己报出来的）。
+  //   漏登记的后果与上面那一族逐字相同：它们的路由对基线不可见 ⇒
+  //   删掉/改掉一条路由，--check 说「无漂移」。修法同样是补登记。
+  //   ★ 顺序必须与 `server.mjs` 的 `createRouter([...])` **逐字同序** ——
+  //     用例 ⑩ 拿装配处当权威逐项比对（前 5 个族就装在最前面）。
+  { module: 'routesWorkflowPacks', family: 'workflow-packs', factory: 'createWorkflowPackRoutes' },
+  { module: 'routesAgents', family: 'agents', factory: 'createAgentsRoutes' },
+  { module: 'routesWriteIntent', family: 'write-intent', factory: 'createWriteIntentRoutes' },
+  { module: 'routesDelivery', family: 'delivery', factory: 'createDeliveryRoutes' },
+  { module: 'routesMetrics', family: 'metrics', factory: 'createMetricsRoutes' },
   { module: 'routesRules', family: 'rules', factory: 'createRulesRoutes' },
   { module: 'routesPermissions', family: 'permissions', factory: 'createPermissionsRoutes' },
   { module: 'routesChat', family: 'chat', factory: 'createChatRoutes' },
@@ -340,7 +379,9 @@ export const ROUTE_FAMILY_SOURCES = Object.freeze([
   { module: 'routesRunBudgetMaySwitchModel', family: 'run-budget-may-switch-model', factory: 'createRunBudgetMaySwitchModelRoutes' },
   { module: 'routesActivity', family: 'activity', factory: 'createActivityRoutes' },
   { module: 'routesArtifactContent', family: 'artifact-content', factory: 'createArtifactContentRoutes' },
-])
+  { module: 'routesChannels', family: 'channels', factory: 'createChannelRoutes' },
+  { module: 'routesHarness', family: 'harness', factory: 'createHarnessRoutes' },
+  { module: 'routesAgentWorkflow', family: 'agent-workflow', factory: 'createAgentWorkflowRoutes' },])
 SOURCES.experienceStore = join(ROOT, 'team-hub', 'experience-store.mjs')
 
 /**
@@ -539,6 +580,38 @@ export function extractDeclaredRoutes(source) {
     /method:\s*'([A-Z]+)',[^}]*?path:\s*'([^']+)'/g,
     /path:\s*'([^']+)',[^}]*?method:\s*'([A-Z]+)'/g,
   ]
+
+  // ★★★ T-177 归零：**第三种声明形态** —— `on('<METHOD>', /^\/api\/…$/, run)`。
+  //   `team-hub/routes/{delivery,write-intent}.mjs` 用这种写法（且 `delivery.mjs:175`
+  //   自己也把它 map 成 `{ method, path: h.re.source }`），而上面两条 pairs 都认不出它
+  //   ⇒ 那两个族的 **17 条真实端点对平台契约完全不可见**，删掉一条 `--check` 会说「无漂移」。
+  //
+  //   > 一个「只认 `{method,path}` 字面量对象」的抽取器，
+  //   > 与一个「那些用正则声明的端点不存在」的抽取器，在输出上是同一个东西——
+  //   > 只不过前者会让搬家/删除**看不见**。
+  //
+  //   ⇒ 把正则源转成契约路径：`^\/api\/tasks\/([^/]+)\/write-intent$` ⇒
+  //     `/api/tasks/:param/write-intent`；`(?:(\/[^/]+))?` 这种可选段 ⇒ `/:param`。
+  //     （`:param` 是本仓**首次**出现的写法：正则里的捕获组没有名字，而它必须落成
+  //      一个**逐条可比**的路径——落成前缀会把 9 条路由压成 1 条，删除就看不出来了。）
+  const ON_RE = /on\('([A-Z]+)',\s*\/([^\n]+?)\/[gimsuy]*\s*,\s*(?:async\s*)?\(/g
+  const regexPath = (src) => {
+    let p = src
+    if (p.startsWith('^')) p = p.slice(1)
+    p = p.replace(/\$$/, '')
+    p = p.split('\\/').join('/')
+    p = p.replace(/\(\?:(\/[^)]*)\)\?/g, (m, inner) => (inner.includes('[') || inner.includes(':') ? '/:param' : inner))
+    p = p.replace(/\(\[\^\/\]\+\)/g, ':param')
+    p = p.replace(/\(\[\^\/\]\*\)/g, ':param')
+    return p
+  }
+  let om
+  while ((om = ON_RE.exec(source)) !== null) {
+    const p = regexPath(om[2])
+    // 只收能落成**干净 API 路径**的：还留着正则记号的一律不要（宁可少，不要假）
+    if (!/^\/api\/[A-Za-z0-9/_:.-]*$/.test(p)) continue
+    routes.add(`${om[1]} ${p}`)
+  }
   const isMethodFirst = [true, false]
   pairs.forEach((re, i) => {
     let m

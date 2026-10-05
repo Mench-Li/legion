@@ -148,6 +148,23 @@ const countIn = (src, key) => (src.match(word(key)) ?? []).length
 const files = allTracked().filter((f) => ROOTS.some((r) => f.startsWith(`${r}/`)))
 // ★ v4：**所有读取都走 `codeOnly`** —— 注释与字符串里的提及不算"有人读它"。
 const source = new Map(files.map((f) => [f, codeOnly(readFileSync(f, 'utf8'))]))
+// ★★★ 2026-10-05（T-177 归零）：**计数的面要比声明的面宽**。
+//   `allTracked()` 只收 `.mjs`，于是「全仓出现次数」实际只数了 `.mjs` ——
+//   而本文件头的判据逐字写的是「在**整个仓库**里出现次数 == 它的声明次数」。
+//   实测咬到的形状：`mediateMergeFails` 声明在 `scripts/legion-profile.mjs`（.mjs），
+//   而它**唯一**的读者在 `plugins/src/index.ts:3594`（`config.mediateMergeFails`）。
+//   ⇒ 只数 .mjs 会把它读成「全仓只出现 1 次」的哑声明。
+//   > 一个「只在 .mjs 里找不到读者」的读数，与一个「全仓没有读者」的读数，
+//   > 在同一个字段上给出同一个结论——只不过前者是**量错了面**。
+//   ⚠️ 只把 `.ts/.tsx` 加进**计数面**，不加进**声明的面**（声明仍只认 .mjs 生产模块），
+//      否则 TS 里的接口字段会当成新的「声明」冒出来。
+const countSurface = (() => {
+  const out = execFileSync('git', ['ls-files'], { encoding: 'utf8', maxBuffer: 1 << 28 })
+  return out.split('\n').map((x) => x.trim())
+    .filter((x) => /\.(mjs|ts|tsx)$/.test(x))
+    .filter((x) => ROOTS.some((r) => x.startsWith(`${r}/`)))
+})()
+const countSource = new Map(countSurface.map((f) => [f, codeOnly(readFileSync(f, 'utf8'))]))
 
 // 全仓每个词的"按文件出现次数"，用于快速累加
 const rows = []
@@ -157,10 +174,20 @@ for (const [f, src] of source) {
     if (seen.has(key)) continue
     seen.add(key)
     // 只算**生产**文件里的声明（用例里造字段很正常）
-    const isProd = !f.includes('.test.mjs') && !f.includes('/tests/')
+    // ★★ 2026-10-05（T-177 归零）：原来这里写的是 `'/tests/'`，而 `git ls-files` 给的是
+    //   **仓库相对 posix 路径** ⇒ 顶层 `tests/...` **没有**前导斜杠，于是
+    //   `tests/p13-fixture/*.mjs`（手动 E2E 夹具）被当成了**生产**文件。
+    //   实测后果：那两份夹具输出的 4 个报告字段（finalWorktreeClean /
+    //   frozenToolVersionsVerified / independentReceiptBound / reworkWorktreeClean）
+    //   被报成「新出现的哑声明」。
+    //   > 一个「只数生产文件的声明」的谓词，与一个「顶层 tests/ 也算生产」的谓词，
+    //   > 在「谁该被判哑声明」这个问题上给出不同答案——而上面那句注释写的是前者。
+    //   ⇒ 按注释的本意补上顶层 `tests/`。
+    const isProd = !f.includes('.test.mjs')
+      && !(f.startsWith('tests/') || f.includes('/tests/'))
     if (!isProd) continue
     let total = 0
-    for (const s of source.values()) total += countIn(s, key)
+    for (const s of countSource.values()) total += countIn(s, key)
     if (total <= decls) rows.push({ key, file: f, decls, total })
   }
 }

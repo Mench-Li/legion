@@ -406,7 +406,7 @@
 
 | 候选 | 适配度 | 成本 | 风险 | 结论 |
 | --- | --- | --- | --- | --- |
-| **K3-A（推荐）team-hub DB 新表 rules + API**：表 `rules(key TEXT PRIMARY KEY, scope TEXT, content TEXT, updatedAt)`，key='global' 为全局层（scope='*'），另预留 space 级 rules（scope=<spaceId>）作「DB 空间层」扩展点；`GET /api/rules?scope=global|space` 供守护拉取，`POST /api/rules` 走 handleWrite（by 必填 + audit `rules:update` + SSE，仿 chat 写纪律）；守护每轮 fetchRules 缓存于内存（同 fetchSkills 模式 :436-447） | 高：单源单事实、跨仓库可用（不同空间守护从同一 hub 取全局层）、审计/维护入口天然（workbench「规范」卡，保存即 audit）、不依赖文件落盘位置 | 中-低：1 表 + 2 路由 + 守护 fetch + 前端一页；与既有 chat/calendar 扩表先例同构（零迁移 IF NOT EXISTS） | 低：内容规模小（K 级文本）；SQLite 无压力；守护多空间同时拉 = 只读 GET 无害 | **一等**：AC-R2-6「维护入口 + audit 可断言」最直接达成；全局层与任何单一仓库解耦（正中 D-7 语义） |
+| **K3-A（推荐）team-hub DB 新表 rules + API**：表 `rules(key TEXT PRIMARY KEY, scope TEXT, content TEXT, updatedAt)`，key='global' 为全局层（scope='*'），另预留 space 级 rules（scope=<spaceId>）作「DB 空间层」扩展点；`GET /api/rules?scope={global,space}` 供守护拉取，`POST /api/rules` 走 handleWrite（by 必填 + audit `rules:update` + SSE，仿 chat 写纪律）；守护每轮 fetchRules 缓存于内存（同 fetchSkills 模式 :436-447） | 高：单源单事实、跨仓库可用（不同空间守护从同一 hub 取全局层）、审计/维护入口天然（workbench「规范」卡，保存即 audit）、不依赖文件落盘位置 | 中-低：1 表 + 2 路由 + 守护 fetch + 前端一页；与既有 chat/calendar 扩表先例同构（零迁移 IF NOT EXISTS） | 低：内容规模小（K 级文本）；SQLite 无压力；守护多空间同时拉 = 只读 GET 无害 | **一等**：AC-R2-6「维护入口 + audit 可断言」最直接达成；全局层与任何单一仓库解耦（正中 D-7 语义） |
 | K3-B 守护配置指向的全局文件（如 config.globalRulesFile = <某共享路径>/agent.global.md，每派工实时读盘合并） | 高：编辑体验 = 直接改 md 文件，可 git 管理、diff/评审自然；readRepoRules 现读盘实现 :849-862 可顺手统一 | 低：配置文件 + readFileSync；无需新表 | 中：维护入口 = 文件系统（指挥台内编辑需 serve.mjs 文件中心放开该目录或引导到外部编辑器）；**audit 弱**（文件写留痕依赖既有文件中心审计，路径不在 local_dir 内时无入口）；多守护部署时每守护需同文件可见 | 备选：适合「将军只想要一个 md、不想碰 DB/UI」的场景；若选此路线需把 AC-R2-6 的 audit 口径降级为「经文件中心写文件留痕」（要另立入口） |
 | K3-C 每仓库复制一份全局文件 | 低：多仓库各自副本必然漂移 | 低 | 高：全局层语义被仓库绑定破坏（两空间共仓即共享同一文件，REQUIREMENTS §2.2 已指出此问题） | 排除（D-7 语义要求独立于单一仓库根） |
 
@@ -671,7 +671,7 @@
 | A6：main 仍是 BrowserPanel | workbench/src/App.tsx:351-356（chat→ChatView、files→FilesView、browser→BrowserPanel）；w/T-051 分支已有 BrowserView.tsx（改名 + errorText 全码映射 :37-52 + isErrorResult :56-62，含 too_many_redirects/web_error；提交 a524951，evidence docs/T051-evidence/） | 收口实现已存在未合入 |
 | 占位模块 | workbench/src/components/Sidebar.tsx:21-22（calendar/notify 定义）、:63（notify 计数=inReview）、:78-79（点击仅 toast 占位） | B1/B2 待实现 |
 | 实时/审计底座 | team-hub/server.mjs:188 audit 表、:413-415 audit()、:1573-1583 GET /api/activity（scope/taskId/limit）、:1807-1817 /api/events SSE（回放最近 30 条 audit、retry 2000、15s hb）、:1633-1666 /api/chat/* 路由（写走 handleWrite）；api.ts:489-491 subscribeHubAudit（单一 EventSource /api/events 按 action chat:* 过滤） | B2 通知中心可派生复用；chat 写纪律是 B1 数据面模板 |
-| 依赖面 | workbench/package.json（dependencies 仅 react/react-dom/three/@react-three/fiber|drei；engines >=22.5）；workbench/node_modules/.pnpm 实测 130 项 = 仅自身依赖闭包 | 任何第三方组件本地均不可得 → 引入需 pnpm install（禁网 = blocker） |
+| 依赖面 | workbench/package.json（dependencies 仅 react/react-dom/three/@react-three/{fiber,drei}；engines >=22.5）；workbench/node_modules/.pnpm 实测 130 项 = 仅自身依赖闭包 | 任何第三方组件本地均不可得 → 引入需 pnpm install（禁网 = blocker） |
 | w/T-051 与 A6 | git diff main...w/T-051：BrowserPanel.tsx→BrowserView.tsx + App.tsx + README×2 + evidence（build/typecheck/web-test 绿） | A6 可直接采纳合入 |
 
 ### 1.3 评估维度与引用分级
@@ -767,7 +767,7 @@
 | --- | --- | --- | --- |
 | **J9-A（推荐）既有契约套件扩用例 + 构建 + 浏览器清单**：A1/A2/A4 的新用例**追加进既有文件**（workbench/scripts/files-api.test.mjs 现状 34/34、web.test.mjs 12/12 基线，T-062 evidence）；A5 守卫纯函数可入 team-hub 或 workbench scripts 的 node --test（chat.test.mjs 先例）；存量回归 = tests/contract/contracts.test.mjs（56 基线）+ whiteboard node --test（67 基线）+ 前端 pnpm build/tsc + 浏览器主路径手工清单（三中心实时/断线/隔离/渲染安全，见 REQUIREMENTS R-A7 验收 1-3） | 高 | 中-低 | **一等**：R-B3 宿主项（board-plugin 注入 DSH Desktop）不可达时按「环境受限 + 复现步骤」如实记录（REQUIREMENTS R-6/OQ-8） |
 | J9-B 新引 vitest/@testing-library 做 React 单测 | 中 | 高（需安装 vitest/jsdom——本地盘点无 → blocker；配置/改造 tsconfig） | 否（沿用既有 R-3 结论：纯逻辑下沉 node --test、UI 走构建 + 浏览器清单） |
-| J9-C 仅手工回归 | 低 | 低 | 无自动化证据，不满足仓库「真实验证」纪律 | 否（作为 J9-A 的补充而非替代） |
+| J9-C 仅手工回归 | 低 | 低 | 无自动化证据，不满足仓库「真实验证」纪律 ⇒ 否（作为 J9-A 的补充而非替代） |
 
 ## 11. 一等选型汇总 → 直接支撑 breaker 拆片的建议
 

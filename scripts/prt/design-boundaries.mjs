@@ -105,14 +105,38 @@ function checkNoSecondAgentLoop() {
 
 /**
  * C3 ② 不复制任务/审批/审计数据库
- *   可机械化的形式：`team-hub/` 下打开控制面库的**生产**文件只有那一个。
+ *   可机械化的形式：`team-hub/` 下**自己拼路径**打开控制面库的生产文件只有那一个。
  *   多一个 ⇒ 出现了第二本"任务/审批/审计"账。
  *   （`team-hub/scripts/` 是运维脚本，不算；用例各自开 `:memory:` 或隔离库，不算。）
+ *
+ * ★★ 2026-10-05（T-177 归零）：这条判据原来把「**第二个打开点**」直接读成「**第二本账**」。
+ *   实测 `team-hub/integration-job-thread.mjs` 也调 `new DatabaseSync(...)`，
+ *   但它**不是**第二本账：它是 `team-hub/server.mjs:6653` 起的**工作线程**，
+ *   库路径由**父线程**经 `workerData.dbFile` 传入（`:6654` 传的正是 `DB_FILE`）。
+ *
+ *   > 一个「同一本库多开一个连接」的读法，与一个「复制了一本库」的读法，
+ *   > 在「只看谁调了 `new DatabaseSync`」的判据里是同一个东西——
+ *   > 只不过前者会把**同一本账的工作线程**判成边界被破。
+ *
+ *   ⇒ 判据改成认**库的来源**：只有「自己拼出路径」的打开点才计入；
+ *     同库工作线程必须**逐字**用 `workerData.<字段>` 取路径才豁免。
+ *     （这不是放宽：往 `SAME_DB_WORKERS` 里加文件、或把那个文件的路径写死，
+ *       两种都仍然是红。）
  */
+const SAME_DB_WORKERS = Object.freeze([
+  'team-hub/integration-job-thread.mjs', // 同库工作线程：库路径来自父线程的 workerData.dbFile
+])
+
 function checkSingleControlPlaneDb() {
   const files = trackedFiles(['team-hub/*'])
     .filter((f) => /\.(mjs|ts)$/.test(f) && !isTest(f) && !f.startsWith('team-hub/scripts/'))
-  const found = files.filter((f) => /new DatabaseSync\(/.test(read(f)))
+  const found = files.filter((f) => {
+    const src = read(f)
+    if (!new RegExp('new DatabaseSync\\(').test(src)) return false
+    const fromParent = new RegExp('new DatabaseSync\\(workerData\\.\\w+\\)').test(src)
+    if (SAME_DB_WORKERS.includes(f) && fromParent) return false
+    return true
+  })
   return { scanned: files.length, found, expected: ['team-hub/server.mjs'] }
 }
 

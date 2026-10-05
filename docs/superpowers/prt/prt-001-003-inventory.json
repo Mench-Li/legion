@@ -33,7 +33,7 @@
       "sensitiveEnv": [
         "TEAM_HUB_TOKEN"
       ],
-      "declaredFieldCount": 17,
+      "declaredFieldCount": 18,
       "envReadKeys": [
         "CHAT_ATTACH_BLACKLIST_EXT",
         "CHAT_ATTACH_MAX_BYTES",
@@ -42,6 +42,7 @@
         "CHAT_ATTACH_TTL_MS",
         "CHAT_REPLY_TIMEOUT_MS",
         "LEGION_HUB_URL",
+        "LEGION_INTEGRATION_MODE",
         "MAX_RULES_LEN",
         "TEAM_HUB_DB",
         "TEAM_HUB_PORT",
@@ -50,9 +51,9 @@
         "USERDOMAIN",
         "USERNAME"
       ],
-      "envReadCount": 14,
+      "envReadCount": 15,
       "undeclaredEnvKeys": [],
-      "filesScanned": 39
+      "filesScanned": 113
     },
     {
       "name": "workbench",
@@ -74,15 +75,21 @@
         {
           "env": "DSH_WORKBENCH_PORT",
           "default": 5173
+        },
+        {
+          "env": "TEAM_HUB_PORT",
+          "default": 0
         }
       ],
       "sensitiveEnv": [
         "DSH_WORKBENCH_TOKEN",
         "TEAM_HUB_TOKEN"
       ],
-      "declaredFieldCount": 23,
+      "declaredFieldCount": 28,
       "envReadKeys": [
+        "BASE_URL",
         "DSH_HUB_UPSTREAM",
+        "DSH_MODELS_BASE_URL",
         "DSH_WEB_AUDIT_FILE",
         "DSH_WEB_FETCH_ALLOW_PRIVATE",
         "DSH_WEB_SHOT_BROWSER",
@@ -90,11 +97,14 @@
         "DSH_WEB_SHOT_ENABLE",
         "DSH_WORKBENCH_REVEAL_DRY",
         "DSH_WORKBENCH_SPACES_JSON",
+        "TEAM_HUB_DB",
+        "TEAM_HUB_HOST",
+        "TEAM_HUB_PORT",
         "TEAM_HUB_TOKEN"
       ],
-      "envReadCount": 9,
+      "envReadCount": 14,
       "undeclaredEnvKeys": [],
-      "filesScanned": 58
+      "filesScanned": 78
     },
     {
       "name": "whiteboard",
@@ -152,11 +162,14 @@
       "protocol": "进程内（无监听端口）",
       "ports": [],
       "sensitiveEnv": [],
-      "declaredFieldCount": 6,
-      "envReadKeys": [],
-      "envReadCount": 0,
+      "declaredFieldCount": 8,
+      "envReadKeys": [
+        "LEGION_INTEGRATION_MODE",
+        "PATH"
+      ],
+      "envReadCount": 2,
       "undeclaredEnvKeys": [],
-      "filesScanned": 21
+      "filesScanned": 28
     },
     {
       "name": "board-plugin",
@@ -204,13 +217,14 @@
       "sensitiveEnv": [
         "TEAM_HUB_TOKEN"
       ],
-      "declaredFieldCount": 3,
+      "declaredFieldCount": 4,
       "envReadKeys": [
         "DSH_HUB_UPSTREAM",
+        "DSH_WEB_URL",
         "TEAM_HUB_HOST",
         "TEAM_HUB_TOKEN"
       ],
-      "envReadCount": 3,
+      "envReadCount": 4,
       "undeclaredEnvKeys": [],
       "filesScanned": 2
     },
@@ -248,7 +262,7 @@
       ],
       "envReadCount": 10,
       "undeclaredEnvKeys": [],
-      "filesScanned": 65
+      "filesScanned": 84
     },
     {
       "name": "orchestrator",
@@ -281,7 +295,7 @@
       ],
       "envReadCount": 6,
       "undeclaredEnvKeys": [],
-      "filesScanned": 21
+      "filesScanned": 24
     },
     {
       "name": "runtime",
@@ -300,13 +314,14 @@
       "protocol": "DSH 组合层（进程内）+ Runtime Contract HTTP（回环端口，端口由 bindPort: 0 分配后发布）",
       "ports": [],
       "sensitiveEnv": [
-        "TEAM_HUB_TOKEN"
+        "TEAM_HUB_TOKEN",
+        "LEGION_RUNTIME_TOKEN"
       ],
-      "declaredFieldCount": 10,
+      "declaredFieldCount": 17,
       "envReadKeys": [],
       "envReadCount": 0,
       "undeclaredEnvKeys": [],
-      "filesScanned": 78
+      "filesScanned": 122
     },
     {
       "name": "security",
@@ -352,7 +367,8 @@
         "whiteboard"
       ],
       "LEGION_RUNTIME_TOKEN": [
-        "orchestrator"
+        "orchestrator",
+        "runtime"
       ]
     },
     "plaintextOnDisk": {

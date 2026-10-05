@@ -420,3 +420,138 @@ test('★★★ 每个声明的错误码都必须有发出点（"声明了却不
     '这些错误码被声明了，但**没有任何分支会返回它们**。读代码的人会以为那个情形被处理了，'
     + '所以要么补上发出点，要么把这个码删掉：\n' + dead.join('\n'))
 })
+
+// ---------------------------------------------------------------------------
+// ★★★ 生产代码里提到的 `*.test.mjs` 必须**真的存在**
+// ---------------------------------------------------------------------------
+
+/**
+ * 找出"注释里承诺的证据文件不存在"的地方。
+ *
+ * ★ 这个形状是本次会话里最贵的一次发现：`transport.mjs` 的自检写着
+ *   「网络行为的证据在 `transport.test.mjs` 里」，而**那个文件从来没有被写出来**。
+ *   于是那个模块只有"常量等于设计数字"这一层证据，而补上缺失的用例之后
+ *   **当场暴露了一个生产缺陷**（流式限长超限时的 `this.#onTrip()?.()` 会去调用
+ *   一个 `AbortSignal`，把 `NET_TOO_LARGE` 顶成 `net-offline`）。
+ *
+ *   同一次扫描还发现第二处：`extract.mjs` 写着
+ *   「两条常量各自声明，`closure.test.mjs` 有一条断言要求它们相等——一旦有人改了
+ *   一边，契约就红」——而 `closure.test.mjs` 也不存在，那两条
+ *   `MAX_CLOSURE_BYTES` 当时**只靠人工保持一致**。
+ *
+ *   > 一句"这个契约由某条判据守着"，与那条判据，
+ *   > 在"契约会不会漂移"上不是同一个东西——
+ *   > 而前者的代价比没有这句话更高：它让人**不去检查**。
+ *
+ *   判据就是上面那句话的机械形式：**提到就必须存在**。
+ *   解析两种写法（与本文件其余地方一致）：相对提及者所在目录、相对仓库根。
+ */
+function findDanglingTestRefs(readFile, listDir, exists, basenameExists) {
+  const findings = []
+  const testRef = /([A-Za-z0-9_./-]+\.test\.mjs)/g
+  const walk = (relDir) => {
+    for (const entry of listDir(relDir)) {
+      const relPath = `${relDir}/${entry.name}`
+      if (entry.isDirectory()) { walk(relPath); continue }
+      if (!entry.name.endsWith('.mjs') || /\.test\.mjs$/.test(entry.name) || /\.testkit\.mjs$/.test(entry.name)) continue
+      let text
+      try { text = readFile(relPath) } catch { continue }
+      const dir = relPath.slice(0, relPath.lastIndexOf('/'))
+      for (const match of text.matchAll(testRef)) {
+        const ref = match[1]
+        const candidates = [ref.startsWith('./') ? `${dir}/${ref.slice(2)}` : null,
+          `${dir}/${ref}`, ref].filter((c) => c !== null)
+        if (candidates.some((c) => exists(c))) continue
+        // ★ 第三档：**按文件名**在整仓找一次。
+        //
+        //   实测有两处是"用文件名简称"的合法写法（`shell-files.test.mjs` 在
+        //   `desktop/scripts/` 下、`patch-loadable.test.mjs` 在
+        //   `runtime/dsh-composition/` 下）。这条判据要拦的是"这个文件
+        //   **哪儿都没有**"——那才是"这句承诺是假的"。
+        //
+        //   > 把"简称"判成"悬空"，会让这条判据在第一次运行时就被人关掉；
+        //   > 而它真正要拦的那一处（`closure.test.mjs`，全仓不存在）
+        //   > 会跟着一起被放过。
+        if (basenameExists(ref.slice(ref.lastIndexOf('/') + 1))) continue
+        findings.push(Object.freeze({ file: relPath, ref, tried: Object.freeze(candidates) }))
+      }
+    }
+  }
+  for (const dir of TLS_SCAN_DIRS) walk(dir)
+  return findings
+}
+
+test('★★★★ 生产代码里提到的 `*.test.mjs` 必须真的存在（证据的地址不能指向空处）', async () => {
+  const { readFileSync, readdirSync, existsSync } = await import('node:fs')
+  const root = fileURLToPath(new URL('../../', import.meta.url))
+
+  // ── ① ★ 正对照：这个判据必须抓得到"指向不存在的文件" ──
+  //
+  //   一条"扫描没发现任何东西"的判据，与一条"解析写错了所以永远匹配不上"的
+  //   判据，读数完全一样。所以先喂它一个假的目录树。
+  {
+    const fakeFiles = {
+      'product/update/fake.mjs': '// 证据在 fake-missing.test.mjs 里\n',
+      'product/update/present.test.mjs': '// 存在\n',
+    }
+    const fakeList = (dir) => {
+      const prefix = `${dir}/`
+      const names = new Set()
+      for (const p of Object.keys(fakeFiles)) {
+        if (p.startsWith(prefix) && !p.slice(prefix.length).includes('/')) {
+          names.add(p.slice(prefix.length))
+        }
+      }
+      return [...names].map((name) => ({ name, isDirectory: () => false }))
+    }
+    const found = findDanglingTestRefs(
+      (rel) => fakeFiles[rel],
+      fakeList,
+      (rel) => fakeFiles[rel] !== undefined,
+      // ★ 正对照里 basename 兜底必须**也是假的树**：否则它会去真实仓库里
+      //   找到 `present.test.mjs`（真仓恰好有这么个文件？没有，但别的名字有），
+      //   于是"抓不到悬空"的失败会被掩盖。
+      () => false,
+    )
+    const dangling = found.filter((f) => f.file === 'product/update/fake.mjs')
+    assert.equal(dangling.length, 1, `正对照失败（这个判据抓不到悬空引用）：${JSON.stringify(found)}`)
+    assert.equal(dangling[0].ref, 'fake-missing.test.mjs')
+  }
+
+  // ── ② 反对照：指向**存在**的文件不许报（含"用文件名简称"的合法写法）──
+  {
+    const fakeFiles = {
+      'product/update/fake.mjs': '// 证据在 present.test.mjs 里，另一处在 other.test.mjs 里\n',
+      'product/update/present.test.mjs': '// 存在\n',
+      'some/where/else/other.test.mjs': '// 在别处（简称写法）\n',
+    }
+    const basenames = new Set(Object.keys(fakeFiles).map((p) => p.slice(p.lastIndexOf('/') + 1)))
+    const found = findDanglingTestRefs(
+      (rel) => fakeFiles[rel],
+      (dir) => Object.keys(fakeFiles)
+        .filter((p) => p.startsWith(`${dir}/`) && !p.slice(dir.length + 1).includes('/'))
+        .map((p) => ({ name: p.slice(dir.length + 1), isDirectory: () => false })),
+      (rel) => fakeFiles[rel] !== undefined,
+      (name) => basenames.has(name),
+    )
+    assert.deepEqual(found, [], `反对照失败（存在的文件被报成悬空）：${JSON.stringify(found)}`)
+  }
+
+  // ── ③ 真仓：一处都不许有 ──
+  //
+  //   basename 索引从 `git ls-files` 取（整仓，含 product/、desktop/、runtime/…），
+  //   这样"用文件名简称"的合法写法不会被误报。
+  const { execFileSync } = await import('node:child_process')
+  const allTracked = execFileSync('git', ['ls-files'], { cwd: root, encoding: 'utf8' })
+    .split('\n').map((s) => s.trim()).filter(Boolean)
+  const trackedBasenames = new Set(allTracked.map((p) => p.slice(p.lastIndexOf('/') + 1)))
+  const findings = findDanglingTestRefs(
+    (rel) => readFileSync(`${root}${rel}`, 'utf8'),
+    (rel) => readdirSync(`${root}${rel}`, { withFileTypes: true }),
+    (rel) => existsSync(`${root}${rel}`),
+    (name) => trackedBasenames.has(name),
+  )
+  assert.deepEqual(findings, [],
+    '生产代码里提到了不存在的用例文件（那句"由某条判据守着"是假的）：\n'
+    + findings.map((f) => `  ${f.file} → ${f.ref}（试过：${f.tried.join(' / ')}）`).join('\n'))
+})

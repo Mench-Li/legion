@@ -557,6 +557,14 @@ async function stageTest() {
         //   > 一个没有用例的文件，与"这个文件里的判据都通过了"，
         //   > 在读报告的人眼里长得一样。
         'product/update/transport.test.mjs',
+        // ★★ 闭包协议的判据。这个文件此前**不存在**，而 `extract.mjs` 里写着
+        //   「两条常量各自声明，`closure.test.mjs` 有一条断言要求它们相等」——
+        //   于是那两条 `MAX_CLOSURE_BYTES` 只靠人工保持一致（当时恰好相等）。
+        //   本文件的第一条用例就是那条被承诺的断言。
+        //
+        //   > 一句"这个契约由某条判据守着"，比没有这句话更坏：
+        //   > 它让下一个人**不去检查**。
+        'product/update/closure.test.mjs',
         'product/update/modules.test.mjs',
         // 在途任务读数：词表（两套真实词表的一致性）与生产端。
         // 这两条守的是"接上真实读数会不会永久阻塞升级"那个缺陷。

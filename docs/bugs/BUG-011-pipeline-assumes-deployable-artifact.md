@@ -96,6 +96,45 @@ $ judgeFileDomain(['scratch/'], ignoredFileDomainEntries(...))
 它在读数面需要一个"不必报警"的出口，在流转面需要一个"不必建下游"的出口。
 两条都只是各自绕开，**没有一个地方真的把它命名出来**。
 
+### 1.4 旁证：tester→devops 这个交接**从来没有一次被接受过**（审计事实，非本条证明）
+
+`team-hub/team.db` 的 `audit` 表里，`devops` 任务一共 14 个，按 `parent` 分成两类，分得干干净净：
+
+| 来源 | 数量 | 状态 |
+| --- | --- | --- |
+| `parent = null`（**人工**建的目标级部署任务） | 6（T-093/T-102/T-110/T-118/T-126/T-173） | **done 6/6** |
+| `parent = <前序任务>`（`advancePipeline` **自动**补建的） | 4（T-063/T-064/T-067/T-072） | **canceled 4/4** |
+
+而这 4 个的取消是**同一次批量动作** —— `audit` 里逐字：
+
+```
+T-063  2026-09-04T04:14:10.665Z | general | transition | {"to":"canceled"}
+T-064  2026-09-04T04:14:10.766Z | general | transition | {"to":"canceled"}
+T-067  2026-09-04T04:14:11.033Z | general | transition | {"to":"canceled"}
+T-072  （create 之后无 claim、无 transition，状态 canceled）
+```
+
+T-063 的审计链还把 §1 的机制**逐拍记下来了**，是这条链最干净的一份现场：
+
+```
+claim {"soldier":"tester"} → patch {"files":"docs/TEST_REPORT.md"}
+→ tester test-report {"passed":true,"failures":0} → tester advance {}
+→ soldier-auto create {"title":"S3 serve.mjs 扩 /api/files list/read/download"}   ← 后继就是这一步长出来的
+→ claim {"soldier":"devops"} → patch {"files":"docs/DEPLOY.md,…"} → devops transition {"to":"in_review"}
+→ general transition {"to":"canceled"}                                          ← 人 4 分钟后把它否掉
+```
+
+**必须说清这份旁证证明不了什么**：`audit` 只记动作、**不记理由**，所以我读不到"为什么取消"。
+而且 T-063/T-064/T-067 的 tester 都**真的写了** `docs/TEST_REPORT.md`（不是零交付），
+它们的 worktree 路径是 `D:\tmp\legion-slice-verify\…`（切片编排的验证项目）。
+
+所以它支持的是一个**较弱但更难反驳**的说法：
+**「tester→devops」这个交接在全部审计历史里一次都没被接受过**（自动建的 4/4 全被人工取消，
+被接受的 6 个全是人工建的目标级任务）—— 至于取消的具体理由，本条只能推测，不能声称。
+
+（这个区分是刻意的：一个"看起来完全支持我"的旁证，如果不把它**证不到**的部分写出来，
+下一个人会拿它当证明用；而那正是 BUG-009-a 与 BUG-010 §2.3 各自踩过的坑。）
+
 ## 2. 修法（未实施，三个选项）
 
 ### 选项 A（推荐）—— 在**任务创建面**加"这一环产不产得出交接物"的前置判据
@@ -148,6 +187,21 @@ $ judgeFileDomain(['scratch/'], ignoredFileDomainEntries(...))
   派出一个部署环去部署不存在的东西，而 `canceled` **不会被派下游**：
   `advancePipeline` 的唯一调用点是"4. 流水线 done 补流转"那道扫单，
   而它只取 `status === 'done'` 的任务，`canceled` 根本进不了那一步。
+
+  **已执行**：`node docs/bugs/BUG-011-close-t179.mjs`（写入生产中枢，可重复运行）。
+  它做三件事，且 ① ② 各自幂等（`canceled → canceled` 中枢会回 400 非法迁移，
+  所以第二次跑必须跳过而不是重试）：
+
+  | 步 | 动作 | 幂等方式 |
+  | --- | --- | --- |
+  | ① | `POST /api/comment` 留一条处置说明（含依据与"为什么不推 done"） | 已含同一标记就不再追加 |
+  | ② | `POST /api/transition {to:"canceled"}` | 已是 canceled 就不再迁 |
+  | ③ | 自查：状态确为 canceled、且**没有**任何 `parent=T-179` 或 `blockedBy` 挂 T-179 的 devops 任务 | — |
+
+  实测输出：`T-179 状态 = canceled` / `后继任务 =（无）` / `以 blockedBy 挂 T-179 的 devops 任务 =（无）`
+  ⇒ **PASS（3/3）**。③ 那两条断言是刻意的：**脚本做的事必须与它宣称的事一致** ——
+  只报"我推了 canceled"而不检查"下游没被建出来"，就只是把 §1 的机制当成已被信任的前提。
+
 - **本条不改 `roles.json`**（理由见选项 C 的"为什么不建议顺手做"）。
 - **本条不碰 BUG-010 的读数**：那道的 `own.length === 0` 闸门是"不必报警"，
   与本条的"不必建下游"是两件事，各自在自己的面上成立。

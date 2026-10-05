@@ -230,6 +230,80 @@ test('slice analysis tail done triggers beam registration parsed from TASK_BREAK
   }
 })
 
+test('★ 切片未声明文件域 → 退化读数必须**说出来**（此前是静默整仓独占）', async () => {
+  // 背景（实测）：hub 侧 `reserveWrite` 在 `paths.length === 0` 时下 `exclusive`，
+  // 而整仓独占与**任何**任务都冲突（findConflicts 直接拿 `(whole repository)` 配对，
+  // 不做路径相交判断）。于是 TASK_BREAKDOWN.md 第三段留空的切片，会让整个目标的
+  // 并行度塌成 1——而清单照样注册、任务照样派工，**没有任何一处说得出这件事**。
+  // 本用例钉的就是那处"说出来"：日志 + 活动 + 注册评论三处都要带退化读数。
+  const root = await mkdtemp(join(tmpdir(), 'slice-nodomain-'))
+  const originalFetch = globalThis.fetch
+  const restoreTasks = protectTasksFile(root)
+  mkdirSync(join(root, 'docs'), { recursive: true })
+  writeFileSync(join(root, 'docs', 'TASK_BREAKDOWN.md'), [
+    '# 拆解说明',
+    '## slices',
+    '- S1 | 有文件域的切片 | src/auth.ts | 编译通过',
+    '- S2 | 留空文件域的切片 |  | 渲染成功',
+    '- S3 | 也留空 |  | 无异常',
+    '',
+  ].join('\n'))
+  const requests = []
+  const commentTexts = []
+  let posted
+  const base = hubStub({ board: () => [TD], requests })
+  globalThis.fetch = async (input, init = {}) => {
+    const url = new URL(String(input))
+    const body = JSON.parse(String(init.body ?? '{}'))
+    // ★ 必须在委派给 base **之前**捕获：base(`hubStub`) 自己就处理并记录 `/api/comment`，
+    //   放在它后面写分支等于永远不执行（第一版就是这么错的——`requests` 里只有 base 推的 'comment'）。
+    if (url.pathname === '/api/comment' && typeof body.text === 'string') commentTexts.push(body.text)
+    const handled = await base(input, init)
+    if (handled !== undefined) return handled
+    if (url.pathname === '/api/goal/slices') {
+      posted = body
+      return response({ task: { created: ['T-002', 'T-003', 'T-004', 'T-005'], devops: 'T-006' } })
+    }
+    throw new Error(`unexpected request ${url.pathname}`)
+  }
+
+  const harness = fakeContext({ status: 'done', summary: '', evidence: '', blocker: '' })
+  try {
+    apply(harness.ctx, config(root))
+    harness.intervals[0]()
+    await waitFor(() => posted !== undefined, 'beam was never registered')
+    // 清单本身照常投递（退化不等于不派工）
+    assert.equal(posted.slices.length, 3)
+    assert.deepEqual(posted.slices[1].files, [], '留空的第三段解析成空数组（这正是退化条件）')
+    // ① 注册评论必须点出退化与补救办法
+    await waitFor(() => commentTexts.some(t => t.includes('已注册')), '注册评论没到')
+    const comment = commentTexts.find(t => t.includes('已注册'))
+    assert.match(comment, /2 个切片未声明文件域/, '评论必须给出未声明文件域的**数量**')
+    assert.match(comment, /留空文件域的切片/, '评论必须点名是哪个切片')
+    assert.match(comment, /整仓独占/, '评论必须说明后果（整仓独占 / 退化串行）')
+    assert.match(comment, /TASK_BREAKDOWN\.md/, '评论必须指出补救位置')
+    // ② 活动读数同样带退化标记（看板/时间线读者也能看见）。
+    //    守护的 `activity()` 落在 `<scrumDir>/activity.jsonl`（index.ts:540），日志落 `config.logFile`。
+    const activityFile = join(root, 'scrum', 'activity.jsonl')
+    const acts = existsSync(activityFile)
+      ? readFileSync(activityFile, 'utf8').trim().split('\n').filter(Boolean).map(l => JSON.parse(l)).filter(a => a.kind === 'slices')
+      : []
+    assert.ok(acts.length > 0, '没有切片活动读数（夹具或落点变了）')
+    assert.ok(acts.some(a => /未声明文件域/.test(a.text)), '活动读数缺少退化标记：' + JSON.stringify(acts.map(a => a.text)))
+    assert.ok(acts.some(a => /整仓独占/.test(a.text)), '活动读数应说明后果（整仓独占）')
+    // 日志里也必须有（值班的人先看日志）
+    const workerLog = existsSync(join(root, 'worker.log')) ? readFileSync(join(root, 'worker.log'), 'utf8') : ''
+    assert.match(workerLog, /未声明文件域/, '守护日志里必须有这条退化读数')
+    // ③ 反向对照：**没有**留空的切片不得被标成退化（否则这句警告很快变成没人看的噪音）
+    assert.ok(!acts.some(a => /3 个未声明/.test(a.text)), '不能把有文件域的切片也算进去')
+  } finally {
+    for (const dispose of harness.disposers) await dispose()
+    globalThis.fetch = originalFetch
+    restoreTasks()
+    await cleanup(root)
+  }
+})
+
 test('a passing slice tester report auto-advances done under tester identity (D7 gate)', async () => {
   // 机器闸门：tester worker 回报 testReport.passed=true → /api/test-report 登记 → advance by=tester。
   // 不出现 in_review（人工验收）路径。

@@ -11,6 +11,16 @@
 //   **`fileDomain` 传什么读回来都是 `null`** —— 也就是说路由体里那一句
 //   `fileDomain: body.fileDomain` 是**惰性**的，改掉它没有任何可观测差别。
 //   不先量就会为它写一条**永远不可能失败**的断言。
+//
+// ★★ 2026-10-05 复核：**上面这条读数已经过期**，而且它过期的方式正是这条注释自己警告的那种。
+//   当时量到的"传什么都读回 null"是真的（PRT-316 切片 20 那会儿），但现在
+//   `createTaskInTx`（server.mjs:4519）确实把 `input.fileDomain` 落库了。实测（隔离 hub、不碰 live 库）：
+//     回执 fileDomain = ["scripts/prt/","docs/"] · GET /api/task = 同值 · 库里的原始列 = 同值 JSON
+//   ⇒ 惰性的是**这条注释**，不是那行代码。
+//   而它比"少一条断言"更贵：`fileDomain` 是并行派工的唯一依据（空 ⇒ hub 下 `exclusive`
+//   整仓独占，与任何任务都冲突），一句"传了也没用"足以让后来的人不再传——实测就是这么发生的：
+//   software 空间 139 个任务里**声明过 fileDomain 的曾经是 0 个**。
+//   下面 ⑪ 用断言把这个能力钉住（含"不相交域可并行 / 未申报则独占"的正反对照）。
 // ============================================================================
 import { test, before, after } from 'node:test'
 import assert from 'node:assert/strict'
@@ -127,6 +137,41 @@ test('⑨ 同一个 title 建两次是两个任务（这条端点不去重）', 
   assert.equal(a.status, 200)
   assert.equal(b.status, 200)
   assert.notEqual(a.body.task.id, b.body.task.id)
+})
+
+test('⑪ ★★★ fileDomain 建任务时必须落库，且它真的决定并行还是独占', async () => {
+  // 这条补的是本文件头部那条**过期读数**留下的坑（详见文件头 ★★）。
+  // 它同时钉三件事，缺一条这个能力就会再退化成"没人传"：
+  //   ① 回执 / GET 读回 / 库列三处一致（落库了，不是只回显）；
+  //   ② 不相交域的两个任务**能同时认领**（并行真的成立）；
+  //   ③ 未申报域的任务与**任何**已认领任务都冲突（整仓独占的代价看得见）。
+  const dom = ['scripts/prt/', 'docs/']
+  const r = await create({ title: '带文件域', fileDomain: dom })
+  assert.equal(r.status, 200)
+  assert.deepEqual([...r.body.task.fileDomain], dom, '回执里必须带上 fileDomain')
+  const t = await readTask(r.body.task.id)
+  assert.deepEqual([...t.fileDomain], dom, 'GET /api/task 必须读回同一个值（只回显不落库是另一种假象）')
+  const raw = mod.db.prepare('SELECT fileDomain FROM tasks WHERE id=?').get(r.body.task.id)?.fileDomain
+  assert.deepEqual(JSON.parse(raw), dom, '库里的原始列必须也是它')
+
+  // 未传 → null（而不是 [] 或 undefined）：null 才是"没申报"这个事实的准确表达
+  const bare = await create({ title: '不带文件域' })
+  assert.equal(bare.body.task.fileDomain, null, '未申报应当是 null，不是空数组')
+
+  // ② 不相交文件域 → 可并行
+  const a = await create({ title: '并行A', status: 'todo', fileDomain: ['workbench/'] })
+  const b = await create({ title: '并行B', status: 'todo', fileDomain: ['security/'] })
+  const ca = await req('POST', '/api/claim', { id: a.body.task.id, by: 'w1', scope: 'default' })
+  const cb = await req('POST', '/api/claim', { id: b.body.task.id, by: 'w2', scope: 'default' })
+  assert.equal(ca.status, 200, 'A 应当认领成功：' + JSON.stringify(ca.body))
+  assert.equal(cb.status, 200, 'B 与 A 文件域不相交，必须也能认领（否则并行能力等于不存在）')
+
+  // ③ 未申报域 → 整仓独占：与上面两个**不相干**的任务也冲突
+  const c = await create({ title: '独占C', status: 'todo' })
+  const cc = await req('POST', '/api/claim', { id: c.body.task.id, by: 'w3', scope: 'default' })
+  assert.equal(cc.status, 409, '未申报文件域的任务持整仓独占，必须被已在写的任务挡住')
+  assert.match(String(cc.body?.error ?? cc.body?.reason ?? ''), /whole repository|整仓|占用/,
+    '拒绝理由要说清是整仓占用：' + JSON.stringify(cc.body))
 })
 
 test('⑩ ★★★ 写门面炸了必须**向调用方抛出**，不能变成没人管的 promise', async () => {

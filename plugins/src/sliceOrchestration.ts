@@ -267,11 +267,31 @@ export function createSliceOrchestration(deps: SliceOrchestrationDeps): SliceOrc
           log(`${tdDone.id} 分析前缀完成但 TASK_BREAKDOWN.md 无切片清单（${bdPath}），等待 breaker 产出（退避重试）`)
           return
         }
+        // ★ 文件域留空 = 该切片退化为「整仓独占」：hub 侧 `reserveWrite` 在
+        //   `paths.length === 0` 时下 `exclusive`，而整仓独占与**任何**任务都冲突
+        //   （findConflicts 直接拿 `(whole repository)` 配对，不做路径相交判断）。
+        //   后果是同一目标里本可完全并行的切片全部串行——而这件事**从前是静默的**：
+        //   清单照样注册、任务照样派工，只是永远只有一个在跑。
+        //   把读数说出来，而不是让它看起来像"目标比较大、跑得慢"。
+        const noDomain = slices.filter(s => s.files.length === 0)
+        if (noDomain.length > 0) {
+          log(`${tdDone.id} 切片清单有 ${noDomain.length}/${slices.length} 个未声明文件域：`
+            + `这些切片将整仓独占（与任何任务都冲突），目标内并行退化为串行 —— ${noDomain.map(s => s.title).join('、')}`)
+        }
         try {
           const res = await hubPost('/api/goal/slices', { testDesignerTaskId: tdDone.id, slices, by: config.role }) as { created?: string[] }
           const n = (res.created ?? []).length
-          await safeComment(tdDone.id, `📐 已注册 ${n} 个切片（coder_Si→tester_Si 微链 + devops 目标级收尾），切片之间互不依赖，可并行派工。`)
-          activity('slices', tdDone.id, `切片展开：${n} 个任务`)
+          // 注册成功也把"有没有文件域"写进评论：这张清单是并行的唯一依据，
+          // 读者（将军/下一位 breaker）应当一眼看见退化，而不是从"怎么都在排队"去猜。
+          const domainNote = noDomain.length > 0
+            ? `\n⚠️ 其中 **${noDomain.length} 个切片未声明文件域**（${noDomain.map(s => s.title).join('、')}）：`
+              + '它们会整仓独占、与任何任务冲突，目标内并行退化为串行。'
+              + '请在 TASK_BREAKDOWN.md 的 `## slices` 第三段补上文件域（见 roles.json breaker 提示词）。'
+            : ''
+          await safeComment(tdDone.id, `📐 已注册 ${n} 个切片（coder_Si→tester_Si 微链 + devops 目标级收尾），切片之间互不依赖，可并行派工。${domainNote}`)
+          activity('slices', tdDone.id, noDomain.length > 0
+            ? `切片展开：${n} 个任务（其中 ${noDomain.length} 个未声明文件域 → 整仓独占、退化串行）`
+            : `切片展开：${n} 个任务`)
           log(`${tdDone.id} 切片束已注册：${n} 个任务`)
         } catch (e) {
           expandRetryAt.set(tdDone.id, Date.now())

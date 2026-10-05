@@ -297,6 +297,47 @@ describe('手机端接口契约（照 app.mjs 的顺序）', () => {
     } finally { clearTimeout(timer) }
   })
 
+  it('⑮ 写路径也受空间授权（scope 在**请求体**里，门禁读不到）', async () => {
+    // ★ 远程门禁只看得到 URL：`?scope=` 它能判，但 **POST 的 scope 在 body 里**，
+    //   而门禁读不到 body —— 读了就把流消耗掉，路由再也拿不到。
+    //   不补这一道的话，任何登录用户只要在 body 里把 scope 换成别人的空间，
+    //   就能往那个空间写消息、建会话、下命令。
+    //
+    //   修法是把判定放进路由族（那里同时有已解析的 body 与已注入的身份）。
+
+    // 造一个**真实存在但该用户没有角色**的空间（带编队）。
+    // 用"不存在的空间"去测是测不准的：那种情况会先在别处 404，
+    // 于是"被空间授权拦住"与"那个空间本来就没有 Agent"分不开。
+    //
+    // 注意 SQL 里的空串要写 `''`（模板字面量里用单引号）：SQLite 把 `""` 当成
+    // **标识符**，会报 `no such column: ""`——那是"列名不存在"，不是"值不合法"。
+    mod.db.prepare(`INSERT OR REPLACE INTO spaces (id,name,private,local_dir,remote_url,createdAt,updatedAt)
+      VALUES (?,?,0,'','',?,?)`).run('other-space', '别人的空间', new Date().toISOString(), new Date().toISOString())
+    mod.db.prepare('INSERT INTO roster (scope, role, name, kind, avatar, sort) VALUES (?,?,?,?,?,?)')
+      .run('other-space', 'coder', '别人的编码兵', 'agent', '🤖', 0)
+    mod.agentConversations.syncRoster()
+    const otherAgentId = mod.db.prepare("SELECT agent_id FROM agent_registry WHERE scope='other-space'").get()?.agent_id
+    assert.ok(otherAgentId, '测试前置：other-space 里要有 Agent')
+
+    const alien = await call('POST', '/api/agent-conversations', {
+      body: { agentId: otherAgentId, scope: 'other-space', by: 'mobile' }, token: ctx.access,
+    })
+    assert.equal(alien.status, 403, `往没角色的空间建会话应 403，实际 ${alien.status}：${alien.text.slice(0, 160)}`)
+    assert.equal(alien.json.code, 'SPACE_FORBIDDEN')
+
+    // 往**有**角色的空间写照常放行（这条防止"一律拒绝"被当成修好了）。
+    const mine = await call('POST', '/api/agent-conversations', {
+      body: { agentId: ctx.agentId, scope: ctx.scope, by: 'mobile' }, token: ctx.access,
+    })
+    assert.equal(mine.status, 200)
+
+    // 机器令牌不受这条影响：同一个空间、同一个 agent，它应当**成功**。
+    const viaMachine = await call('POST', '/api/agent-conversations', {
+      body: { agentId: otherAgentId, scope: 'other-space', by: 'general' }, token: HUB_TOKEN,
+    })
+    assert.equal(viaMachine.status, 200, `机器令牌应放行，实际 ${viaMachine.status}：${viaMachine.text.slice(0, 160)}`)
+  })
+
   it('⑫ 刷新凭据能换新令牌（手机会话过 15 分钟靠它）', async () => {
     const r = await call('POST', '/api/identity/refresh', { body: { refreshToken: ctx.refresh } })
     assert.equal(r.status, 200)

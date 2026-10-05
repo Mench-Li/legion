@@ -6732,7 +6732,16 @@ const router = createRouter([
   createWorkflowPackRoutes({
     db, json, handleWrite: (req, res, run) => handleWrite(req, res, run, { maxBytes: 2 * 1024 * 1024 }), audit, withTx,
   }),
-  createAgentsRoutes({ service:agentConversations,json,authorized,readBody,requireMember,readScope }),
+  createAgentsRoutes({
+    service:agentConversations,json,authorized,readBody,requireMember,readScope,
+    // 写路径的空间授权：门禁只看得到 URL，而 POST 的 scope 在请求体里（见该族的注释）。
+    //
+    // ★ 这里**必须**包一层箭头函数，不能写成 `userStore === null ? null : …`：
+    //   本行在 `const userStore` 声明**之前**执行（路由表先建、`userStore` 在文件末尾），
+    //   直接读它会撞 TDZ 并在启动时抛 ReferenceError。
+    //   `requireSpaceAccess` 自己在**调用时**才看 `userStore`，于是这里是延迟求值。
+    requireSpace: (req, scope) => requireSpaceAccess(req, scope),
+  }),
   // 冲突治理族放在最前：/api/tasks/:id/write-intent 等具体路径必须先于宽前缀匹配。
   createWriteIntentRoutes({
     json, readBody, authorized, writeIntentStore, db,
@@ -7564,6 +7573,27 @@ export const userStore = REMOTE_AGENT_ENABLED
 export const deviceStore = REMOTE_AGENT_ENABLED
   ? createDeviceStore({ db, withTx, audit })
   : null
+
+/**
+ * 空间级授权的**唯一判定处**（读取与写入共用）。
+ *
+ * `req.__legionUser` 由远程门禁在"用户令牌已验证"之后打上；没有它就说明
+ * 这个请求不是用户令牌来的（机器令牌 / 本机无鉴权），此时**不做判定**——
+ * 与 `authorized` 在无 token 时的既有语义一致，不改变本机部署的行为。
+ *
+ * 抛的是带 `status` 的普通错误（与 `AgentConversationError` 同形），
+ * 路由族把它翻成响应。返回 `undefined` 表示放行。
+ */
+function requireSpaceAccess(req, scope) {
+  // 在**调用时**才读 `userStore`：本函数的定义在文件末尾，而路由表在它之前建好，
+  // 于是这里必须延迟求值（见调用点那段注释）。
+  if (REMOTE_AGENT_ENABLED !== true || userStore === null) return
+  const actor = req?.__legionUser
+  if (actor === undefined || actor === null) return
+  if (typeof scope !== 'string' || scope.length === 0) return
+  if (userStore.hasRoleAtLeast(actor.userId, scope, 'viewer') === true) return
+  throw Object.assign(new Error(`无权访问空间「${scope}」`), { code: 'SPACE_FORBIDDEN', status: 403 })
+}
 
 /** 网关需要一个任务摘要端口（它不认识 `tasks` 表的列）。 */
 function describeTaskForNode(taskId, scope) {

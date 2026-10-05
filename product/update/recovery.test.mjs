@@ -23,7 +23,7 @@ import { acquireBarrier } from './barrier.mjs'
 import { createJournal } from './journal.mjs'
 import {
   RECOVERY_CODES, RECOVERY_SAFETY, barrierProvedBeforeBackup, classifySnapshotSafety,
-  planRecoveryFromBackups, restoreFromBackup,
+  planRecoveryFromBackups, readTransactionView, restoreFromBackup,
 } from './recovery.mjs'
 import { BACKUP_CODES, createSnapshot } from '../upgrade/backup.mjs'
 
@@ -320,6 +320,127 @@ test('恢复：配置文件的恢复也接上了（不只是数据库）', (t) =
 test('BACKUP_CODES 与恢复模块的错误码不冲突（两层的码要能分开）', () => {
   const overlap = Object.values(RECOVERY_CODES).filter((c) => Object.values(BACKUP_CODES).includes(c))
   assert.deepEqual(overlap, [], `恢复层与备份层复用了同一个码：${overlap.join(', ')}`)
+})
+
+test('★★★ 三种**终态**都不许被说成"已经提交"（理由必须与事实相符）', () => {
+  // ★ 设计 line 192 把自动恢复限定在「**未提交**事务」上，于是三种终态都要
+  //   落到"要问"：`committed`（有新写入会丢）/ `rolled-back`（已回退过，
+  //   再来一次是二次回退）/ `recovery-required`（按定义没解决）。
+  //
+  // ★★ 这条用例的第一版是**空的**，而且注释里的风险说错了。值得把纠正过程记下来：
+  //
+  //   我原以为"把 `view.committed === true` 放宽成 `view.finishedPhase !== null`"
+  //   会让后两种变成**可自动恢复**。实测（把变异真的跑一遍）发现：**不会**——
+  //   那个分支在安全档那段代码里排在 safe-automatic **之前**，所以放宽它只会
+  //   让后两种拿到一个**错误的理由**（"这次事务已经提交：恢复会丢掉提交之后
+  //   产生的所有新写入"），而档位仍然是 needs-confirmation。
+  //
+  //   所以真正被这个重构破坏的是**理由与事实的相符性**：
+  //   一个 `rolled-back` 的事务并没有"提交之后的新写入"可丢，而界面会告诉
+  //   操作者他会丢——那会让人做出不一样的判断（"既然要丢新写入，那算了"）。
+  //
+  //   > 一个装错档位的读数会被下一次操作抓到；
+  //   > 一个**说错原因**的读数会被当成依据。
+  //
+  //   因此判据落在 `evidence.committed` 与理由文本上，而不是只落在档位上。
+  const complete = { id: 's', status: 'complete', createdAtMs: 1, fileCount: 1, totalBytes: 1, root: '/nowhere' }
+  const withFinish = (finishPhase) => ({
+    snapshot: complete,
+    journal: {
+      records: [
+        { kind: 'result', action: 'barrier-acquire', data: { ok: true } },
+        { kind: 'result', action: 'backup', data: { ok: true } },
+        { kind: 'finish', action: `transaction-${finishPhase}`, data: { phase: finishPhase } },
+      ],
+      active: null,
+    },
+  })
+  for (const phase of ['committed', 'rolled-back', 'recovery-required']) {
+    const verdict = classifySnapshotSafety(withFinish(phase))
+    assert.equal(verdict.safety, 'needs-confirmation',
+      `终态 ${phase} 被判成了 ${verdict.safety}：只有"未提交"那一档能自动恢复（设计 line 192）`)
+    assert.equal(verdict.requiresConfirmation, true, `终态 ${phase} 没有要求确认`)
+    // ★ 关键：只有 committed 才能说"已经提交"。
+    assert.equal(verdict.evidence.committed === true, phase === 'committed',
+      `终态 ${phase} 的 committed 读数不对：${JSON.stringify(verdict.evidence)}`)
+    assert.equal(/已经提交/.test(verdict.reason), phase === 'committed',
+      `终态 ${phase} 的理由${/已经提交/.test(verdict.reason) ? '错误地' : '没有'}说"已经提交"：${verdict.reason}`)
+  }
+})
+
+test('★★★ 有屏障证明但**没有活动事务**时不能自动恢复（line 192 的"未提交"要求）', () => {
+  // ★ 这一条守的是 safe-automatic 那一档的**第二个**条件。
+  //
+  //   那个条件是 `view.active !== null && proof.proved`——两个都不可少。如果
+  //   有人只留下 `proof.proved`（读起来像"屏障证明了就够了"），那么下面这种
+  //   日志会变成**可自动恢复**：屏障与备份的完成记录都在、而**没有任何活动
+  //   事务描述符、也没有终态记录**。
+  //
+  //   那种日志的含义恰恰是"**我们不知道那次事务最后停在哪**"（描述符丢了、
+  //   终态没写下来）。设计 line 192 允许自动恢复的前提是"未提交事务"——
+  //   一个连"有没有未提交事务"都答不出来的状态**不是**未提交。
+  //
+  //   > "没有活动事务"与"不知道有没有活动事务"必须是两个读数；
+  //   > 把它们合成一个，就会让"不知道"落进"可以自动动手"。
+  const complete = { id: 's', status: 'complete', createdAtMs: 1, fileCount: 1, totalBytes: 1, root: '/nowhere' }
+  const proofOnly = classifySnapshotSafety({
+    snapshot: complete,
+    journal: {
+      records: [
+        { kind: 'result', action: 'barrier-acquire', data: { ok: true } },
+        { kind: 'result', action: 'backup', data: { ok: true } },
+      ],
+      active: null,
+    },
+  })
+  assert.equal(proofOnly.safety, 'needs-confirmation',
+    `只有屏障证明、没有活动事务时被判成了 ${proofOnly.safety}：'
+      + '那种日志的含义是"不知道那次事务停在哪"，不是"未提交"`)
+  assert.equal(proofOnly.requiresConfirmation, true)
+  assert.equal(proofOnly.evidence.barrierProved, true,
+    '屏障证明本身应当是成立的（这一条的要点是"光有它不够"）')
+  // 对照：把同一个日志补上活动描述符 ⇒ 才进 safe-automatic。
+  const sameButActive = classifySnapshotSafety({
+    snapshot: complete,
+    journal: {
+      records: [
+        { kind: 'result', action: 'barrier-acquire', data: { ok: true } },
+        { kind: 'result', action: 'backup', data: { ok: true } },
+      ],
+      active: { txnId: 't', phase: 'validate' },
+    },
+  })
+  assert.equal(sameButActive.safety, 'safe-automatic',
+    '补上活动描述符之后仍然没有判为可自动恢复——上面那条因此失去了分辨力')
+})
+
+test('★ readTransactionView：从**日志终态记录**读"最后停在哪"（提交后描述符就没了）', () => {
+  // 这条守的是 ㉘ 里那个死分支的根因：`readActive()` 在提交之后返回
+  // `journal-no-active`，所以"已提交"**不可能**从活动描述符读出来。
+  const view = readTransactionView({
+    records: [
+      { kind: 'phase', action: 'phase-migrate', data: { phase: 'migrate' } },
+      { kind: 'finish', action: 'transaction-committed', data: { phase: 'committed' } },
+    ],
+    active: null,
+  })
+  assert.equal(view.active, null, '提交之后不该有活动描述符')
+  assert.equal(view.finishedPhase, 'committed')
+  assert.equal(view.committed, true, '从终态记录没有认出"已提交"')
+  assert.equal(view.lastPhase, 'migrate', 'lastPhase 应当取自最后一条 phase 记录')
+  // 没有终态记录时不能自称"已提交"。
+  const open = readTransactionView({
+    records: [{ kind: 'phase', action: 'phase-backup', data: { phase: 'backup' } }],
+    active: { txnId: 't', phase: 'backup' },
+  })
+  assert.equal(open.committed, false)
+  assert.equal(open.activePhase, 'backup')
+  // 坏行与"描述符读不出来"是两个独立读数（第四档的理由靠它们说准）。
+  const damaged = readTransactionView({
+    records: [], active: null, badLines: ['{', '{'], activeUnreadable: { code: 'x', reason: 'y' },
+  })
+  assert.equal(damaged.badLines, 2)
+  assert.equal(damaged.activeUnreadable?.code, 'x')
 })
 
 test('★★ plan 的所有出口返回**同一个形状**（少给字段会在读它的那一侧炸掉）', (t) => {

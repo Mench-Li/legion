@@ -1564,6 +1564,28 @@ git worktree remove <tmp> --force
 | `scripts/prt/declaration-mirrors.test.mjs` | 11 过 / **1 失败** | **12 过 / 0 失败** | **本分支造成**（㊵，已修） |
 | `scripts/prt/silent-declarations.test.mjs` | 2 过 / **1 失败** | 2 过 / **1 失败**（失败用例名相同） | 前存 |
 
+★ 顺着 ㊵ 的教训，把剩下那些**会扫全仓的**判据逐个在基点上跑了一遍
+（它们最可能被"我新增了文件"影响，而它们**不**在文件名里提到我）：
+
+| 套件 | 基点 `a8ff20de` | 本分支 |
+|---|---|---|
+| `scripts/prt/doc-table-integrity.test.mjs` | 8 过 / **2 失败** | 8 过 / **2 失败** |
+| `scripts/prt/feature-table-status.test.mjs` | 8 过 / **1 失败** | 8 过 / **1 失败** |
+| `scripts/prt/feature-evidence.test.mjs` | 10 过 / **2 失败** | 10 过 / **2 失败** |
+| `scripts/prt/ledger-evidence.test.mjs` | 10 过 / **1 失败** | 10 过 / **1 失败** |
+| `scripts/prt/boundary-facts.test.mjs` | 74 过 / **7 失败** | 74 过 / **7 失败** |
+| `scripts/prt/design-boundaries.test.mjs` | 11 过 / **1 失败** | 11 过 / **1 失败** |
+| `scripts/prt/baseline-snapshot.test.mjs` | 23 过 / **3 失败** | 23 过 / **3 失败** |
+| `scripts/prt/topology-inventory.test.mjs` | 20 过 / **1 失败** | 20 过 / **1 失败** |
+
+八条**逐项相同**。加上前面那七条，**基点已核对 15 个套件**（其中 1 个是本分支造成的、
+已修）。剩下的 ~30 个仍然只有"与我自己上一次跑相比没变"这一层**弱证据**——
+它们大多需要真机进程/真 DSH 检出/真浏览器，本机单独跑也未必复现。
+
+★ 而"套件清单不完备"那一条（未登记用例）现在是 **32 个**：本分支**新增的 24 个
+用例文件全部已登记**（逐个核过），而 `desktop/main.test.mjs` 是本次**登记掉**的
+那一个（33 → 32）。
+
 ★ 顺带记一个有用的现成设施：本机**已经有一个基点的干净 worktree**
 （`C:/Users/11150/AppData/Local/Temp/legion-main-pristine`，detached 在 `a8ff20de`），
 所以"在基点跑一遍"不需要新建 worktree，`cd` 过去跑就行。

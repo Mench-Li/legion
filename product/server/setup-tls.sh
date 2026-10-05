@@ -56,9 +56,10 @@ fi)
 
 $(if [ -f "/etc/letsencrypt/live/$DOMAIN/fullchain.pem" ]; then cat <<SSLBLOCK
 server {
-    listen 443 ssl;
-    listen [::]:443 ssl;
-    http2 on;
+    # 见 setup-ip-entry.sh 中同处的说明：这里用 listen ... http2 而不是
+    # http2 on;（后者需要 nginx >= 1.25.1，本机是 1.24.0）。
+    listen 443 ssl http2;
+    listen [::]:443 ssl http2;
     server_name $DOMAIN;
 
     ssl_certificate     /etc/letsencrypt/live/$DOMAIN/fullchain.pem;

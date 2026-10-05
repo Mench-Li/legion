@@ -244,6 +244,24 @@ test('协议版本不兼容时**拒绝连接**并回双方范围，不静默降�
   } finally { await ctx.stop() }
 })
 
+test('hello 成功之后握手超时必须被取消（否则正常连接会在到点时被关掉）', async () => {
+  // ★ 这条守的是一个只有**长连接**才会暴露的缺陷：握手超时定时器原本只在连接
+  //   收尾时清除，于是 hello 成功之后它仍会开火，把一条完全正常的连接关掉。
+  //   症状是"每隔 N 秒掉线重连一次"，而两端日志都写着注册成功。
+  //   短用例跑不到超时那一刻，所以这条用例刻意把超时设短、然后等过它。
+  const ctx = await startHub({ gatewayOptions: { helloTimeoutMs: 150, dispatchPollMs: 0 } })
+  try {
+    const c = await connect(ctx)
+    await c.waitFor(FRAME_TYPES.HELLO_ACK)
+    await sleep(400)
+    assert.equal(ctx.gateway.stats.connected, 1, 'hello 成功后连接应保持')
+    assert.equal(ctx.gateway.stats.online, 1)
+    const closed = await Promise.race([c.closed, sleep(50).then(() => 'still-open')])
+    assert.equal(closed, 'still-open', '连接不应被握手超时关掉')
+    c.ws.close()
+  } finally { await ctx.stop() }
+})
+
 test('hello 超时后连接被关闭', async () => {
   const ctx = await startHub({ gatewayOptions: { helloTimeoutMs: 150 } })
   try {

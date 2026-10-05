@@ -231,7 +231,7 @@ export function createNodeGateway({
     const finish = ({ graceful = false } = {}) => {
       if (state.closed) return
       state.closed = true
-      clearTimeout(helloTimer)
+      clearTimeout(state.helloTimer)
       for (const t of state.ackTimers.values()) clearTimeout(t)
       state.ackTimers.clear()
       // presence 用 connectionId 栅栏清：迟到的 close 不会把新连接标成离线。
@@ -243,10 +243,13 @@ export function createNodeGateway({
       } catch { /* 已断 */ }
     }
 
-    const helloTimer = setTimeout(() => {
+    // 握手超时挂在 `state` 上而不是闭包变量上：`onHello` 定义在**工厂作用域**
+    // （与 `attachConnection` 平级），拿不到 attachConnection 里的局部变量。
+    // 放到 state 上，两边都看得见。
+    state.helloTimer = setTimeout(() => {
       closeWith(WS_CLOSE.POLICY_VIOLATION, 'hello timeout', GATEWAY_CODES.HELLO_TIMEOUT, '连接后未在时限内发送 hello')
     }, helloTimeoutMs)
-    if (typeof helloTimer.unref === 'function') helloTimer.unref()
+    if (typeof state.helloTimer.unref === 'function') state.helloTimer.unref()
 
     // 同一节点重连：关掉旧连接。两台机器共用一个 nodeId 是配置错误，
     // 保留两条会让"这条尝试归谁跑"变得不确定。
@@ -355,6 +358,16 @@ export function createNodeGateway({
     }
     state.phase = 'ready'
     state.protocolVersion = negotiated.version
+    // ★ **必须**在这里取消握手超时。
+    //
+    // 这个定时器是"连上之后多久还不 hello 就断开"的保护。它原本只在连接收尾
+    // （`finish`）时被清掉，于是 hello **成功**之后它仍然会在到点时开火，
+    // 把一条完全正常的连接关掉——10 秒后。症状是"每隔十秒掉线重连一次"，
+    // 而两端日志都显示注册成功。
+    //
+    // 只有真实的长连接能发现它：短用例跑不到超时那一刻。实测就是这么发现的
+    // （电脑侧日志：`已注册` 紧接着 `Hub 拒绝：NODE_HELLO_TIMEOUT`）。
+    clearTimeout(state.helloTimer)
     try { deviceStore.touchDevice({ nodeId: state.nodeId, protocolVersion: negotiated.version }) } catch { /* 记账失败不阻断 */ }
     try { deviceStore.markOnline({ nodeId: state.nodeId, connectionId: state.connectionId }) } catch { /* 同上 */ }
     record(state.nodeId, 'global', 'node:online', null, { connectionId: state.connectionId, protocolVersion: negotiated.version })

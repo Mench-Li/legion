@@ -85,6 +85,33 @@ test('★ 所有装载期自检结论都是 ok', async () => {
   assert.deepEqual(failures, [], `装载期自检未通过：\n${failures.join('\n')}`)
 })
 
+test('★★★ selfCheckAll() 必须覆盖**每一个**有自检的模块（新增一层要同时进两处）', async () => {
+  // ★ 这条是我自己漏过一次之后补的：加 `recovery.mjs` 时我把 `EXPECTED_MODULES`
+  //   与 `CHECKED_EXPORTS` 都改了，**忘了**改 `index.mjs` 的 `selfCheckAll()`。
+  //   于是那个汇总读了 22 层，而实际上有 23 个模块带自检——
+  //   上面那条"结论都是 ok"照样全绿，因为**它读的不是同一张清单**。
+  //
+  //   > 一份"汇总"漏掉一项时，它不会报错——它会**少报一个数**。
+  //   > 而少报的那一项，恰恰是刚加的那个。
+  //
+  //   为什么必须两处都有：`CHECKED_EXPORTS` 是**测试**清单（只有跑测试时才读），
+  //   而 `selfCheckAll()` 是**运行时**汇总（`product/update/index.mjs` 导出它，
+  //   给桌面端/诊断用）。两处漏一处的后果不同，所以两处都要，且必须相等。
+  const mod = await import(new URL('./index.mjs', import.meta.url))
+  const all = await mod.selfCheckAll()
+  const inSummary = [...all.results.map((r) => r.layer)].sort()
+  const expected = Object.keys(CHECKED_EXPORTS).sort()
+  assert.deepEqual(inSummary, expected,
+    'selfCheckAll() 覆盖的层与有自检的模块对不上。缺的那一层不会让任何用例变红，'
+    + '只会让运行时汇总**少报一个数**：\n'
+    + `  只在 CHECKED_EXPORTS 里：${expected.filter((x) => !inSummary.includes(x)).join(', ') || '(无)'}\n`
+    + `  只在 selfCheckAll 里：${inSummary.filter((x) => !expected.includes(x)).join(', ') || '(无)'}`)
+  // 顺带把它**逐层**读过：汇总说全绿，就要求每一层真的 ok。
+  for (const layer of all.results) {
+    assert.equal(layer.ok, true, `${layer.layer} 在汇总里不是 ok：${JSON.stringify(layer.problems)}`)
+  }
+})
+
 test('自检结论本身是检查过的（不是恒真的占位）', async () => {
   // ★ 一条"永远返回 ok:true"的自检比没有自检更糟：它会让"有人放宽了某条
   //   拒绝"看起来已经通过。所以这里逐条要求自检**真的报出了一个读数**。

@@ -1045,7 +1045,9 @@ node --test desktop/update-wiring.test.mjs
 # 错误码文案表的完备性
 node --test product/update/errors.test.mjs
 
-# 各模块的装载期自检汇总（22 层）
+# 各模块的装载期自检汇总（**23 层**）。★ 这个数字由 `modules.test.mjs` 里那条
+# "selfCheckAll() 必须覆盖每一个有自检的模块"钉住——它曾经是 22，而实际有 23 个
+# 模块带自检（`recovery` 那层被漏掉了，且**没有任何用例会因此变红**）。
 node -e "import('./product/update/index.mjs').then(async m => console.log(JSON.stringify(await m.selfCheckAll(), null, 2)))"
 
 # 打包闭包判据

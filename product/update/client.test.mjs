@@ -48,6 +48,12 @@ function createStaticHost({
   // ★ 通道 sequence 也要能调：第二个发行必须用**更高**的 sequence，
   //   否则 `judgeSequence` 会以"同 sequence 换摘要"把它拒掉（那条判据是对的）。
   sequence = 42,
+  // ★ 让夹具能造出"两份清单对不上"的情形（设计 §5 line 114）。
+  //   为什么需要**两份**覆盖：改发行清单验证的是"签名的清单自称属于别的通道"，
+  //   改通道清单验证的是"托管上那份清单写着别的版本"。两者的拦截者可能不同
+  //   （见 `client.test.mjs` 里那条平台/架构的说明），所以必须能分别造。
+  releaseOverrides = {},
+  feedOverrides = {},
 }) {
   const productManifest = {
     format: 'legion/version-manifest@1',
@@ -75,6 +81,7 @@ function createStaticHost({
     rollbackPolicy: 'program-only',
     issuedAt: '2026-10-03T00:00:00Z',
     expiresAt: '2026-10-10T00:00:00Z',
+    ...releaseOverrides,
   })
   const manifestBytes = Buffer.from(serializeEnvelope(signEnvelope(release, { privateKeyPem, keyId })), 'utf8')
   const manifestSha256 = createHash('sha256').update(manifestBytes).digest('hex')
@@ -83,6 +90,7 @@ function createStaticHost({
     issuedAt: '2026-10-03T00:00:00Z', expiresAt: '2026-10-10T00:00:00Z',
     releaseId: release.releaseId, productVersion,
     manifestPath: `releases/${releaseId}/manifest.json`, manifestSha256,
+    ...feedOverrides,
   })
   const feedBytes = Buffer.from(serializeEnvelope(signEnvelope(feed, { privateKeyPem, keyId })), 'utf8')
 
@@ -194,12 +202,16 @@ function setup({
   //   **同一把钥匙**签名，否则它会以 `envelope-unknown-key` 被拒——
   //   那会掩盖这条用例真正要测的东西。
   keys = null,
+  // ★ 通道清单与发行清单的字段覆盖（设计 §5 line 114 的"两者必须一致"）。
+  releaseOverrides = {},
+  feedOverrides = {},
 } = {}) {
   const keyId = 'release-2026-a'
   const keyPair = keys ?? generateReleaseKeyPair({ keyId })
   const trustStore = createTrustStore([{ keyId, publicKeyPem: keyPair.publicKeyPem }])
   const fetchImpl = createStaticHost({
     keyId, privateKeyPem: keyPair.privateKeyPem, packageBytes, mutate, slowChunks, productVersion, releaseId, sequence,
+    releaseOverrides, feedOverrides,
   })
   fetchImpl.trustStore = trustStore
   const cacheDir = mkdtempSync(join(tmpdir(), 'legion-update-test-'))
@@ -497,6 +509,68 @@ test('摘要不符的身份也不能复用已就绪的包', async (t) => {
   const installed = await client.install(check.candidate.releaseId, 'f'.repeat(64))
   assert.equal(installed.ok, false)
   assert.equal(installed.code, 'update-identity-mismatch', installed.reason)
+})
+
+test('★★★ 发行清单与通道清单的 channel／productVersion 不一致 → 下载前就拒（设计 §5 line 114）', async (t) => {
+  // ★ 设计 §5 line 114 那张表要求发行清单里的
+  //   「releaseId、productVersion、channel、platform、arch | **与通道清单一致**，
+  //     锁定一次发行」。
+  //
+  //   实现是 `validateRelease(payload, { expect })` 里一个**逐字段**的循环，
+  //   生产接线也在（`client.mjs` 把五个字段一起传进去）。但**用例只证了其中
+  //   两个**：`release.mjs` 的装载期自检喂的是 `expect: { releaseId, productVersion }`
+  //   ——`channel`/`platform`/`arch` 那三个**没有任何用例**。
+  //
+  //   > 一条判据的用例只碰了它的一部分时，**没被碰的那部分是裸的**。
+  //
+  // ★ 实测过五个字段各自的**实际拦截者**（见下面那条被跳过的说明）：
+  //   `channel` 与 `productVersion` 确实由这个 `expect` 循环拦下；
+  //   `platform`/`arch` 会被**更早**的白名单判据拦下（`KNOWN_PLATFORMS`／
+  //   通道清单与本机平台的一致性），所以那两条在真实链路上到不了这里。
+  //   这条用例只断言**真的会走到这个循环**的那两个字段，
+  //   并把这件事写清楚——把到不了的那三个也写进来，会得到一条
+  //   "由别的判据满足"的绿灯，看起来在守这条循环，实际没有。
+  for (const [label, opts] of [
+    ['发行清单自称属于另一个通道', { releaseOverrides: { channel: 'canary' } }],
+    ['通道清单写着另一个 productVersion', { feedOverrides: { productVersion: '1.2.0' } }],
+  ]) {
+    const ctx = setup(opts)
+    t.after(() => rmSync(ctx.cacheDir, { recursive: true, force: true }))
+    const client = makeClient(ctx)
+    const result = await client.check()
+    assert.equal(result.outcome, 'failed',
+      `${label}：两份清单对不上，却被接受了（设计 §5 line 114）`)
+    // 码来自 `release.mjs` 自己的词表（`release-identity-mismatch`），
+    // 不是 `UPDATE_CODES_CLIENT.IDENTITY_MISMATCH`——后者说的是"下载/安装时
+    // 请求的身份与当前候选/已就绪的身份不符"，是**另一条**判据。
+    assert.equal(result.code, 'release-identity-mismatch',
+      `${label}：应当报身份不符，实际 ${result.code}：${result.reason}`)
+    assert.equal(client.candidate(), null, `${label}：身份不一致不该留下候选`)
+  }
+})
+
+test('★ platform／arch 的分歧由**更早的**白名单判据拦下（那两条到不了身份循环）', async (t) => {
+  // 这一条的作用是**把上一条的边界写清楚**：`validateRelease` 的 `expect`
+  // 循环里确实列了 platform/arch，但在真实链路上它们永远走不到那里——
+  // 通道清单会先被"与本机平台/架构是否一致"拦下。
+  //
+  // ★ 为什么值得单独写一条：不写的话，下一个人看到"循环里有五个字段、
+  //   用例只测了两个"，会以为是**测试不全**，然后补上三个到不了那里的断言，
+  //   得到三条"由别的判据满足"的绿灯。而"一条由别的判据满足的断言"比没有
+  //   断言更糟：它让人以为这条路径被守住了。
+  for (const [label, opts] of [
+    ['通道清单说自己是 linux', { feedOverrides: { platform: 'linux' } }],
+    ['通道清单说自己是 arm64', { feedOverrides: { arch: 'arm64' } }],
+  ]) {
+    const ctx = setup(opts)
+    t.after(() => rmSync(ctx.cacheDir, { recursive: true, force: true }))
+    const client = makeClient(ctx)
+    const result = await client.check()
+    assert.equal(result.outcome, 'failed', `${label}：却被接受了`)
+    // 拦下它的是**具名**的通道清单字段判据，不是身份循环。
+    assert.equal(result.code, 'feed-bad-field',
+      `${label}：期望由通道清单的字段判据拦下，实际 ${result.code}：${result.reason}`)
+  }
 })
 
 // ---------------------------------------------------------------------------

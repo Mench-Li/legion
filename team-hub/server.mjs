@@ -104,6 +104,7 @@ import { createRunStore, RunError } from './run-store.mjs'
 import { Worker } from 'node:worker_threads'
 import { resolveRepoIdentity } from '../packages/shared/src/repo-identity.mjs'
 import { runGit as runDeliveryGit } from './git-plumbing.mjs'
+import { judgeFileDomain, ignoredFileDomainEntries } from './file-domain-guard.mjs'
 import { MODEL_ERRORS, ModelError, createModelStore, ensureModelSchema } from './model-store.mjs'
 import {
   BINDING_STORE_ERRORS, BindingStoreError, createBindingStore, ensureBindingSchema,
@@ -5071,7 +5072,43 @@ function readAgentWorkflowInstances({ scope, limit = 20, offset = 0, status = 'a
 
 /** 建任务的**唯一对外入口**：自己开一个事务，然后走上面那个函数体。 */
 function createTask(input) {
+  assertDeliverableFileDomain(input)   // ★ BUG-009-a：域不可交付时**不建**这个任务（理由见该函数与 file-domain-guard.mjs）
   return withTx(() => { routeHarnessForTask(input); return createTaskInTx(input) })   // ★ F-23：建任务前先判定交给哪个 harness（指名不在册 ⇒ 抛，不建这个任务）
+}
+
+/**
+ * BUG-009-a：建任务前判定「声明的文件域是否**可交付**」。
+ *
+ * 现场（T-179）：切片把域声明成 `["scratch/"]`，而 `scratch/` 在 `.gitignore` 里。worker 干完了
+ * （23KB 逐套件判定报告），却**永远交付不了** —— 分支 0 提交、`git status` 干净、闸门还会报一堆
+ * "越域文件"（那些其实是主分支新增的）。一条 5 小时的活烂在被忽略的目录里。
+ *
+ * 三条纪律：
+ *   ① **只在"全部条目都被忽略"时拒绝**（那是无歧义的交付不了）；部分被忽略是合法用法
+ *      （`["scratch/","docs/"]` = 临时区 + 交付区），只告警不拦。
+ *   ② **不可知一律放行**：仓库没绑定、不是 git 仓库、git 命令出错 —— 这些时候我们**不知道**
+ *      域是否可交付，而"不知道"不该让人建不了任务（一个因为探不到 git 就挡住建任务的闸门，
+ *      比它要防的问题更坏）。探测器的 ③ 条约束见 file-domain-guard.mjs 文件头。
+ *   ③ 判定用的是**真实 git**（`check-ignore`），不自己重写 gitignore 语义 ——
+ *      嵌套 .gitignore / 取反规则 / 目录通配都不是抄一遍能对的东西。
+ */
+function assertDeliverableFileDomain(input) {
+  const domain = Array.isArray(input?.fileDomain)
+    ? input.fileDomain.filter((x) => typeof x === 'string' && x.trim().length > 0)
+    : []
+  if (domain.length === 0) return
+  const scope = typeof input?.scope === 'string' && input.scope.trim().length > 0 ? input.scope.trim() : 'default'
+  let workspaceDir = ''
+  try {
+    const binding = resolveDeliveryBinding(scope)
+    // 绑定失败 / 不是 git 仓库 ⇒ 不可知 ⇒ 放行（纪律②）
+    if (binding?.error || binding?.capability !== 'git') return
+    workspaceDir = binding.workspaceDir ?? binding.checkoutRoot ?? ''
+  } catch { return }
+  const ignored = ignoredFileDomainEntries((args, cwd) => runDeliveryGit(args, cwd), workspaceDir, domain)
+  const verdict = judgeFileDomain(domain, ignored)
+  if (!verdict.ok) throw Object.assign(new Error(verdict.message), { code: verdict.code, statusCode: 400 })
+  if (verdict.code === 'DOMAIN_PARTLY_IGNORED') console.error(`[team-hub] 文件域告警（BUG-009-a）：${verdict.message}`)
 }
 
 // ── 目标自动分解：发布目标时按空间编队生成「阶段任务链」，指派给对应智能体 ──
@@ -5081,6 +5118,8 @@ const GOAL_STAGE_LABELS = ['需求讨论', '方案设计', '任务拆分', '用�
 
 /** 建一个 [auto-goal] 任务行（chain / slice 展开共用）。goalId = 所属目标（多目标并发按目标挂接）。返回新任务。 */
 function insertGoalTask({ title, description, acceptance, boundary, role, scope, blockedBy = [], status = 'todo', parent = null, slice = null, sliceIdx = null, fixOf = null, fixCount = 0, priority = 'high', goalId = null, fileDomain = null, docSync = false, agentSelectionSnapshot = null }) {
+  // ★ BUG-009-a：目标分解出来的切片同样要过域护栏（否则"域是 gitignored"会从这条路径溜进来）
+  assertDeliverableFileDomain({ fileDomain, scope })
   assertGoalOpen(goalId)
   const id = nextId()
   db.prepare(`
@@ -5995,6 +6034,14 @@ function transitionTask(id, to, by, ifVersion, force, confirmedStopped = false) 
     db.prepare('UPDATE tasks SET status=?, version=version+1, updatedAt=? WHERE id=?').run(to, now(), id)
     if (to === 'done') finishTaskReservationInTx(id)
     if (to === 'canceled') finishTaskReservationInTx(id, { cancelled: true })
+    // ── BUG-009-c：进 in_review 就**释放**写入预约 ──────────────────────────────────
+    // 理由：in_review 表示这一轮已经写完并提交（worker 提交后才自己转到这个状态），
+    // **它不再写任何文件**，却仍然占着声明的文件域。占着的后果实测过：T-178 已交付进 main、
+    // 任务停在 in_review，它的预约却继续挡着 T-184（同域切片），T-184 卡在 waiting-file 四十多分钟，
+    // 直到人工去释放。这类阻塞与"有人在写"无关，纯粹是账本没结清。
+    // 释放用 release 而不是 markReconciling：in_review 的前提是 worker 已经收工（不是"不知道停了没"），
+    // 不存在 BUG-007 那种"未能确认停止"的语义。若将军把任务打回 todo，守护下一轮会重新认领并重新预约。
+    if (to === 'in_review') finishTaskReservationInTx(id)
     return getTask(id)
   })
   if (result?.blocked) {

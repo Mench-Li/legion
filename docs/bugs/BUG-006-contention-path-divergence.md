@@ -1,11 +1,9 @@
 # BUG-006｜`contention` 诊断端点与认领路径**文件域口径分叉**（读数与事实不一致）
 
-> 对应任务 **T-183**（`general` 于 2026-10-05 11:56 建）。**已修复**：四处（认领/预约/过渡/诊断）
-> 现在共用同一个取法 `writeIntentStore.resolvePlannedPaths()`。
->
-> ⚠️ **生产中枢（8787）仍跑着旧代码**：修复在 `team-hub/`，需要一次中枢重启才生效。
-> 我没有重启 —— 当时 T-178 / T-179 正在跑且各占一个写入槽，为一条 curl 打断两个在跑的任务
-> 不值得（详见 §6）。修复本身已在隔离实例上验证到 HTTP 层。
+> 对应任务 **T-183**（`general` 于 2026-10-05 11:56 建；同日 12:43 将军判定它与本工作区的在制品
+> **重复**而取消 —— 取消的评论指向的就是本修复，见 §3.2）。**已修复并已在生产上生效**：
+> 四处（认领/预约/过渡/诊断）现在共用同一个取法 `writeIntentStore.resolvePlannedPaths()`，
+> 中枢已于 13:27 重启，活体判据见 §3.1。
 
 ## 1. 缺陷
 
@@ -60,6 +58,62 @@ node docs/bugs/BUG-006-verify.mjs
 ```
 
 判据：① 有 fileDomain 无 intent ⇒ 分叉消除 ✅；② 无 fileDomain ⇒ 仍整仓独占（未放宽）✅。
+
+### 3.1 ★ 活体验证（2026-10-05 13:27 重启后，**生产库当前状态**）
+
+重启后 8787 已跑新代码，判据是**只有新代码才有的 `pathsFrom` 字段**：
+
+```bash
+curl -s "http://127.0.0.1:8787/api/tasks/T-183/contention"
+```
+
+```json
+{"ok":false,"code":"FILE_CONTENTION","reason":"文件被任务 T-178 占用：team-hub",
+ "paths":["team-hub"],"holderTaskId":"T-178","holderState":"reserved",
+ "pathsFrom":"file-domain-fallback","schedulingState":"waiting-file"}
+```
+
+对照**重启前**（同一端点、旧代码）：`"reason":"文件被任务 T-178 占用：(whole repository)"`、
+`"paths":["(whole repository)"]`、且**没有** `pathsFrom` 字段。
+
+★ 但这一对读数**不能单独证明是代码修好的**：这段时间里 T-183 的 `fileDomain` 也从 `null`
+被改成了 `["team-hub/","docs/bugs/"]` —— **两个变量同时变了**。所以补一条把变量隔离的判据：
+
+```bash
+node docs/bugs/BUG-006-live-ab.mjs     # 在生产库**副本**上，同一份状态并排算新旧两种取法
+```
+
+实测（6 个任务里 **2 个**读数不同）：
+
+```
+任务 T-183（fileDomain=["team-hub/","docs/bugs/"] intent=0）
+   旧 intent?.paths ?? []      ⇒ ok:false FILE_CONTENTION → ["(whole repository)"]
+   新 resolvePlannedPaths()   ⇒ ok:false FILE_CONTENTION → ["team-hub"]   (from=file-domain-fallback)
+   ★ 读数不同 —— 旧写法报的不是实际冲突范围
+
+任务 T-184（fileDomain=["plugins/src/","team-hub/","docs/bugs/"] intent=0）
+   旧 ⇒ ok:false → ["(whole repository)"]
+   新 ⇒ ok:false → ["team-hub"]   (from=file-domain-fallback)
+```
+
+其余 4 个（无 fileDomain 的 T-133/T-134，有 intent 的 T-178/T-179）两种取法**本来就该一致**，
+实测一致 —— 这也说明本次修改没有顺手改掉别的方向。
+
+> ★★ **这里我自己错过一次，值得留痕**：`live-ab` 第一版把"分叉"判成 `oldV.ok !== newV.ok`，
+> 于是 T-183/T-184 因为**两边都是 `ok:false`** 被算成"一致"，小结得出错误的"0 个不同"。
+> 而缺陷的本质恰恰不是 ok 翻转，是**读数与事实不一致**：同样一句"有冲突"，旧写法把人指向
+> 「整个仓库被占了」，新写法指向「`team-hub` 被占了」—— 前者会让人去查一个范围大得多的东西。
+> 判据随即改成同时比 `ok` 与 `paths` 集合。**一个只比布尔值的断言，会把这类缺陷全放过**。
+
+### 3.2 T-183 已被将军取消（判定与本次工作重复）
+
+`audit seq=55767`：2026-10-05 12:43 `general` → `transition to=canceled`，评论写明：
+
+> 【将军决定 · 取消】本任务与 `.legion-worktrees/bugs`（fix/bugs 工作区）**正在做的同一件事重复**。
+> 实测（12:5x）：bugs 工作区有 BUG-006 的未提交在制品 —— `M team-hub/routes/write-intent.mjs` …
+> 按 LEGION.md「修复分派」：bug 类统一在 bugs 工作区完成。本任务取消，不再重派。
+
+也就是说：**本修复就是 T-183 想要的答案**，任务因"同一件事已经在做"而取消，缺陷本身不取消。
 
 ## 4. 修法
 
@@ -137,16 +191,35 @@ node --test team-hub/write-intent-routes.test.mjs team-hub/claim-reservation.e2e
 反向用例也换成了真正可区分的"永远用 fileDomain"。（另有一条反向用例失败也是**我的变异写错了**：
 `{"not":"an array"}` 是合法 JSON，`JSON.parse` 不会抛；我据此给测试补了"根本不是 JSON"的脏数据。）
 
+### 5.2 第二个自我订正：`live-ab` 自己造过一次**假绿**
+
+`BUG-006-live-ab.mjs` 第一版按"脚本所在目录往上两级"找 `team-hub/team.db`。在 `fix/bugs`
+工作树里跑时，那算到的是**工作树自己的**目录 —— 而 `team-hub/team.db` 是 **gitignored 的本地状态，
+git worktree 之间不共享它**（工作树里那份是 10-04 的旧副本，933KB）。结果：
+
+```
+=== 小结：0 个任务里 0 个的读数在新旧取法下不同     ← 假绿：看着像"没有分叉"
+```
+
+**这与我正在修的缺陷是同一个形状**：一个读数在骗人。修正两处：
+
+- 用 `git rev-parse --git-common-dir` 解析主检出（worktree 安全的通用做法），
+  并允许 `BUG006_ROOT` 覆盖；`repoId` 改为**从库里取**（原先硬编码机器路径，换个机器
+  会算出一堆"无冲突"，是同一个假绿来源）。
+- 加护栏：读不到任何任务 / 库里没有任何预约记录 ⇒ **报错退出**，不打印结论。
+  反向验证：`BUG006_ROOT=<worktree>` ⇒ **exit 1**，不再输出"0 个不同"。
+
 ## 6. 边界与遗留
 
-- **生产中枢未重启**：修复在 `team-hub/`（诊断端点与 store），8787 上仍是旧代码。
-  当时 T-178 / T-179 正在跑且各占一个写入槽 —— 重启会让它们中途看到连接错误，
-  而收益只是一条 curl 的现场对照，**不划算**。验证改用隔离实例（临时库 + 真实端点），
-  这反而比现场 curl 更能**隔离变量**。重启由将军决定时机。
+- **生产中枢已重启（2026-10-05 13:27），修复已在生产上生效**（§3.1 的 `pathsFrom` 判据）。
+  提交时它还没重启 —— 当时 T-178 / T-179 正在跑且各占一个写入槽，为一条 curl 打断两个在跑的任务
+  不划算，所以验证先走隔离实例（临时库 + 真实端点），重启后补了活体对照。
 - **没有顺手改别的**：不动认领/预约语义，不动 `requireTaskDomain`（intent ⊆ fileDomain 那条约束），
   不动 `platformHttpRoutes()` 的路由抽取面。
-- **T-183 本身仍被卡住，且与本次修复无关**：它的 `contention` 报的是
-  `holder=T-178 (reconciling/task-cancelled)` 那类**残留写入资格**（见 T-183 记录），
-  属于"取消没有把预约推到终态"的另一件事。本次修复**不会**解除它的等待。
+- **T-183 自身的"卡住"是另一件事，本次修复不解除它**：它原先报的是
+  `holder=T-178 (reconciling/task-cancelled)` 那类**残留写入资格**（"取消没有把预约推到终态"）。
+  重启后 T-178 已重新认领（`attempt=legacy:T-178:66`、`state=reserved`），那条残留自然消失了 ——
+  **是重启与重认领解决的，不是本次修复**，两者不要混为一谈。现在 T-183 报的是
+  `holder=T-178 state=reserved`：那是**真实的**文件域冲突（两者都要 `team-hub`），读数正确。
 - 我另外确认：`contention` 只看 `write_reservations` 的活跃行（`activeRows`），不看 intent ——
   所以上面 ③ 的"intent 优先"说的是**取哪些路径**，不是"intent 本身构成占用"。

@@ -339,3 +339,91 @@ test('派生只收 http 类就绪判定，不编造其它进程的检查', () =>
   assert.equal(derived.ok, true, derived.reason ?? '')
   assert.deepEqual(derived.spec.checks.map((item) => item.name), ['a'])
 })
+
+// ---------------------------------------------------------------------------
+// ★★★ 两处占位符展开必须语义一致（注释这么写，而此前没有判据守着）
+// ---------------------------------------------------------------------------
+
+test('★★★★ `health.expandStrict` 与 `launcher.expandExpectation` 在共同定义域上必须同结论', async () => {
+  // ★ 这条守的是一句**注释所承诺、而此前没有任何判据守着**的一致性：
+  //
+  //   `health.mjs` 的注释：「严格的占位符展开 —— 语义与 `launcher.mjs` 的
+  //   `expandExpectation` **一致**。」
+  //
+  //   两处各自实现了一遍（不是复用），各自带自检，而**没有任何东西比较过它们**。
+  //   本仓对这个形状是有先例的：`dshPatchPairOf` / `patchPairOf` 是对拍的，
+  //   在途任务那两套词表也是逐字对拍的（`task-state.test.mjs` 去读另一份文件
+  //   抽字面量）。这里补上同一个手法。
+  //
+  //   为什么值得：两者不一致时的症状是**沉默的**——一个占位符在一处展开、
+  //   在另一处抛错，得到的是"身份断言永远不成立"，而它会被误报成"就绪超时"
+  //   （这正是两个实现里各自那段注释想防的事）。
+  //
+  //   > 两处"语义一致"的实现，与一处实现加上一句"另一处也一样"的注释，
+  //   > 在它们开始漂移的那一天不是同一个东西。
+  //
+  //   ★ 定义域要说清：`expandStrict` 是**严格超集**（它还会递归走进对象与数组），
+  //     所以这里只在**共同定义域**上对拍（字符串与普通标量），
+  //     不声称两者在容器上相同——那是"刻意不同"，不是"漂移"。
+  const { expandStrict } = await import('./health.mjs')
+  const { expandExpectation } = await import('../launcher/launcher.mjs')
+
+  const vars = Object.freeze({ port: 51814, ok: true, dir: 'C:\\legion', zero: 0, empty: '' })
+  const cases = [
+    // [输入, 说明]
+    ['{port}', '整串占位符'],
+    ['{ok}', '整串占位符（布尔）'],
+    ['{zero}', '整串占位符（0 —— 不能靠真值判断）'],
+    ['{empty}', '整串占位符（空串 —— 同上）'],
+    ['http://h:{port}/x', '内嵌在字符串里'],
+    ['{port}{port}', '同一变量出现两次'],
+    ['C:\\{dir}\\y', '内嵌在路径里'],
+    ['no-placeholder', '没有占位符'],
+    ['{}', '空花括号不是占位符'],
+    ['{ port }', '带空格的花括号不是占位符'],
+    ['{nope}', '未知变量（整串）'],
+    ['a{nope}b', '未知变量（内嵌）'],
+    ['{port}{nope}', '一个合法 + 一个未知'],
+  ]
+
+  const run = (fn, input) => {
+    try { return { threw: false, value: fn(input, vars) } } catch (error) { return { threw: true } }
+  }
+
+  for (const [input, label] of cases) {
+    const a = run(expandStrict, input)
+    const b = run(expandExpectation, input)
+    // ★ 判据是"**同结论**"，不是"同一个值"：抛错时两边的文案**允许**不同
+    //   （各自提到了自己的使用场景），所以在两种实现之间**不**比对消息。
+    assert.equal(a.threw, b.threw,
+      `${label}（${JSON.stringify(input)}）：一边抛错一边没抛 —— `
+      + `expandStrict=${a.threw ? '抛' : JSON.stringify(a.value)}，`
+      + `expandExpectation=${b.threw ? '抛' : JSON.stringify(b.value)}`)
+    if (!a.threw) {
+      assert.deepEqual(a.value, b.value, `${label}（${JSON.stringify(input)}）：两处展开结果不同`)
+      // 整串占位符必须保留**原类型**（两处都要）——这是最有价值的那条子性质。
+      if (/^\{[a-zA-Z0-9_]+\}$/.test(input)) {
+        assert.equal(typeof a.value, typeof vars[input.slice(1, -1)],
+          `${label}：整串占位符没有保留原类型`)
+      }
+    }
+  }
+
+  // ★ 非字符串标量：两处都必须原样返回（不抛、不改）。
+  for (const scalar of [0, 1, true, false, null, undefined]) {
+    const a = run(expandStrict, scalar)
+    const b = run(expandExpectation, scalar)
+    assert.equal(a.threw, false)
+    assert.equal(b.threw, false)
+    assert.equal(a.value, scalar)
+    assert.equal(b.value, scalar)
+  }
+
+  // ★ 而容器是**刻意**的分歧，写下来免得下一个人以为是漏了一处：
+  //   `expandStrict` 递归进去（就绪判据的形状是 `{ port: '{teamHubPort}' }`），
+  //   而 `expandExpectation` 的调用点只喂标量。断言这个分歧**是真的**。
+  assert.equal(expandStrict({ port: '{port}' }, vars).port, 51814,
+    'expandStrict 不再递归走进对象了 —— 那么 health 那边"整串替换真的数字"会失效')
+  assert.deepEqual(expandExpectation({ port: '{port}' }, vars), { port: '{port}' },
+    'expandExpectation 开始递归了 —— 两处的分歧说明需要更新')
+})

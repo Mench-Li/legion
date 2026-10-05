@@ -13,7 +13,7 @@ WorkingDirectory=/srv/legion-hub/app
 ExecStart=/usr/bin/node /srv/legion-hub/app/product/server/backup.mjs \
   --db /var/lib/legion-hub/team.db \
   --out /var/lib/legion-hub/backups \
-  --passphrase-file /etc/legion-hub/backup.passphrase \
+  --passphrase-file /var/lib/legion-hub/backup.passphrase \
   --keep 7
 # 失败要留痕：备份失败却报"成功"，与没有备份是同一个东西。
 # `Type=oneshot` + 非零退出码会让 `systemctl --failed` 看得见它。

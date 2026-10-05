@@ -8,10 +8,14 @@
 #   目录属于 root 时它会以 SQLite 的 "unable to open database" 失败——
 #   那句话读起来像"库坏了"，真实原因是权限。
 install -d -m 0700 -o legion-hub -g legion-hub /var/lib/legion-hub/backups
-# ★ 口令文件同理要属于备份用户，否则 gpg 之前的可读性检查就会拒。
-openssl rand -base64 48 | tr -dc 'A-Za-z0-9' | head -c 40 > /etc/legion-hub/backup.passphrase
-chmod 600 /etc/legion-hub/backup.passphrase
-chown legion-hub:legion-hub /etc/legion-hub/backup.passphrase
+# ★ 口令放在**数据目录**里，不放 /etc/legion-hub/。
+#   原因实测过：/etc/legion-hub 是 0700 root，而备份以 legion-hub 运行——
+#   它连 stat 都做不到，脚本会报"口令文件不存在"，而人会去找一个其实存在的文件
+#   （`existsSync` 把 EACCES 吞成了 false）。
+#   数据目录本来就是 0700 legion-hub，口令放这里既够隐蔽也够得着。
+openssl rand -base64 48 | tr -dc 'A-Za-z0-9' | head -c 40 > /var/lib/legion-hub/backup.passphrase
+chmod 600 /var/lib/legion-hub/backup.passphrase
+chown legion-hub:legion-hub /var/lib/legion-hub/backup.passphrase
 
 cp /srv/legion-hub/app/product/server/legion-hub-backup.service /etc/systemd/system/
 cp /srv/legion-hub/app/product/server/legion-hub-backup.timer   /etc/systemd/system/

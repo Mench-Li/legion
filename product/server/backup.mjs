@@ -31,7 +31,7 @@
 //   node product/server/backup.mjs --db <team.db> --out <备份目录> [--passphrase-file <路径>] [--keep N]
 //   node product/server/backup.mjs --verify <备份文件> --passphrase-file <路径>
 // ============================================================================
-import { closeSync, existsSync, mkdirSync, openSync, readFileSync, readdirSync, rmSync, statSync, unlinkSync, writeSync } from 'node:fs'
+import { closeSync, existsSync, mkdirSync, openSync, readdirSync, rmSync, statSync, unlinkSync } from 'node:fs'
 import { basename, dirname, join, resolve } from 'node:path'
 import { spawnSync } from 'node:child_process'
 import { DatabaseSync } from 'node:sqlite'
@@ -205,8 +205,29 @@ function main() {
     //   合成一句"读取失败"会让人去重新生成一个已经存在的口令，
     //   而那会让**此前所有备份都解不开**。
     if (!existsSync(passPath)) {
-      warn(`口令文件不存在：${passPath}`)
-      warn('  生成一个：openssl rand -base64 48 | tr -dc \'A-Za-z0-9\' | head -c 40 > <路径>; chmod 600 <路径>')
+      // ★ 「不存在」有**两种**成因，而它们的修法不同：
+      //   ① 真的没生成；
+      //   ② 文件在、但**父目录**对本进程不可穿越（`existsSync` 会把 EACCES 吞成 false）。
+      //   实测踩过 ②：口令放在 `/etc/legion-hub/`（`0700 root`），
+      //   而备份以 `legion-hub` 跑 —— 它连 stat 都做不到，于是这里报"不存在"，
+      //   而人去找一个已经存在的文件。
+      const parent = dirname(passPath)
+      let parentReachable = false
+      try { const fd = openSync(parent, 'r'); closeSync(fd); parentReachable = true } catch { parentReachable = false }
+      warn(`口令文件读不到（existsSync=false）：${passPath}`)
+      warn(parentReachable
+        ? '  父目录可进入，所以它大概是真的不存在。生成一个：'
+        : `  ⚠ **父目录 ${parent} 对本进程不可进入**（existsSync 会把权限错误吞成 false）。`)
+      if (!parentReachable) {
+        const st = (() => { try { return statSync(parent) } catch { return null } })()
+        if (st !== null) warn(`     目录所有权 uid=${st.uid} gid=${st.gid} mode=${(st.mode & 0o777).toString(8)}；本进程 uid=${process.getuid?.() ?? '?'}`)
+        warn('     修法：把口令放到备份用户能到的位置（推荐数据目录内），而不是放宽目录权限。')
+        warn(`       mv ${passPath} /var/lib/legion-hub/backup.passphrase`)
+        warn('       chown legion-hub:legion-hub /var/lib/legion-hub/backup.passphrase')
+        warn('       chmod 600 /var/lib/legion-hub/backup.passphrase')
+      } else {
+        warn('    openssl rand -base64 48 | tr -dc \'A-Za-z0-9\' | head -c 40 > <路径> && chmod 600 <路径>')
+      }
       warn('  ⚠ **不要**在已有备份之后重新生成——那会让此前每一份备份都解不开。')
       rmSync(rawPath, { force: true })
       return 1

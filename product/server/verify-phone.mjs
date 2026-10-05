@@ -11,18 +11,22 @@
 // 口令从文件读、令牌只在本进程内存里——**都不打印**。
 // 用法（在服务器上）：node product/server/verify-phone.mjs [baseUrl]
 // ============================================================================
-import { readFileSync } from 'node:fs'
+import { readCredentials } from './read-credentials.mjs'
 
 const BASE = process.argv[2] ?? 'https://legion-si.online'
-// 口令文件由 bootstrap 步骤写入 `/etc/legion-hub/`（那目录是 0700 root，
-// 而本脚本按设计以 root 跑）。**不**放在数据目录里：数据目录属于 legion-hub，
-// 而这是一次性的引导凭据，不该长期留在服务账号能读到的地方。
+// 口令来源：`LEGION_PW_FILE` 指到哪就用哪。`.json` 结尾按**纯 JSON** 解析
+// （`{ user_name, password }`），其余按纯文本。
+//
+// ★ 用 `readCredentials` 而不是自己 `readFileSync().trim()`：
+//   实测踩过——人写的「新口令：<值>」那一行在冒号后带了**两个不可见字符**，
+//   按行解析把它读成了口令的一部分，表现是"口令不正确"，而人看到的是一串方块。
+//   那条路径现在会被**具名拒绝**（`CREDENTIALS_UNPRINTABLE`），
+//   而不是等到登录失败才发现。
 const PW_FILE = process.env.LEGION_PW_FILE ?? '/etc/legion-hub/first-admin-password.txt'
-const USER = process.env.LEGION_ADMIN_NAME ?? 'legion'
+const creds = readCredentials(PW_FILE)
+const USER = process.env.LEGION_ADMIN_NAME ?? creds.userName ?? 'legion'
 const SPACE = process.env.LEGION_SPACE ?? 'default'
-
-let password
-try { password = readFileSync(PW_FILE, 'utf8').trim() } catch { password = process.env.LEGION_PW ?? '' }
+const password = creds.password
 
 const results = []
 const check = (label, ok, detail = '') => {

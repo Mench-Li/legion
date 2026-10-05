@@ -2,7 +2,7 @@
   "$comment": "PRT-007 旧系统平台契约基线。由 scripts/prt/baseline-snapshot.mjs 生成；不含时间戳以便逐字节 diff。漂移由 sources 的 sha256 归因。",
   "version": 1,
   "sources": {
-    "team-hub/server.mjs": "09e38da78978a598668ed0f6339fa2089950c3483b7fba4191740bb8b1aa149f",
+    "team-hub/server.mjs": "bbec79be830ced410c999e687a09689597206adde39cebd878c693960c9becd8",
     "team-hub/permission-engine.mjs": "ad399442a1bb50f5a5796126caf402f114462e6b9f60735e24380d7a8672350f",
     "team-hub/run-store.mjs": "ac9992fcf1feaf60d964865a9f777a7470ec4897884356a648d3c24e6002a33d",
     "team-hub/model-store.mjs": "2d2cc90f9a4d357e9138b7e9933ce68215fd32d4d5cfe7179d63cf8f015d78e8",
@@ -19,7 +19,7 @@
     "team-hub/pack-facts.mjs": "c0d2254e615a80613417c01d59aeb701e578720fa0c67fe15ff9435efa916d69",
     "team-hub/connector-store.mjs": "0e76e269728b97417fc17d878815ad73aa004e63acb7d2e0f3a96015e0d6f379",
     "team-hub/role-pack-store.mjs": "685f776d55ec84d56b876b5207a5d913e6dc226cd371f3fc332d4f4941c5209f",
-    "team-hub/agent-conversations.mjs": "22ece2c62dc707e7c8d997116c849dea656b6d30e1212c9ce0db8b35508eb930",
+    "team-hub/agent-conversations.mjs": "ddd5d50d24c14ce4291fca37dc56861e26c3ccbf8160f1cee0e59da5127c23ba",
     "team-hub/channel-store.mjs": "09f6f2ee6045790630c21bb65bec5d50afc9dc650ba2bc94e39ed1613ef18539",
     "team-hub/delivery-store.mjs": "8f5149b2400d6264936f387e667d042334fed239920f0ea4f74f64b9688d4a9f",
     "team-hub/harness-store.mjs": "54d241ccd4ad5f374d959c2b11f2753ed4333847ec3c1a9c3fc9132ef1b0b70a",

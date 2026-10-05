@@ -561,6 +561,23 @@ async function stageTest() {
         //     在 CI 里跑着，而**桌面这一半从来没有**。于是"挡住了启动"有人守，
         //     "挡住之后对用户说了什么"没人守——而后者才是用户真正看到的东西。
         'desktop/main.test.mjs',
+        // ★ 桌面与 Launcher 之间的那种进程边界桥：**更新接线层从它读端口**。
+        //
+        //   `desktop/main.mjs:14` 按路径装载 `product/launcher/desktop-bridge.mjs`，
+        //   把它作为 `bridge` 交给 `update-wiring.mjs` 的 `readLauncherPorts()`，
+        //   而那个读数是**健康探针规格**里端口那一项的来源。所以这两个文件
+        //   不是"桌面杂项"，而是更新链路上的一环：
+        //
+        //     main.mjs ──装载──▶ desktop-bridge.mjs ──▶ readLauncherPorts()
+        //                              │                        │
+        //                              └── speak ──▶ desktop-protocol.mjs ──▶ healthProbeSpec.ports
+        //
+        //   ⚠️ 本仓此前**没有**登记它们，而我在 §6.1 里把理由写成"与自动更新
+        //      无关"。那句话是错的（见 §5 的 ㊷）——我核对的是"文件名里有没有
+        //      update"，而不是"更新链路会不会走到它"。这两个文件都实测是绿的
+        //      （11 + 3 条），所以登记它们只减不减红：未登记数 30 → 28。
+        'product/launcher/desktop-bridge.test.mjs',
+        'product/launcher/desktop-protocol.test.mjs',
         'desktop/scripts/shell-files.test.mjs',
         'desktop/scripts/update-payload.test.mjs',
         'scripts/update/publish.test.mjs',

@@ -7534,6 +7534,7 @@ import { createUserStore } from './user-store.mjs'
 import { createDeviceStore } from './device-store.mjs'
 import { createNodeGateway } from './node-gateway.mjs'
 import { createNodeContextPreparer } from './node-context.mjs'
+import { createNodeRecovery } from './node-recovery.mjs'
 import { PUBLIC_PATHS, decideRemoteAuth, extractBearer } from './remote-auth.mjs'
 
 /** 远程通道是否启用：配了身份签名密钥即启用。 */
@@ -7583,6 +7584,17 @@ const nodeContextPreparer = REMOTE_AGENT_ENABLED
       record: (snapshot, opts) => contextStore().record(snapshot, opts),
     },
   })
+  : null
+
+/**
+ * 远程节点的租约回收与预约结清（`node-recovery.mjs`）。
+ *
+ * `externalEffectPossible` **默认对一切在途状态返回 true** —— 逾期的远端尝试
+ * 可能已经在电脑上产生了副作用（推到远端、删了文件、付了款），
+ * 两条出口里「可重试」会重复执行而「未知」只是要人对账，代价不对称。
+ */
+const nodeRecovery = REMOTE_AGENT_ENABLED
+  ? createNodeRecovery({ db, runStore, writeIntentStore, audit })
   : null
 
 export const nodeGateway = REMOTE_AGENT_ENABLED
@@ -7643,6 +7655,28 @@ if (REMOTE_AGENT_ENABLED) {
   router.families.unshift(createMobileRoutes({ root: join(ROOT, 'workbench', 'mobile') }))
 
   nodeGateway.attach(server)
+
+  // 远程节点的租约回收。**必需**，理由见 `node-recovery.mjs` 文件头：
+  // 本机 worker 会自己回收自己的租约，而远程节点断线/关机后没有任何人收拾它留下的
+  // 租约——那条租约占着单写者位，于是**所有**新任务都领不到
+  // （`claim` 返回 `file-contention`，界面上只是"任务不动"）。
+  //
+  // 30s：与投递回收、自动化 tick 同一个量级。`unref()`：一个会阻止进程退出的
+  // 定时器与一个关不掉的后台任务是同一个东西（测试进程会因此永远不结束）。
+  setInterval(() => {
+    try {
+      const r = nodeRecovery.sweepOnce()
+      if (r.errors.length > 0) {
+        console.warn(`[node-recovery] 回收有失败项：${r.errors.map((e) => `${e.phase}:${e.message}`).join('；')}`)
+      }
+      // 只在**真的动了东西**时打一行：每 30 秒重印"什么都没做"是噪音。
+      if (r.leasesRecovered > 0 || r.reservationsReleased > 0) {
+        console.log(`[node-recovery] 到期租约 ${r.leasesRecovered} 条；结清预约 ${r.reservationsReleased} 条`)
+      }
+    } catch (e) {
+      console.warn(`[node-recovery] 回收崩了（下一轮再试）：${e instanceof Error ? e.message : String(e)}`)
+    }
+  }, 30000).unref()
 }
 
 export { PUBLIC_PATHS }

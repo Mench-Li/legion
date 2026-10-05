@@ -401,6 +401,57 @@ test('屏障：不能被另一个事务抢占，也不能被非持有者解除',
   assert.equal(readBarrier(ctx.dataDir).blocked, false)
 })
 
+test('★★★ 屏障：解除时**不说明身份**也必须被拒（"少传一个参数"不能绕过持有者判据）', async (t) => {
+  // ★ 这条守的是一个**潜伏的 fail-open**。原先的持有者判据是
+  //
+  //     if (state.barrier !== null && typeof txnId === 'string' && txnId !== ''
+  //         && state.barrier.txnId !== txnId) { …拒… }
+  //
+  //   三个条件**串在**一起。于是 `releaseBarrier(dataDir)`（不传 txnId）让中间
+  //   两个条件为假 → 整个 if 短路 → 直接走到 `rmSync` → **一次不声明身份的
+  //   调用把正在进行的升级屏障删掉了**，而这个函数自己的注释写的是
+  //   "只有持有者能解"。
+  //
+  //   今天没有生产调用方犯这个错（install.mjs 与 helper.mjs 全都传了 txnId），
+  //   所以它不会在真实链路里发作——**这条用例是仅有的守卫**。它要防的不是
+  //   今天有人踩，而是**下一个人写 `releaseBarrier(dataDir)` 时看起来完全
+  //   合理**（"我只是想清掉它"）。
+  //
+  //   代价不对称：拒绝一次多余的解除（调用方补上 txnId 即可）对比在备份/切换
+  //   中途把屏障解掉（写入重新涌入，而备份已经建立）。所以默认是拒。
+  const ctx = setup(t)
+  assert.equal(acquireBarrier({ dataDir: ctx.dataDir, txnId: 'ut-owner', now: () => NOW }).ok, true)
+
+  // 各种"没有身份"的形状都算：不给、给 undefined、给空串。
+  for (const args of [[ctx.dataDir], [ctx.dataDir, undefined], [ctx.dataDir, ''], [ctx.dataDir, null]]) {
+    const r = releaseBarrier(...args)
+    assert.equal(r.ok, false, `没有 txnId 时居然解除了屏障（参数 ${JSON.stringify(args.slice(1))}）`)
+    assert.equal(r.code, 'barrier-no-txn-id')
+    assert.equal(readBarrier(ctx.dataDir).blocked, true,
+      `屏障被"没有身份的解除"删掉了（参数 ${JSON.stringify(args.slice(1))}）`)
+  }
+
+  // 持有者仍然解得掉——否则上面那条只是"谁都解不掉"。
+  assert.equal(releaseBarrier(ctx.dataDir, 'ut-owner').ok, true)
+  assert.equal(readBarrier(ctx.dataDir).blocked, false)
+  // 而且"本来就没有屏障"时，不带身份也是幂等的成功（什么都没删）。
+  assert.equal(releaseBarrier(ctx.dataDir).ok, true)
+  assert.equal(releaseBarrier(ctx.dataDir).code, 'barrier-none')
+})
+
+test('★★ 屏障：**读不出来**时同样拒绝不带身份的解除（那是最不该被顺手删的一种）', async (t) => {
+  // 设计 line 21-29 的判据是"读不出来时按被挡住处理"。一个损坏的屏障恰恰
+  // 最不该被"我只是想清掉它"顺手删掉——而删它的后果正是那道判据要防的。
+  const ctx = setup(t)
+  mkdirSync(join(ctx.dataDir, 'update'), { recursive: true })
+  writeFileSync(join(ctx.dataDir, 'update', 'maintenance.json'), '{ half written', 'utf8')
+  const r = releaseBarrier(ctx.dataDir)
+  assert.equal(r.ok, false)
+  assert.equal(r.code, 'barrier-no-txn-id')
+  assert.equal(existsSync(join(ctx.dataDir, 'update', 'maintenance.json')), true,
+    '损坏的屏障被不带身份的解除删掉了')
+})
+
 test('屏障：启动闸门在没有事务时放行，有事务时拦住并给建议', async (t) => {
   const ctx = setup(t)
   assert.equal(startupGate({ dataDir: ctx.dataDir }).allowed, true)

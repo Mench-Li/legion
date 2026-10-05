@@ -42,6 +42,9 @@ export const BARRIER_CODES = Object.freeze({
   HELD: 'barrier-held',
   UNREADABLE: 'barrier-unreadable',
   FOREIGN: 'barrier-foreign-txn',
+  // 解除时没说明是哪个事务。它与 FOREIGN（说的是"你不是持有者"）分开，
+  // 因为处置不同：FOREIGN 要去问持有者，NO_TXN_ID 是自己把参数补上。
+  NO_TXN_ID: 'barrier-no-txn-id',
 })
 
 /** 维护屏障的固定位置（与事务日志同目录，helper 与各服务都要找得到）。 */
@@ -140,13 +143,45 @@ export function readBarrier(dataDir) {
  * 参数里传 `txnId` 而不是"随便解"，是因为解除屏障必须与"事务已提交"
  * 绑定：一个"谁都能解"的屏障在一次崩溃之后会被下一次启动顺手解掉，
  * 而那次崩溃可能正停在"数据库已迁移、程序未验证"的位置。
+ *
+ * ★★ `txnId` 缺失时**必须拒绝**，而不是"没有持有者声明就直接删"。
+ *
+ *   原先的持有者判据写的是
+ *   `if (state.barrier !== null && typeof txnId === 'string' && txnId !== '' && …)`
+ *   ——三个条件**串在**一起。于是 `releaseBarrier(dataDir)`（不传 txnId）
+ *   会让中间那两个条件为假、整个 `if` 短路、代码直接走到 `rmSync`：
+ *   **一次不声明身份的调用把正在进行的升级屏障删掉了**，而函数自己的注释
+ *   写的是"只有持有者能解"。
+ *
+ *   今天没有生产调用方犯这个错（install.mjs 与 helper.mjs 全都传了 txnId），
+ *   所以它是一个**潜伏的 fail-open**：判据在，但它的成立条件可以被"少传一个
+ *   参数"绕过。这类洞的危险不在于今天有人踩，而在于**下一个人写
+ *   `releaseBarrier(dataDir)` 时看起来完全合理**——"我只是想清掉它"。
+ *
+ *   代价不对称：拒绝一次多余的解除（调用方补上 txnId 即可）对比
+ *   在备份/切换中途把屏障解掉（写入重新涌入，而备份已经建立）。所以默认是拒。
+ *
+ *   > 一个"少传一个参数就失效"的守卫，与没有守卫的区别只在于
+ *   > **它让人以为有守卫**。
  */
 export function releaseBarrier(dataDir, txnId) {
   const state = readBarrier(dataDir)
+  // 本来就没有屏障：这是**幂等**的成功，什么都不会被删。
   if (!state.blocked && state.code === BARRIER_CODES.NONE) {
     return Object.freeze({ ok: true, code: BARRIER_CODES.NONE, reason: '本来就没有屏障' })
   }
-  if (state.barrier !== null && typeof txnId === 'string' && txnId !== '' && state.barrier.txnId !== txnId) {
+  // ★ 有屏障（含"读不出来"）时必须声明身份。读不出来也拒，理由同上：
+  //   一个损坏的屏障恰恰是最不该被顺手删掉的那一种。
+  if (typeof txnId !== 'string' || txnId === '') {
+    return Object.freeze({
+      ok: false, code: BARRIER_CODES.NO_TXN_ID,
+      reason: '解除维护屏障必须说明是哪个事务（缺少 txnId）：'
+        + `当前屏障属于 ${state.barrier?.txnId ?? '（读不出来）'}，`
+        + '不声明身份的解除会被拒绝——屏障存在的意义就是不让别人顺手解掉它',
+      barrier: state.barrier,
+    })
+  }
+  if (state.barrier !== null && state.barrier.txnId !== txnId) {
     return Object.freeze({
       ok: false, code: BARRIER_CODES.FOREIGN,
       reason: `维护屏障属于事务 ${state.barrier.txnId}，${txnId} 不能解除它`,
@@ -232,6 +267,27 @@ export function selfCheckBarrier() {
   // ★ 读不出来时 `blocked` 必须是 true。
   const state = readBarrier(join(process.cwd(), '.no-such-legion-dir'))
   if (state.blocked !== false) problems.push('不存在的屏障被判为 blocked')
+  /**
+   * ★★ 解除屏障的两条判据，这里各问一句。
+   *
+   * 1. "没有屏障"时**不带 txnId 也必须成功**（幂等：什么都没删）。
+   * 2. 而"有屏障"时**不带 txnId 必须失败**——这一条需要盘上真的有一个屏障，
+   *    所以它由 `install.test.mjs` 的用例守着（`barrier-no-txn-id`）。
+   *    装载期自检**故意不建临时目录**：自检跑在每次 import 上，而"为了自检
+   *    往磁盘写东西"会让产品在只读安装目录里起不来——用一个更严重的故障
+   *    去防一个更轻的故障，不划算。
+   *
+   *    但错误码必须真的在表里：少了它，上面那条用例会以一个
+   *    `undefined === 'barrier-no-txn-id'` 的形式失败，而症状看起来像
+   *    别的地方坏了。
+   */
+  const noTxnOnEmpty = releaseBarrier(join(process.cwd(), '.no-such-legion-dir'))
+  if (noTxnOnEmpty.ok !== true || noTxnOnEmpty.code !== BARRIER_CODES.NONE) {
+    problems.push('没有屏障时，不带 txnId 的解除应当是幂等成功（什么都没删）')
+  }
+  if (typeof BARRIER_CODES.NO_TXN_ID !== 'string' || BARRIER_CODES.NO_TXN_ID === '') {
+    problems.push('缺少"解除时未声明事务身份"的错误码')
+  }
   return Object.freeze({
     ok: problems.length === 0,
     problems: Object.freeze(problems),

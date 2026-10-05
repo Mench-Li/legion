@@ -41,6 +41,26 @@ export const HOST_CODES = Object.freeze({
   CROSS_ORIGIN: 'host-cross-origin',
   BAD_STATUS: 'host-bad-status',
   BAD_CACHE: 'host-bad-cache',
+  // ★ 路径的形状不是"树内相对路径"。
+  //
+  //   这个码守的是一条**接缝**：本模块里的路径有**两种形状**，而它们长得很像——
+  //
+  //     · 传进 `joinUrl()` / `artifactUrl()` 的：树内相对（`releases/x.zip`），
+  //       由 `joinUrl` 拼上 `origin + prefix`；
+  //     · 传进 `evaluateResponse()` / `expectedCacheControl()` 的：**同样**是
+  //       树内相对，**不带前缀**。
+  //
+  //   ★ 一旦把"带前缀的 URL 路径"（`/test/legion/feeds/x.json`）喂给后者，
+  //     `expectedCacheControl` 会因为它不以 `feeds/` 开头而**当作发行路径**，
+  //     于是要求它带 `immutable`——报出来的是一句"**发行文件**应包含 immutable"，
+  //     而那个路径明明是通道清单。**它不报"路径形状不对"，它报一个错的诊断。**
+  //
+  //   > 一个错形状的输入，如果落在"另一条分支"上，
+  //   > 得到的是一个**看起来与形状无关**的错误结论。
+  //
+  //   所以这里把它变成具名拒绝，并把"只认这两种路径开头"也一起钉住：
+  //   设计 §4 的目录布局里**只有** `feeds/` 与 `releases/` 两类路径。
+  BAD_PATH: 'host-bad-path',
   REDIRECT: 'host-redirect',
   // ★ 这个表里原本还有一个"长度"码，已删除。它与 `transport.mjs` 里那个
   //   `BAD_HEADERS: 'net-bad-headers'` 是**同一个缺陷**：声明了却
@@ -204,7 +224,44 @@ export function isSameOrigin(candidate, host) {
   return Object.freeze({ ok: true, code: null, reason: null, url: candidate })
 }
 
-/** 这条路径期望的 `Cache-Control`（供客户端核对与发布端自检共用）。 */
+/**
+ * 树内相对路径的形状判据（设计 §4 的目录布局里**只有**这两类路径）。
+ *
+ * ★ 单独抽出来，是因为它必须**也是自检的一部分**——见 `selfCheckHost()`。
+ *   一条只被"调用方记得传对"守着的约定，与一条写在代码里的判据不是一回事。
+ */
+function relativePathShape(relativePath) {
+  if (typeof relativePath !== 'string' || relativePath === '') {
+    return Object.freeze({
+      ok: false,
+      problem: hostProblem(HOST_CODES.BAD_PATH, `响应核对的路径必须是非空字符串，实际 ${JSON.stringify(relativePath)}`),
+    })
+  }
+  if (!relativePath.startsWith('feeds/') && !relativePath.startsWith('releases/')) {
+    // 这里同时挡住两类输入，理由不同但后果一样：
+    //   · 带前缀的 URL 路径（`/test/legion/feeds/x.json`）——**最容易犯的**，
+    //     因为 `feedUrl()` 返回的就是那个形状，而 `joinUrl` 与 `evaluateResponse`
+    //     对"相对"的定义**恰好相反**（前者要树内相对再拼前缀，后者要的已经是
+    //     拼完之后的树内相对）。
+    //   · 打错的路径（`feed/…`）——会被当成发行路径。
+    return Object.freeze({
+      ok: false,
+      problem: hostProblem(HOST_CODES.BAD_PATH,
+        `${relativePath} 不是树内相对路径：必须以 feeds/ 或 releases/ 开头，`
+        + '且**不带** URL 前缀（带前缀的路径会被当成发行路径，从而报出一个与路径无关的缓存结论）；'
+        + `允许的两类见设计 §4 的目录布局`),
+    })
+  }
+  return Object.freeze({ ok: true, problem: null })
+}
+
+/**
+ * 这条路径期望的 `Cache-Control`（供客户端核对与发布端自检共用）。
+ *
+ * ★ 输入必须是**树内相对路径**（`feeds/…` 或 `releases/…`），**不带** URL 前缀。
+ *   形状不对时**先拒**，见 `evaluateResponse` 里的 `HOST_CODES.BAD_PATH`——
+ *   这个函数自己没法报错（它返回一个字符串），所以判据放在调用方那唯一一处。
+ */
 export function expectedCacheControl(relativePath) {
   return relativePath.startsWith('feeds/') ? FEED_CACHE_CONTROL : RELEASE_CACHE_CONTROL
 }
@@ -212,11 +269,18 @@ export function expectedCacheControl(relativePath) {
 /**
  * 核对一次响应的头。
  *
- * @param {string} relativePath
+ * @param {string} relativePath **树内相对路径**（`feeds/…` / `releases/…`），不是 URL
  * @param {{status: number, headers: Record<string,string>}} response
  */
 export function evaluateResponse(relativePath, { status, headers = {} } = {}) {
   const problems = []
+  const shape = relativePathShape(relativePath)
+  if (!shape.ok) {
+    // ★ 形状不对时**直接返回**，不再往下判缓存头：一条"路径形状不对"的结论
+    //   比一句"发行文件应包含 immutable"有用得多，而后者正是继续往下走会得到的
+    //   （见 `HOST_CODES.BAD_PATH` 的说明）。
+    return Object.freeze({ ok: false, problems: Object.freeze([shape.problem]) })
+  }
   if (status !== 200) {
     problems.push(hostProblem(HOST_CODES.BAD_STATUS, `${relativePath} 返回 HTTP ${status}，期望 200`))
   }
@@ -369,6 +433,25 @@ export function selfCheckHost() {
   if (releaseBad.ok) problems.push('缺 immutable 的发行缓存头被接受了')
   const notFound = evaluateResponse('feeds/stable/win-x64.json', { status: 404, headers: { 'cache-control': 'no-store' } })
   if (notFound.ok) problems.push('404 被当成了成功响应')
+
+  // ★ 路径形状：把"带前缀的 URL 路径"喂进来必须得到**路径结论**，
+  //   而不是一句"发行文件应包含 immutable"（那是错分支的诊断）。
+  for (const badPath of ['/test/legion/feeds/stable/win-x64.json', 'feed/stable/win-x64.json', '', 'feeds']) {
+    const shaped = evaluateResponse(badPath, { status: 200, headers: { 'cache-control': 'no-store' } })
+    if (shaped.ok) { problems.push(`路径形状不对却被接受了：${JSON.stringify(badPath)}`); continue }
+    if (shaped.problems[0]?.code !== HOST_CODES.BAD_PATH) {
+      problems.push(`路径 ${JSON.stringify(badPath)} 的拒绝码是 ${shaped.problems[0]?.code}，期望 ${HOST_CODES.BAD_PATH}`)
+    }
+  }
+  // ★ 对照：**同一个**带前缀的路径，用 `artifactUrl` 的入口却是合法的——
+  //   这正说明"两种形状长得很像"不是假想。没有这条对照，上面那四条
+  //   可能只是因为"evaluateResponse 什么都不接受"。
+  const prefixedViaArtifact = artifactUrl(prod.host, 'releases/rel-1/legion-win-x64.zip')
+  if (!prefixedViaArtifact.ok) problems.push(`树内相对路径在 artifactUrl 那一侧被拒了：${prefixedViaArtifact.reason}`)
+  if (!feedUrl(prod.host).endsWith('/feeds/stable/win-x64.json')) problems.push('feedUrl 的形状变了（它返回带前缀的 URL）')
+  // 而 `evaluateResponse` 收的**不是**那个形状。
+  const fromFeedUrl = evaluateResponse(feedUrl(prod.host), { status: 200, headers: { 'cache-control': 'no-store' } })
+  if (fromFeedUrl.ok) problems.push('把 feedUrl() 的返回值直接喂给 evaluateResponse 却通过了——接缝判据失效')
 
   // 重定向。
   if (!evaluateRedirect('https://updates.example.com/legion/a.json', '/legion/b.json', prod.host).ok) {

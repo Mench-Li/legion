@@ -560,6 +560,16 @@ async function stageTest() {
         //   少了这条，`envelope.applyTrustUpdate()` 就是一个生产里调用方数为 0
         //   的函数——那种东西与不存在的函数在部署上是同一个东西。
         'scripts/update/rotation.test.mjs',
+        // ★ 托管 nginx 配置**生成器**的判据。仓库里原先只有"核对托管对不对"的
+        //   `verify-host.mjs`，没有任何东西能把它**建对**——那份配置只存在于
+        //   托管机的 `/etc/nginx/sites-available/` 上。加了这个生成器之后，
+        //   "`UPLOAD_TARGETS` 声明的每棵树都要有落点"才第一次成为一条可跑的判据
+        //   （当时生产前缀 `/legion` 在托管上根本没有 location，而按
+        //   `upload-plan.txt` 走完生产发布之后，回读那一步必然 404）。
+        //   其中最有价值的一条是把渲染出的缓存头**再喂回** `host.mjs` 的
+        //   `evaluateResponse()` —— 生成器与验证器用同一个函数连起来，
+        //   两处就不可能各自漂移。
+        'scripts/update/host-config.test.mjs',
       ],
       cwd: ROOT,
     },

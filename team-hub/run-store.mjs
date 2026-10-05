@@ -30,6 +30,7 @@
 import {
   ATTEMPT_STATES,
   DEFAULT_BACKOFF,
+  isActiveAttemptState,
   isKnownAttemptState,
   recoveryDecision,
   retryDelayMs,
@@ -1145,6 +1146,20 @@ export function createRunStore({
   // Called inside the claim transaction, after the Attempt ID is known and
   // before the lease is granted. A failed reservation rolls the Attempt back.
   reserveWrite = null,
+  /**
+   * 心跳里的**写入预约**续期（可选端口，形状与 `reserveWrite` 对称）。
+   *
+   * 与租约续期在**同一次事务**里发生：两条寿命一旦分开，就会漂移成
+   * "租约是新鲜的、预约已经过期"，而按 `expires_at_ms` 判定的路径
+   * （`sweepExpiredLeases`、运维诊断）会把一个**正在心跳的活任务**
+   * 读成"进程未确认退出"。
+   *
+   * 端口**不返回 ok 不抛错**：预约层的状况（没有预约、正在对账冻结、epoch 过期）
+   * 是心跳应答里要说出去的事实，不是让心跳本身失败的理由——心跳失败会让 worker
+   * 置 `leaseMayBeLost` 并停手，那是**另一个**读数。结果原样放进返回值
+   * 的 `writeReservation` 字段。
+   */
+  renewWrite = null,
   onWriteContention = null,
   deliveryStateForTask = null,
   integrationMode = false,
@@ -1634,10 +1649,47 @@ export function createRunStore({
           '这条尝试随时可能被回收并交给别人，立即停止副作用并等待回收',
           { leaseExpiresAtMs: row.lease_expires_at_ms, serverTimeMs: atMs })
       }
-      const expiresAtMs = atMs + ttl
-      db.prepare("UPDATE run_attempts SET lease_expires_at_ms = ?, updated_at_ms = ? WHERE id = ? AND lease_epoch = ? AND state = 'Leased'")
-        .run(expiresAtMs, atMs, attemptId, epoch)
-      return Object.freeze({ ok: true, attemptId, leaseEpoch: epoch, leaseExpiresAtMs: expiresAtMs, serverTimeMs: atMs, ignoredClientFields: Object.freeze(ignoredClientFields) })
+      // ── 租约续期：只在**真的还持有租约**的状态里发生 ──────────────────────
+      //
+      // 原来这一句写死了 `AND state = 'Leased'`。而 `Leased` 只覆盖"已认领、还没
+      // 开始干活"那一小段——尝试一旦走到 `PreparingWorkspace` / `BuildingContext` /
+      // `Running`（**每一次真实执行**都要走的那三个），这条 UPDATE 就静默地影响
+      // 0 行，而返回值照样报一个 `atMs + ttl` 的到期时间：**心跳在撒谎**。
+      //
+      // 后果不是"少续了一次"：认领时写下的 `lease_expires_at_ms` 会照常到点，
+      // 而远端回收器正是按 `lease_expires_at_ms <= now` 判定（`recoverExpired`），
+      // 于是一个**正在心跳的活任务**会被判成"结果待确认"（`UnknownOutcome`）。
+      // 把一个正在跑的读成未知，与把未知读成已知是同一类错误，方向相反而已。
+      // 掩住它的正是这条链的时长：跑得比租期短的验证任务在到期前就结束了。
+      //
+      // 终态（含 `UnknownOutcome` / `DeadLetter`）不续期，但**也不报错**：
+      // "worker 报完终态之后又飞了一个心跳"是正常竞态而不是故障。此时如实返回
+      // 库里的到期时间并置 `renewed: false`，不再编一个没写进去的时间。
+      const active = isActiveAttemptState(row.state)
+      let leaseExpiresAtMs = row.lease_expires_at_ms ?? null
+      let renewed = false
+      if (active) {
+        const res = db.prepare(
+          `UPDATE run_attempts SET lease_expires_at_ms = ?, updated_at_ms = ?
+            WHERE id = ? AND lease_epoch = ? AND state = ?`,
+        ).run(atMs + ttl, atMs, attemptId, epoch, row.state)
+        // 续期没写进去（并发改过这一行）时**不许**报成功：这个字段的全部价值
+        // 就是"我说续到几点，库里就是几点"。
+        renewed = Number(res.changes) === 1
+        leaseExpiresAtMs = renewed
+          ? atMs + ttl
+          : (db.prepare('SELECT lease_expires_at_ms FROM run_attempts WHERE id = ?').get(attemptId)?.lease_expires_at_ms ?? null)
+      }
+      // 写入预约与租约在**同一次事务**里续期，理由见 `renewWrite` 的端口注释。
+      // 预约层的拒因（没有预约 / 对账冻结中 / epoch 过期）原样回报，不让心跳失败——
+      // 心跳失败会让 worker 置 `leaseMayBeLost` 并停手，那是**另一个**读数。
+      const writeReservation = typeof renewWrite === 'function'
+        ? renewWrite({ taskId: row.task_id, scope: row.scope, attemptId, epoch, leaseMs: ttl })
+        : null
+      return Object.freeze({
+        ok: true, attemptId, leaseEpoch: epoch, renewed, leaseExpiresAtMs,
+        writeReservation, serverTimeMs: atMs, ignoredClientFields: Object.freeze(ignoredClientFields),
+      })
     })
   }
 

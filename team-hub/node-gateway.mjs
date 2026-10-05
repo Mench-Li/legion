@@ -446,7 +446,19 @@ export function createNodeGateway({
       }
       try {
         const r = runStore.heartbeat({ attemptId: entry.attemptId, leaseEpoch: entry.leaseEpoch, workerId: workerIdOf(state.nodeId), leaseTtlMs })
-        renewed.push({ attemptId: entry.attemptId, leaseExpiresAtMs: r.leaseExpiresAtMs })
+        // 把**真实**的续期结论带回给节点，而不是一个"收到了"的应答：
+        //   · `renewed === false` 说明这条尝试已经不在持有租约的状态里，
+        //     节点再按它自己的账本继续跑，就只是在产生无人认账的副作用；
+        //   · `writeReservation` 是写入预约的续期结论（Hub 在同一次事务里做的）。
+        //     它**不**让节点停手——预约被冻结仍占着位（`ACTIVE_SQL` 含
+        //     `reconciling`），"该不该放锁"只有对账的人能判——但这条读数
+        //     必须留在节点日志里，否则排障时只能看到"一切正常"。
+        renewed.push({
+          attemptId: entry.attemptId,
+          leaseExpiresAtMs: r.leaseExpiresAtMs,
+          renewed: r.renewed,
+          writeReservation: r.writeReservation ?? null,
+        })
       } catch (e) {
         rejected.push({ attemptId: entry.attemptId, code: e?.code ?? GATEWAY_CODES.STORE_REJECTED, message: e?.message })
         state.inFlight.delete(entry.attemptId)

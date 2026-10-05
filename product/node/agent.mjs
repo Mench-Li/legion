@@ -218,6 +218,27 @@ export function createNodeAgent({
       running.delete(rejected.attemptId)
       ledger.record({ taskId: entry.frame.taskId, attemptId: rejected.attemptId, leaseEpoch: entry.frame.leaseEpoch, phase: 'finished', outcome: 'outcome_unknown' })
     }
+    // 续期**没生效**的租约：不 abort，但要说话。
+    //
+    // 与上面那条 `rejected` 的区别是"Hub 有没有拒绝"：这里是 Hub 收到了、
+    // 也答了 200，只是**没有任何东西被续上**。最常见的一种是这条尝试已经
+    // 走到终态之后又飞了一个心跳——那无害。但另一种不是：租约一旦真的没人续，
+    // 它到点后会被 Hub 判成"结果待确认"，而节点这边**看不出任何异常**。
+    // 静默的代价是把"我的结果可能会被丢掉"变成事后才知道的事。
+    for (const r of frame.renewed ?? []) {
+      if (r.renewed === true) continue
+      log('warn', `租约未能续期 ${r.attemptId}：这条尝试已不在持有租约的状态（到期时间仍为 ${r.leaseExpiresAtMs ?? '无'}）`)
+    }
+    // 写入预约的续期结论：只记录，不停手。
+    //
+    // 预约被冻结（`RECONCILING`）时它**仍然占着单写者位**，所以"继续跑还是停下"
+    // 由对账的人判，不由此处代劳。但这条读数必须留下——否则排障时两端日志都
+    // 只有"一切正常"，而问题在第三处。
+    for (const r of frame.renewed ?? []) {
+      const w = r.writeReservation
+      if (w === null || w === undefined || w.ok === true) continue
+      log('warn', `写入预约未续期 ${r.attemptId}：${w.code}${w.reason ? `（${w.reason}）` : ''}——写入保护可能已不由本次执行持有`)
+    }
   }
 
   function onError(frame) {

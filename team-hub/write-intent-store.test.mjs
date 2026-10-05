@@ -248,3 +248,87 @@ test('活跃预约只允许原样重放，不能缩小范围或改写 epoch', ()
   assert.deepEqual(store.listActiveReservations('r1')[0].paths, first.reservation.paths)
   assert.equal(store.reserve({ repoId: 'r1', taskId: 't2', attemptId: 'a2', epoch: 1, paths: ['b.mjs'] }).code, 'FILE_CONTENTION')
 })
+
+// ── 预约续期（与租约同一次心跳） ──────────────────────────────────────────
+//
+// 这一组守的是"两条寿命不许漂移"：预约在 claim 时写死 `expires_at_ms`，
+// 若没人延长它，一个跑得比租期长的任务就会变成"租约新鲜、预约已过期"，
+// 而按 `expires_at_ms` 判定的路径会把**正在心跳的活任务**读成"进程未确认退出"。
+
+test('renew 把到期时间推后，且不动路径与 epoch', () => {
+  const { dbA: db } = pair()
+  let clock = 1000
+  const store = createWriteIntentStore(db, { now: () => clock })
+  const r = store.reserve({ repoId: 'r1', taskId: 't1', attemptId: 'a1', epoch: 3, paths: ['src/a.mjs'], leaseMs: 500 })
+  assert.equal(r.reservation.expiresAtMs, 1500)
+  clock = 1200
+  const renewed = store.renew({ repoId: 'r1', taskId: 't1', attemptId: 'a1', epoch: 3, leaseMs: 500 })
+  assert.equal(renewed.ok, true)
+  assert.equal(renewed.renewed, true)
+  assert.equal(renewed.reservation.expiresAtMs, 1700)
+  assert.deepEqual(renewed.reservation.paths.map((p) => p.path), ['src/a.mjs'], '续期不是扩域，路径必须原样')
+  assert.equal(renewed.reservation.leaseEpoch, 3)
+  assert.equal(store.listActiveReservations('r1').length, 1, '续期不新增预约行')
+})
+
+test('renew 之后租约不再"先过期"：sweepExpiredLeases 扫不到它', () => {
+  const { dbA: db } = pair()
+  let clock = 1000
+  const store = createWriteIntentStore(db, { now: () => clock })
+  store.reserve({ repoId: 'r1', taskId: 't1', attemptId: 'a1', epoch: 1, paths: ['src/a.mjs'], leaseMs: 500 })
+  // 心跳按 leaseMs/5 的节奏来，跑满 5 个租期：不续期的话第一轮之后就该被冻结
+  for (let i = 0; i < 5; i += 1) {
+    clock += 100
+    assert.equal(store.renew({ repoId: 'r1', taskId: 't1', attemptId: 'a1', epoch: 1, leaseMs: 500 }).ok, true)
+  }
+  assert.deepEqual(store.sweepExpiredLeases({ repoId: 'r1', nowMs: clock }), [], '续期过的预约不得被判过期')
+  assert.equal(store.listActiveReservations('r1')[0].state, 'reserved')
+
+  // 反证：停止续期、跨过租期之后，它**应当**被判过期。
+  // 没有这一半，「扫不到」可能只是因为扫描根本不起作用。
+  clock += 501
+  assert.equal(store.sweepExpiredLeases({ repoId: 'r1', nowMs: clock }).length, 1)
+})
+
+test('reconciling 的预约拒绝续期：续期会抹掉那次对账冻结', () => {
+  const { dbA: db } = pair()
+  const store = createWriteIntentStore(db)
+  store.reserve({ repoId: 'r1', taskId: 't1', attemptId: 'a1', epoch: 5, paths: ['x.mjs'] })
+  store.markReconciling({ repoId: 'r1', taskId: 't1', attemptId: 'a1', epoch: 5, reason: 'UnknownOutcome' })
+  const refused = store.renew({ repoId: 'r1', taskId: 't1', attemptId: 'a1', epoch: 5 })
+  assert.equal(refused.ok, false)
+  assert.equal(refused.code, 'RECONCILING')
+  assert.equal(store.listActiveReservations('r1')[0].state, 'reconciling', '冻结不得被续期按回去')
+  assert.equal(store.listActiveReservations('r1')[0].reason, 'UnknownOutcome')
+})
+
+test('renew 的三条拒因各自具名：无预约 / epoch 过期 / 别的尝试', () => {
+  const { dbA: db } = pair()
+  const store = createWriteIntentStore(db)
+  assert.equal(store.renew({ repoId: 'r1', taskId: 'none', attemptId: 'a1', epoch: 1 }).code, 'NO_ACTIVE_RESERVATION')
+  store.reserve({ repoId: 'r1', taskId: 't1', attemptId: 'a2', epoch: 9, paths: ['x.mjs'] })
+  const stale = store.renew({ repoId: 'r1', taskId: 't1', attemptId: 'a2', epoch: 8 })
+  assert.equal(stale.code, 'EPOCH_STALE')
+  assert.equal(stale.currentEpoch, 9, '要把当前真实 epoch 告诉调用方，否则它只能无限重试')
+  assert.equal(store.renew({ repoId: 'r1', taskId: 't1', attemptId: 'other', epoch: 9 }).code, 'ATTEMPT_MISMATCH')
+  assert.equal(store.renew({ repoId: 'r1', taskId: 't1', attemptId: 'a2', epoch: 9 }).ok, true, '正确的持有者仍然续得上')
+})
+
+test('renew 不追加事件：心跳是分钟级的，事件表是给 metrics 与审计读的', () => {
+  const { dbA: db } = pair()
+  const store = createWriteIntentStore(db)
+  store.reserve({ repoId: 'r1', taskId: 't1', attemptId: 'a1', epoch: 1, paths: ['x.mjs'] })
+  const before = store.listWriteIntentEvents('r1').length
+  for (let i = 0; i < 20; i += 1) store.renew({ repoId: 'r1', taskId: 't1', attemptId: 'a1', epoch: 1, leaseMs: 500 })
+  assert.equal(store.listWriteIntentEvents('r1').length, before, '20 次续期不得写进 20 条事件')
+})
+
+test('leaseMs 为 null 表示"无到期"，与 reserve 的口径一致', () => {
+  const { dbA: db } = pair()
+  const store = createWriteIntentStore(db)
+  store.reserve({ repoId: 'r1', taskId: 't1', attemptId: 'a1', epoch: 1, paths: ['x.mjs'], leaseMs: 500 })
+  const cleared = store.renew({ repoId: 'r1', taskId: 't1', attemptId: 'a1', epoch: 1, leaseMs: null })
+  assert.equal(cleared.ok, true)
+  assert.equal(cleared.reservation.expiresAtMs, null)
+  assert.equal(store.listWriteIntentEvents('r1').length, 1, '只有初始 RESERVED 那一条')
+})

@@ -584,6 +584,24 @@ const runStore = createRunStore({
       db.prepare("UPDATE tasks SET scheduling_state='waiting-file' WHERE id=?").run(taskId)
     }
   },
+  /**
+   * 心跳里的预约续期（端口形状与 `reserveWrite` 对称）。
+   *
+   * 预约的仓库绑定**从任务当下的绑定重新解析**，而不是回读预约行自己记的
+   * `repo_id`：绑定是可以被改的（`REPO_BINDING_CHANGED` 就是为这件事存在的），
+   * 而拿旧行里的仓库去续期，会续到一条**已经不属于这条任务**的锁上——
+   * 续期成功、真实锁没人管。
+   *
+   * 解不出来时返回具名拒绝而不是抛错：续期失败是心跳应答里的事实，
+   * 不该让整次心跳失败（那会让 worker 以为租约丢了而停手，是另一个读数）。
+   */
+  renewWrite: ({ taskId, scope, attemptId, epoch, leaseMs }) => {
+    const binding = resolveDeliveryBinding(scope)
+    if (binding.error) return { ok: false, code: 'REPO_UNBOUND', reason: binding.error }
+    return writeIntentStore.renew({
+      repoId: binding.repoId, taskId, attemptId, epoch, leaseMs,
+    })
+  },
   integrationMode: process.env.LEGION_INTEGRATION_MODE === 'integration',
   deliveryStateForTask: (taskId) => taskDeliveryStore.getDeliveryByTask(taskId)?.state ?? null,
   onAttemptProjected: ({ attempt, state }) => {

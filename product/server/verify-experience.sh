@@ -64,18 +64,31 @@ phone timeline | node -e '
 
 echo
 echo "===== ⑤ 任务与尝试的最终状态 ====="
+# ★ 取**最新**那个带任务关联的消息，不是第一个：本脚本用同一会话重复跑，
+#   会话里会累积历史任务（T-001、T-002…），取第一个会读到上一轮的对象，
+#   表现为"这次任务怎么没动"——而它其实早就跑完了。
 TID=$(phone timeline | node -e '
   let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{
-    const a=JSON.parse(s);const m=a.find((x)=>x.taskId);console.log(m?m.taskId:"")})')
+    const a=JSON.parse(s);const withTask=a.filter((x)=>x.taskId)
+    console.log(withTask.length?withTask[withTask.length-1].taskId:"")})')
 if [ -n "$TID" ]; then
+  echo "  （时间线里最新的任务：$TID）"
   phone task "$TID" | sed 's/^/  /'
 else
   echo "  （时间线里没有带任务关联的消息）"
 fi
 
 echo
-echo "===== ⑥ 出境策略仍在生效（含私钥块的那条进展应被拦下）====="
-phone timeline | grep -o '已拦下：包含私钥块' | head -1 | sed 's/^/   见到：/' || echo "   （本次时间线里没有该条）"
+echo "===== ⑥ Agent 的**结构化进展**是否进了时间线 ====="
+# 设计文档 §6.1 第 6 步要求 Agent 的进展经 Hub 持久化后手机能看到。
+# 只看到"本轮状态：Running"是不够的——那是状态变迁，不是"它做了什么"。
+phone timeline | node -e '
+  let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{
+    const a=JSON.parse(s)
+    const steps=a.filter(x=>x.semanticType==="progress" && /第 |正在|已拦下|工作区|处理/.test(x.body))
+    if (steps.length===0) { console.log("  ✖ 时间线里看不到 Agent 的步骤级进展（只有状态变迁）"); process.exit(0) }
+    for (const m of steps) console.log("   · "+m.body.slice(0,90))
+  })'
 
 echo
 echo "  node.log 全文:"

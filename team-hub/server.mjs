@@ -7595,6 +7595,40 @@ function requireSpaceAccess(req, scope) {
   throw Object.assign(new Error(`无权访问空间「${scope}」`), { code: 'SPACE_FORBIDDEN', status: 403 })
 }
 
+/**
+ * 把节点上报的进展投影进**会话**（持久化的那一条路）。
+ *
+ * 为什么需要它：网关那边的两条出口都只到得了"活着的订阅者"——
+ * 运行明细手机不会读，审计走 SSE 断线就错过了。设计文档 §6.1 第 6 步
+ * 要的是「Hub 持久化后推给手机」，而 §1 要的是它在**同一 Agent 详情**里可追溯：
+ * 手机重开时那条进展必须还在。
+ *
+ * `agentConversations.report()` 正是"把运行事实投影进对话"的既有路径
+ * （Attempt/任务状态变迁一直这么做），所以进展也走它，不另造一条。
+ */
+function projectProgressToConversation({ taskId, scope, frame }) {
+  if (agentConversations === undefined || agentConversations === null) return
+  const task = db.prepare('SELECT scope, role, soldier FROM tasks WHERE id=?').get(taskId)
+  if (!task) return
+  const taskScope = task.scope ?? scope
+  // 任务属于哪个 Agent：角色 → 注册表。投影不到就不投影（例如该角色已归档），
+  // 那是"这条任务没有对应的 Agent 会话"，不是错误。
+  const agent = db.prepare('SELECT * FROM agent_registry WHERE scope=? AND role=? AND archived=0')
+    .get(taskScope, task.role ?? task.soldier)
+  if (!agent) return
+  const kindLabel = { started: '开始', step: '进展', tool: '工具', note: '说明', blocked: '受阻', question: '提问', artifact: '产物' }[frame.kind] ?? '进展'
+  agentConversations.report(
+    agent, taskId,
+    // sourceKey 决定幂等：同一个 eventId 重复投影只落一条消息。
+    // 用 JSON.stringify 拼键，与 `agent-conversations.mjs` 内部的 `keyOf` 同形
+    // （那是模块私有的，不为了这一个调用点把它导出来）。
+    JSON.stringify(['node-progress', frame.eventId ?? `${frame.attemptId}:${frame.seq}`]),
+    `${taskId} ${kindLabel}：${frame.summary}`,
+    [{ taskId, attemptId: frame.attemptId, eventSeq: frame.seq }],
+    { semanticType: 'progress', attemptId: frame.attemptId, nodeEventId: frame.eventId ?? null },
+  )
+}
+
 /** 网关需要一个任务摘要端口（它不认识 `tasks` 表的列）。 */
 function describeTaskForNode(taskId, scope) {
   try {
@@ -7645,6 +7679,8 @@ export const nodeGateway = REMOTE_AGENT_ENABLED
     // 派发前冻结上下文。没有它远端到不了 `Running`：状态机要求
     // `BuildingContext → Running` 先有 `run_context_snapshots` 的一行。
     prepareContext: nodeContextPreparer,
+    // 把节点上报的进展投影进会话（否则手机重开后时间线里看不到它做过什么）。
+    projectProgressToConversation,
     claimScope: CFG.values.claimScope || null,
     onWarn: (code, detail) => console.warn(`[node-gateway] ${code}: ${JSON.stringify(detail)}`),
   })

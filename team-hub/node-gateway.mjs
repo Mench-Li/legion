@@ -74,6 +74,7 @@ export const GATEWAY_CODES = Object.freeze({
   CLAIM_BLOCKED: 'NODE_CLAIM_BLOCKED',
   CLAIM_UNBLOCKED: 'NODE_CLAIM_UNBLOCKED',
   CONTEXT_NOT_FROZEN: 'NODE_CONTEXT_NOT_FROZEN',
+  PROGRESS_PROJECTION_FAILED: 'NODE_PROGRESS_PROJECTION_FAILED',
   PUMP_FAILED: 'NODE_PUMP_FAILED',
 })
 
@@ -123,6 +124,16 @@ export function createNodeGateway({
    *   看起来只是"任务不动"，与队列为空长得一样。
    */
   prepareContext = null,
+  /**
+   * 把节点上报的进展**投影进会话**：`({taskId, scope, frame}) => void`。
+   *
+   * 不注入时进展只到得了"活着的订阅者"（运行明细 + SSE），
+   * 而**手机重开之后时间线上看不到它做过什么**——设计与 §1 要的是可追溯。
+   *
+   * 允许不注入（测试夹具不必接全套会话层），但那样就没有持久化的进展，
+   * 所以它缺席时**明确说出**一次，而不是让人事后去猜为什么时间线里少了东西。
+   */
+  projectProgressToConversation = null,
   onWarn = null,
   path = NODE_PATH,
   helloTimeoutMs = 10_000,
@@ -549,7 +560,34 @@ export function createNodeGateway({
     // ★ 幂等判据来自 run-store 的计数，不是这里的另一层去重。
     const duplicate = Number(result.written) === 0 && Number(result.skipped) > 0
     if (duplicate) counters.duplicateEvents += 1
-    else recordInScope(frame, state, 'node:progress', { seq: frame.seq, kind: frame.kind, summary: frame.summary, eventId: frame.eventId })
+    else {
+      recordInScope(frame, state, 'node:progress', { seq: frame.seq, kind: frame.kind, summary: frame.summary, eventId: frame.eventId })
+      // ── 把进展**投影进会话**（持久化的那一条路）──────────────────────────
+      //
+      // 上面那两条都只到得了「活着的订阅者」：`recordRunEvents` 写进运行明细
+      // （手机不会去读它），`record` 走审计 → SSE（断线期间就错过了）。
+      //
+      // 设计文档 §6.1 第 6 步要求的是「Hub 持久化后经 SSE/WebSocket 推给手机」，
+      // 而 §1 要求它在**同一 Agent 详情**里可追溯。也就是说：重开手机时
+      // 那条进展必须还在。所以还要经 `agentConversations.report()` 落成一条会话消息
+      // ——那是把运行事实投影进对话的既有路径（状态变迁一直这么做）。
+      //
+      // 只在**非重复**时投影：重复的进展已经被幂等闸门挡掉了，
+      // 再投影一次就是"同一件事在时间线上出现两遍"。
+      //
+      // 投影失败**不影响**上报的接受（进展已经写进运行明细了，那是权威的）；
+      // 但要说出来——静默吞掉会让"时间线里少了一段进展"变成不可解释的缺失。
+      if (typeof projectProgressToConversation === 'function') {
+        try {
+          projectProgressToConversation({ taskId: frame.taskId, scope: state.scopes.get(frame.attemptId) ?? null, frame })
+        } catch (e) {
+          warn(GATEWAY_CODES.PROGRESS_PROJECTION_FAILED, {
+            taskId: frame.taskId, attemptId: frame.attemptId,
+            message: e instanceof Error ? e.message.slice(0, 200) : String(e),
+          })
+        }
+      }
+    }
     io.send(FRAME_TYPES.ACK, {
       requestId: frame.requestId, nodeId: state.nodeId, taskId: frame.taskId, attemptId: frame.attemptId,
       leaseEpoch: frame.leaseEpoch, accepted: true, duplicate, seq: frame.seq, serverTimeMs: clock(),

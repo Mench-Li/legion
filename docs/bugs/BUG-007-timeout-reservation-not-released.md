@@ -175,14 +175,104 @@ await safeComment(t.id, settlement.comment)                      // ④ 文案�
 - `timeout-settlement` 6/0 · `worker-regression` 15/0 · `stateMachine` 40/0 ·
   `reclamation` 21/0 · `slice-orchestration` 10/0 · `write-eligibility` 8/0
 
-### 8.5 未覆盖的残留风险（如实记下）
+### 8.5 残留风险与第一轮留下的尾巴
 
-`transitionTo` 在 hub 侧可能因**乐观锁版本冲突**失败（任务被别的路径改过）。
-该分支已 catch 并落日志"保持持有，等待人工确认"，但**没有**自动化测试覆盖那条路径
-（需要模拟版本冲突）。它不会造成两个写者（失败即不释放），只是仍需人工。
+`transitionTo` 在 hub 侧可能因**乐观锁版本冲突**失败（任务被别的路径改过）。失败即不释放，
+不会造成两个写者，只是仍需人工。
+
+★ **第一轮在这里留了一个"读数不一致"的尾巴**：失败分支 catch 之后仍然打印 `release-and-retry`
+的成功文案（"写入占用随之释放…下一轮重派"），而预约其实还在本轮持有——这正是 BUG-007 的
+同一种病（文案与事实两张皮），也与本任务"评论文案必须与实现一致"的验收项冲突。
+第二轮已修：失败时改写成 `planTimeoutTransitionFailure` 的诚实文案 + 两步人工恢复命令，
+并补上单测与接线防回归（详见 §九）。
 
 ### 8.6 与另一条路径的关系（未改，故意）
 
 `in_progress → in_review` **不释放**写入预约（`team-hub/server.mjs` 只在 `→todo/blocked/done/canceled`
 与 `confirmedStopped` 时处理）。这是**独立的设计缺口**（等待人工验收期间整仓独占），
 不在本次范围内——本文只修"执行者已不存在"这条路径。
+---
+
+## 九、第二轮续修与验证（2026-10-05，T-184 续做）
+
+### 9.1 续修内容：失败分支也要"读数说实话"
+
+上一轮把超时结算接到了诚实出口（§八），但 `transitionTo` 抛错时只落了一行日志，
+**仍然打印释放成功的文案**（`settlement.comment`：说"写入占用随之释放…下一轮重派"，
+而预约其实还在本轮持有）。这与本缺陷的病根是同一种病——文案与事实两张皮，
+也与 §8.5 记下的尾巴对应。
+
+本轮修法（只动超时结算调用点与决策模块，不碰无关模块）：
+
+- `plugins/src/timeoutSettlement.ts` 新增 `planTimeoutTransitionFailure({taskId,scope,reason})`：
+  产出**释放失败**的诚实文案（"自动把任务释放回 todo 失败"、"写入占用仍被本轮持有"、
+  "不会自动重试"）。为什么恢复命令是**两步**：`confirm-stopped` 只对 `reconciling` 预约 +
+  `todo/blocked/canceled` 任务开放（`team-hub/routes/write-intent.mjs`），而失败后任务仍是
+  `in_progress` + `reserved`，直接调会被 403/404 拒。
+- `plugins/src/index.ts` 超时结算：`transitionTo` 成功后用 `settlement.comment`；失败则在 catch 里
+  改写成 `failure.comment` / `failure.activity`，再统一 `safeComment` + `activity`。
+  **释放没成功，就不打印释放成功的文案。**
+
+### 9.2 回归测试（三半对照）
+
+- `plugins/tests/timeout-settlement.test.mjs` 新增 ⑦⑧：
+  · ⑦ `planTimeoutTransitionFailure` 必须说失败与后果，且**不得**出现"写入占用随之释放 / 下一轮重派"；
+    恢复命令可照抄（先 `transition→todo`、再 `confirm-stopped`）。
+  · ⑧ 接线防回归：index.ts 必须在失败分支改写 `timeoutComment`/`timeoutActivity`，
+    且 `safeComment` 打印最终裁定后的文案。
+- `team-hub/claim-reservation.e2e.test.mjs` 新增 ⑰（真实 hub，三半对照）：
+  · ① 能证实（`by=执行者本人` + `confirmedStopped=true` 走 `in_progress→todo`）
+    ⇒ 预约 `released` + 任务 `todo` + **下一轮 claim 立刻 200**；
+  · ② 不能证实（同样 `in_progress→todo`，不带 `confirmedStopped`）⇒ 预约 `reconciling` + claim 409，
+    人工 `confirm-stopped` 后才可认领；
+  · ③ 非执行者拿 `confirmedStopped=true` 声明 ⇒ 403 `STOP_CONFIRMATION_DENIED`，整事务回滚
+    （任务仍 `in_progress`、预约仍 `reserved`）。
+
+### 9.3 变异验证（把修复弄坏，确认断言当场变红，再还原）
+
+| 变异 | 期望变红 | 实测 |
+| --- | --- | --- |
+| A 把 catch 里的 `timeoutComment = failure.comment` 改回 `settlement.comment` | ⑧ | ✓ ⑧ 红（"评论必须在失败分支被改写成 failure.comment"），还原后 8/8 |
+| B 把 hub 诚实出口 `cancelled: !confirmedStopped` 改成 `cancelled: true` | ⑰①（以及既有的 blocked 诚实出口断言） | ✓ 断在 `released` vs `reconciling` 上，还原后全套通过 |
+
+### 9.4 验证读数（本会话，工作区 T-184）
+
+- `tsc -p plugins/tsconfig.json --noEmit` ⇒ exit 0（检出 tsc：`D:/project/DSH/dsh/deepseek-harness/node_modules/typescript/bin/tsc`）
+- `timeout-settlement` **8/0**（原 6 + 新增 ⑦⑧）
+- `team-hub/claim-reservation.e2e.test.mjs` **1/0**（含新增 ⑰ 三半对照）
+- `stateMachine` 40/0 · `reclamation` 21/0 · `write-eligibility` 8/0 ·
+  `write-intent-store` 19/0 · `write-intent-routes` 7/0
+- ⚠ 环境限制（与本修复无关）：`worker-regression` 8/15、`slice-orchestration` 8/10 —— 失败行全部是
+  `initGitRepo` 的 `git init 失败` / `本地 taskctl 没有被调用`。根因是本会话沙箱禁止 `child_process`
+  走**管道 stdio**（`spawnSync('git',…)` ⇒ `EPERM`；`stdio:'inherit'` 正常；已实测），这些用例需要
+  真起 git 仓库/子进程，在本沙箱内跑不了。它们在无沙箱环境（上一轮记录 15/0、10/0）通过；
+  本修复不触及这两条代码路径。
+
+### 9.5 复现命令与"修复前后"同一命令的输出
+
+§七 的命令 2 在真库上（只读）：
+
+```
+修复前（BUG-007 现场，§一）：{"id":12,"task_id":"T-178","state":"reconciling",…}   ← claim 一律 409 RECONCILING
+修复后（本会话，D:/project/DSH/legion/team-hub/team.db）：
+  active = [{"id":31,"task_id":"T-184","state":"reserved"}]        ← T-178/T-179 无 reconciling 残留
+```
+
+同一组步骤（`claim → transition(in_progress→todo) → 查预约 → 再 claim`）在真实 hub 上的两半输出：
+
+```
+confirmedStopped=false（普通 in_progress→todo / 不能证实）
+  transition=200  任务=todo  预约=reconciling  下一轮 claim=409 RECONCILING   ❌ 冻结
+confirmedStopped=true （能证实已停止，走守护的诚实出口）
+  transition=200  任务=todo  预约=released     下一轮 claim=200              ✅ 释放并可认领
+```
+
+### 9.6 判据未放宽（`assert.` 出现次数，前后对比）
+
+| 文件 | 修复前 | 本轮 | 变更 |
+| --- | --- | --- | --- |
+| `plugins/tests/timeout-settlement.test.mjs` | 32 | 47 | +15 |
+| `team-hub/claim-reservation.e2e.test.mjs` | 72 | 89 | +17 |
+
+`skip` / `only` 前后均为 0；无断言被删除、无 expected 被改成 actual。
+

@@ -112,3 +112,31 @@ export async function workerStoppedWithin(run: { result: Promise<unknown> }, gra
     if (timer !== undefined) clearTimeout(timer)
   }
 }
+
+/**
+ * 已取得终止证据、但把任务释放回 todo **失败**时的文案（`transitionTo` 抛错）。
+ *
+ * ★ 这一条同样是"读数说实话"的一部分：释放失败时预约**没有**被释放、任务**没有**回 todo。
+ *   若此时仍打印 `release-and-retry` 的文案（"写入占用随之释放…下一轮重派"），就是 BUG-007
+ *   的同一种病——文案与事实两张皮。
+ *
+ * ★ 这里**不能**只叫人去调 `confirm-stopped`：那条路只对 `reconciling` 预约 +
+ *   `todo/blocked/canceled` 任务开放（`team-hub/routes/write-intent.mjs`），而失败之后任务仍是
+ *   `in_progress` + `reserved`，直接调会被 403/404 拒。所以给的是**两步**人工恢复路径：
+ *   先由将军把任务迁回 todo（不带 confirmedStopped ⇒ 预约进 reconciling、任务回 todo），
+ *   再 confirm-stopped 释放。
+ */
+export function planTimeoutTransitionFailure(input: {
+  taskId: string
+  scope: string
+  reason: string
+}): { comment: string; activity: string } {
+  const reason = input.reason.replace(/[\r\n\t]+/g, ' ').slice(0, 200)
+  return Object.freeze({
+    comment: `⚠ worker 超时：已确认该次执行终止，但**自动把任务释放回 todo 失败**（${reason}）。`
+      + `写入占用仍被本轮持有，**不会自动重试**（放开会有两个写者落进同一个 worktree）。`
+      + `人工恢复：① POST /api/transition {"id":"${input.taskId}","to":"todo","by":"general","scope":"${input.scope}"} `
+      + `② POST /api/tasks/${input.taskId}/reservation/confirm-stopped {"by":"general","confirm":"stopped:${input.taskId}"}。`,
+    activity: 'worker 超时强制结算：已确认终止但释放失败，保持持有等待人工',
+  })
+}

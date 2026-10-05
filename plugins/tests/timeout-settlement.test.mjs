@@ -23,6 +23,7 @@ import test from 'node:test'
 
 import {
   planTimeoutSettlement,
+  planTimeoutTransitionFailure,
   workerStoppedWithin,
   TIMEOUT_SETTLE_GRACE_MS,
 } from '../lib/timeoutSettlement.js'
@@ -117,4 +118,35 @@ test('⑥ 接线防回归：index.ts 不许再出现那句做不到的承诺，�
   // 顺序也要钉住：dispose 必须在取证之前（先终止本次会话，再问它是否终止）
   const iDispose = INDEX_CODE.indexOf('await run.dispose().catch(() => undefined)\n      const workerStopped = await workerStoppedWithin')
   assert.ok(iDispose >= 0, '顺序必须是：先 dispose（终止会话），再取证（workerStoppedWithin）')
+})
+
+test('⑦ 取证成功但转 todo 失败 ⇒ 文案必须改成"没释放、不会自动重试"（不许沿用释放成功的文案）', () => {
+  const f = planTimeoutTransitionFailure({ taskId: 'T-178', scope: 'default', reason: '乐观锁冲突：任务 T-178 当前 version=9' })
+  // 必须说清失败与后果——这两条是"读数与事实一致"的核心
+  assert.match(f.comment, /自动把任务释放回 todo 失败/)
+  assert.match(f.comment, /写入占用仍被本轮持有/)
+  assert.match(f.comment, /不会自动重试/)
+  // ★ 反向：释放没成功时，句子必须是"随之释放 / 下一轮重派"的**否定**
+  assert.ok(!/写入占用随之释放/.test(f.comment), '释放失败时不许说"写入占用随之释放"')
+  assert.ok(!/下一轮重派/.test(f.comment), '释放失败时不许承诺"下一轮重派"')
+  // 恢复路径要能照着做：confirm-stopped 只对 reconciling+todo 开放，所以必须先迁回 todo
+  assert.match(f.comment, /POST \/api\/transition \{"id":"T-178","to":"todo","by":"general","scope":"default"\}/)
+  assert.match(f.comment, /POST \/api\/tasks\/T-178\/reservation\/confirm-stopped/)
+  assert.match(f.comment, /"confirm":"stopped:T-178"/)
+  // 失败原因要写进文案，不能让人去猜
+  assert.match(f.comment, /乐观锁冲突/)
+  assert.match(f.activity, /保持持有等待人工/)
+})
+
+test('⑧ 接线防回归：index.ts 在 transition 失败分支改用失败文案，成功文案只在成功后打印', () => {
+  assert.ok(INDEX_CODE.includes('planTimeoutTransitionFailure({'),
+    'index.ts 必须在 transition 抛错时产出"释放失败"文案')
+  assert.ok(INDEX_CODE.includes('timeoutComment = failure.comment'),
+    '评论必须在失败分支被改写成 failure.comment，否则释放没成功却打印释放成功的读数')
+  assert.ok(INDEX_CODE.includes('timeoutActivity = failure.activity'),
+    '活动流同样要改写（否则活动流说已释放重派、预约却还持有）')
+  assert.ok(INDEX_CODE.includes('await safeComment(t.id, timeoutComment)'),
+    'safeComment 必须打印最终裁定后的文案，而不是无条件打印 settlement.comment')
+  assert.ok(INDEX_CODE.includes('let timeoutComment = settlement.comment'),
+    '成功路径仍须使用 planTimeoutSettlement 产出的文案（防被顺带删掉）')
 })

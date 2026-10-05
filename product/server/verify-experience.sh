@@ -29,7 +29,29 @@ sleep 12
 sed 's/^/  /' node.log
 
 echo
-echo "===== ② 手机发一条「创建任务」消息（intent=create_task）====="
+echo "===== ② 先腾出写入位：验收上一次留下的已完成任务 ====="
+# ★ 队列**按验收串行**：一条交付在 `in_review` 期间一直持有单写者位
+#   （`write_reservations`），下一个任务领不到。这是设计（"单写者 + 交付需验收"），
+#   不是排队坏了——但它意味着**每一次验收演示都要先结清上一次**。
+#   `by` 必须是 `general`：看板规则要求"只有将军能在用户接受后把任务移到 done"。
+$SSH 'bash -s' <<'REMOTE' 2>&1 | tail -6
+set -a; . /etc/legion-hub.env; set +a
+H=http://127.0.0.1:${TEAM_HUB_PORT:-8787}
+A=(-H "Authorization: Bearer $TEAM_HUB_TOKEN" -H 'content-type: application/json')
+node -e "const {DatabaseSync}=require('node:sqlite');const db=new DatabaseSync('/var/lib/legion-hub/team.db');
+for(const t of db.prepare(\"SELECT id,version FROM tasks WHERE status='in_review'\").all()) console.log(t.id+'\t'+t.version);" |
+while IFS=$'\t' read -r id v; do
+  [ -n "$id" ] || continue
+  curl -sS --max-time 10 -X POST "${A[@]}" -d "{\"by\":\"general\",\"scope\":\"default\",\"id\":\"$id\",\"to\":\"done\",\"ifVersion\":$v}" "$H/api/transition" >/dev/null
+  echo "  已验收 $id（写入位释放）"
+done
+node -e "const {DatabaseSync}=require('node:sqlite');const db=new DatabaseSync('/var/lib/legion-hub/team.db');
+const n=db.prepare(\"SELECT COUNT(*) c FROM write_reservations WHERE state IN ('reserved','reconciling')\").get().c;
+console.log('  剩余活跃写入预约：'+n)"
+REMOTE
+
+echo
+echo "===== ③ 手机发一条「创建任务」消息（intent=create_task）====="
 OUT="$(phone create "端到端验收：请写一个 greet 函数并跑一次测试")"
 echo "$OUT" | sed 's/^/  /'
 

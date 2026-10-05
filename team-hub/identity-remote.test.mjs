@@ -244,6 +244,27 @@ describe('远程 Agent 通道接线', () => {
     sock.close()
   })
 
+  it('网关依赖的注入面都在（缺一个就会静默少一段功能）', async () => {
+    // ★ 这条守的是一类**只在运行时才炸**的缺失。
+    //   实测踩过：网关调 `agentConversations.report(...)` 想把节点进展投影进会话，
+    //   而 `report` 是模块私有的、没导出 → 每次进展都得到 `report is not a function`。
+    //
+    //   那个失败之所以当场可见，是因为调用点包了 warn；
+    //   否则表现会是"时间线里少了一段进展"，而**没有任何地方说过为什么**。
+    //   所以在接线处直接断言"它依赖的方法存在"——比等到运行时便宜得多。
+    // 只断言**导出面**上够得着的那些。`runStore` 是本文件模块作用域的 const
+    // （直接传给网关，不走 HTTP、也不导出），所以从外面看不到它——
+    // 断言一个够不着的东西，等于测"我能不能 import 它"，而不是测"接线对不对"。
+    for (const name of ['report', 'includeFeedback', 'binding', 'reconcile']) {
+      assert.equal(typeof mod.agentConversations?.[name], 'function',
+        `agentConversations 缺 ${name}——网关/对账链路会静默少一段功能`)
+    }
+    // 网关自己的读数面（诊断用，运维要靠它）。
+    assert.equal(typeof mod.nodeGateway?.stats, 'object')
+    assert.equal(typeof mod.nodeGateway?.connectionViews, 'function')
+    assert.equal(typeof mod.nodeGateway?.pump, 'function')
+  })
+
   it('未鉴权的普通 HTTP 请求打 /node 被门禁拒掉（而 WSS 升级走的是另一条路）', async () => {
     // ★ 关键性质：Node 网关挂在 `http.Server` 的 **upgrade** 事件上，不经过
     //   `handle()`，所以远程门禁不会挡真正的 Node 连接——它自己做设备令牌鉴权。

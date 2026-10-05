@@ -1,0 +1,26 @@
+fix(remote): 进展投影调不到 report —— 它是模块私有的
+
+上一版把节点进展经 `agentConversations.report()` 投影进会话，而 `report`
+**从来没有被导出过**（它是 `reconcile` 的内部原语）。于是每次进展都得到
+`report is not a function`，时间线里依然只有状态变迁。
+
+修法：把 `report` 加进服务的返回面并注明理由——它是「把运行事实投影进会话」
+的既有原语，远程链路与 `reconcile` 用的是同一个。
+
+## 这个失败之所以当场可见，是因为调用点包了 warn
+
+如果当时写的是 `try { … } catch {}`，表现会是「时间线里少了一段进展」，
+而**没有任何地方说过为什么**。日志里那句
+
+    NODE_PROGRESS_PROJECTION_FAILED: agentConversations.report is not a function
+
+把排查从"猜"变成了"读"。
+
+## 新增用例：在接线处断言依赖面存在
+
+`identity-remote.test.mjs` 加一条「网关依赖的注入面都在」——比等到运行时
+便宜得多。只断言**导出面**上够得着的：`runStore` 是模块作用域的 const
+（不走 HTTP、也不导出），断言一个够不着的东西等于测「我能不能 import 它」，
+而不是测接线。
+
+测试 15 通过。

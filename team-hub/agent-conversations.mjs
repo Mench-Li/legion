@@ -416,5 +416,13 @@ export function createAgentConversationService({ db, withTx, audit, clock = Date
   }
   syncRoster()
   return { syncRoster,list,detail,conversation,send,read,command,runtime,question,reconcile,includeFeedback,getCommand,manualHold,
+    // ★ `report` 要**显式导出**：它是"把一条运行事实投影进会话"的既有原语
+    //   （`reconcile` 用它投影 Attempt/任务状态）。远程派发链路也需要它——
+    //   节点上报的进展要落成会话消息，手机重开时才看得到它做过什么。
+    //
+    //   原先它是模块私有的，于是网关调它得到 `report is not a function`。
+    //   那个失败之所以**当场可见**，是因为调用点包了 warn 而不是静默吞掉；
+    //   否则表现会是"时间线里少了一段进展"，而没有任何地方说过为什么。
+    report,
     binding: (convId) => db.prepare('SELECT * FROM agent_conversation_bindings WHERE conv_id=?').get(Number(convId)) ?? null }
 }

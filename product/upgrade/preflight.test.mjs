@@ -71,6 +71,68 @@ test('① N-1 允许；N-2 与降级各归各的码', () => {
   assert.equal(down.code, 'manifest-downgrade', '降级没有自己的码——它与"窗口外"的处置不同')
 })
 
+test('① ★★★ 发行方声明的 supportedFromVersions 必须**真的**被读（设计 §5）', () => {
+  // ★ 这条补的是一个"声明了没人读"的空洞，它的形状是本次会话反复遇到的那一类：
+  //
+  //   `release.mjs` 把 `supportedFromVersions` 的形状验得很细（非空、合法、
+  //   不自指、不降级），而**没有任何代码拿本机版本去问"我在这个集合里吗"**。
+  //   `semver.mjs` 里那个为它而写的 `isSupportedFrom()` 全仓 **0 个调用点**。
+  //
+  //   于是策略窗口与声明窗口可以不一致，而且**声明更严的那种不一致会被放行**：
+  //   `1.0.5 → 1.1.0` 在同一主版本内，`upgradeWindow()` 放行；而若这份发行
+  //   声明 `supportedFromVersions: ['1.0.0']`，1.0.5 这台机器**不在**它验过的
+  //   窗口里。
+  //
+  //   > 一份"发行方声明了它只支持从哪些版本升"的清单，此前在读它的人眼里
+  //   > 与没有这份声明是一样的。
+  const from105 = createManifest({ ...CURRENT, productVersion: '1.0.5' })
+  const to110 = target({ productVersion: '1.1.0', legionVersion: '1.1.0' })
+
+  // 先证明"策略窗口放行"——否则下面那条红可能只是因为别的判据拦住了。
+  const withoutDeclaration = checkCompatibility({ current: from105, target: to110, patchPair: 'match' })
+  assert.equal(withoutDeclaration.verdict, 'ok',
+    `没有声明时本来应当放行（同一主版本内），实际被拦：${JSON.stringify(withoutDeclaration.reasons)}`)
+
+  // 声明了"只从 1.0.0 验过" ⇒ 1.0.5 必须被拦，而且要有自己的码。
+  const declared = checkCompatibility({
+    current: from105, target: to110, patchPair: 'match', supportedFromVersions: ['1.0.0'],
+  })
+  assert.equal(declared.verdict, 'blocked', '发行方声明的窗口被忽略了')
+  assert.equal(declared.code, PREFLIGHT_CODES.SOURCE_VERSION_UNSUPPORTED)
+  assert.match(declared.reasons.join('；'), /1\.0\.5/)
+  assert.match(declared.reasons.join('；'), /1\.0\.0/)
+  // ★ 与策略窗口那一条**不同码**：两者的处置不同（前者换包，后者换组合），
+  //   合成一个码会让排查时看不出到底该动哪一边。
+  assert.notEqual(declared.code, 'manifest-upgrade-not-allowed')
+
+  // 在集合里 ⇒ 放行。
+  const inSet = checkCompatibility({
+    current: createManifest({ ...CURRENT, productVersion: '1.0.0' }), target: to110,
+    patchPair: 'match', supportedFromVersions: ['1.0.0'],
+  })
+  assert.equal(inSet.verdict, 'ok', `声明里的版本被拦了：${JSON.stringify(inSet.reasons)}`)
+
+  // 多个来源版本时按集合判（不是"任意版本都行"）。
+  const multi = checkCompatibility({
+    current: createManifest({ ...CURRENT, productVersion: '1.0.5' }), target: to110,
+    patchPair: 'match', supportedFromVersions: ['1.0.0', '1.0.4'],
+  })
+  assert.equal(multi.verdict, 'blocked', '集合里没有 1.0.5，却被放行了')
+
+  // ★ 没给声明时**不拦**（既有调用方里只想体检磁盘/任务的不少）。
+  //   这个取舍的代价是"没给"与"支持"在这一层读数相同——所以生产路径
+  //   **必须**真的把它接上，那条判据在 `install.test.mjs` 里（"接线"那条）。
+  const notGiven = checkCompatibility({ current: from105, target: to110, patchPair: 'match' })
+  assert.equal(notGiven.verdict, 'ok', '没给声明时不该拦（那会打断只想体检磁盘/任务的调用方）')
+  // 而"给了空数组"与"没给"不是一回事：空数组意味着"这份发行谁也不支持"，
+  // 它不构成一条读数，所以与没给同档（不拦）——但那种清单在 `release.mjs`
+  // 那一层就已经被拒了（`supportedFromVersions 必须是非空数组`）。
+  const empty = checkCompatibility({
+    current: from105, target: to110, patchPair: 'match', supportedFromVersions: [],
+  })
+  assert.equal(empty.verdict, 'ok')
+})
+
 test('① ★★ 补丁层与 DSH 不成对必须拦住（这条比 DSH API 变化更隐蔽）', () => {
   const r = checkCompatibility({ current: CURRENT, target: target(), patchPair: 'mismatch' })
   assert.equal(r.verdict, 'blocked', '补丁层不成对却被放行')

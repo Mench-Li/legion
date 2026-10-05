@@ -189,6 +189,51 @@ test('正常路径：九步走完并交接 helper，屏障保持立着', async (
   }
 })
 
+test('★★★ 接线：发行清单声明的 supportedFromVersions 必须**真的**进预检（设计 §5）', async (t) => {
+  // ★ 这条守的是"那份声明终于有人读"这件事，也就是**接线本身**。
+  //
+  //   背景（本次会话实测出来的空洞）：`release.mjs` 把
+  //   `supportedFromVersions` 的形状验得很细，而**没有任何代码拿本机版本去问
+  //   "我在这个集合里吗"**——`semver.mjs` 里为它而写的 `isSupportedFrom()`
+  //   全仓 **0 个调用点**。于是策略窗口（`upgradeWindow()` 的主版本算术）
+  //   放行 `1.0.5 → 1.1.0`，哪怕这份发行只声明支持从 `1.0.0` 升。
+  //
+  //   修法有两半：判据加在 `preflight.checkCompatibility()` 里（那一半的用例
+  //   在 `preflight.test.mjs`），而**这一半**证明生产事务真的把读数递了进去。
+  //   只做前一半的话，`runPreflight({ supportedFromVersions })` 的默认值是
+  //   `null`——一段没人递读数的判据与不存在是同一个东西（本次会话的老毛病）。
+  //
+  //   ★ 所以这条用例的形状是：**同一个事务、只改声明**，结论必须相反。
+  //     把 `install.mjs` 里那行 `supportedFromVersions:` 删掉，它就会红。
+  const ctx = setup(t)
+
+  // ① 声明**不含**本机（本机 1.0.0，声明只支持从 0.9.0 升）⇒ 必须在预检停下。
+  const refused = await runInstallTransaction(baseArgs(ctx, effects(), {
+    release: Object.freeze({
+      ...releaseFixture({ packagePath: ctx.packagePath, sha256: ctx.sha256 }),
+      supportedFromVersions: Object.freeze(['0.9.0']),
+    }),
+  }))
+  assert.equal(refused.ok, false, '声明里没有本机版本，事务却继续了')
+  assert.equal(refused.verdict, 'not-started')
+  assert.match(refused.reason, /supportedFromVersions|只支持从/,
+    `拒绝理由没有提到"声明的窗口"：${refused.reason}`)
+  assert.match(refused.reason, /preflight-source-version-unsupported/,
+    `不是那条具名判据拒绝的：${refused.reason}`)
+
+  // ② 对照：**同一个事务**，只把声明改成含本机 ⇒ 正常交接。
+  //    没有这一半，"①红"可能只是因为别的原因拦住了。
+  const ctx2 = setup(t)
+  const accepted = await runInstallTransaction(baseArgs(ctx2, effects(), {
+    release: Object.freeze({
+      ...releaseFixture({ packagePath: ctx2.packagePath, sha256: ctx2.sha256 }),
+      supportedFromVersions: Object.freeze([CURRENT_VERSION]),
+    }),
+  }))
+  assert.equal(accepted.ok, true, `声明里含本机版本，却被拦了：${accepted.reason}`)
+  assert.equal(accepted.verdict, 'handed-off')
+})
+
 test('事务 ID 唯一，且写进活动描述符与凭证', async (t) => {
   const ctx = setup(t)
   const fx = effects()

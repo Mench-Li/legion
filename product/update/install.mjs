@@ -320,6 +320,20 @@ export async function runInstallTransaction({
     patchPair: patchPairOf(release.productManifest ?? release, patchBindings),
     minWindowsBuild,
     windowsBuild,
+    // ★★ 发行方**声明的**升级窗口（设计 §5 的 `supportedFromVersions`）。
+    //
+    //   这一行是"那份声明终于有人读"的接线点。在它之前：`release.mjs` 把
+    //   `supportedFromVersions` 的形状验得很细（非空、合法、不自指、不降级），
+    //   而**没有任何代码拿本机版本去问"我在这个集合里吗"**——
+    //   `semver.mjs` 里那个为它而写的 `isSupportedFrom()` 全仓 0 个调用点。
+    //   于是 `1.0.5 → 1.1.0` 会被 `upgradeWindow()` 放行（同一主版本内），
+    //   哪怕这份发行声明的是"只从 1.0.0 验过"。
+    //
+    //   ★ 放在**预检**里而不是只放在客户端：客户端那一层决定"要不要把这个
+    //     候选显示给用户"（体验），而这里是**动程序之前的最后一道门**（安全）。
+    //     两道都要有——只修客户端的话，一个绕过界面直接调 `install()` 的调用方
+    //     （或者一次界面状态错乱）就能从没验过的版本升上来。
+    supportedFromVersions: release.supportedFromVersions ?? null,
   })
   if (!preflight.ok) {
     journal.result('recheck', { ok: false, reason: preflight.reasons })

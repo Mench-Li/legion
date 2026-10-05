@@ -34,6 +34,11 @@
 
 import { compareVersions, isExactVersion, upgradeWindow } from './manifest.mjs'
 import { ACTIVE_TASK_STATES, TERMINAL_TASK_STATES, WAITING_TASK_STATES } from './task-state.mjs'
+// 发行方声明的升级窗口的成员判定。★ 复用 `product/update/semver.mjs` 里的
+// `isSupportedFrom()`，而不是在这里再写一遍 `includes()`——那个函数本来就是
+// 为设计 §5 的 `supportedFromVersions` 写的（它的注释引着那一条），
+// 在这里调用它才让它从"声明了没人用"变成承重的一环。
+import { isSupportedFrom } from '../update/semver.mjs'
 
 /** 本模块的三个检查 id。顺序即 spec §9.4 的句子顺序。 */
 export const PREFLIGHT_CHECKS = Object.freeze(['compatibility', 'disk', 'in-flight-tasks'])
@@ -192,6 +197,26 @@ export const PREFLIGHT_CODES = Object.freeze({
   DSH_TOO_OLD: 'preflight-dsh-too-old',
   /** 清单本身不合法。 */
   MANIFEST_INVALID: 'preflight-manifest-invalid',
+  /**
+   * 本机当前版本**不在发行清单声明的升级窗口里**（设计 §5 的
+   * `supportedFromVersions`）。
+   *
+   * ★ 它与 `MANIFEST_CODES.UPGRADE_NOT_ALLOWED`（`upgradeWindow()` 那条）
+   *   **不是同一条判据**，两者必须都留着：
+   *
+   *   | | 判据是什么 | 谁的值 |
+   *   |---|---|---|
+   *   | `upgradeWindow()` | **主版本算术**（N-1 政策：不许跳多个主版本） | 策略，写在代码里 |
+   *   | 这一条 | 发行方**声明的精确集合**（"这份包从哪些版本验过"） | 数据，写在签过名的清单里 |
+   *
+   *   两者会不一致，而且**声明可以更严**：`1.0.5 → 1.1.0` 在同一主版本内，
+   *   `upgradeWindow()` 放行；而若这份发行声明的是 `supportedFromVersions:
+   *   ["1.0.0"]`，那么 1.0.5 这台机器**不在**它验证过的窗口里。
+   *
+   *   > 一条只按主版本算术放行的策略窗口，与一条"发行方声明的窗口"，
+   *   > 在"这份包在这个版本上验过没有"这个问题上不是同一个读数。
+   */
+  SOURCE_VERSION_UNSUPPORTED: 'preflight-source-version-unsupported',
 
   /** 可用空间不足。 */
   DISK_INSUFFICIENT: 'preflight-disk-insufficient',
@@ -244,6 +269,7 @@ const unknown = (check, code, reason) => Object.freeze({
  */
 export function checkCompatibility({
   current, target, platform = null, minDshVersionMajor = null, patchPair = null,
+  supportedFromVersions = null,
 } = {}) {
   const reasons = []
   if (current === null || typeof current !== 'object') {
@@ -271,6 +297,32 @@ export function checkCompatibility({
   // 这里不重写一遍——两份"能不能升"的判定必然漂移，而漂移的方向是放行。
   const window = upgradeWindow(current.productVersion, target.productVersion)
   if (!window.allowed) reasons.push(`${window.code}: ${window.reason}`)
+
+  // ★★ 发行方**声明的**升级窗口（设计 §5 的 `supportedFromVersions`）。
+  //
+  //   与上面那条是**两个不同的读数**：上面那条是策略（主版本算术），
+  //   这一条是数据（这份包从哪些版本验过）。见 `SOURCE_VERSION_UNSUPPORTED`
+  //   的注释。判定复用 `semver.mjs` 的 `isSupportedFrom()`——它一直存在、
+  //   注释里引着设计 §5，而在加上这一段之前**全仓没有任何调用点**：
+  //   一份"发行方声明了它只支持从哪些版本升"的清单，此前在读它的人眼里
+  //   与没有这份声明是一样的。
+  //
+  //   ★ 只有**拿到**声明时才判（`null` = 调用方没给这个读数）。
+  //     这个取舍是刻意的：`runPreflight()` 的既有调用方里有只想体检磁盘与
+  //     在途任务的，让"没给"直接变成拦人会把那些用法一起打断。代价是
+  //     "没给"与"支持"在这里读数相同——所以**必须有一条判据钉住生产路径
+  //     真的把它接上了**（见 `install.test.mjs` 的"接线"那条），
+  //     否则这一段会像它替换掉的那个空洞一样安静。
+  if (Array.isArray(supportedFromVersions) && supportedFromVersions.length > 0) {
+    if (typeof current.productVersion === 'string'
+      && !isSupportedFrom(current.productVersion, supportedFromVersions)) {
+      reasons.push(
+        `${PREFLIGHT_CODES.SOURCE_VERSION_UNSUPPORTED}: ` +
+        `本机是 ${current.productVersion}，而这份发行声明只支持从 ` +
+        `${supportedFromVersions.join(' / ')} 升级（设计 §5 的 supportedFromVersions 是**精确集合**）`,
+      )
+    }
+  }
 
   if (current.channel !== undefined && target.channel !== undefined && current.channel !== target.channel) {
     reasons.push(
@@ -557,11 +609,14 @@ export function runPreflight({
   current, target, stage = 'pre-switch', platform = null, minDshVersionMajor = null,
   patchPair = null, freeBytes = null, packageBytes = null, backupBytes = 0, dataDirBytes = 0,
   tasks = null, nowMs = null, oldestLeaseExpiryMs = null, diskPolicy = DEFAULT_DISK_POLICY,
+  supportedFromVersions = null,
 } = {}) {
   if (stage !== 'pre-download' && stage !== 'pre-switch') {
     throw preflightError('preflight-stage-unknown', `未知的体检阶段 ${JSON.stringify(stage)}`)
   }
-  const compatibility = checkCompatibility({ current, target, platform, minDshVersionMajor, patchPair })
+  const compatibility = checkCompatibility({
+    current, target, platform, minDshVersionMajor, patchPair, supportedFromVersions,
+  })
   const disk = checkDiskSpace({ freeBytes, packageBytes, backupBytes, dataDirBytes, policy: diskPolicy })
   const inFlight = checkInFlightTasks({ tasks, nowMs, oldestLeaseExpiryMs })
 

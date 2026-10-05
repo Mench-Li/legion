@@ -193,6 +193,19 @@ export function projectState(snapshot) {
       }),
     operationId: Number.isSafeInteger(snapshot?.operationId) ? snapshot.operationId : null,
     snoozedUntilMs: Number.isSafeInteger(snapshot?.snoozedUntilMs) ? snapshot.snoozedUntilMs : null,
+    /**
+     * ★ "稍后"针对的是**哪一个发行**（设计 §7 line 146 的「同一发行」）。
+     *
+     *   必须一起带出来：这是从客户端到界面之间的那层投影，`client.snapshot()`
+     *   有的字段不会自动到这里。只带时间戳的话，界面无法把"这个发行我已推迟"
+     *   与"任何发行都别烦我"分开显示——而这两种状态对用户的含义完全不同。
+     *
+     *   ⚠️ 这一条是**加 `snoozedReleaseId` 时顺手自查出来的**：投影漏字段正是
+     *      本仓反复出现的那类缺陷（⑰：校验了、算了，但没有携带到调用方读的
+     *      那个对象里）。客户端那一刻有它、用例那一刻看不出差别，
+     *      而界面永远拿不到它。
+     */
+    snoozedReleaseId: typeof snapshot?.snoozedReleaseId === 'string' ? snapshot.snoozedReleaseId : null,
   })
 }
 

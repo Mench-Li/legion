@@ -293,6 +293,27 @@ test('稍后：转成 snooze，不改变"能不能安装"这件事', async () =>
   assert.equal(client.calls.at(-1)[0], 'snooze')
 })
 
+test('★★ 投影必须带上"稍后针对的是哪一个发行"（漏字段 = 界面永远看不到它）', async () => {
+  // ★ 客户端到界面之间有一层**显式的**投影（`projectSnapshot`），
+  //   `client.snapshot()` 里的字段不会自动过来。所以每加一个界面要用的字段，
+  //   都必须在这层里加一次——而漏掉它的时候，**两边的用例都不会红**：
+  //   客户端那一侧的用例看的是客户端的快照，服务这一侧的用例看的是投影，
+  //   只有"界面拿不到它"这一件事没人测。
+  //
+  //   这正是 ⑰ 的形状（算了/校验了，但没有携带到调用方读的那个对象里）。
+  const { service, client, event } = await setupService({ client: createFakeClient({ state: 'available' }) })
+  // 让替身进入"已对某个发行点过稍后"的状态。
+  client.setState({ snoozedUntilMs: Date.now() + 60_000, snoozedReleaseId: RELEASE })
+  const reading = service.snapshot()
+  assert.equal(reading.snoozedReleaseId, RELEASE,
+    '投影把 snoozedReleaseId 丢了：界面无法把"这个发行我已推迟"与"任何发行都别烦我"分开')
+  assert.equal(typeof reading.snoozedUntilMs, 'number')
+  // 没有稍后过时是 null，不是 undefined（"没推迟过"要能被明确表达）。
+  client.setState({ snoozedUntilMs: null, snoozedReleaseId: null })
+  assert.equal(service.snapshot().snoozedReleaseId, null)
+  void event
+})
+
 test('安装：只把身份转交，不转交任何路径', async () => {
   const { service, client, event } = await setupService({ client: createFakeClient({ state: 'ready' }) })
   const result = await service.dispatch('update.install', { releaseId: RELEASE, manifestDigest: DIGEST }, event)

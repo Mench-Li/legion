@@ -144,6 +144,13 @@ export function createUpdateClient({
   let activeDownload = null
   let readyIdentity = null
   let snoozedUntilMs = null
+  /**
+   * 被"稍后"推迟的那一个发行（设计 §7 line 146 的「**同一发行**」）。
+   *
+   * 少了它，24 小时的沉默会变成"对所有发行生效"，于是一个在窗口期内发布的、
+   * **用户从未见过**的新版本会被静默吞掉。见 `snooze()` 的注释。
+   */
+  let snoozedReleaseId = null
   let inFlightCheck = null
   /** 发布说明（设计 §7 line 146：发现新版后展示版本、发布说明）。 */
   let releaseNotes = null
@@ -180,6 +187,14 @@ export function createUpdateClient({
       releaseNotes: releaseNotes === null ? null : releaseNotes.text,
       releaseNotesUnavailableReason: releaseNotes === null ? null : releaseNotes.reason,
       snoozedUntilMs,
+      /**
+       * ★ 快照里也要给出"稍后"针对的是哪个发行。
+       *
+       *   只给时间戳的界面**无法**把"这个发行我已推迟"与"任何发行都别烦我"
+       *   分开显示——而这两种状态对用户的含义完全不同。给出它，界面才能说
+       *   "已推迟 1.1.0 的提醒"，而不是一个孤零零的截止时间。
+       */
+      snoozedReleaseId,
       /**
        * ★ 这里**没有** `pendingTasks`（早先是硬编码的 `null`）。
        *
@@ -710,22 +725,52 @@ export function createUpdateClient({
   }
 
   // -------------------------------------------------------------------------
-  // 提醒（设计 §7 line 146 的"同一发行默认 24 小时内不重复主动提醒"）
+  // 提醒（设计 §7 line 146 的"**同一发行**默认 24 小时内不重复主动提醒"）
   // -------------------------------------------------------------------------
 
-  /** 用户点"稍后"。只收起提醒，不影响主状态（设计 §7 line 146）。 */
+  /**
+   * 用户点"稍后"。只收起提醒，不影响主状态（设计 §7 line 146）。
+   *
+   * ★★ 必须**记下是哪一个发行**被"稍后"了。
+   *
+   *   设计那句里的限定词是「**同一发行**」——这不是修饰语，而是这条规则的
+   *   全部内容：24 小时的沉默只针对**用户看见并推迟的那一个版本**。
+   *
+   *   原先只存了一个时间戳（`snoozedUntilMs`），于是 `shouldNotify()` 在任何
+   *   24 小时窗口内都返回 false，**与候选是哪一个发行无关**。后果是：
+   *   用户对 1.1.0 点了"稍后"，而 1.2.0 在几小时后发布 ⇒ **1.2.0 被静默吞掉**，
+   *   用户不会被告知，直到那个窗口过完。而"有更新可用"正是这个功能存在的
+   *   全部理由。
+   *
+   *   > 一条带限定词的规则，如果实现里丢掉了那个限定词，
+   *   > 它的作用范围就从"那一个"变成了"全部"——而这两种写法在代码上
+   *   > 只差一个字段。
+   *
+   *   `snooze()` 的返回值里**一直**带着 `releaseId`（说明写的人知道发行是有
+   *   关系的），只是那个读数没有被判断用上——与 ⑪～㉖ 同一个形状。
+   */
   function snooze({ durationMs = 24 * 60 * 60 * 1000 } = {}) {
     snoozedUntilMs = now() + durationMs
+    snoozedReleaseId = candidate?.releaseId ?? null
     setState('snooze', {})
     publish()
-    return Object.freeze({ ok: true, snoozedUntilMs, releaseId: candidate?.releaseId ?? null })
+    return Object.freeze({ ok: true, snoozedUntilMs, releaseId: snoozedReleaseId })
   }
 
-  /** 现在应不应该**主动**提醒（托盘气泡/系统通知）。 */
+  /**
+   * 现在应不应该**主动**提醒（托盘气泡/系统通知）。
+   *
+   * 「稍后」只对**它当时推迟的那一个发行**生效；换了一个发行就重新提醒。
+   */
   function shouldNotify() {
     if (candidate === null) return false
-    if (snoozedUntilMs !== null && now() < snoozedUntilMs) return false
-    return state === 'available'
+    if (state !== 'available') return false
+    // ★ 同一个发行且在窗口内 → 沉默；否则（包括"换了一个发行"）→ 提醒。
+    if (snoozedUntilMs !== null && now() < snoozedUntilMs
+      && snoozedReleaseId !== null && snoozedReleaseId === candidate.releaseId) {
+      return false
+    }
+    return true
   }
 
   // -------------------------------------------------------------------------

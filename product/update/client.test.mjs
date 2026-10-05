@@ -39,21 +39,30 @@ const NEXT = '1.1.0'
 function createStaticHost({
   keyId, privateKeyPem, packageBytes, notesBytes = Buffer.from('修复若干问题。\n', 'utf8'),
   mutate = null, slowChunks = 0,
+  // ★ 让夹具能装出**第二个**发行（默认仍是 `NEXT`）。
+  //   需要它是因为"稍后只对同一个发行生效"这条判据的正确性，只有在
+  //   **同一个客户端**前后看到两个**不同**发行时才看得出来——而一个只会
+  //   产出同一个发行的夹具，恰好在那件事上什么也证明不了（见 ㉗ 的用例）。
+  productVersion = NEXT,
+  releaseId = `rel-${productVersion}`,
+  // ★ 通道 sequence 也要能调：第二个发行必须用**更高**的 sequence，
+  //   否则 `judgeSequence` 会以"同 sequence 换摘要"把它拒掉（那条判据是对的）。
+  sequence = 42,
 }) {
   const productManifest = {
     format: 'legion/version-manifest@1',
-    productVersion: NEXT,
-    legionVersion: NEXT,
+    productVersion,
+    legionVersion: productVersion,
     dshVersion: '0.8.3',
     dshCompositionPatchVersion: 2,
     channel: 'stable',
   }
-  const pkg = artifactFromBytes(`releases/rel-${NEXT}/legion-win-x64.zip`, packageBytes)
-  const installer = artifactFromBytes(`releases/rel-${NEXT}/Legion-Setup-win-x64.exe`, Buffer.from('installer'))
-  const notes = artifactFromBytes(`releases/rel-${NEXT}/notes.zh-CN.txt`, notesBytes)
+  const pkg = artifactFromBytes(`releases/${releaseId}/legion-win-x64.zip`, packageBytes)
+  const installer = artifactFromBytes(`releases/${releaseId}/Legion-Setup-win-x64.exe`, Buffer.from('installer'))
+  const notes = artifactFromBytes(`releases/${releaseId}/notes.zh-CN.txt`, notesBytes)
   const release = buildRelease({
-    releaseId: `rel-${NEXT}`,
-    productVersion: NEXT,
+    releaseId,
+    productVersion,
     channel: 'stable',
     productManifest,
     supportedFromVersions: [CURRENT],
@@ -70,16 +79,16 @@ function createStaticHost({
   const manifestBytes = Buffer.from(serializeEnvelope(signEnvelope(release, { privateKeyPem, keyId })), 'utf8')
   const manifestSha256 = createHash('sha256').update(manifestBytes).digest('hex')
   const feed = buildFeedPayload({
-    channel: 'stable', platform: 'win32', arch: 'x64', sequence: 42,
+    channel: 'stable', platform: 'win32', arch: 'x64', sequence,
     issuedAt: '2026-10-03T00:00:00Z', expiresAt: '2026-10-10T00:00:00Z',
-    releaseId: release.releaseId, productVersion: NEXT,
-    manifestPath: `releases/rel-${NEXT}/manifest.json`, manifestSha256,
+    releaseId: release.releaseId, productVersion,
+    manifestPath: `releases/${releaseId}/manifest.json`, manifestSha256,
   })
   const feedBytes = Buffer.from(serializeEnvelope(signEnvelope(feed, { privateKeyPem, keyId })), 'utf8')
 
   const files = new Map([
     ['feeds/stable/win-x64.json', { bytes: feedBytes, cache: FEED_CACHE_CONTROL }],
-    [`releases/rel-${NEXT}/manifest.json`, { bytes: manifestBytes, cache: RELEASE_CACHE_CONTROL }],
+    [`releases/${releaseId}/manifest.json`, { bytes: manifestBytes, cache: RELEASE_CACHE_CONTROL }],
     [pkg.path, { bytes: packageBytes, cache: RELEASE_CACHE_CONTROL }],
     [installer.path, { bytes: Buffer.from('installer'), cache: RELEASE_CACHE_CONTROL }],
     [notes.path, { bytes: notesBytes, cache: RELEASE_CACHE_CONTROL }],
@@ -178,14 +187,23 @@ function makeClient({
   })
 }
 
-function setup({ mutate = null, packageBytes = Buffer.from('PK\u0003\u0004 pretend zip payload'), slowChunks = 0 } = {}) {
+function setup({
+  mutate = null, packageBytes = Buffer.from('PK\u0003\u0004 pretend zip payload'), slowChunks = 0,
+  productVersion = NEXT, releaseId = `rel-${productVersion}`, sequence = 42,
+  // ★ 可复用同一对密钥：合成"同一个信任根下的两个发行"时，第二个必须由
+  //   **同一把钥匙**签名，否则它会以 `envelope-unknown-key` 被拒——
+  //   那会掩盖这条用例真正要测的东西。
+  keys = null,
+} = {}) {
   const keyId = 'release-2026-a'
-  const keys = generateReleaseKeyPair({ keyId })
-  const trustStore = createTrustStore([{ keyId, publicKeyPem: keys.publicKeyPem }])
-  const fetchImpl = createStaticHost({ keyId, privateKeyPem: keys.privateKeyPem, packageBytes, mutate, slowChunks })
+  const keyPair = keys ?? generateReleaseKeyPair({ keyId })
+  const trustStore = createTrustStore([{ keyId, publicKeyPem: keyPair.publicKeyPem }])
+  const fetchImpl = createStaticHost({
+    keyId, privateKeyPem: keyPair.privateKeyPem, packageBytes, mutate, slowChunks, productVersion, releaseId, sequence,
+  })
   fetchImpl.trustStore = trustStore
   const cacheDir = mkdtempSync(join(tmpdir(), 'legion-update-test-'))
-  return { fetchImpl, cacheDir, keys, trustStore }
+  return { fetchImpl, cacheDir, keys: keyPair, trustStore }
 }
 
 // ---------------------------------------------------------------------------
@@ -598,6 +616,86 @@ test('稍后：24 小时内不重复主动提醒，但候选仍然可见', async
   })
   await later.check()
   assert.equal(later.shouldNotify(), true)
+})
+
+test('★★★ 稍后只对**它当时推迟的那一个发行**生效：换了一个发行就要重新提醒', async (t) => {
+  // ★ 这是 ㉗：设计 §7 line 146 的原话是
+  //
+  //   「稍后仅收起提醒，设置页仍可见；**同一发行**默认 24 小时内不重复主动提醒。」
+  //
+  //   限定词「同一发行」是这条规则的**全部内容**：24 小时的沉默只针对用户
+  //   看见并推迟的那一个版本。
+  //
+  //   原先只存了一个时间戳，`shouldNotify()` 在任何窗口内都返回 false，
+  //   **与候选是哪一个发行无关**。后果：用户对 1.1.0 点了"稍后"，而 1.2.0
+  //   在几小时后发布 ⇒ **1.2.0 被静默吞掉**，用户不会被告知，直到窗口过完。
+  //   而"有更新可用"正是这个功能存在的全部理由。
+  //
+  //   > 一条带限定词的规则，如果实现里丢掉了那个限定词，
+  //   > 它的作用范围就从"那一个"变成了"全部"——而这两种写法在代码上
+  //   > 只差一个字段。
+  //
+  // ★★ 这条用例第一版是**空的**，值得把原因记下来：
+  //
+  //   我一开始用**两个客户端实例**来比较（A 对 1.1.0 点稍后，再用另一个
+  //   客户端看 1.2.0）。那是错的——一个新客户端**根本没有稍后状态**
+  //   （`snoozedUntilMs === null`），所以它当然会提醒。把修复整个撤掉重跑，
+  //   那条用例**照样通过**。也就是说它测的是"新客户端会提醒"，而不是
+  //   "换了发行就不再沉默"。
+  //
+  //   正确的构造是**同一个客户端**先后看到两个发行：先用 `check()` 看到
+  //   1.1.0、点稍后（进入沉默），再让托管换成 1.2.0（sequence 前进），
+  //   同一个客户端再 `check()` 一次。
+  //
+  //   > 一个"两个对象各测一半"的用例，测不出"同一个对象上的状态变化"。
+  const ctxA = setup()
+  t.after(() => rmSync(ctxA.cacheDir, { recursive: true, force: true }))
+  // ★ 第二个发行必须：① 由**同一把钥匙**签名（否则是"未知钥匙"而不是"换了发行"）；
+  //   ② 用**更高**的 sequence（否则会被"同 sequence 换摘要"拒掉——那条判据是对的）。
+  const ctxB = setup({ productVersion: '1.2.0', sequence: 43, keys: ctxA.keys })
+  t.after(() => rmSync(ctxB.cacheDir, { recursive: true, force: true }))
+
+  let swapped = false
+  // 换发行之后，feed 与 `rel-1.2.0/*` 都从 B 那份托管取；其余仍走 A。
+  const combined = async (url, options = {}) => {
+    if (swapped && (url.includes('/feeds/') || url.includes('/rel-1.2.0/'))) {
+      return ctxB.fetchImpl(url, options)
+    }
+    return ctxA.fetchImpl(url, options)
+  }
+  combined.host = ctxA.fetchImpl.host
+  combined.trustStore = ctxA.trustStore
+
+  const client = makeClient({ fetchImpl: combined, cacheDir: ctxA.cacheDir })
+  const first = await client.check()
+  assert.equal(first.outcome, 'available', first.reason)
+  assert.equal(client.candidate().releaseId, `rel-${NEXT}`)
+  assert.equal(client.shouldNotify(), true)
+
+  client.snooze()
+  assert.equal(client.shouldNotify(), false, '刚点完稍后就不该提醒')
+  // 快照里必须能看出"推迟的是哪一个发行"（否则界面只能说一个孤零零的截止时间）。
+  assert.equal(client.snapshot().snoozedReleaseId, `rel-${NEXT}`)
+
+  // 仍是同一个发行（再次检查到同一份清单）→ 窗口内继续保持沉默。
+  const again = await client.check()
+  assert.equal(again.candidate.releaseId, `rel-${NEXT}`)
+  assert.equal(client.shouldNotify(), false, '同一个发行在窗口内不该重新提醒（原判据要保持）')
+
+  // ── 发布方发了新版：通道 sequence 前进，指向 rel-1.2.0 ──
+  swapped = true
+  const second = await client.check()
+  assert.equal(second.outcome, 'available', second.reason)
+  assert.equal(client.candidate().releaseId, 'rel-1.2.0')
+  // ★ 关键断言：时刻仍在 A 的 24 小时窗口之内（`now` 固定为 NOW_MS），
+  //   但候选换了发行 ⇒ **必须提醒**。
+  assert.equal(client.shouldNotify(), true,
+    '换了一个发行之后仍然不提醒：用户会永远看不到新版本（㉗）')
+
+  // ★ 对**新的**那个发行点稍后，它自己也应当被沉默（并且记的是新发行）。
+  client.snooze()
+  assert.equal(client.shouldNotify(), false)
+  assert.equal(client.snapshot().snoozedReleaseId, 'rel-1.2.0')
 })
 
 // ---------------------------------------------------------------------------

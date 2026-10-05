@@ -256,7 +256,8 @@
   - [x] 账号体系：注册（closed/invite/open）、改口令、会话管理、邀请码
   - [x] Hub 门口页（`GET /`）与下载入口
   - [x] 桌面版安装包的**托管**（Hub 自托管发布目录：`LEGION_RELEASES_DIR` + `/legion/*`，含 Range 续传）
-  - [ ] 桌面版安装包**本体**（Electron 打包 + 签名密钥 + 发布流程，属桌面自动更新那条线）
+  - [x] 桌面版安装包**本体**（本地构建跑通，产出 195 MB NSIS 安装包；见下「安装包本体」）
+  - [ ] 安装包**签名**（Authenticode 证书，属运营者资产）与**发布流程**（签名信封 + sequence，属桌面自动更新那条线）
   - [x] 指挥台的**登录 / 注册页**（Web 与桌面共用；本机单机部署不弹）
   - [ ] 真机上设 `LEGION_REGISTRATION` 并跑一次 `verify-phone.mjs`（本机已 20/20）
 
@@ -799,6 +800,67 @@ localStorage——那不是产品该给人的操作。落在「设置 → 连接
 （`docs/superpowers/specs/2026-10-02-legion-desktop-auto-update-design.md`）。
 Hub 侧的托管（`LEGION_RELEASES_DIR` + `/legion/*`）与门口页的自动链接都已就位，
 往目录里放文件即刻生效。
+
+### 安装包本体：**真的构建出来了**（2026-10-06）
+
+此前这条一直记为"不是代码能关的"。这一轮把它跑通了，途中修掉两个**真缺陷**。
+
+**① 打包依赖机器的 PowerShell 执行策略。** 构建到第 ③ 步就断：
+
+```text
+无法加载文件 …\.desktop-build\expand-node.ps1，因为在此系统上禁止运行脚本。
+Archive extraction failed (1)
+```
+
+`prepare:node` 与 `prepare:git` 都是「写一个 .ps1，再用 `-File` 执行」。而
+ExecutionPolicy 管的是**脚本文件**——Restricted/AllSigned 的机器上这一步必失败，
+**而报错一句话也没提构建**，看的人会去查签名策略。
+
+> 一个"因为构建脚本是 .ps1 而被策略拦下"的失败，
+> 与一个"解压真的坏了"的失败，在日志里是同一句话。
+
+改成内联 `-Command`（不经过脚本文件）+ 环境变量传路径：命令串是**常量**，
+原注释要的"命令里没有插值进来的源码"这条性质原样保留，**没有放宽任何策略**。
+
+**② 1.8 GB 构建产物一条都没被忽略。** `desktop/dist`（917 MB）与
+`.desktop-build`（940 MB）从来没有被任何规则忽略，也从未被跟踪过——一次
+`git add -A` 就会把将近两 GB 二进制提交进去，**而在这之前不会有任何提示**。
+
+> 一个"忘了忽略构建产物"的仓库，与一个"构建产物已经被提交过"的仓库，
+> 在 `git status` 上只差一次 `-A`。
+
+**产出**（本机）：
+
+```text
+desktop/dist/Legion-0.1.0-internal-x64-setup.exe   204,582,159 字节（195 MB）
+```
+
+完整流水线：`npm install → prepare:payload → prepare:node → prepare:git →
+stage → dist`。途中还撞到 npm 的 `allow-scripts` 拦下 electron 的 postinstall
+（`electron/dist` 不存在），跑一次 `node node_modules/electron/install.js` 补上。
+
+**「下载」这条链已经端到端走通**（真安装包，不是替身）：按设计文档 §4 摆好
+`releases/<releaseId>/{manifest.json,notes.zh-CN.txt,Legion-Setup-win-x64.exe}` 与
+`feeds/internal/win-x64.json`，起真 Hub 指向该目录，实测：
+
+| 检查 | 读数 |
+| --- | --- |
+| 门口页自动链到最新那份 | `href="/legion/releases/r-2026-10-06_0.1.0/Legion-Setup-win-x64.exe"` |
+| 通道清单 | `200` + `cache-control: no-store` |
+| 整份下载 | `200`，204,582,159 字节 |
+| 断点续传 | `206`，`content-range: bytes 0-1023/204582159` |
+| **读回来的 sha256** | 与源文件、与清单声明**三者一致** |
+| 产物是个真 PE | 头两字节 `4d5a`（MZ） |
+
+**仍未做，且**不是**本仓的半成品能补的**：
+
+- **签名**。当前是 `-internal-` 未签名构建。Authenticode 需要证书，属运营者资产。
+- **发布流程**。设计文档 §5 规定通道清单与发行清单都是**带 Ed25519 签名的信封**
+  （`legion/update-feed@1`，`keyId` + `signature`，`canonicalJson` 固定向量，
+  sequence 单调、`supportedFromVersions`、`migrationPlanDigest`…）。
+  对应的**客户端校验器尚未实现**（属自动更新那条线）。在这一步之前写一个发布脚本，
+  只会产出形状可能不被未来校验器接受的清单——所以这里**不写**，上面的目录是
+  手工摆的，步骤已如实记在本文。
 
 ### 闭环里仍然成立的限制（不是缺陷，是设计）
 

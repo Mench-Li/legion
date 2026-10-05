@@ -87,6 +87,26 @@ cat > "$SITE" <<NGINX
 #   /healthz 从 200 变成 401）。域名备案通过后改用域名站点，删掉本文件即可回滚。
 
 server {
+    # ★ Origin 别名：Cloudflare 隧道面板里的 Service 填的是 `http://localhost:3000`
+    #   （Hub 实际在 8787）。这一段就是为了让那份**已经配好的**面板配置能用。
+    #
+    #   它存在的唯一理由是那个端口号。把面板里的 Service 改成
+    #   `http://127.0.0.1:8787` 之后，**删掉这个 server 块即可**——
+    #   它不该长期留着：同一个服务有两个入口，迟早会有人问"3000 是什么"。
+    #
+    #   不直接让 Hub 去听 3000：那等于让产品去迁就一次配置笔误。
+    #   入口层的职责本来就是"把外面的名字接到里面的端口上"，这件事归 nginx。
+    listen 3000;
+    listen [::]:3000;
+    server_name _;
+
+    server_tokens off;
+    add_header X-Content-Type-Options nosniff always;
+
+    include /etc/nginx/snippets/legion-hub-proxy.conf;
+}
+
+server {
     # ★ 用 listen ... http2 而不是 http2 on;（后者需要 nginx >= 1.25.1，
     #   本机是 1.24.0）。旧写法在 1.25+ 上仍有效（只有 deprecation 警告），
     #   所以它是**跨版本**的那个选择。

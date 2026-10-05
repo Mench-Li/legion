@@ -96,7 +96,7 @@
 
 写下来是因为它们的形状比"改对了"更值得留下来。
 
-一共三十一条。①～⑩ 是各层实现里的具体错误（错读一个头、前缀不一致、跨不过
+一共三十四条。①～⑩ 是各层实现里的具体错误（错读一个头、前缀不一致、跨不过
 进程边界、手写清单漏了文件……）；**⑪～㉓ 属于同一类**，它们不是"某个函数
 写错了"，而是**判据/承诺与它的输入之间那条线从来没有接上**——⑪～⑱ 与
 ⑲～㉓ 都是这一类，区别只在于**被谁发现**：⑪～⑯ 是全链路用例与接线层用例
@@ -725,7 +725,119 @@ CI 的 `product-update` 套件（**另一份清单**）。两份数字（662 / 4
 > 一个**写出来的数字**，是唯一能让"清单漏了一项"这件事变得可见的东西。
 > 所以复现命令旁边那个数字不是装饰，它是判据的一部分。
 
-### 5.2 ⑲～㉛ 是怎么找到的：**逐条对照设计**
+**㉜ 一份能用的托管配置只存在于托管机上——仓库里能核对它，却不能建对它。**
+引导计划的第 2–5 步（单独站点、目录布局、缓存策略、只允许 GET/HEAD、关闭目录索引）
+是在**会话里**执行完的，配置留在托管机的 `/etc/nginx/sites-available/legion-updates`
+上，**仓库里没有**。后果：`verify-host.mjs` 能告诉你托管**不对**，而换一台空白机器
+只能凭记忆重来——引导计划自己就写着「脚本已加入有界重试，**尚未在新空白机器重跑**」。
+
+★★ 而**顺着 `UPLOAD_TARGETS` 再问一次**就露出来了。在真实托管上逐条核对引导计划的
+判据，**全部通过**：
+
+```
+GET 通道清单 → 200    HEAD → 200    POST → 403
+目录索引 → 404        缺失清单 → 404
+通道清单 Cache-Control: no-store
+发行文件 Cache-Control: public, max-age=31536000, immutable
+```
+
+而顺着生产前缀再问：
+
+| 路径 | 真实托管（当时） |
+|---|---|
+| `/test/legion/…` | **200** ← 托管上有这条 location |
+| `/legion/…` | **404** ← 托管上**没有**任何 location 服务它 |
+| `/production/legion/…` | 404 ← 有 location，但生产树是空的（正常） |
+
+即：托管把生产树放在 **`/production/legion`**（测试期写法），而 `UPLOAD_TARGETS`
+声明生产前缀是 **`/legion`**（正式期写法）。按 `upload-plan.txt` 走完一次生产发布
+之后，计划里第 2/4 步那条 `verify-host --prefix /legion` **必然 404**，
+而计划里**没有任何一步**会提示"你还得先加一个 server 块"。
+
+> 两个各自都对的东西，可以在**接缝处**对不上——
+> 而接缝处没有测试时，它会在第一次真发布时才说话。
+
+修法：`scripts/update/host-config.mjs` 从**另外两处**推出配置，而不是抄一份文本。
+
+| 配置里的东西 | 单一来源 |
+|---|---|
+| 每棵树的内容根 / URL 前缀 | `publish.mjs` 的 `UPLOAD_TARGETS` |
+| 每条路径的 `Cache-Control` | `host.mjs` 的 `FEED_CACHE_CONTROL` / `RELEASE_CACHE_CONTROL` |
+
+★ 而"推不出来"本身是判据：某棵树的内容根**不以**它的 URL 前缀结尾时，nginx 的
+`root` 语义（文件 = root + URI）下**不存在**合适的 root——那时生成器**报错**，
+而不是生成一份看起来对、实际全 404 的配置。
+
+**真实托管上的证据**：真 nginx `nginx -t` 接受两棵树的渲染结果；在托管上**另起一个**
+实例（8080、独立 pid，不碰 80 那个）服务同一棵测试树，**五条判据逐项相同**
+（`healthz` / 目录索引 / 通道清单 / 缺失清单 / 发行文件），`POST 403 / HEAD 200`
+两个端口都成立，三份正文的 `sha256` **逐字节相同**；而线上那份 `mtime` 仍是引导那天
+（`2026-10-04 11:32:52`），**一字未动**。
+
+★★ 顺带查出一条与生产域名直接相关的事实：线上那个 block 的 `server_name` 是
+`117.72.146.36`，所以它**只**回应这个 Host，别的 Host 会落到 80 的默认 server
+（当前是 404，不会串到别的业务站点——查过了）。**加了生产域名之后 `server_name`
+必须跟着改**，否则每一个请求都会落到默认 server 上拿到 404。生成器把
+`--server-name` 做成了**必填**，正是这个必须改的参数。
+
+**㉝ 路径的两种形状：一个错形状的输入，会得到一个看起来与形状无关的结论。**
+`host.mjs` 里的路径有**两种形状**，而它们长得很像：
+
+```
+feedUrl(host)          → https://…/legion/feeds/stable/win-x64.json   （带前缀）
+evaluateResponse(...)  → 要的是 'feeds/stable/win-x64.json'            （树内相对）
+```
+
+把前者喂给后者，`expectedCacheControl` 会因为它不以 `feeds/` 开头而**当作发行路径**，
+于是报出来的是：
+
+    "…/feeds/stable/win-x64.json 的 Cache-Control 是 "no-store"，
+     **发行文件**应包含 immutable"
+
+——一句与"前缀"完全无关的诊断，排查会从缓存策略查起。
+
+> 一个错形状的输入，如果落在"另一条分支"上，
+> 得到的是一个**看起来与形状无关**的错误结论。
+
+★ 我是**在自己写用例时**踩上它的（㉜ 那条"接缝"用例第一版就写成
+`evaluateResponse(`${urlPrefix}/feeds/…`)`）。修法：新增 `HOST_CODES.BAD_PATH`，
+形状不对时**先拒**并直接返回，不再往下判缓存头；只认设计 §4 目录布局里的
+两类开头（`feeds/`、`releases/`）。而这条判据也进了 `selfCheckHost()`——
+**一条只被"调用方记得传对"守着的约定，与一条写在代码里的判据不是一回事**。
+
+**㉞（方法）一次"没被抓住"的变异，先要排除"变异本身没打中"。**
+验证 ㉜ 那条"生成器 ↔ 验证器"用例时，我把 `FEED_CACHE_CONTROL` 的 `add_header`
+行改成混合指令，跑测试——**照样全绿**，我一度以为那条判据是空的。
+
+真相是变异打偏了：`FEED_CACHE_CONTROL` 在那个渲染函数里出现在**两处**
+`add_header`（`/healthz` 与 `feeds/`），而 `String.replace` 不带 `g` 只换第一处，
+**改中的是 healthz**。接缝用例只读 `feeds/` 与 `releases/`，所以看不到它。
+
+> 一次"没被抓住"的变异，先要排除"变异本身没打中"——
+> 否则会把"我改错了地方"读成"判据是空的"。
+
+改成正则 + **锚点唯一性检查**（命中多于一处直接拒绝，而不是当成功）之后，
+接缝用例**立刻变红**。
+
+★★ 而它顺带暴露了一个**真的**缺口：`/healthz` 的 `no-store` **不在**
+`evaluateResponse` 的覆盖范围内（那个函数只认 `feeds/` 与 `releases/`，
+连 `/healthz` 本身都会被新加的 `BAD_PATH` 拒掉）。于是健康检查的缓存头
+**只在真实托管上验过一次，代码里没人守**：
+
+> 一条"只在真实机器上验过一次、代码里没人守"的性质，
+> 会在下一次改配置时安静地消失。
+
+补上判据之后，`/healthz` 那条变异也被抓住了。**五种破坏，每条都被抓住**：
+
+| 变异 | 结果 |
+|---|---|
+| `feeds/` 的缓存头改成混合指令 | 1 条红（接缝用例） |
+| `/healthz` 的缓存头改成 `public, max-age=600` | 1 条红（新增的用例） |
+| `relativePathShape` 关掉 | 4 条红 |
+| `root` 推导改成直接拿内容根 | 1 条红 |
+| `server_name` 允许为空 | 1 条红 |
+
+### 5.2 ⑲～㉞ 是怎么找到的：**逐条对照设计**
 ⑪～⑱ 是被用例逼出来的（写用例 → 发现生产缺东西）。⑲～㉗ 不全是——它们是**拿着
 设计文档一行一行核对实现**找出来的。两种方法各有盲区：
 
@@ -737,9 +849,9 @@ CI 的 `product-update` 套件（**另一份清单**）。两份数字（662 / 4
 ⑲ 与 ⑳ 落在第一张表的右边：**没有任何用例会去测一个谁都没实现的要求**。
 所以下一步的验证方式也必须是"对照文档"，而不只是"再写点用例"。
 
-## 5.0 一个反复出现的模式（十八个缺陷同源）
+## 5.0 一个反复出现的模式（十九个缺陷同源）
 
-⑪ 到 ㉛ 里的十九个是同一个模式：**一个判据（或一个承诺）需要一个读数，
+⑪ 到 ㉜ 里的二十个是同一个模式：**一个判据（或一个承诺）需要一个读数，
 而那个读数在真实链路上不存在。**（⑧ 的 `{teamHubPort}` 未展开是它的变体。）
 
 | # | 判据 / 承诺 | 缺的读数 | 症状 | 方向 |
@@ -1049,12 +1161,12 @@ node scripts/update/verify-host.mjs --origin <生产 origin> --prefix /legion \
 ## 7. 复现证据
 
 ```bash
-# 全部自动更新相关用例（**662 条**）
+# 全部自动更新相关用例（**674 条**）
 #
 # ★ 下面这份清单与 CI 的 `product-update` 套件**不是**同一份，两者都要跑：
 #   这里多跑了 `launcher.test.mjs` / `desktop-bridge.test.mjs` 等接线层，
 #   而 CI 那份多跑了 `errors` / `integration` / `envelope` 等（见 §7.1）。
-#   两个数字应当各自对得上——`product-update` 是 406。
+#   两个数字应当各自对得上——`product-update` 是 **419**。
 #
 # ★ 清单里必须包含 `product/launcher/cli-recovery.test.mjs`：它是恢复入口
 #   （设计 §8 line 190）的 9 条用例。**先前这一行漏了它**，于是按本文档
@@ -1068,11 +1180,12 @@ node --test product/update/*.test.mjs product/upgrade/*.test.mjs \
   product/launcher/cli-recovery.test.mjs \
   desktop/scripts/shell-files.test.mjs desktop/scripts/update-payload.test.mjs
 
-# CI 的 `product-update` 套件那一份（**407 条**）。两份都与上面同一棵树上跑过。
+# CI 的 `product-update` 套件那一份（**419 条**）。两份都与上面同一棵树上跑过。
 #
-# ★ 这个数字比 §7.1 里那次全量 CI 的读数（406）**多 1**，差的是
-#   `modules.test.mjs` 里那条"selfCheckAll() 必须覆盖每一个有自检的模块"
-#   ——它是那次 CI 之后才加的。写清楚差在哪，比让两个数字对不上要好。
+# ★ 与 §7.1 里那次全量 CI 的读数（406）不同，差的是三次之后才加的东西：
+#   `modules.test.mjs` 的"selfCheckAll() 必须覆盖每一个有自检的模块"、
+#   `scripts/update/host-config.test.mjs`（托管配置生成器的 12 条）。
+#   写清楚差在哪，比让两个数字对不上要好——㉛ 就是"数字对不上"查出来的。
 node --test product/update/client.test.mjs product/update/errors.test.mjs \
   product/update/envelope.test.mjs product/update/feed.test.mjs \
   product/update/extract.test.mjs product/update/zip.test.mjs \
@@ -1084,7 +1197,8 @@ node --test product/update/client.test.mjs product/update/errors.test.mjs \
   product/launcher/update-gate.test.mjs desktop/update-service.test.mjs \
   desktop/update-wiring.test.mjs desktop/update-panel.test.mjs \
   desktop/scripts/shell-files.test.mjs desktop/scripts/update-payload.test.mjs \
-  scripts/update/publish.test.mjs scripts/update/rotation.test.mjs
+  scripts/update/publish.test.mjs scripts/update/rotation.test.mjs \
+  scripts/update/host-config.test.mjs
 
 # 全链路集成（发布 → 托管 → 检查 → 下载 → 事务 → helper → 提交）
 node --test product/update/integration.test.mjs

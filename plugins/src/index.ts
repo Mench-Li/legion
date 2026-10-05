@@ -84,6 +84,7 @@ import { createAcceptance } from './acceptance.js'
 import { createHandoff, isSliceTesterTask } from './handoff.js'
 import { createSliceOrchestration } from './sliceOrchestration.js'
 import { decideProductionTool, type GrantedWrite } from './productionWriteGuard.js'
+import { planTimeoutSettlement, workerStoppedWithin, TIMEOUT_SETTLE_GRACE_MS } from './timeoutSettlement.js'
 import { parseExternalWorkerReport } from '../../runtime/adapters/dsh/external-agent.mjs'
 // PRT-108 棘轮：provider 目录读取与外部 Agent 接线一律经适配层，插件不再直接依赖执行面服务。
 // 见 runtime/adapters/dsh/subagent-client.mjs 的文件头（为什么这 5 个调用点必须下沉）。
@@ -2451,9 +2452,37 @@ function spaceWorker(ctx: AppContext, config: Config): void {
         await run.dispose().catch(() => undefined)
         return
       }
-      await safeComment(t.id, '⚠ worker 超时（守护强制结算），任务保留在 in_progress，下一轮自动重试（会复用 w/<id> 的 WIP 续做）')
-      activity('aborted', t.id, 'worker 超时强制结算，保留 in_progress 待重试')
+      // ★ BUG-007：超时结算必须**先取证、再决定**（详见 ./timeoutSettlement.ts 的文件头）。
+      //
+      // 从前这里只写一句"任务保留在 in_progress，下一轮自动重试"就返回：既不改变任务状态、
+      // 也不碰写入预约。而 15 分钟后守护自己的 stale 回收器会把该预约**冻结**成 reconciling，
+      // 于是那句话永远无法兑现——认领一律被 RECONCILING 拒掉，只能人工 confirm-stopped 解开。
+      // 实测 T-178/T-179 双双卡死、两个并发槽位空转，且每 40 分钟必复现。
+      //
+      // 顺序是刻意的：先 dispose（终止本次会话）→ 再取证（`run.result` 是否在宽限期内结算）
+      // → 最后才决定要不要释放写入占用。**取不到证据就不释放**：abort 不保证杀死子代理，
+      // 而重派会复用同一个 worktree ⇒ 两个写者落进同一目录比卡住更糟。
       await run.dispose().catch(() => undefined)
+      const workerStopped = await workerStoppedWithin(run, TIMEOUT_SETTLE_GRACE_MS)
+      const settlement = planTimeoutSettlement({
+        taskId: t.id,
+        stopped: workerStopped,
+        graceMs: TIMEOUT_SETTLE_GRACE_MS,
+        timeoutMinutes: Math.round(config.workerTimeoutMs / 60000),
+      })
+      if (settlement.to !== null) {
+        // 已取得终止证据 ⇒ 走既有诚实出口：执行者自己（by = t.soldier）以 confirmedStopped=true
+        // 走 in_progress → todo，在 hub 侧这条路径是**释放**预约（team-hub/server.mjs 的 transition）。
+        try {
+          await transitionTo(t.id, settlement.to, t.scope ?? scope, settlement.confirmedStopped)
+        } catch (e) {
+          // 转不过去（版本冲突/已被他人动过）时**保持持有**，并把真实原因写进评论——
+          // 不能因为"想让自动化成功"就退化成不说实话。
+          log(`${t.id} 超时结算转 todo 失败（保持持有，等待人工确认）：${String(e)}`)
+        }
+      }
+      await safeComment(t.id, settlement.comment)
+      activity('aborted', t.id, settlement.activity)
       return
     }
     await run.dispose()

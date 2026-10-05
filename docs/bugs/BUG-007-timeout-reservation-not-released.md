@@ -117,3 +117,72 @@ node -e "const{DatabaseSync}=require('node:sqlite');const db=new DatabaseSync('t
 # 3) 人工解锁（现状下唯一出路）
 #    POST /api/tasks/<id>/reservation/confirm-stopped  {by:'general',confirm:'stopped:<id>'}
 ```
+
+## 八、修复（2026-10-05）
+
+### 8.1 改法与位置
+
+新增纯决策模块 **`plugins/src/timeoutSettlement.ts`**（决策 + 文案，可单测两个分支），
+调用点改为**先取证、再决定**（`plugins/src/index.ts` 超时结算分支）：
+
+```ts
+await run.dispose().catch(() => undefined)                       // ① 先终止本次会话
+const workerStopped = await workerStoppedWithin(run, TIMEOUT_SETTLE_GRACE_MS)   // ② 再取证
+const settlement = planTimeoutSettlement({ taskId: t.id, stopped: workerStopped, … })
+if (settlement.to !== null) {
+  await transitionTo(t.id, settlement.to, t.scope ?? scope, settlement.confirmedStopped)  // ③ 只在此处释放
+}
+await safeComment(t.id, settlement.comment)                      // ④ 文案与效果同源
+```
+
+- **能取证**（`run.result` 在宽限期 20 秒内结算）⇒ `action='release-and-retry'`：
+  `to='todo'` + `confirmedStopped=true`。走的是 hub 侧**既有的诚实出口**
+  （`team-hub/server.mjs` 的 transition：`finishTaskReservationInTx(id, { cancelled: !confirmedStopped })`
+  ⇒ `cancelled:false` = **释放**），于是"下一轮重派"第一次成为事实。
+- **取不到证据** ⇒ `action='hold-for-manual'`：`to=null`（**不动状态**）+ `confirmedStopped=false`
+  （**不释放**），文案写明"写入占用仍被本轮持有、不会自动重试"，并给出确切的
+  `confirm-stopped` 命令。安全方向（不许出现两个写者）保持不变。
+
+### 8.2 为什么宽限期是 20 秒
+
+正常被 abort 的 run 在秒级内结算；20 秒留给"正在收尾的写操作落盘"，又不至于拖住扫描循环
+（`intervalMs` 是 30 秒量级）。该值由测试 ⑤ 钉住上下界（≥5s 防误判挂死写操作，≤30s 防拖住循环）。
+
+### 8.3 回归测试与变异验证
+
+新增 **`plugins/tests/timeout-settlement.test.mjs`（6 条）**，并逐个做**变异验证**
+（把修复弄坏，确认对应断言当场变红，再还原）：
+
+| 变异 | 期望变红 | 实测 |
+| --- | --- | --- |
+| A 删掉 hold 分支（"取不到证据也当已停止"） | ② | ✓ ② 红，还原后 6/6 |
+| B 让 `workerStoppedWithin` 无条件返回 true | ④ | ✓ ④ 红，还原后 6/6 |
+| C 去掉 index.ts 的取证接线（纯函数再好也不调用） | ⑥ | ✓ ⑥ 红，还原后 6/6 |
+
+其中 ⑥ 是**接线防回归**：断言 index.ts 的可执行代码里不再出现那句做不到的承诺、
+超时文案只由 `planTimeoutSettlement` 一处产出（防止"实现改了、评论还在承诺旧行为"——
+这正是本缺陷的形态）、且 `dispose → 取证 → 决定` 的顺序成立。
+
+★ 两处断言写法的坑（留给后来人）：
+1. 断言必须针对**代码**而非注释——修好后源码里应当允许出现"从前是这么写的"这种解释性注释，
+   把注释算进去会让防回归在"有人老实写了为什么改"时误报，从而被下一个人顺手删掉。
+2. 断言不能过粗：`safeComment` 里出现"自动重试"是**合法的**
+   （`index.ts:3647` 调解器"调解已自动重试 2 次"是真的），所以只钉"超时文案不得在调用点另写一份"。
+
+### 8.4 验证读数
+
+- `tsc -p plugins/tsconfig.json --noEmit` exit 0
+- `timeout-settlement` 6/0 · `worker-regression` 15/0 · `stateMachine` 40/0 ·
+  `reclamation` 21/0 · `slice-orchestration` 10/0 · `write-eligibility` 8/0
+
+### 8.5 未覆盖的残留风险（如实记下）
+
+`transitionTo` 在 hub 侧可能因**乐观锁版本冲突**失败（任务被别的路径改过）。
+该分支已 catch 并落日志"保持持有，等待人工确认"，但**没有**自动化测试覆盖那条路径
+（需要模拟版本冲突）。它不会造成两个写者（失败即不释放），只是仍需人工。
+
+### 8.6 与另一条路径的关系（未改，故意）
+
+`in_progress → in_review` **不释放**写入预约（`team-hub/server.mjs` 只在 `→todo/blocked/done/canceled`
+与 `confirmedStopped` 时处理）。这是**独立的设计缺口**（等待人工验收期间整仓独占），
+不在本次范围内——本文只修"执行者已不存在"这条路径。

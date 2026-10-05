@@ -164,6 +164,50 @@ test('真实任务认领与文件预约同事务：撞车等待，释放后才�
     // 而它回到 todo 的意义正在这里：人工确认那条恢复路径可用
     assert.equal((await post('/api/tasks/T-stale-frozen/reservation/confirm-stopped', { by: 'general', scope: 'default', confirm: 'stopped:T-stale-frozen' })).status, 200)
     assert.equal((await post('/api/claim', { id: 'T-stale-frozen', by: 'worker', scope: 'default' })).status, 200)
+
+    // ── ⑰ BUG-007：超时结算的诚实出口（in_progress → todo，by = 执行者本人）──────────────
+    //
+    // 现场记录 docs/bugs/BUG-007-timeout-reservation-not-released.md。守护 worker 超时（25 分钟）
+    // 后从前既不释放预约、也不改任务状态，只写一句"下一轮自动重试"；15 分钟后超龄回收器
+    // （⑯②）把预约冻结，于是那句话永远无法兑现，任务每 40 分钟卡死一次。
+    // 修好后：守护在**证实 worker 已停止**时，以 by = t.soldier + confirmedStopped: true 走
+    // in_progress → todo —— hub 侧就是这里的三半对照。
+    ins.run('T-timeout-confirmed', 'timeout confirmed', 'todo', 'default', 0)
+    await post('/api/tasks/T-timeout-confirmed/write-intent', { by: 'planner', scope: 'default', paths: ['src/timeout.mjs'] })
+    assert.equal((await post('/api/claim', { id: 'T-timeout-confirmed', by: 'worker', scope: 'default' })).status, 200)
+    // ① 能证实（执行者本人声明已停止）⇒ released + 回 todo + 下一轮立刻能认领
+    const confirmedStop = await post('/api/transition', { id: 'T-timeout-confirmed', to: 'todo', by: 'worker', scope: 'default', confirmedStopped: true })
+    assert.equal(confirmedStop.status, 200, JSON.stringify(confirmedStop.body))
+    assert.equal(hub.db.prepare("SELECT status FROM tasks WHERE id='T-timeout-confirmed'").get().status, 'todo')
+    assert.equal(hub.db.prepare("SELECT state FROM write_reservations WHERE task_id='T-timeout-confirmed' ORDER BY id DESC LIMIT 1").get().state, 'released',
+      '能证实时必须是 released（cancelled:false）："下一轮自动重试"只有这样才成立')
+    assert.equal((await post('/api/claim', { id: 'T-timeout-confirmed', by: 'worker', scope: 'default' })).status, 200,
+      '释放后下一轮必须能真正重派（从前这里 409 RECONCILING："上一轮执行尚未确认停止"）')
+
+    // ② 对照：同样是 in_progress → todo，但**不能证实**（confirmedStopped=false）⇒ 仍冻结
+    ins.run('T-timeout-unconfirmed', 'timeout unconfirmed', 'todo', 'default', 0)
+    await post('/api/tasks/T-timeout-unconfirmed/write-intent', { by: 'planner', scope: 'default', paths: ['src/timeout2.mjs'] })
+    assert.equal((await post('/api/claim', { id: 'T-timeout-unconfirmed', by: 'worker', scope: 'default' })).status, 200)
+    const unconfirmedStop = await post('/api/transition', { id: 'T-timeout-unconfirmed', to: 'todo', by: 'worker', scope: 'default' })
+    assert.equal(unconfirmedStop.status, 200)
+    assert.equal(hub.db.prepare("SELECT status FROM tasks WHERE id='T-timeout-unconfirmed'").get().status, 'todo')
+    assert.equal(hub.db.prepare("SELECT state FROM write_reservations WHERE task_id='T-timeout-unconfirmed' ORDER BY id DESC LIMIT 1").get().state, 'reconciling',
+      '不能证实仍须冻结：这一半不许被"顺手释放"改掉')
+    assert.equal((await post('/api/claim', { id: 'T-timeout-unconfirmed', by: 'worker', scope: 'default' })).status, 409)
+    // 人工确认那条恢复路径仍可用（与 ⑯② 同一条）
+    assert.equal((await post('/api/tasks/T-timeout-unconfirmed/reservation/confirm-stopped', { by: 'general', scope: 'default', confirm: 'stopped:T-timeout-unconfirmed' })).status, 200)
+    assert.equal((await post('/api/claim', { id: 'T-timeout-unconfirmed', by: 'worker', scope: 'default' })).status, 200)
+
+    // ③ 诚实出口只对**执行者本人**开放：非执行者拿 confirmedStopped=true 声明必须 403，且整事务回滚
+    ins.run('T-timeout-imposter', 'timeout imposter', 'todo', 'default', 0)
+    await post('/api/tasks/T-timeout-imposter/write-intent', { by: 'planner', scope: 'default', paths: ['src/timeout3.mjs'] })
+    assert.equal((await post('/api/claim', { id: 'T-timeout-imposter', by: 'worker', scope: 'default' })).status, 200)
+    const imposter = await post('/api/transition', { id: 'T-timeout-imposter', to: 'todo', by: 'general', scope: 'default', confirmedStopped: true })
+    assert.equal(imposter.status, 403)
+    assert.equal(imposter.body.code, 'STOP_CONFIRMATION_DENIED')
+    assert.equal(hub.db.prepare("SELECT status FROM tasks WHERE id='T-timeout-imposter'").get().status, 'in_progress')
+    assert.equal(hub.db.prepare("SELECT state FROM write_reservations WHERE task_id='T-timeout-imposter' ORDER BY id DESC LIMIT 1").get().state, 'reserved',
+      '403 必须整事务回滚：非执行者声明既不能释放、也不能冻结他人的预约')
   } finally {
     hub.server.closeAllConnections?.()
     hub.server.close()

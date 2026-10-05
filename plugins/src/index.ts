@@ -84,7 +84,7 @@ import { createAcceptance } from './acceptance.js'
 import { createHandoff, isSliceTesterTask } from './handoff.js'
 import { createSliceOrchestration } from './sliceOrchestration.js'
 import { decideProductionTool, type GrantedWrite } from './productionWriteGuard.js'
-import { planTimeoutSettlement, workerStoppedWithin, TIMEOUT_SETTLE_GRACE_MS } from './timeoutSettlement.js'
+import { planTimeoutSettlement, planTimeoutTransitionFailure, workerStoppedWithin, TIMEOUT_SETTLE_GRACE_MS } from './timeoutSettlement.js'
 import { branchOwnChangesRefspec } from './branchScope.js'
 import { resolveStaleMinutes } from './configSanity.js'
 import { parseExternalWorkerReport } from '../../runtime/adapters/dsh/external-agent.mjs'
@@ -2505,6 +2505,8 @@ function spaceWorker(ctx: AppContext, config: Config): void {
         graceMs: TIMEOUT_SETTLE_GRACE_MS,
         timeoutMinutes: Math.round(config.workerTimeoutMs / 60000),
       })
+      let timeoutComment = settlement.comment
+      let timeoutActivity = settlement.activity
       if (settlement.to !== null) {
         // 已取得终止证据 ⇒ 走既有诚实出口：执行者自己（by = t.soldier）以 confirmedStopped=true
         // 走 in_progress → todo，在 hub 侧这条路径是**释放**预约（team-hub/server.mjs 的 transition）。
@@ -2512,12 +2514,15 @@ function spaceWorker(ctx: AppContext, config: Config): void {
           await transitionTo(t.id, settlement.to, t.scope ?? scope, settlement.confirmedStopped)
         } catch (e) {
           // 转不过去（版本冲突/已被他人动过）时**保持持有**，并把真实原因写进评论——
-          // 不能因为"想让自动化成功"就退化成不说实话。
+          // 不能因为"想让自动化成功"就退化成不说实话：释放没成功，就不能打印释放成功的文案。
           log(`${t.id} 超时结算转 todo 失败（保持持有，等待人工确认）：${String(e)}`)
+          const failure = planTimeoutTransitionFailure({ taskId: t.id, scope: t.scope ?? scope, reason: String(e) })
+          timeoutComment = failure.comment
+          timeoutActivity = failure.activity
         }
       }
-      await safeComment(t.id, settlement.comment)
-      activity('aborted', t.id, settlement.activity)
+      await safeComment(t.id, timeoutComment)
+      activity('aborted', t.id, timeoutActivity)
       return
     }
     await run.dispose()

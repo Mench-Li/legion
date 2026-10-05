@@ -214,7 +214,7 @@ const drive = async (router, path, body) => {
 test('⑤ ★★★ 发布时**作用域回落**：`body.scope` 有就用（trim），没有就用 hub 给的那个', async () => {
   const { router, calls } = spyRouter()
   await drive(router, '/api/goal', { by: 'general', objective: 'O' })
-  assert.deepEqual(calls.publish[0], ['scope-from-hub', 'O', 'chain', 'general', false],
+  assert.deepEqual(calls.publish[0], ['scope-from-hub', 'O', 'chain', 'general', false, null],
     '★★★ 没有 body.scope 时必须回落到 handleWrite 递进来的 scope')
   await drive(router, '/api/goal', { by: 'general', objective: 'O', scope: '  other  ' })
   assert.equal(calls.publish[1][0], 'other', '★★ 给了 scope 就用它，且要去空白')
@@ -222,6 +222,26 @@ test('⑤ ★★★ 发布时**作用域回落**：`body.scope` 有就用（trim
   assert.equal(calls.publish[2][0], 'scope-from-hub', '★ 只有空白等于没给')
   await drive(router, '/api/goal', { by: 'general', objective: 'O', scope: 123 })
   assert.equal(calls.publish[3][0], 'scope-from-hub', '★ 非字符串也等于没给')
+
+  // ★ 2026-10-05（T-178）：publishGoalRecord 的**第 6 个位置**是
+  //   workflowDefinitionRef（契约在 team-hub/server.mjs:2379）：
+  //     function publishGoalRecord(targetScope, objective, mode = 'chain', by = 'general',
+  //                                docSync = false, workflowDefinitionRef = null)
+  //   本判据最初只写到第 5 位；第 6 位接上之后，deepEqual 把**正确**的搬运
+  //   （多一个 null）报成了'作用域没有回落'——错误信息指向一个完全不相干的地方。
+  //
+  //   > 一个'照第 5 位写的'参数搬运判据，与一个'第 6 位上线后把正确实现报成错'的判据，
+  //   > 在 failing test 的名字上是同一个东西。
+  //
+  //   契约依据不止这一处：team-hub/routes/goal-lifecycle.mjs:77 把
+  //   body.workflowDefinition ?? null 放进第 6 位；team-hub/pipeline.test.mjs:589-597
+  //   从 **HTTP 层**覆盖了'给了 definition 就按它冻结工作流'。所以这里补上第 6 位，
+  //   并且**正面**钉住它真的被搬过去（而不是把它从断言里删掉）。
+  assert.equal(calls.publish[0][5], null,
+    '★ 没给 workflowDefinition ⇒ 第 6 位是 null（既不是 undefined，也不是被吞掉）')
+  await drive(router, '/api/goal', { by: 'general', objective: 'O', workflowDefinition: { id: 'wf.x', version: 3 } })
+  assert.deepEqual(calls.publish.at(-1)[5], { id: 'wf.x', version: 3 },
+    '★★ body.workflowDefinition 必须原样搬到第 6 位（胶水不许把它丢掉）')
 })
 
 test('⑤b ★★★ `docSync` 有**两个来源**：`body.docSync === true` **或** `body.feature === true`', async () => {

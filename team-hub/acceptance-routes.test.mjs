@@ -47,9 +47,29 @@ async function call(method, path, body) {
   return { status: res.status, body: parsed }
 }
 
-/** 建一条任务（可选带验收判据），并保证此刻队列里只有它。 */
+/**
+ * 建一条任务（可选带验收判据），并保证此刻队列里只有它。
+ *
+ * ★ 2026-10-05（T-178）：这里**必须**连写入预约一起结清。
+ *
+ * 本函数用裸 SQL 把别的任务置成 `done`，绕过了产品里"任务收口"那条路
+ * ——而那条路（`team-hub/server.mjs` 的 `finishTaskReservationInTx`，见
+ * `to === 'done'` 与 `advanceTask`）**一定会释放该任务的写入预约**。
+ * 于是夹具声称"队列里只剩这一条"，库里却留着上一条任务 `state='reserved'`
+ * 的整仓独占预约：下一次 `/api/runtime/claim` 以 `FILE_CONTENTION` 返回
+ * `claimed:null`，红的位置却指向"这次的任务没领到"，与真实原因（上一条用例的
+ * 预约没结清）毫无关系。
+ *
+ * 这不是产品缺陷：预约跨 `in_review` 持有是刻意的（`write-intent-store.mjs`
+ * 的 `rebindForRetry`：`A reviewed attempt has stopped; keep the same path lock`），
+ * 而"未申报写入范围 ⇒ 整仓独占"也被 `contention-paths.test.mjs` ④ 明确钉住。
+ * 夹具要模拟的是"这些任务已经收口"，就必须做出产品在那一刻做的那件事。
+ */
 function onlyTask(id, { acceptance = '[]' } = {}) {
   mod.db.prepare("UPDATE tasks SET status = 'done' WHERE status IN ('todo','backlog')").run()
+  mod.db.prepare(
+    "UPDATE write_reservations SET state = 'released', updated_at_ms = ? WHERE state IN ('reserved','reconciling')",
+  ).run(Date.now())
   mod.db.prepare(
     'INSERT OR REPLACE INTO tasks (id, title, priority, status, scope, hold, createdAt, updatedAt, acceptance) VALUES (?,?,?,?,?,?,?,?,?)',
   ).run(id, id, 'medium', 'todo', 'default', 0, new Date().toISOString(), new Date().toISOString(), acceptance)

@@ -299,12 +299,31 @@ async function get(path) {
   return { status: r.status, body: await r.json().catch(() => null) }
 }
 
-/** 造一条任务并认领它，返回 lease。 */
+/**
+ * 造一条任务并认领它，返回 lease。
+ *
+ * ★ 2026-10-05（T-178）：夹具任务必须**申报自己的写入范围**（`fileDomain`）。
+ *
+ * 本文件所有用例共用**一个 hub 库**，而认领会在同一事务里授予写入预约。
+ * 未申报范围的会被按**整仓独占**处理（设计如此：`write-intent-store.mjs` 的
+ * `resolvePlannedPaths` 返回 `unplanned-exclusive`，`reserve({exclusive:true})`；
+ * `contention-paths.test.mjs` ④ 明确钉住了这个方向）。而预约**跨 `in_review`
+ * 持有**也是刻意的（`rebindForRetry` 的注释："A reviewed attempt has stopped;
+ * keep the same path lock while binding it to its retry"）。
+ *
+ * 两条合起来：⑬ 跑完停在与 `in_review` 对应的 `Validating`，它那条**整仓独占**
+ * 预约仍然活跃 ⇒ ⑭ 起的每一次 `claimOne()` 都以 `FILE_CONTENTION` 返回
+ * `claimed:null`，红的位置却指向"没能认领到任务"，与真实原因（上一条用例的
+ * 整仓预约还压着）毫无关系。
+ *
+ * 修法是让夹具与实际派工一致：每个用例的任务只申报自己那一片路径，
+ * 于是它们**互不相交**，谁也不整仓独占。断言一条没动。
+ */
 async function claimOne(tag) {
   const id = `T-EV-${tag}`
   mod.db.prepare(
-    'INSERT OR REPLACE INTO tasks (id, title, priority, status, scope, hold, createdAt, updatedAt) VALUES (?,?,?,?,?,0,?,?)',
-  ).run(id, id, 'medium', 'todo', 'software', new Date().toISOString(), new Date().toISOString())
+    'INSERT OR REPLACE INTO tasks (id, title, priority, status, scope, hold, createdAt, updatedAt, fileDomain) VALUES (?,?,?,?,?,0,?,?,?)',
+  ).run(id, id, 'medium', 'todo', 'software', new Date().toISOString(), new Date().toISOString(), JSON.stringify([`ev/${tag}`]))
   const r = await post('/api/runtime/claim', { workerId: `w-${tag}`, scope: 'software' })
   assert.equal(r.status, 200, JSON.stringify(r.body))
   // 响应形状是 `{ok:true, claimed:{attemptId,…}}`——`claimed` 是**对象**不是布尔。

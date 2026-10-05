@@ -348,15 +348,39 @@ describe('③ 每条路径都必须在平台契约里真实存在（交叉校验
     // **一条会给出错误结论的校验，比不校验更坏**，所以这里把范围收窄到能可靠判定的集合。
     const src = readFileSync(resolve(ROOT, 'workbench/src/api.ts'), 'utf8')
     const found = []
+    // ★ 2026-10-05（T-178）：抽取器从前在模板段（美元花括号）处**截断**，
+    //   于是中间带模板段的路径只剩前缀：tasks 那条抽成 /api/tasks/、
+    //   repositories 那条抽成 /api/repositories/。那些**截断出来的前缀**
+    //   再去与路由表做前缀匹配必然全落空 —— 报出来的是「前端写了个不存在的端点」，
+    //   而真实情况是**抽取器自己截断了**。
+    //
+    //   > 一个「在模板段处截断」的抽取器，与一个「前端调了 6 个不存在的端点」的抽取器，
+    //   > 报的是同一句话；而这句话读起来完全正确，所以没人会去怀疑抽取器。
+    //
+    //   现在改抽**整个字面量**，再把模板段归一成路由表里位置参数的写法（:param）、
+    //   并去掉查询串（查询串不属于路径）。判据没有放宽：被检查的路径**变多**了
+    //   （后缀不再被丢掉），而且位置参数段必须与路由表逐字对上。
+    // 归一规则（两条，各自对应一种真实形态）：
+    //   · 模板段后面还有路径字面量（/api/tasks/${id}/write-intent）⇒ 它是位置参数，换 :param；
+    //   · 模板段直接接在路径末尾（plan${qs}、skills${qs.size …}）⇒ 它是查询串/拼接，丢掉。
+    //     这一条也顺带兜住**嵌套模板**（`/api/skills${qs.size ? `?${qs}` : ''}` 会被
+    //     内层反引号切断，残留 `${…`）——判据只对"清理干净的路径"做。
+    const normalize = (raw) => raw
+      .split('?')[0]
+      .replace(/(\/)?\$\{[^}]*\}/g, (m, slash) => (slash === '/' ? '/:param' : ''))
+      .replace(/\$\{.*$/, '')
+    // 反引号在正则字符类里写成 \x60（免得与这里的模板串定界符打架）。
     const patterns = [
-      [/hubGet\(\s*[`'"](\/api\/[^`'"$]*)/g, 'GET'],
-      [/hubPost\(\s*[`'"](\/api\/[^`'"$]*)/g, 'POST'],
-      [/hubRequest\(\s*'([A-Z]+)'\s*,\s*[`'"](\/api\/[^`'"$]*)/g, null],
+      [/hubGet\(\s*[\x60'"](\/api\/[^\x60'"]*)/g, 'GET'],
+      [/hubPost\(\s*[\x60'"](\/api\/[^\x60'"]*)/g, 'POST'],
+      [/hubRequest\(\s*'([A-Z]+)'\s*,\s*[\x60'"](\/api\/[^\x60'"]*)/g, null],
     ]
     for (const [re, method] of patterns) {
       let m
       while ((m = re.exec(src)) !== null) {
-        found.push(method === null ? { method: m[1], path: m[2] } : { method, path: m[1] })
+        found.push(method === null
+          ? { method: m[1], path: normalize(m[2]) }
+          : { method, path: normalize(m[1]) })
       }
     }
 
@@ -370,11 +394,12 @@ describe('③ 每条路径都必须在平台契约里真实存在（交叉校验
       assert.ok(found.some((f) => f.path === p || f.path.startsWith(p + '/')), `抽取结果里缺少 ${p}`)
     }
 
-    // 已知的两处**本抽取器覆盖不到**的地方，写在这里以免日后被当成"已经校验过"：
-    //   · 轮换的路径以 `${encodeURIComponent(ref)}/rotate` 结尾，抽取器在 `$` 处截断，
-    //     只能拿到 `/api/secrets/`。**后缀本身**由 ① 的行为用例断言
-    //     （`rotateSecret` 的真实 URL 必须以 `/rotate` 结尾），不靠这里。
-    //   · DELETE 的路径同理在 `$` 处截断。行为断言同样在 ①。
+    // 抽取器的覆盖边界（写在这里，以免日后被当成"已经校验过"）：
+    //   · 从前那两处盲区（轮换路径与 DELETE 路径在模板段处被截断）**已经不存在**：
+    //     归一规则把 `${…}/rotate` 落成 `/:param/rotate`、把末尾的模板段丢弃，
+    //     于是 `/api/secrets/:param/rotate` 与 `/api/secrets/:param` 都被逐条校验了。
+    //   · 本抽取器**不**负责查询串里的语义：`?taskId=` 这类参数名不属于路径，
+    //     这里只校验路径本身（查询串在切分时就丢掉了）。
 
     const bad = found.filter((f) => !exists(f.method, f.path))
     assert.deepEqual(

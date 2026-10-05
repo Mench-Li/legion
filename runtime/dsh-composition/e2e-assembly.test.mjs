@@ -113,6 +113,18 @@ function fakeHub({ reserveStatus = 200, settleStatus = 200, frozenText = '冻结
         record({ kind: 'observe', body })
         return { status: 200, body: { ok: true, cancel: false } }
       }
+      // ★ 2026-10-05（T-178）：`/api/agent-runtime` 是 **Run 内的 agent 通道**
+      //   （`orchestrator/worker/agent-channel.mjs`：`start()` 与 `stop()` 各拨一次，
+      //   上报进度/取回取消命令）。生产路径现在**恒定**开着它
+      //   （`executor-binding.mjs` 的 `agentInteractions: true`），所以它会落在
+      //   这条时间线上。以前它掉进下面那个 catch-all 被记成 `assemble` ——
+      //   一个**记错了名字**的读数：让"顺序里多了两条 assemble"看起来像
+      //   "上下文被装配了两次"，而真正的调用根本不是装配。
+      //   （夹具把不认识的调用当成最像的那一个，正是本仓反复踩的那类坑。）
+      if (path.endsWith('/agent-runtime')) {
+        record({ kind: 'agent-runtime', body })
+        return { status: 200, body: { ok: true, commands: [] } }
+      }
       record({ kind: 'assemble', body })
       return { status: 200, body: { ok: true, recorded: true, summary: {}, snapshotHash: 'h' } }
     },
@@ -208,7 +220,14 @@ test('① **全链路跑通**：自检 → 注册 → worker 拿到引擎 → �
     // 顺序是这条链的要害：**预留 → 执行 → 结算**。
     // 用**同一条**时间线断言，因为"两笔账务都有"证明不了执行夹在中间——
     // 而"钱在花之前就被占住"正是这道闸门存在的全部意义。
-    assert.deepEqual(hub.fullOrder(), ['get-snapshot', 'reserve', 'engine-run', 'settle'],
+    //
+    // ★ 2026-10-05（T-178）：序列里补上 `/api/agent-runtime` 两次 ——
+    //   Run 内的 agent 通道（`agent-channel.mjs` 的 `start()`/`stop()`）现在
+    //   在生产路径上恒定开启（`executor-binding.mjs` 的 `agentInteractions: true`），
+    //   一次在执行前、一次在执行后。它是**进度/取消**通道，不是账务，也不是装配。
+    //   仍然用**整体序列**比较（不是"包含"）：多一个/少一个都红。
+    assert.deepEqual(hub.fullOrder(),
+      ['get-snapshot', 'reserve', 'agent-runtime', 'engine-run', 'agent-runtime', 'settle'],
       '预留必须先于执行、结算必须在执行之后；' +
       `实际：${hub.fullOrder().join(' → ')}`)
     assert.equal(host.calls.length, 1, '引擎只被调用一次')
@@ -426,7 +445,11 @@ test('④ 没接预算闸门时，全链路结果里 `budgetState` 是 `not-gate
     assert.equal(result.outcome, 'completed')
     assert.equal(result.budgetState, 'not-gated')
     assert.equal(result.settlement, null)
-    assert.equal(hub.order().filter((k) => k !== 'get-snapshot').length, 0,
+    // ★ 2026-10-05（T-178）：这里数的是**账务**请求，不是"hub 上的任何调用"。
+    //   原判据把 `agent-runtime`（进度/取消通道，恒定开启）也算进来，于是
+    //   一条**没有接预算闸门**的正确实现被报成"发了 2 条账务请求"——
+    //   而它一条都没发。账务的入口只有这三个 kind（`budget-gate.mjs`）。
+    assert.equal(hub.order().filter((k) => k === 'reserve' || k === 'settle' || k === 'observe').length, 0,
       '没接闸门时一条账务请求都不该发出去')
   } finally { boot.unbind?.(); resetDshRuntimeBinding() }
 })

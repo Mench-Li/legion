@@ -56,9 +56,31 @@ function setPipeline(scope, stages) {
   stages.forEach((s, i) => ins.run(scope, s.role, s.label, '', s.next, 0, null, null, i, s.enabled === false ? 0 : 1, new Date().toISOString()))
 }
 
-/** 建一条任务，并保证此刻队列里只有它（运行面按创建时间取队首）。 */
+/**
+ * 建一条任务，并保证此刻队列里只有它（运行面按创建时间取队首）。
+ *
+ * ★ 2026-10-05（T-178）：把别的任务标成 `done` 时必须**连写入预约一起结清**。
+ *
+ * 产品里"任务收口"一定会释放写入预约（`team-hub/server.mjs` 的
+ * `finishTaskReservationInTx`，见 `to === 'done'` 与 `advanceTask`）；
+ * 本函数用裸 SQL 清队列，绕过了那条路，于是库里留着上一条任务
+ * `state='reserved'` 的整仓独占预约 —— 下一次 `/api/runtime/claim` 以
+ * `FILE_CONTENTION` 返回 `claimed:null`，红的位置指向"这次的任务没领到"。
+ *
+ * 这里还多一种泄漏源，本文件独有：① 在 `/api/runtime/handoff` 之后领走了
+ * **产品自己建的后继任务**（`buildHandoffTask` 的 payload 里没有 `fileDomain`，
+ * 见 `orchestrator/pipeline/index.mjs:211-227`），那条后继同样是整仓独占，
+ * 且它是产品建的、夹具改不了它 —— 所以只能在"清队列"时把它的预约一并结清。
+ *
+ * 这不是产品缺陷：预约跨 `in_review` 持有是刻意的
+ * （`write-intent-store.mjs` 的 `rebindForRetry` 注释），而"未申报写入范围 ⇒
+ * 整仓独占"被 `contention-paths.test.mjs` ④ 明确钉住。
+ */
 function onlyTask(id, { scope = 'default', role = 'analyst', goalId = null, acceptance = '[{"kind":"run-completed"}]' } = {}) {
   mod.db.prepare("UPDATE tasks SET status = 'done' WHERE status IN ('todo','backlog')").run()
+  mod.db.prepare(
+    "UPDATE write_reservations SET state = 'released', updated_at_ms = ? WHERE state IN ('reserved','reconciling')",
+  ).run(Date.now())
   mod.db.prepare(
     `INSERT OR REPLACE INTO tasks (id, title, description, priority, status, scope, role, parent, goalId, hold, createdAt, updatedAt, acceptance)
      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`,

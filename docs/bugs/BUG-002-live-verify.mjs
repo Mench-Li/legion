@@ -5,6 +5,8 @@
 //
 // 运行：node docs/bugs/BUG-002-live-verify.mjs [--conv 25] [--scope software] [--timeout 240]
 //   ⚠ 它会在目标会话留下：1 条提问 + 1 条 AI 回复（并产生一次模型调用）。默认只读地等 240s。
+//   ★ `--retry <msgId>`：**不发新消息**，只把一条已 failed 的消息置回 awaiting 再等回复
+//     （用于"改完模型配置后重跑同一条"，不往会话里再添一条提问）。
 //
 // 读数怎么判：
 //   · 回复出现且 meta.aiStatus=replied → 队列修复生效（这是本 Bug 的主症状）
@@ -18,6 +20,7 @@ const arg = (name, def) => {
 const HUB = process.env.BUG002_HUB ?? 'http://127.0.0.1:8787'
 const CONV = Number(arg('conv', '25'))
 const SCOPE = arg('scope', 'software')
+const RETRY = arg('retry', '')
 const TIMEOUT_MS = Number(arg('timeout', '240')) * 1000
 const BODY = process.env.BUG002_BODY ?? '【BUG-002 活体验证】这条消息用于确认「Agent 对话回复」是否恢复，可忽略。'
 
@@ -29,23 +32,36 @@ const before = await msgs()
 const lastId = before.at(-1)?.id ?? 0
 console.log(`会话 ${CONV}：发前最后一条 id=${lastId}，共 ${before.length} 条`)
 
-const res = await fetch(HUB + '/api/chat/messages', {
-  method: 'POST', headers: { 'content-type': 'application/json' },
-  body: JSON.stringify({ conv: CONV, body: BODY, by: 'general' }),
-})
-const sent = await res.json()
-const mine = sent?.task ?? sent
-console.log(`已发送：HTTP ${res.status}，msg=${mine?.id}，aiStatus=${mine?.meta?.aiStatus}`)
-if (res.status !== 200) { console.error('发送失败：', JSON.stringify(sent)); process.exit(1) }
+let mine
+if (RETRY !== '') {
+  const r = await fetch(HUB + '/api/chat/replies/retry', {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ msgId: Number(RETRY), by: 'general' }),
+  })
+  const out = await r.json()
+  console.log(`重试 msg ${RETRY}：HTTP ${r.status}，${JSON.stringify(out).slice(0, 200)}`)
+  mine = out?.task
+  if (r.status !== 200) process.exit(1)
+} else {
+  const res = await fetch(HUB + '/api/chat/messages', {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ conv: CONV, body: BODY, by: 'general' }),
+  })
+  const sent = await res.json()
+  mine = sent?.task ?? sent
+  console.log(`已发送：HTTP ${res.status}，msg=${mine?.id}，aiStatus=${mine?.meta?.aiStatus}`)
+  if (res.status !== 200) { console.error('发送失败：', JSON.stringify(sent)); process.exit(1) }
+}
 
 const started = Date.now()
 const seen = new Set(before.map(m => m.id))
+const srcId = Number(RETRY) || mine.id
 let outcome = null
 while (Date.now() - started < TIMEOUT_MS) {
   await sleep(10000)
   const list = await msgs()
   const replies = list.filter(m => !seen.has(m.id) && m.author !== 'general')
-  const src = list.find(m => m.id === mine.id)
+  const src = list.find(m => m.id === srcId)
   const elapsed = Math.round((Date.now() - started) / 1000)
   const ai = src?.meta?.aiStatus ?? '(无)'
   console.log(`  +${elapsed}s  源消息 aiStatus=${ai}${src?.meta?.aiError ? `  aiError=${src.meta.aiError.slice(0, 70)}` : ''}  新回复=${replies.length}`)

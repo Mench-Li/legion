@@ -1,5 +1,9 @@
 # BUG-004｜对话回复仍然失败的真因：**全部 14 条岗位模型绑定都指向一个已不存在的供应商**
 
+> ✅ **已修复并活体验证（2026-10-05 01:40）**：登记 3 条 `fjd-ds` 档案 + 改 14 条绑定 + 补 2 条
+> `assistant` 绑定（零错误），随后把失败的那条消息重试 → **40 秒后收到真实回复**
+> （`aiModel=deepseek-v4-flash-openai`）。读数见 §7。
+>
 > 这是 BUG-002 的**下一条**（不是替代）。BUG-002 修的"守护看不见消息"已经**活体验证通过**——
 > 修完之后守护 **10 秒内**就看见了消息并开始回答；它在**模型调用**这一步失败，
 > 0 token 立即返回，而旧守护的分类器只能说「原因暂不可识别」。
@@ -123,9 +127,49 @@ node docs/bugs/BUG-002-live-verify.mjs --conv 25 --scope software --timeout 260
 
 ## 6. 边界
 
-- 本记录**只做诊断，未改任何配置**（生产库、DSH 档案、中枢都保持原样）。
-- 活体验证**已在 conv 25 留下 2 条消息**：id=172（我的验证提问，现为 `failed`）
-  与它触发的一次模型调用尝试（0 token，未产生回复）。这是**你已批准**的验证动作。
+- 本记录最初**只做诊断**（未改配置）；§7 的两步写入是在你批准后执行的，全部走中枢 API
+  （带审计与 SSE），写入前后都读回对比。
+- 活体验证在 conv 25 留下两条**你已批准**的消息：id=172（验证提问，现已 `replied`）与
+  id=179（AI 回复）；另有 id=176/178 是**真实任务汇报**（T-175/T-176 完成）——它们能出现在
+  这条会话里，正是 BUG-003 修法 A 生效的证据（见 §7）。
 - `custom-ds` 是否**曾经**在 DSH 档案里存在过，本记录只能证明"现在不存在"；
   旧守护日志（2026-09-08/09-10）显示当时回复成功且 `provider=custom-ds`——
   也就是说改名/迁移发生在 09-10 之后，而**绑定表没有被一起迁走**。
+- **仍待一次 DSH 宿主重启**（与 BUG-001/BUG-002 同一次）：回复现在的作者是
+  `software-assistant`（旧守护不知道岗位身份）；重启后才是 `agent:software:coder`
+  并带上该岗位任务记录。这不影响"能回复"这个结论。
+
+## 7. 修复与验证读数（2026-10-05 01:38–01:40）
+
+**修法**（`docs/bugs/BUG-004-apply-fix.mjs`，先 `--dry-run` 复核再执行）：
+
+| 步 | 动作 | 结果 |
+| --- | --- | --- |
+| ① | 登记 3 条 `fjd-ds` 档案（`fjd-ds-deepseek-v4-{pro,flash,flash-vision}-openai`，endpoint 与型号**逐项对齐** DSH 档案，`secretRef=FJD_DS_API_KEY`） | 创建 3 条，0 错误 |
+| ② | 14 条绑定 `custom-ds` → `fjd-ds`（model id 不变） | 改 14 条，0 错误 |
+| ③ | `software` / `gf001` 各补一条 `assistant` 绑定（`fjd-ds/deepseek-v4-flash-openai`） | 写 2 条，0 错误 |
+
+读回：模型档案 **3** 条；岗位绑定 **16** 条；仍指向 `custom-ds` 的 **0** 条。
+
+**端到端**（不发新消息，把那条失败的重试）：
+
+```bash
+node docs/bugs/BUG-002-live-verify.mjs --conv 25 --scope software --retry 172 --timeout 260
+```
+
+```text
+重试 msg 172：HTTP 200 → aiStatus=awaiting
+  +10s awaiting  +20s awaiting  +30s awaiting
+  +40s replied  新回复=1
+结果：40s 后收到回复 —— author=software-assistant
+```
+
+**会话 25 的完整读回**——一次同时证明三个修复：
+
+| msg | author | 说明 | 证明了什么 |
+| --- | --- | --- | --- |
+| 165 | general | 你最初的「什么进展了」（`failed`，现在可以点重试） | — |
+| **172** | general | 我的验证提问 → **`replied`** | BUG-002 队列 + BUG-004 模型都好了 |
+| **176 / 178** | `agent:software:coder` | `T-175 / T-176 任务状态：已完成。` | **BUG-003 修法 A 生效**：汇报真的落进了用户打开的这条会话（多播 + 标题后缀都是活的） |
+| **179** | `software-assistant` | AI 回复正文，`aiModel=deepseek-v4-flash-openai` | 模型调用真的发生了（不再是 0 token）；作者仍是旧守护身份 ⇒ 待宿主重启 |
+

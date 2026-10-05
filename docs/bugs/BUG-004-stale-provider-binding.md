@@ -135,9 +135,17 @@ node docs/bugs/BUG-002-live-verify.mjs --conv 25 --scope software --timeout 260
 - `custom-ds` 是否**曾经**在 DSH 档案里存在过，本记录只能证明"现在不存在"；
   旧守护日志（2026-09-08/09-10）显示当时回复成功且 `provider=custom-ds`——
   也就是说改名/迁移发生在 09-10 之后，而**绑定表没有被一起迁走**。
-- **仍待一次 DSH 宿主重启**（与 BUG-001/BUG-002 同一次）：回复现在的作者是
-  `software-assistant`（旧守护不知道岗位身份）；重启后才是 `agent:software:coder`
-  并带上该岗位任务记录。这不影响"能回复"这个结论。
+- **宿主已重启（2026-10-05 09:16）**，与 BUG-001/BUG-002 同一批全部生效，三条活体读数：
+  ① **注入侧**——`.legion-services.log` 出现
+  `模型配置宿主地址 DSH_MODELS_BASE_URL=http://127.0.0.1:19387（派生自本次启动的宿主…）`，
+  workbench 配置摘要同步显示 `modelsBaseUrl=http://127.0.0.1:19387`；
+  ② **「供应商与模型」页的请求到达宿主**——`POST :5173/api/dsh-models` 由修前的
+  `400 {"error":"fetch failed"}` 变为 `401 {"error":"模型服务连接未授权…"}`（到达即证明地址对了，
+  401 是宿主自己的会话鉴权）；
+  ③ **守护身份**——重启后的回复作者是 **`agent:software:coder`**（重启前 `software-assistant`），
+  并把该岗位任务记录带进了提示词。
+  另有一条**自洽性**改善：`GET /api/chat/health` 的 `model.source` 由 `daemon-heartbeat`
+  变为 **`agent_models`**——健康端点与回复终于读同一个源（此前它俩不一致，正是界面误报"正常"的原因）。
 
 ## 7. 修复与验证读数（2026-10-05 01:38–01:40）
 

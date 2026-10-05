@@ -4,14 +4,6 @@ import { redactValue } from '../runtime/adapters/dsh/redact.mjs'
 const parse = (value, fallback = []) => { try { return JSON.parse(value ?? '') } catch { return fallback } }
 const keyOf = (...parts) => JSON.stringify(parts)
 const id = prefix => `${prefix}-${randomUUID()}`
-/** 汇报流会话的标题后缀（BUG-003 的顺手项）。
- *
- *  为什么需要：同一个 (空间, 岗位) 有两条会话——这条汇报流（`agent_conversation_bindings`）
- *  与对话中心那条（`conversations.agent_role`），标题都是岗位名。空间会话列表里那条
- *  与 Agent 页面的那条**同名不同内容**，用户分不出哪条是汇报。
- *  加一个后缀只为可分辨；它不改任何数据归属，也不改会话的身份（身份是 binding_key）。 */
-export const REPORT_STREAM_SUFFIX = ' · 汇报流'
-const reportStreamTitle = (agentName) => `${agentName}${REPORT_STREAM_SUFFIX}`
 export class AgentConversationError extends Error {
   constructor(code, message, status = 400) { super(message); this.code = code; this.status = status }
 }
@@ -113,11 +105,33 @@ export function createAgentConversationService({ db, withTx, audit, clock = Date
       if (existing) return { convId: existing.conv_id, agentId, taskId }
       if (a.archived) fail('AGENT_ARCHIVED', 'Agent 已归档', 409)
       const time = iso()
-      const r = db.prepare(`INSERT INTO conversations(scope,title,kind,participants,createdAt,updatedAt)
-        VALUES(?,?,?,?,?,?)`).run(scope, taskId ? `${a.name} · ${taskId}` : reportStreamTitle(a.name), taskId ? 'task' : 'direct', JSON.stringify(['general',agentId]), time, time)
-      const convId = Number(r.lastInsertRowid)
+      // ★★ 修法 C（单入口）：直接会话**收养**该岗位已有的「对话中心」会话，而不是再建一条同名的。
+      //
+      //   为什么必须收养：同一个 (空间, 岗位) 此前会有两条会话——
+      //     · 对话中心那条（`conversations.agent_role`，界面按它找会话、人在这里说话）
+      //     · 汇报流那条（`agent_conversation_bindings`，汇报与 /api/agent-messages 写在这里）
+      //   两条标题一样，汇报只在后者、人的消息只在前者。收养让**两条入口指向同一条**，
+      //   而且不改动任何一条既有的消息（旧汇报流会话原样留着，只由迁移脚本改个标题）。
+      //
+      //   收养后这条会话**同时**带 `agent_role` 与 binding：前者让界面找得到它，
+      //   后者让汇报与控制命令写得进来（`postMessage` 对"主对话"两种协议都放行，见 server.mjs）。
+      const adopted = taskId === null
+        ? db.prepare('SELECT id FROM conversations WHERE scope=? AND agent_role=?').get(scope, a.role)
+        : null
+      let convId
+      if (adopted) {
+        // 主对话就是它：标题回到纯岗位名（收纳了汇报之后，"· 汇报流"那个后缀反而会误导）。
+        db.prepare('UPDATE conversations SET title=?, updatedAt=? WHERE id=?').run(a.name, time, adopted.id)
+        convId = Number(adopted.id)
+      } else {
+        const r = db.prepare(`INSERT INTO conversations(scope,title,kind,participants,createdAt,updatedAt)
+          VALUES(?,?,?,?,?,?)`).run(scope, taskId ? `${a.name} · ${taskId}` : a.name, taskId ? 'task' : 'direct', JSON.stringify(['general',agentId]), time, time)
+        convId = Number(r.lastInsertRowid)
+        // 直接会话即是该岗位的主对话 ⇒ 打上 agent_role（任务会话不打：它是任务上下文，不是主对话）。
+        if (taskId === null) db.prepare('UPDATE conversations SET agent_role=? WHERE id=?').run(a.role, convId)
+      }
       db.prepare('INSERT INTO agent_conversation_bindings VALUES(?,?,?,?,?)').run(convId,scope,agentId,taskId,bindingKey)
-      audit(by,scope,'chat:create',taskId,{ conv: convId,agentId })
+      audit(by,scope,'chat:create',taskId,{ conv: convId,agentId,adopted: adopted !== null })
       return { convId, agentId, taskId }
     })
   }
@@ -328,26 +342,61 @@ export function createAgentConversationService({ db, withTx, audit, clock = Date
    *   所以：副本只在主场确有新投递（或该 Agent 一个绑定会话都没有）时写。
    *   代价是部署后那条会话要等**下一次状态变化**才有第一条汇报，这一点写进了文档。
    */
-  function report(a, taskId, sourceKey, body, sourceRefs, meta = {}) {
+  /**
+   * 事件"还算新鲜"的窗口。**只补最近窗口内漏掉的，不把历史重新盖章。**
+   *
+   * 为什么需要：reconcile 每 3 秒扫一遍"当前状态还没有对应汇报"的任务。在**新**会话上
+   * （新 Agent、或修法 C 刚把 binding 搬到主对话之后），那些**几周前**的终态会一并命中，
+   * 于是被 `insertMessage` 盖上"现在"的时间戳写进用户的主对话 ——
+   * 实测过一次：43 条 `T-006 任务状态：已取消。` 挤进会话，看起来像刚刚发生。
+   * 那不是补全历史，是**把旧事件重新盖章成新事件**。
+   *
+   * 24 小时这个值的选择：它必须远大于"中枢/守护停摆后恢复"的合理窗口（否则真漏报的会被丢掉），
+   * 又必须远小于"历史积压"的年龄（否则又会重现上面那一幕）。本仓的实际情况里两者相差数周。
+   */
+  const REPORT_FRESH_WINDOW_MS = 24 * 60 * 60 * 1000
+
+  /**
+   * 把一条汇报投影成消息：**绑定会话各一份 +（若两者不同）该岗位的「对话中心」会话一份**。
+   *
+   * 修法 C 之后，"绑定会话"与"对话中心会话"通常已经是**同一条**（收养/迁移收敛），
+   * 于是这里只写一份 —— 这正是单入口想要的结果，多播分支保留给尚未收敛的库（任务会话、
+   * 以及迁移前的存量双子），它仍然是幂等的。
+   *
+   * `atMs` = 这条汇报所描述的**事件发生时间**；超出新鲜窗口就不投影（见上）。
+   */
+  function report(a, taskId, sourceKey, body, sourceRefs, meta = {}, atMs = clock()) {
+    if (Number.isFinite(atMs) && clock() - atMs > REPORT_FRESH_WINDOW_MS) {
+      return { skipped: 'stale-event', ageMs: clock() - atMs }
+    }
     const cv = conversation({ agentId: a.agent_id, scope: a.scope, by: 'system:agent-report' })
     const convs = db.prepare('SELECT * FROM agent_conversation_bindings WHERE agent_id=? AND (task_id IS NULL OR task_id=?)').all(a.agent_id, taskId)
     const roleConv = db.prepare('SELECT id FROM conversations WHERE scope=? AND agent_role=?').get(a.scope, a.role)
     const multicast = roleConv && !convs.some(b => b.conv_id === roleConv.id)
       ? { conv_id: roleConv.id, scope: a.scope, agent_id: a.agent_id, task_id: null, author: `agent:${a.scope}:${a.role}` }
       : null
-    /** 投递一份；返回本次是否**新写了一条消息**（已投递过 → false）。 */
+    /** 投递一份；返回本次是否**新写了一条消息**（已投递过 → false）。
+     *
+     *  作者身份按**这条会话在界面里是谁的**来选（修法 C 之后这一点变得要紧）：
+     *   · 该岗位的**主对话**（`agent_role` 就是它）→ `agent:<scope>:<role>`。
+     *     对话中心正是按这个身份把汇报显示成"编码工程师"说的；用稳定 `agent_id` 会让它
+     *     在用户主对话里显示成一串 uuid（`ChatView` 只认这一个身份）。
+     *   · 任务会话等其它落点 → 稳定 `agent_id`（`AgentConversationPanel` 按它认人）。 */
+    const authorFor = (convId) => {
+      const c = db.prepare('SELECT agent_role FROM conversations WHERE id=?').get(convId)
+      return c && c.agent_role === a.role ? `agent:${a.scope}:${a.role}` : a.agent_id
+    }
     const deliver = (b) => withTx(() => {
       const rId=id('report')
       db.prepare('INSERT OR IGNORE INTO agent_reports(report_id,source_key,conv_id,source_refs) VALUES(?,?,?,?)').run(rId,sourceKey,b.conv_id,JSON.stringify(sourceRefs))
       const r = db.prepare('SELECT * FROM agent_reports WHERE source_key=? AND conv_id=?').get(sourceKey,b.conv_id)
       if (r.message_id) return false
-      const messageId=insertMessage(b,b.author ?? a.agent_id,body,{ source:'progress',semanticType:'progress',agentId:a.agent_id,taskId,sourceRefs,reportId:r.report_id,...meta })
+      const messageId=insertMessage(b,b.author ?? authorFor(b.conv_id),body,{ source:'progress',semanticType:'progress',agentId:a.agent_id,taskId,sourceRefs,reportId:r.report_id,...meta })
       db.prepare("UPDATE agent_reports SET message_id=?,state='delivered' WHERE report_id=?").run(messageId,r.report_id)
       return true
     })
-    let fresh = false
-    for (const b of convs) if (deliver(b)) fresh = true
-    if (multicast && (fresh || convs.length === 0)) deliver(multicast)
+    for (const b of convs) deliver(b)
+    if (multicast) deliver(multicast)
     return cv
   }
   function reconcile() {
@@ -363,22 +412,28 @@ export function createAgentConversationService({ db, withTx, audit, clock = Date
     for (const a of db.prepare('SELECT * FROM agent_registry WHERE archived=0').all()) {
       for (const t of db.prepare('SELECT * FROM tasks WHERE scope=? AND COALESCE(role,soldier)=?').all(a.scope,a.role)) {
         const attempt=latest(t.id)
+        // 这条任务最后一次变更的时刻（毫秒）。**每条汇报都带着它**，用来判断"这是新事件，
+        // 还是新会话上重新扫到的历史积压"——后者若投影，会被盖上"现在"的时间戳（见 report 的注释）。
+        const taskAtMs = Number.isFinite(Date.parse(t.updatedAt)) ? Date.parse(t.updatedAt) : clock()
         // Production soldiers already publish blocking questions through task comments.
         // Project that authoritative path; keep comments available to legacy clients.
         if (t.status==='blocked') for (const [index,note] of parse(t.comments).entries()) {
           if (!String(note.text ?? '').includes('❓')) continue
           const qId=`question-${createHash('sha256').update(keyOf(t.id,index,note.at,note.text)).digest('hex')}`
           if (db.prepare('SELECT id FROM agent_questions WHERE id=?').get(qId)) continue
+          const noteAtMs = Number.isFinite(Date.parse(note.at)) ? Date.parse(note.at) : taskAtMs
           withTx(() => {
             db.prepare('INSERT OR IGNORE INTO agent_questions(id,scope,agent_id,task_id,attempt_id,body,options_json) VALUES(?,?,?,?,?,?,?)')
               .run(qId,a.scope,a.agent_id,t.id,attempt?.id ?? null,String(note.text),'[]')
-            report(a,t.id,keyOf('question',qId),String(note.text),[{ taskId:t.id,commentIndex:index }],{ semanticType:'question',questionId:qId,questionVersion:1 })
+            report(a,t.id,keyOf('question',qId),String(note.text),[{ taskId:t.id,commentIndex:index }],{ semanticType:'question',questionId:qId,questionVersion:1 },noteAtMs)
           })
         }
-        if (attempt) report(a,t.id,keyOf('attempt',attempt.id,attempt.state),`${t.id} 本轮状态：${attempt.state}。${attempt.state === 'Completed' ? '本轮已结束，交付仍以任务验收为准。' : ''}`,[{ attemptId:attempt.id,state:attempt.state }])
-        if (['done','in_review','blocked','canceled'].includes(t.status)) report(a,t.id,keyOf('task',t.id,t.version,t.status),`${t.id} 任务状态：${t.status === 'done' ? '已完成' : t.status === 'in_review' ? '待验收' : t.status === 'blocked' ? '受阻' : '已取消'}。`,[{ taskId:t.id,version:t.version }])
+        if (attempt) report(a,t.id,keyOf('attempt',attempt.id,attempt.state),`${t.id} 本轮状态：${attempt.state}。${attempt.state === 'Completed' ? '本轮已结束，交付仍以任务验收为准。' : ''}`,[{ attemptId:attempt.id,state:attempt.state }],{},
+          Number.isFinite(Number(attempt.updated_at_ms)) ? Number(attempt.updated_at_ms) : taskAtMs)
+        if (['done','in_review','blocked','canceled'].includes(t.status)) report(a,t.id,keyOf('task',t.id,t.version,t.status),`${t.id} 任务状态：${t.status === 'done' ? '已完成' : t.status === 'in_review' ? '待验收' : t.status === 'blocked' ? '受阻' : '已取消'}。`,[{ taskId:t.id,version:t.version }],{},taskAtMs)
         if (attempt) for (const ev of db.prepare("SELECT * FROM run_events WHERE attempt_id=? AND type IN ('artifact.produced','run.failed','run.cancelled','run.outcome_unknown') ORDER BY event_seq").all(attempt.id)) {
-          report(a,t.id,keyOf('event',attempt.id,ev.event_seq),`${t.id} 已记录 ${ev.type}。请查看运行记录和产物；此消息不代表验收通过。`,[{ attemptId:attempt.id,eventSeq:ev.event_seq }],{ attemptId:attempt.id })
+          report(a,t.id,keyOf('event',attempt.id,ev.event_seq),`${t.id} 已记录 ${ev.type}。请查看运行记录和产物；此消息不代表验收通过。`,[{ attemptId:attempt.id,eventSeq:ev.event_seq }],{ attemptId:attempt.id },
+            Number.isFinite(Number(ev.created_at_ms)) ? Number(ev.created_at_ms) : taskAtMs)
         }
       }
     }
@@ -431,22 +486,51 @@ export function createAgentConversationService({ db, withTx, audit, clock = Date
     })
   }
   /**
-   * 把**已经存在**的汇报流会话标题补上后缀（BUG-003 顺手项，幂等）。
+   * **修法 C 的存量迁移**（单入口，幂等，**不自动执行**——由脚本显式调用）。
    *
-   * 只动一类行：`agent_conversation_bindings.task_id IS NULL`（直接绑定那条 = 汇报流），
-   * 且标题**正好等于**岗位名（既没有后缀、也不是任务会话 `岗位名 · T-xxx`）。
-   * 已有后缀的不动，用户能看见的历史标题不会被反复改写。
-   * 这是纯展示层改写：会话身份是 `binding_key`，标题从来不参与匹配。
+   * 背景：`conversation()` 已经会**收养**该岗位的 `agent_role` 会话（见那里的注释），
+   * 但存量数据里已经存在"两条同名会话"：一条被 binding 指着（汇报流），一条带 `agent_role`
+   * （对话中心、人的消息在这条）。本函数把 binding **搬到** `agent_role` 那条上，于是
+   * 两条入口指向同一条，且**一条消息都不搬**：
+   *
+   *   · 目标（`agent_role` 那条）= 主对话：标题回到纯岗位名，补上 binding；
+   *   · 来源（原汇报流那条）= 历史：保留全部消息与 `agent_reports` 记录，只改标题写明去向；
+   *   · 直接绑定但**没有** `agent_role` 的（新库或刚建的）= 直接补上 `agent_role`。
+   *
+   * 为什么不自动跑：它改的是**用户看得见的会话归属**，必须在库副本上先验证、由人显式执行。
+   * 一个在启动时顺手改归属的迁移，与一个没人知道发生过的迁移，在"出问题时能否回退"上不是一回事。
    */
-  function backfillReportStreamTitles() {
-    const rows = db.prepare(`SELECT b.conv_id, r.name FROM agent_conversation_bindings b
-      JOIN agent_registry r ON r.agent_id = b.agent_id
-      WHERE b.task_id IS NULL`).all()
-    for (const row of rows) {
-      const conv = db.prepare('SELECT title FROM conversations WHERE id=?').get(row.conv_id)
-      if (!conv || conv.title !== row.name) continue
-      db.prepare('UPDATE conversations SET title=? WHERE id=?').run(reportStreamTitle(row.name), row.conv_id)
-    }
+  function convergeAgentConversations() {
+    const out = { adopted: [], tagged: [], renamed: [], skipped: [] }
+    return withTx(() => {
+      const direct = db.prepare(`SELECT b.conv_id, b.agent_id, r.scope, r.role, r.name
+        FROM agent_conversation_bindings b JOIN agent_registry r ON r.agent_id = b.agent_id
+        WHERE b.task_id IS NULL`).all()
+      for (const row of direct) {
+        const bound = db.prepare('SELECT id, agent_role, title FROM conversations WHERE id=?').get(row.conv_id)
+        if (!bound) { out.skipped.push({ conv: row.conv_id, why: 'conversation-missing' }); continue }
+        const twin = db.prepare('SELECT id, title FROM conversations WHERE scope=? AND agent_role=? AND id<>?').get(row.scope, row.role, row.conv_id)
+        if (twin) {
+          // ① binding 搬到 agent_role 那条；② 两条的标题各就各位。
+          db.prepare('UPDATE agent_conversation_bindings SET conv_id=? WHERE conv_id=?').run(twin.id, row.conv_id)
+          db.prepare('UPDATE conversations SET title=? WHERE id=?').run(row.name, twin.id)
+          db.prepare('UPDATE conversations SET agent_role=NULL, title=? WHERE id=?')
+            .run(`${row.name} · 历史汇报（已并入主对话）`, row.conv_id)
+          audit('system:agent-converge', row.scope, 'chat:converge', null,
+            { from: row.conv_id, to: twin.id, role: row.role, moved: 'binding' })
+          out.adopted.push({ scope: row.scope, role: row.role, from: row.conv_id, to: twin.id })
+          out.renamed.push(row.conv_id)
+          continue
+        }
+        // 没有双子：这条就是主对话，只保证它带 agent_role（老库可能没有）。
+        if (bound.agent_role === null) {
+          db.prepare('UPDATE conversations SET agent_role=? WHERE id=?').run(row.role, row.conv_id)
+          out.tagged.push({ scope: row.scope, role: row.role, conv: row.conv_id })
+        }
+        if (bound.title !== row.name) db.prepare('UPDATE conversations SET title=? WHERE id=?').run(row.name, row.conv_id)
+      }
+      return out
+    })
   }
   function getCommand(commandId,scope) {
     const c=db.prepare('SELECT * FROM agent_commands WHERE id=? AND scope=?').get(commandId,required(scope,'scope'))
@@ -458,7 +542,6 @@ export function createAgentConversationService({ db, withTx, audit, clock = Date
     db.prepare('DELETE FROM agent_dispatch_holds WHERE task_id=?').run(taskId)
   }
   syncRoster()
-  backfillReportStreamTitles()
-  return { syncRoster,backfillReportStreamTitles,list,detail,conversation,send,read,command,runtime,question,reconcile,includeFeedback,getCommand,manualHold,
+  return { syncRoster,convergeAgentConversations,list,detail,conversation,send,read,command,runtime,question,reconcile,includeFeedback,getCommand,manualHold,
     binding: (convId) => db.prepare('SELECT * FROM agent_conversation_bindings WHERE conv_id=?').get(Number(convId)) ?? null }
 }

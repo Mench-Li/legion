@@ -3487,17 +3487,22 @@ export function createConversation(input) {
     if (typeof input.scope !== 'string' || !input.scope.trim()) throw new Error('Agent 会话必须指定具体空间 scope')
     if (typeof input.agentRole !== 'string' || !input.agentRole.trim()) throw new Error('Agent 会话必须指定岗位 agentRole')
     const role = input.agentRole.trim()
+    // ★★ 修法 C（单入口）：**委托**给岗位会话服务，而不是另建一条。
+    //
+    //   此前这里直接 INSERT 一条带 `agent_role` 的会话，而汇报/控制写的是
+    //   `agent_conversation_bindings` 那条 —— 同一个 (空间, 岗位) 于是长出两条同名会话，
+    //   人在这条说话、汇报在另一条，谁也不知道对方存在（BUG-003 现场）。
+    //   现在只有一条：服务会收养既有的 `agent_role` 会话（见 `conversation()`），
+    //   从源头杜绝"又来一条双子"。界面仍然按 `agent_role` 找会话 —— 命中同一条。
     return withTx(() => {
       const agent = db.prepare('SELECT name FROM roster WHERE scope = ? AND role = ?').get(scope, role)
       if (!agent) throw new Error(`空间 ${scope} 中不存在 Agent 岗位 ${role}`)
-      const existing = db.prepare('SELECT * FROM conversations WHERE scope = ? AND agent_role = ?').get(scope, role)
-      if (existing) return convToObj(existing)
-      const t = now()
-      const result = db.prepare("INSERT INTO conversations (scope,title,kind,participants,createdAt,updatedAt,last_message_at,agent_role) VALUES (?,?,'direct',?,?,?,NULL,?)")
-        .run(scope, agent.name, JSON.stringify([by.trim(), role]), t, t, role)
-      const conv = getConversation(result.lastInsertRowid)
-      audit(by.trim(), scope, 'chat:create', null, { conv: conv.id, title: conv.title, kind: conv.kind, agentRole: role })
-      return conv
+      // registry 可能落后于 roster（测试与热更新都会出现），先同步再查稳定身份。
+      agentConversations.syncRoster()
+      const reg = db.prepare('SELECT agent_id FROM agent_registry WHERE scope = ? AND role = ? AND archived = 0').get(scope, role)
+      if (!reg) throw new Error(`空间 ${scope} 中不存在 Agent 岗位 ${role}`)
+      const { convId } = agentConversations.conversation({ agentId: reg.agent_id, scope, by: by.trim() })
+      return getConversation(convId)
     })
   }
   const title = input?.title
@@ -3528,7 +3533,17 @@ export function listConversations({ scope } = {}) {
 
 /** 发消息（统一写纪律：by 必填 + author=by 防冒名 + 审计/SSE；消息 scope 恒等于会话 scope，跨 scope 写不串）。 */
 export function postMessage(input) {
-  if (agentConversations.binding(input?.conv)) throw new Error('Agent conversation requires /api/agent-messages');
+  // 写协议的分工（修法 C 起）：
+  //   · **任务会话 / 非岗位的联系人会话**（有 binding、但没有 agent_role）→ 只许 `/api/agent-messages`
+  //     （它们承载 intent/target/幂等收据这套语义，用 /api/chat/messages 写会绕开那些约束）；
+  //   · **岗位主对话**（`agent_role` 非空，C 之后它同时带 binding）→ **两种协议都放行**：
+  //     界面走 `/api/chat/messages` 说人话，`/api/agent-messages` 仍可带 intent 写结构化消息。
+  //     这正是单入口的落地方式——**一条会话，两种写入**，而不是把界面改成另一套协议。
+  const bound = input?.conv === undefined ? null : agentConversations.binding(input.conv)
+  if (bound) {
+    const owner = getConversation(Number(input.conv))
+    if (owner.agentRole === null) throw new Error('Agent conversation requires /api/agent-messages')
+  }
   const by = input?.by
   if (typeof by !== 'string' || by.trim().length === 0) throw new Error('缺少操作者身份 by')
   const convId = Number(input?.conv)
@@ -3737,8 +3752,15 @@ export function postAiReply(input) {
     }
     const conv = getConversation(s2.conv_id)
     const t = now()
+    // 回复的作者身份：**按这条会话在界面里是谁的**来定（与 report() 的同一条规则）。
+    //   · 岗位主对话（`agent_role` 非空，修法 C 之后它同时带 binding）→ 用调用方给的身份
+    //     （守护传的是 `agent:<scope>:<role>`）；对话中心只认这个身份，
+    //     用稳定 agent_id 会让回复显示成一串 uuid（实测：单测从 agent:chat-a:coder 变 uuid）。
+    //   · 任务/联系会话（有 binding、无 agent_role）→ 稳定 `agent_id`：AgentConversationPanel 按它认人。
+    const boundConv = agentConversations.binding(s2.conv_id)
+    const author = boundConv && conv.agentRole === null ? boundConv.agent_id : by.trim()
     const r = db.prepare('INSERT INTO messages (conv_id, scope, author, kind, body, meta, client_ts, createdAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
-      .run(s2.conv_id, conv.scope, agentConversations.binding(s2.conv_id)?.agent_id ?? by.trim(), kind, body, JSON.stringify({ replyTo: msgId, aiModel: model }), null, t)
+      .run(s2.conv_id, conv.scope, author, kind, body, JSON.stringify({ replyTo: msgId, aiModel: model }), null, t)
     db.prepare('UPDATE conversations SET last_message_at = ?, updatedAt = ? WHERE id = ?').run(t, t, s2.conv_id)
     meta2.aiStatus = 'replied'
     meta2.repliedAt = t

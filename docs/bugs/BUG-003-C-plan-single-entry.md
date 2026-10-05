@@ -1,7 +1,8 @@
 # BUG-003 · 修法 C 方案（单入口：一个 (空间, 岗位) 只有一条主对话）
 
-> 状态：**方案，未实施**。用户已选定"排期做 C"。本文只描述要动什么、按什么顺序、判据是什么、
-> 风险在哪；不含代码改动。事实部分都标注了**实测出处**（行号/命令），便于复核。
+> 状态：**C1 已实施并在生产库落地**（2026-10-05）；C2 的**核心必要性已被 C1 的设计消掉**
+> （见 §3「落地记录」），C3 仍是"建议不做"。本文上半部分是**施工前的方案**（保留原样以便对照
+> 当初的判断），下半部分 §3 是**实施记录**：实际改了什么、现场读数、以及施工中被迫多修的两处。
 
 ## 1. 目标与验收
 
@@ -100,3 +101,87 @@
 - BUG-002 修好的守护侧身份（`agent:<scope>:<role>`）**正是 C2 依赖的那条回复通道**；
   没有它，C2 之后主对话里的回复作者会是错的。
 - 本文不替代 `2026-10-02` 界面设计文档；它是那份文档落到**当前代码事实**上的一份施工单。
+
+---
+
+# 3. 实施记录（2026-10-05）
+
+## 3.1 先说一个施工中才发现的库级事实
+
+库上**本来就有**这条唯一索引（`team-hub/server.mjs:1607`，实测生产库上也存在）：
+
+```sql
+CREATE UNIQUE INDEX idx_agent_main_conversation ON conversations(scope, agent_role) WHERE agent_role IS NOT NULL
+```
+
+所以"两条都带 `agent_role` 的会话"在库层面**根本不允许**——这让迁移方向变成**单向安全**的：
+把 binding 搬到 `agent_role` 那条，绝不会撞上唯一索引。同时它纠正了方案里的一个说法：
+双子的真正成因不是"两条都带 agent_role"，而是**绑定那条压根没有 `agent_role`**。
+
+## 3.2 实际改了什么（C1）
+
+| 位置 | 改动 |
+| --- | --- |
+| `team-hub/agent-conversations.mjs` `conversation()` | 建直接会话时**收养**该岗位已有的 `agent_role` 会话（存在就复用它、标题回到纯岗位名），否则新建并**打上 `agent_role`** |
+| `team-hub/agent-conversations.mjs` `convergeAgentConversations()` | 新增的**存量迁移**（幂等、不自动执行）：binding 搬到 `agent_role` 那条；历史那条摘 `agent_role`、标题写 `岗位名 · 历史汇报（已并入主对话）`；**一条消息都不搬** |
+| `team-hub/agent-conversations.mjs` `report()` | 改为"绑定会话各一份 +（若不同）`agent_role` 会话一份"，收敛后自然只写一份；**作者按会话归属选**（主对话 `agent:<scope>:<role>`、任务会话稳定 agent_id） |
+| `team-hub/server.mjs` `createConversation({agentRole})` | **委托**给岗位会话服务（先 `syncRoster()`，再按 `agent_id` 调 `conversation()`）——从源头杜绝"又来一条双子" |
+| `team-hub/server.mjs` `postMessage()` | 写协议分工：**任务/联系会话**只许 `/api/agent-messages`；**岗位主对话**两种协议都放行（界面不必改协议） |
+| `team-hub/server.mjs` `postAiReply()` | 回复作者按会话归属选（同上规则）：主对话用调用方身份，任务会话用稳定 agent_id |
+
+**C2 的核心必要性因此被消掉了**：方案原本要求"前端改说 `/api/agent-messages`"，但上面那条
+"主对话两种协议都放行"让 ChatView **一行都不用改**就能写进主对话。C2 剩下的只是增强项
+（intent 选择、控制命令抽屉），不是单入口的必需条件。**C3 按原判断不做。**
+
+## 3.3 施工中被"逼"出来的第二处修复：新鲜窗口
+
+把 binding 搬到主对话后，`reconcile()` 在新会话上会把**几周前的终态**当成"还没有汇报过"而投影，
+`insertMessage` 盖上"现在"的时间戳 —— 正是 BUG-003 当初实测到的 43 条 `T-006 任务状态：已取消。`。
+
+修法：`report()` 增加 `atMs` 参数（**这条汇报所描述的事件发生时间**），超出
+`REPORT_FRESH_WINDOW_MS`（24 小时）就不投影；`reconcile()` 把每个事件的真实时间传进去
+（`task.updatedAt` / `attempt.updated_at_ms` / `run_events.created_at_ms`）。
+判据见 `agent-conversations.test.mjs` 的「历史事件不补播」用例：旧终态一条不投、新事件照常投。
+
+## 3.4 生产库落地读数
+
+**迁移**（先在副本上演练，再 `--db <live> --apply`）：
+
+| 判据 | 读数 |
+| --- | --- |
+| C-1 每 (空间, 岗位) 只有一条主对话 | ✅ 0 组重复 |
+| C-1b 每条主对话都被 binding 指着（汇报写得进来） | ✅ 全部 |
+| C-6 主对话标题是纯岗位名 | ✅ 无 `汇报流`/`历史汇报` 残留 |
+| C-5 历史消息不丢 | ✅ conv 7 的 34 条、conv 10 的 18 条原样保留；消息总数 181 不变 |
+| 收养的双子 | `software/coder`：conv 7 → conv 25；`software/devops`：conv 10 → conv 24 |
+| 其余岗位 | 直接给绑定那条补 `agent_role`（software 6 条 + ozon 13 条 + gf001 3 条） |
+
+**活体判据**（8778 重启后）：
+
+- `GET /api/chat/conversations?scope=software`：每个岗位**一条**，标题为纯岗位名；
+- `POST /api/chat/messages`（**ChatView 用的那条协议**）写主对话 → **HTTP 200**（C-6 成立，
+  以前这里会抛 `Agent conversation requires /api/agent-messages`）；
+- `conv 25` 里**人和汇报在同一条**：`general` 的提问 + `agent:software:coder` 的
+  `T-174 任务状态：已完成。` 与 AI 回复并存；
+- 旧终态**没有回流**（`已取消` 计数 0）。
+
+## 3.5 一处我自己的执行顺序错误（已纠正，留痕）
+
+迁移在生产库上生效、而**仍在运行的旧中枢进程**还没重启的那几十秒里，旧代码（没有新鲜窗口）
+把 **43 条**历史终态灌进了 conv 24/25，作者还是稳定 agent_id。
+
+- 这是**执行顺序**问题（应当先重启中枢再迁移），不是修法缺陷：新代码对这些行**不会投影**
+  （§3.3 的新鲜窗口，单测钉着）。
+- 纠正：`docs/bugs/BUG-003-C-cleanup-burst.mjs --convs 24,25 --apply` 删掉这 43 条及其投递记录，
+  随后新代码在 12 秒内把**窗口内真正新鲜**的事件（如 `T-174 已完成`）用**正确作者**补了回来。
+- 这个过程本身留下一条教训，已写进脚本注释：**清理脚本的范围必须显式传入**——
+  第一版把过滤条件写漏，候选集从 43 条变成 210 条（几乎整个仓库的汇报史）。
+  一个"清理"脚本的范围写宽了，与一个删除脚本没有区别。
+
+## 3.6 剩下的（未做）
+
+- **C2 增强项**：意图选择（`ask`/`feedback`）、控制命令抽屉、把 `AgentConversationPanel` 从死代码
+  接起来（需要补 CSS）。都不是单入口的必需条件。
+- **C3 物理合并**：按原判断**不做**（消息 id 关联三处，收益仅是少一行记录）。
+- 历史会话（conv 7/10）保留为可读的历史，标题已写明去向；若将来要彻底归档，再单独评估。
+

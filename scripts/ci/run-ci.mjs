@@ -510,6 +510,13 @@ async function stageTest() {
       files: [
         'product/update/client.test.mjs',
         'product/update/errors.test.mjs',
+        // ★ 信任根自己的判据（设计 §5）。在补这个文件之前，`envelope.mjs`
+        //   **没有自己的用例文件**——它的正确性只被 client/publish 间接经过，
+        //   于是 `selectKey` 的三条密钥窗口判据（未生效 / 已过期 / 已吊销）
+        //   一次都没被碰过。而吊销是设计 §5 line 128 那条"私钥泄漏后的紧急
+        //   恢复"的实现：一句"泄漏之后可以吊销它"如果没有判据守着，
+        //   泄漏那天才会知道它坏没坏——而那是最不该做实验的时刻。
+        'product/update/envelope.test.mjs',
         // ★ 通道 sequence 高水位的判据：回退拒绝、**续签接受**、同 sequence
         //   换摘要/换 releaseId 拒绝、高水位按 channel/platform/arch 分键。
         //   续签那一条是**防止一个看起来很自然的错误修法**：给

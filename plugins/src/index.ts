@@ -2892,10 +2892,21 @@ function spaceWorker(ctx: AppContext, config: Config): void {
           const outside = outsideDomainFiles(t, await changedFilesOfBranch(t))
           if (outside.length > 0) {
             const domText = (t.fileDomain ?? []).join(', ') || '（未声明）'
-            await safeComment(t.id, `⛔ 文件域越界（合入被机器闸门拦截）：以下改动超出本切片声明文件域【${domText}】→ ${outside.slice(0, 30).join(', ')}${outside.length > 30 ? ` …共 ${outside.length} 个` : ''}。改动保留在分支 w/${t.id}，未合入主分支。请将军裁决：可接受 → 在评论里说明后由将军手动合入（git -C ${workspace.repoRootFor()} merge --no-ff w/${t.id}）或调整切片边界后重派；不可接受 → worktree remove --force ${worktreeDir} && git -C ${workspace.repoRootFor()} branch -D w/${t.id} 丢弃后重新派工。`)
+            // ★ BUG-010：这条评论原先只说了"手动合入"或"丢弃"，**漏了最后一步**：把任务推进 done。
+            //
+            //   为什么那一步不能省：本分支是 `return`，它**绕过了**下面的 `advanceTo` + `advancePipeline`
+            //   ——「阶段 → 阶段」的唯一出口。而"4. 流水线 done 补流转"那道扫单只处理
+            //   `status === 'done'` 的任务。于是：
+            //     人按评论说的合入了 main，任务却停在 in_review ⇒ 扫单看不到它 ⇒
+            //     **下一环（reviewer/tester）永远不会被派**，而链看起来"已经走完了"。
+            //   实测（2026-10-05）：T-178 是 coder、stage.next=reviewer，本该自动合入并派 reviewer
+            //   （历史上 T-050→T-057、T-060→T-065 都是这样接上的），结果代码进了 main、
+            //   **代码审查那一环被静默跳过**，而没有任何读数会说话。
+            //   所以评论必须把恢复路径写全：合入 → **推进 done** → 守护下一轮补派下一环。
+            await safeComment(t.id, `⛔ 文件域越界（合入被机器闸门拦截）：以下改动超出本切片声明文件域【${domText}】→ ${outside.slice(0, 30).join(', ')}${outside.length > 30 ? ` …共 ${outside.length} 个` : ''}。改动保留在分支 w/${t.id}，未合入主分支。请将军裁决：\n· **可接受** → 在评论里说明后手动合入（git -C ${workspace.repoRootFor()} merge --no-ff w/${t.id}），**然后把本任务推进到 done**（界面「✓ 验收通过」；或 POST /api/transition {id:"${t.id}",to:"done"}）。★ 这一步不能省：本任务停在这个状态时不会自动流转，**只有推进 done 之后，守护的「流水线 done 补流转」才会派出下一环（${stage.next}）**；漏掉它 = 下游被静默跳过（本任务已遇到过一次）。\n· **不可接受** → worktree remove --force ${worktreeDir} && git -C ${workspace.repoRootFor()} branch -D w/${t.id} 丢弃后重新派工。`)
             await transitionTo(t.id, 'in_review')
-            activity('domain-block', t.id, `文件域越界 ${outside.length} 个文件，合入被机器闸门拦截`)
-            log(`${t.id} → in_review（文件域越界 ${outside.length} 个文件，机器闸门拦截合入）`)
+            activity('domain-block', t.id, `文件域越界 ${outside.length} 个文件，合入被机器闸门拦截（下游 ${stage.next} 环暂停，需推进 done 才恢复）`)
+            log(`${t.id} → in_review（文件域越界 ${outside.length} 个文件，机器闸门拦截合入；下游 ${stage.next} 环暂停，待将军裁决并推进 done）`)
             return
           }
         }
@@ -3656,6 +3667,25 @@ function spaceWorker(ctx: AppContext, config: Config): void {
       if (isPipeline || tasks.some(x => x.status === 'done' && x.agentSelectionSnapshot?.reviewWorkflow !== undefined)) {
         for (const t of tasks.filter(x => x.status === 'done' && stageOf(x) !== undefined)) {
           await handoff.advancePipeline(t)
+        }
+      }
+      // ★ BUG-010：上面那道补流转**只看 `done`**。而异常路径（文件域越界 / 合入失败）把任务停在
+      //   `in_review` 就 `return` 了 —— 于是"人只合入、没推进 done"时，下一环**永远不会被派**，
+      //   而链看起来像走完了。实测（2026-10-05）：T-178 是 coder、stage.next=reviewer，
+      //   人工合入后停在 in_review，它的代码审查环被静默跳过，且没有任何读数会说话。
+      //   这里每轮报一次读数（**只读、不改状态**），把这件静默的事变成可见的。
+      //
+      //   判据 = 「停在 in_review」+「角色有下一环」+「不是人工闸门岗」+「分支已并入当前 HEAD」。
+      //   后者的语义：正常流转的任务分支会被 autoPromote 删掉（`branch -D w/<id>`），
+      //   所以这个组合只会在"已合入、但没推进 done"时成立；闸门岗（requirement/researcher）
+      //   合法地停在这里等将军，故显式排除。
+      for (const t of tasks.filter(x => x.status === 'in_review' && stageOf(x) !== undefined)) {
+        const sigStage = stageOf(t)
+        if (!sigStage || sigStage.next == null || sigStage.gate === true) continue
+        const anc = await runGit(workspace.repoRootFor(), ['merge-base', '--is-ancestor', `w/${t.id}`, 'HEAD'])
+        if (anc.code === 0) {
+          log(`${t.id} ⚠ 停在 in_review 但分支 w/${t.id} 已并入 HEAD —— 下游「${sigStage.next}」环不会被派`
+            + `（补流转扫单只看 done）。请推进 done：POST /api/transition {id:"${t.id}",to:"done"}（或界面「✓ 验收通过」）`)
         }
       }
       // 4.2 / 4.3 / 4.4 / 4.5a 验收与沉淀管线已拆到 ./acceptance.ts（验收边界）；原始注释

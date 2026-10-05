@@ -96,7 +96,7 @@
 
 写下来是因为它们的形状比"改对了"更值得留下来。
 
-一共二十三条。①～⑩ 是各层实现里的具体错误（错读一个头、前缀不一致、跨不过
+一共二十四条。①～⑩ 是各层实现里的具体错误（错读一个头、前缀不一致、跨不过
 进程边界、手写清单漏了文件……）；**⑪～㉓ 属于同一类**，它们不是"某个函数
 写错了"，而是**判据/承诺与它的输入之间那条线从来没有接上**——⑪～⑱ 与
 ⑲～㉓ 都是这一类，区别只在于**被谁发现**：⑪～⑯ 是全链路用例与接线层用例
@@ -348,7 +348,31 @@ bridge 两个分支，外加 `LAUNCHER_CHECKED` 装载期自检（那个 key 必
 否则用户得到一个服务都在、界面能开、只是再也领不到活的 Legion，而没有任何界面
 读数会提示他。
 
-### 5.2 ⑲～㉓ 是怎么找到的：**逐条对照设计**
+**㉔ 上传计划把远端根写死成生产树（与通道无关）。** `publish.mjs` 的
+`renderUploadPlan` 签名是
+`{ remoteRoot = 'root@117.72.146.36:/srv/legion-updates/production/legion' }`
+——一个**写死的生产路径**；回读命令里的 `--prefix /legion` 也是写死的。所以一次
+`--channel internal` 的测试发行会生成一份**指向生产树**的上传指令，而 internal
+通道的订阅前缀其实是 `/test/legion`（仓库的 `update-config.example.json` 就是
+这么映的）。
+
+这不是"默认值选得不好"，而是**生成了一条把测试物写进生产目录的操作指令**：
+照它执行的人会做对每一步，却把东西放错地方；而 `verify-host` 随后要么 404、
+要么核到另一棵树——两种结果都不会告诉他"你传错了树"。
+
+> 一份把目标猜错的部署指令，比一份要求你填目标的指令危险得多：
+> 前者会被人照着执行。
+
+修法：目标必须**显式**给（`--target test|production`，或 `--remote-root` +
+`--prefix` 一对），**没有默认值**；两者都缺 → 拒绝并说清为什么没有默认值；
+`target` 拼错 → 拒绝；另加一条通道/目标一致性判据（`internal` 发到生产树 → 拒绝，
+因为那个 feed 会被配好的客户端**永远读不到**）。`writePublish` 仍然总是写产物，
+但没有目标时写出的是一份**一行可执行命令都没有**的拒答。
+
+★ 这一条是**在真实托管联调里撞出来的**（见 §7.3）：读代码看不出来，是把它跑
+起来、看到生成的那份计划才发现的。
+
+### 5.2 ⑲～㉔ 是怎么找到的：**逐条对照设计**
 
 ⑪～⑱ 是被用例逼出来的（写用例 → 发现生产缺东西）。⑲～㉓ 不是——它们是**拿着
 设计文档一行一行核对实现**找出来的。两种方法各有盲区：
@@ -361,9 +385,9 @@ bridge 两个分支，外加 `LAUNCHER_CHECKED` 装载期自检（那个 key 必
 ⑲ 与 ⑳ 落在第一张表的右边：**没有任何用例会去测一个谁都没实现的要求**。
 所以下一步的验证方式也必须是"对照文档"，而不只是"再写点用例"。
 
-## 5.0 一个反复出现的模式（十个缺陷同源）
+## 5.0 一个反复出现的模式（十一个缺陷同源）
 
-⑪ 到 ㉓ 里的十一个是同一个模式：**一个判据（或一个承诺）需要一个读数，
+⑪ 到 ㉔ 里的十二个是同一个模式：**一个判据（或一个承诺）需要一个读数，
 而那个读数在真实链路上不存在。**（⑧ 的 `{teamHubPort}` 未展开是它的变体。）
 
 | # | 判据 / 承诺 | 缺的读数 | 症状 | 方向 |
@@ -455,14 +479,19 @@ node scripts/update/verify-host.mjs --origin <生产 origin> --prefix /legion \
 验收**」。据此如实列出：
 
 - **阶段 D 未执行**：没有签名真实安装包，没有干净机器首次安装 + N-1 → N
-  实测，没有文件占用/断电故障注入/撤回演练。§10 的九行验收表里，
-  第一、三、五、六、七、九行都**需要真机**才能给出结论。
-- **自动更新尚未在真实托管上跑通一次**。`scripts/update/verify-host.mjs`
-  可以对 117.72.146.36 运行，但那里目前只有空目录（计划文档：
-  「未发布任何版本、安装包或生产清单」）。
+  实测，没有文件占用/断电故障注入。§10 的九行验收表里，第一、三、五、六、
+  七、九行都**需要真机**才能给出结论。
+  ★ 第 8 行（撤回）的**协议那一半已经做完并实测**了，见 §7.3；没做的是
+  它在真机上的那一半（真装一个坏版本、真撤回、真验证已升级用户的处置）。
+- ~~自动更新尚未在真实托管上跑通一次~~ → **已跑通，证据见 §7.3**。
+  曾经的状态是：`verify-host.mjs` 可以对 117.72.146.36 运行，但那里只有空目录。
+  现在测试树上有一份签名发行，且完成了「公网回读 + 真实客户端检查/下载/就绪 +
+  负向判据 + 撤回演练」。
 - **没有生产 HTTPS 入口**。设计 §11 的"部署时填写"（域名、存储供应商、
   签名发布者、公钥、责任人）仍未填写；仓库里只有
   `product/release/update-config.example.json` 与 `update-trust.example.json`。
+  ★ 测试通道走的是 HTTP + `allowInsecureHttp`（计划文档允许的那条路），
+  而**生产通道必须是 HTTPS**——这一点没有被这次联调改变。
 - **helper 的打包闭包已接线，`unpack` 已用真实实现**（`extract.mjs`：
   越界路径/软链接/重复目标/解压炸弹/未知可执行五条判据，解压前后各核一次
   闭包；闭包来自包内 `closure.json`，摘要在签过名的发行清单里）。
@@ -654,4 +683,67 @@ git worktree add --detach .tmp-basecheck a8ff20de
 node scripts/config/scan.mjs --check    # 在两边各跑一次，取「未在 schema 中处理」那一行
 git worktree remove --force .tmp-basecheck
 ```
+
+### 7.3 真实托管上的实测（`117.72.146.36`，测试通道 `/test/legion`）
+
+这是 `2026-10-04-update-host-bootstrap.md` 那台**已授权托管**上的第一次真实跑通。
+在此之前本文件写的是「自动更新尚未在真实托管上跑通一次」。
+
+**做法**（严格按设计 §9 的顺序：不可变文件先传、回读核对、**最后**换通道指针）：
+
+```bash
+# 0. 托管配置的实际验收（设计 §4 line 79「CDN 配置必须实际验收」）——纯只读
+curl -sI http://117.72.146.36/healthz                    # 200 + cache-control: no-store
+curl -sI http://117.72.146.36/test/legion/feeds/         # 404（目录索引已关）
+curl -s -X POST http://117.72.146.36/test/legion/x       # 403（只允许 GET/HEAD）
+
+# 1. 生成一对**测试用**密钥并出一份签名发行（与正式密钥无关）
+node scripts/update/keygen.mjs new --key-id test-host-2026 --out ./keys --write-private
+node scripts/update/publish.mjs --product-version 1.1.0 --channel internal \
+  --release-id rel-hosttest-1.1.0 --from-version 1.0.0 \
+  --dsh-patch-bindings 0.8.3:2 --package-root ./payload \
+  --key-id test-host-2026 --private-key ./keys/….key.pem \
+  --sequence 1 --issued-at <2 小时前> --expires-at <30 天后> \
+  --target test --out ./dist          # ★ --target 必须显式给（见 §5 的 ㉔）
+
+# 2. 先传不可变文件，回读核对，**最后**单对象替换通道清单
+#    （命令由 dist/upload-plan.txt 给出，顺序写死在那份文件里）
+
+# 3. 公网回读 + 真实客户端
+node scripts/update/verify-host.mjs --origin http://117.72.146.36 --prefix /test/legion \
+  --channel internal --allow-insecure-http --trust ./trust.json --expect-sequence 6
+```
+
+**结果**
+
+| 项 | 读数 |
+|---|---|
+| `verify-host`（对真实托管） | **exit 0，14 项全 PASS**（含 `feed-cache-policy`、`release-digest`、`release-signature`、三个产物可达性） |
+| 真实客户端 `check()` | `available`（`feed-newer-available`，发现 1.1.0 ← 本机 1.0.0） |
+| 真实客户端 `download()` | `ok`，且**本地文件摘要 == 签名清单声明的摘要**（`54fb6f618e57…`） |
+| 就绪状态 | `ready === true` |
+| 安装交接（⑲ 的通道重查通过后） | `ok` |
+| 负向：未知 keyId | `envelope-unknown-key`（拒绝）✓ |
+| 负向：正确密钥 | 通过 ✓（证明上一条不是"什么都拒"） |
+| 负向：篡改一个字节 | `envelope-bad-signature` ✓ |
+| 负向：过期 | `envelope-expired` ✓ |
+| **撤回演练** | 已下载目标点安装 → **`update-target-recalled`**，候选被取消、就绪清空；恢复通道后 check/download/install 全部恢复 ✓ |
+| 托管缓存头（审计记录） | 通道清单 `no-store`；发行文件 `public, max-age=31536000, immutable` —— 与设计 §4 line 79 逐条一致 |
+| **生产树** | **0 个文件**（本次只写测试树） |
+
+**这次联调本身抓到一个缺陷（㉔）**：`publish.mjs` 的上传计划把远端根**写死**
+成 `…/production/legion`，与通道无关。于是一次 `--channel internal` 的发行会
+生成一份**指向生产树**的上传指令。这不是读代码能看出来的——是把它跑起来、
+看到生成的那份计划才发现的。修法与判据见 `12ed27c3`。
+
+  > 光读代码看不出来，是把它跑起来才看见的。
+
+**留下的东西**：测试树上有 `rel-hosttest-1.1.0` 与 `feeds/internal/win-x64.json`
+（由一把**测试密钥**签名，而那把密钥不在任何出厂信任表里，所以没有真实客户端
+能消费它）。要清掉只需要删测试树下的 `releases/rel-hosttest-1.1.0` 与
+`feeds/internal/win-x64.json`。**生产树没被动过。**
+
+**这次联调没有改变的两件事**：① 生产通道仍然必须是 HTTPS（测试通道走 HTTP
++ `allowInsecureHttp`，是计划文档允许的那条路）；② 阶段 D 的真机验收仍然没做。
+
 

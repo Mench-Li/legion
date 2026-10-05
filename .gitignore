@@ -44,6 +44,24 @@ Thumbs.db
 releases/
 scrum/pending-goals.json
 
+# 桌面版的构建产物（可再生成，**绝不能入库**）。
+#
+# 这两条是补的，补之前**没有任何规则忽略它们**，而实测它们加起来 **1.8 GB**
+# （`desktop/dist` 917 MB：195 MB 的安装包 + 未压缩目录；`.desktop-build` 940 MB：
+# DSH payload、Node 与 MinGit 的展开树）。也就是说一次 `git add -A`
+# 会把将近两 GB 的二进制提交进去，而**不会有人在这之前看到任何提示**。
+#
+#   > 一个"忘了忽略构建产物"的仓库，与一个"构建产物已经被提交过"的仓库，
+#   > 在 `git status` 上只差一次 `-A`。
+#
+# 发布件的正式位置是仓库根的 `releases/<releaseId>/`（上面那条已忽略），
+# 由发布流程从 `desktop/dist` 里取产物摆放——两者是"产物"与"发布"的关系。
+#
+# 不加 `desktop/payload/node_modules/`：顶部那条 `node_modules/` 已经覆盖任意层级，
+# 再写一条会让人以为通用规则不管用（而实测它管用）。
+.desktop-build/
+desktop/dist/
+
 # 第 118 轮第十二轮（业主确认④）：被引用的"量具"已收进 scripts/probes/ 并跟踪；
 # 剩下的是运行期状态与一次性草稿，明确不进版本控制。
 scratch/

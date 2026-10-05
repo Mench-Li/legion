@@ -54,6 +54,24 @@ test('③ 闸门岗（gate=true）必须被排除，否则会误报 requirement/
     '没有下一环的角色不该进这个检查（它的"停"不是链断）')
 })
 
+test('⑤ 零改动的分支不许报停摆（T-179 现场：0 提交的分支天然是 HEAD 的祖先）', () => {
+  // 首版判据只有「停在 in_review + 有下一环 + 非闸门岗 + 分支已并入 HEAD」。
+  // 而 `w/T-179` 一个提交都没有（HEAD 就是自己的基线）⇒ ancestor 恒真 ⇒ 每轮一次假警告。
+  // 对零改动的判定型任务，"推进 done"不会派出任何真活 —— 这条读数纯粹是噪音。
+  const from = SRC.indexOf('// ★ BUG-010：上面那道补流转')
+  assert.ok(from > 0, '找不到扫单里那段 BUG-010（锚点失效说明它被改写或搬走了）')
+  const to = SRC.indexOf('for (const t of tasks.filter(x => x.status === \'in_review\'', from)
+  assert.ok(to > from, '找不到那段 in_review 扫单')
+  const block = SRC.slice(to, SRC.indexOf('// 4.2 / 4.3 / 4.4 / 4.5a', to))
+  assert.match(block, /const own = await changedFilesOfBranch\(t\)/,
+    '缺少"分支自己有改动吗"的前置判定 —— 没有它，零提交分支会每轮报一次假停摆（T-179）')
+  assert.match(block, /if \(own\.length === 0\) continue/,
+    'own 必须在报之前拦掉空改动；只取不判等于白算')
+  // 顺序也要钉住：先算 own 再问 git ancestor（省掉零改动分支那次 git 调用）。
+  assert.ok(block.indexOf('changedFilesOfBranch') < block.indexOf('--is-ancestor'),
+    'own 判定必须在 ancestor 之前 —— 否则零改动分支仍要为它跑一次 git')
+})
+
 test('④ 那条读数必须是**只读**的（不许顺手改任务状态）', () => {
   // 锚点用**唯一**的那句话：文件里有两处 `// ★ BUG-010`（闸门评论那处 + 扫单这处），
   // 抓第一个会把闸门自己那句 `transitionTo(...)` 也算进来 —— 那是误判测试，不是误判产品。

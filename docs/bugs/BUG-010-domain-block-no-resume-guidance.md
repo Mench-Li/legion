@@ -83,9 +83,44 @@ for (const t of tasks.filter(x => x.status === 'in_review' && stageOf(x) !== und
 }
 ```
 
-判据是四项的与：**停在 `in_review`** + **角色有下一环** + **不是人工闸门岗** + **分支已并入 HEAD**。
-最后一项是关键：正常流转的任务分支会被 `autoPromote` 删掉（`branch -D w/<id>`），
+判据是**五项**的与：**停在 `in_review`** + **角色有下一环** + **不是人工闸门岗**
++ **分支自己确实改过东西** + **分支已并入 HEAD**。
+倒数第二项是关键：正常流转的任务分支会被 `autoPromote` 删掉（`branch -D w/<id>`），
 所以这个组合只会在"已合入、却没推进 done"时成立。
+
+### 2.3 上线后的订正：零改动的分支不许报停摆（T-179）
+
+首版只有四项（缺"分支自己改过东西"）。**上线后第一轮就误报了**，实测日志：
+
+```
+T-179 ⚠ 停在 in_review 但分支 w/T-179 已并入 HEAD —— 下游「devops」环不会被派…
+```
+
+这是**空洞命中**。为什么必然发生：`git merge-base --is-ancestor` 问的是"HEAD 是否包含该提交"——
+而 `w/T-179` **一个提交都没有**（HEAD 就是它自己的基线）⇒ 它天然是自己的祖先 ⇒ ancestor 恒真：
+
+```bash
+$ git diff --name-only main...w/T-179      # → 0 个文件
+$ git log --oneline main...w/T-179         # → 无提交
+$ git merge-base --is-ancestor w/T-179 HEAD; echo $?   # → 0（真）
+```
+
+于是**每一个"零改动的判定型任务"**（分析、调研、结论 —— 产出是评论而不是文件）都会每轮报一次假停摆，
+而"推进 done"对它不会派出任何真活。忘掉这条的代价不是漏报，是**噪音淹没真信号**：
+真停摆和假停摆长得一模一样。
+
+订正就是把 BUG-008 的 `changedFilesOfBranch`（**三点** refspec，理由见 `./branchScope.ts`）
+拿来当这个前置闸门，并放在 `--is-ancestor` **之前**（零改动分支连那次 git 调用都不必付）：
+
+```ts
+const own = await changedFilesOfBranch(t)
+if (own.length === 0) continue
+const anc = await runGit(workspace.repoRootFor(), ['merge-base', '--is-ancestor', `w/${t.id}`, 'HEAD'])
+```
+
+> 这条订正是"**先上线、再看读数**"抓出来的，不是设计时想出来的 —— 首版写的时候
+> ancestor 看起来"只会在已合入时成立"，而 T-179 这个 0 提交的分支证明它还有第二种成立方式。
+> 这与 BUG-009-a 同形（探测器问错了问题）：判据的**失败方向**比判据本身更容易想漏。
 
 **这一段刻意只读**：它报告问题，不替人决定。替人推进 done 会把"等人工裁决"变成"自动放行" ——
 那正是闸门存在的理由。
@@ -93,7 +128,7 @@ for (const t of tasks.filter(x => x.status === 'in_review' && stageOf(x) !== und
 ## 3. 判据
 
 ```bash
-node --test plugins/tests/pipeline-resume-guidance.test.mjs   # 4 例（源码判据）
+node --test plugins/tests/pipeline-resume-guidance.test.mjs   # 5 例（源码判据）
 ```
 
 | 用例 | 断言 |
@@ -102,9 +137,14 @@ node --test plugins/tests/pipeline-resume-guidance.test.mjs   # 4 例（源码�
 | ② | 必须存在"停在 in_review 但分支已并入 HEAD"的判定与根因文案（`补流转扫单只看 done`） |
 | ③ | 必须排除 `sigStage.gate === true` 与 `next == null`（否则给闸门岗每轮报假警告） |
 | ④ | 那段读数必须**只读**：块内不许出现 `transitionTo(` / `advancePipeline(` |
+| ⑤ | 必须有 `own.length === 0` 的前置闸门，且在 `--is-ancestor` **之前**（T-179 现场） |
 
-**反向验证**（4 条全部实测变红）：① 去掉评论里所有"推进 done"指引；② 删掉根因文案；
-③ 不排除闸门岗；④ 在读数里顺手加一次 `transitionTo`。还原即 4/4 绿。
+**反向验证**（全部实测变红）：
+① 去掉评论里所有"推进 done"指引；② 删掉根因文案；③ 不排除闸门岗；④ 在读数里顺手加一次 `transitionTo`；
+⑤ 删掉 `if (own.length === 0) continue`，或把它挪到 `--is-ancestor` 之后。还原即 5/5 绿。
+
+> 用例 ⑤ 的两次变异是分开做的（删闸门 / 挪顺序），因为它们是**两种不同的错**：
+> 删掉是"假停摆照报"，挪后是"多付一次 git 而假停摆仍报"。一个断言只钉住其中一个就不够。
 
 ### 3.1 两处自我订正（都发生在写这条记录的过程中）
 
@@ -115,6 +155,8 @@ node --test plugins/tests/pipeline-resume-guidance.test.mjs   # 4 例（源码�
    而那行同样含"推进 done" ⇒ 把评论里的指引全删掉，用例照样绿。改成切到紧随其后的
    `await transitionTo(...)` 为止，边界与断言的东西对齐后，变异才测得出来。
    （一个"切片范围比断言对象大"的源码判据，会把缺陷放过 —— 与 BUG-009 的假绿同形。）
+3. **停摆判据的第一版有四条、只有四条**（§2.3）。它在宿主重启后的**第一轮就误报 T-179**——
+   一个 0 提交的分支天然是 HEAD 的祖先。这条错在设计时不可见，只在读数里可见。
 
 ## 4. 边界
 

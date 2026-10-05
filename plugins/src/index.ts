@@ -3680,13 +3680,22 @@ function spaceWorker(ctx: AppContext, config: Config): void {
       //   人工合入后停在 in_review，它的代码审查环被静默跳过，且没有任何读数会说话。
       //   这里每轮报一次读数（**只读、不改状态**），把这件静默的事变成可见的。
       //
-      //   判据 = 「停在 in_review」+「角色有下一环」+「不是人工闸门岗」+「分支已并入当前 HEAD」。
-      //   后者的语义：正常流转的任务分支会被 autoPromote 删掉（`branch -D w/<id>`），
+      //   判据 = 「停在 in_review」+「角色有下一环」+「不是人工闸门岗」
+      //        +「**分支自己确实改过东西**」+「该分支已并入当前 HEAD」。
+      //   后两条的语义：正常流转的任务分支会被 autoPromote 删掉（`branch -D w/<id>`），
       //   所以这个组合只会在"已合入、但没推进 done"时成立；闸门岗（requirement/researcher）
       //   合法地停在这里等将军，故显式排除。
+      //
+      //   ★「分支自己确实改过东西」这一条是**上线后补的**。首版只判 ancestor，于是 T-179
+      //     —— 一个提交都没有的分支，`w/T-179` 的 HEAD 就是它自己的基线 —— **天然是 HEAD 的祖先**，
+      //     每轮都为它报一次"请推进 done"。而对一个零改动的判定型任务，推进 done 不会派出任何
+      //     真正要干活的下游环（没有代码要审/要发）。忘掉这条 = 把一次假停摆变成每轮的噪音，
+      //     而噪音会淹没真信号。判据复用 changedFilesOfBranch（**三点** refspec，理由见 ./branchScope.ts）。
       for (const t of tasks.filter(x => x.status === 'in_review' && stageOf(x) !== undefined)) {
         const sigStage = stageOf(t)
         if (!sigStage || sigStage.next == null || sigStage.gate === true) continue
+        const own = await changedFilesOfBranch(t)
+        if (own.length === 0) continue
         const anc = await runGit(workspace.repoRootFor(), ['merge-base', '--is-ancestor', `w/${t.id}`, 'HEAD'])
         if (anc.code === 0) {
           log(`${t.id} ⚠ 停在 in_review 但分支 w/${t.id} 已并入 HEAD —— 下游「${sigStage.next}」环不会被派`

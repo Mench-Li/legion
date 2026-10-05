@@ -1421,6 +1421,15 @@ async function stageTest() {
     { label: 'calendar（日程日历契约）', files: ['team-hub/calendar.test.mjs'], cwd: ROOT },
     { label: 'calendar-ui（P2-5 日历前端纯函数：周视图/重复文案/关联跳转/表单校验）', files: ['workbench/scripts/calendar-ui.test.mjs'], cwd: ROOT, nodeArgs: ['--experimental-strip-types'] },
     { label: 'chat-ui（P2-6 对话前端纯函数：健康判定/AI 三态/合并/断线补齐）', files: ['workbench/scripts/chat-ui.test.mjs'], cwd: ROOT, nodeArgs: ['--experimental-strip-types'] },
+    // ── C2：岗位对话的意图路由与「任务与控制」面板接线 ──
+    //   ① agent-intent：一次岗位对话有两条通道（聊天 / 结构化），选错 = 消息去错地方；
+    //      三条护栏（结构化意图不许带附件、追加要求必须选任务、回答待决策必须带问题身份）
+    //      都是服务端会拒、但应当在界面先说清的。
+    //   ② agent-panel-wiring：`AgentConversationPanel` 上次死于"全仓没人 import + 
+    //      它用的 CSS 类一个都没有"——两件事都不会让 tsc/构建/任何既有测试变红。
+    //      这组用例把"必须被挂载"与"每个类必须有样式"钉住（手法同 model-config 的 routeAssemblySource）。
+    { label: 'agent-intent（C2 岗位对话意图路由：两条通道 + 三条护栏）', files: ['workbench/scripts/agent-intent.test.mjs'], cwd: ROOT, nodeArgs: ['--experimental-strip-types'] },
+    { label: 'agent-panel-wiring（C2 死代码复活判据：面板真被挂载 + 类都有样式 + 不是第二个聊天界面）', files: ['workbench/scripts/agent-panel-wiring.test.mjs'], cwd: ROOT },
     { label: 'spaces（空间删除级联）', files: ['team-hub/spaces.test.mjs'], cwd: ROOT },
     { label: 'pipeline（空间流水线：编队即流水线 SP-P0）', files: ['team-hub/pipeline.test.mjs'], cwd: ROOT },
     { label: 'goal（目标生命周期）', files: ['team-hub/goal.test.mjs', 'team-hub/goal-closed.test.mjs'], cwd: ROOT },

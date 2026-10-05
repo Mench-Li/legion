@@ -1,10 +1,12 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { createChatConversation, ensureAgentChatConversation, fetchChatConversations, fetchChatHealth, fetchChatMessages, fetchChatReplySettings, fetchSpaces, hubBase, postChatMessage, retryChatReply, saveChatReplySettings, subscribeHubAudit, uploadChatAttachment } from '../api'
+import { createChatConversation, ensureAgentChatConversation, fetchAgentDetails, fetchChatConversations, fetchChatHealth, fetchChatMessages, fetchChatReplySettings, fetchSpaces, hubBase, postAgentMessage, postChatMessage, retryChatReply, saveChatReplySettings, subscribeHubAudit, uploadChatAttachment } from '../api'
+import type { AgentDetail, AgentIntent } from '../api'
 import type { ChatAttachmentRef, ChatConversation, ChatHealthInfo, ChatMessage, SpaceInfo, RosterAgent } from '../types'
 import { mergeById } from '../dedupe'
 import { aiStateView, canSend, chatHealthView, chatSseLabel, maxSeqOf, replyModelOf, sendFailText, shouldRefillChat } from '../chatUi'
 import type { ChatHealthLite, ChatMsgLite } from '../chatUi'
 import { toast } from './Toast'
+import { planAgentSend } from '../agentIntent'
 
 export * from '../chatUi'
 
@@ -161,6 +163,18 @@ export function ChatView({ scope, hubMode, spaces, onPickScope, agent }: {
   const [refillCount, setRefillCount] = useState(0)
   const seqWatermarkRef = useRef(0)
   const refillCountRef = useRef(0)
+  // ── C2：岗位对话的「意图」与控制抽屉 ──────────────────────────────────────────
+  // 意图选择的意义（服务端 send() 的语义）：询问=找人答；追加要求/新建任务/回答待决策
+  // **只有** /api/agent-messages 能表达（它要靠 intent 决定写 feedback、建任务还是消解 question）。
+  const [intent, setIntent] = useState<AgentIntent>('ask')
+  /** 「追加要求 / 新建任务」必须绑定具体任务（服务端 TARGET_AMBIGUOUS 会拒）。 */
+  const [targetTaskId, setTargetTaskId] = useState('')
+  /** 正在回答的待决策问题（点了某个问题后进入该状态；提交即消解它）。 */
+  const [pendingQuestion, setPendingQuestion] = useState<{ id: string; version: number; taskId: string; body: string } | null>(null)
+  const [agentDetail, setAgentDetail] = useState<AgentDetail | null>(null)
+  const [agentDetailError, setAgentDetailError] = useState('')
+  /** 结构化消息的幂等收据（同一次提交重发复用同一个 id；内容变了才换）。 */
+  const agentSendRetry = useRef<{ payload: string; id: string } | null>(null)
   useEffect(() => { if (draftStorageKey) { try { localStorage.setItem(draftStorageKey, draft) } catch { /* 存储不可用时仍可收发 */ } } }, [draft, draftStorageKey])
 
   const loadConvs = useCallback(async (): Promise<void> => {
@@ -184,6 +198,41 @@ export function ChatView({ scope, hubMode, spaces, onPickScope, agent }: {
       if (scopeAtCall === scopeRef.current) { const message = `会话列表加载失败：${e instanceof Error ? e.message : String(e)}`; setConversationError(message); toast('err', message) }
     }
   }, [scope, agent?.role])
+
+  // ── C2：岗位详情（任务 / 待决策问题 / 命令历史）——**唯一**的数据源 ──────────────
+  // 它服务三处：①「追加要求」的任务下拉；② 待决策问题条；③ 控制抽屉（含控制按钮的参数）。
+  // 每 3 秒重读是**必需**的：控制命令要带 attemptId / leaseEpoch / taskVersion 做并发保护，
+  // 拿界面缓存的旧身份发命令会被服务端拒，或更糟——作用到错误的那一轮执行上。
+  // 抽屉组件不自己轮询（同一个端点两个 3s 轮询器 = 双倍请求 + 两个可能不一致的执行身份来源）。
+  const loadAgentDetail = useCallback(async (): Promise<void> => {
+    const sc = scopeRef.current
+    if (!hubMode || !agent || !sc) return
+    try {
+      const list = await fetchAgentDetails(sc)
+      if (scopeRef.current !== sc) return
+      setAgentDetail(list.find(a => a.role === agent.role) ?? null)
+      setAgentDetailError('')
+    } catch (e) {
+      if (scopeRef.current !== sc) return
+      setAgentDetail(null)
+      setAgentDetailError(e instanceof Error ? e.message : String(e))
+    }
+  }, [hubMode, agent?.role])
+
+  useEffect(() => {
+    if (!agent) { setAgentDetail(null); setAgentDetailError(''); return }
+    void loadAgentDetail()
+    const timer = setInterval(() => void loadAgentDetail(), 3000)
+    return () => clearInterval(timer)
+  }, [agent?.role, scope, loadAgentDetail])
+
+  // 换 Agent / 换空间：意图与目标不能跨岗位残留（否则会把"追加要求"提交到另一个岗位的任务上）
+  useEffect(() => {
+    setIntent('ask')
+    setTargetTaskId('')
+    setPendingQuestion(null)
+    agentSendRetry.current = null
+  }, [agent?.role, scope])
 
   // S7（R-2）：「全部空间」视图拉取空间列表（props.spaces 为空时兜底；成功后缓存 localSpaces 供切换回来看）
   useEffect(() => {
@@ -566,6 +615,51 @@ export function ChatView({ scope, hubMode, spaces, onPickScope, agent }: {
     const scopeAtCall = scope // 发起时身份快照（R-A5 / TC-S3-01/03/04）
     const convAtCall = activeId
     const attachmentIds = attachFiles.map(a => a.id as number)
+
+    // ── C2：岗位对话走**结构化意图**（路由规则在 agentIntent.ts，可单测）──────────
+    // 意图不是"消息的装饰"，它决定服务端做什么：追加要求→写 feedback（下一轮生效）、
+    // 新建任务→真的建一个任务、回答待决策→消解那个 question 并把答复写回任务。
+    // 这三件事 `/api/chat/messages` **做不到**（它没有 intent 这个概念），所以它们只能走
+    // `/api/agent-messages`；而「询问」仍然走聊天通道（附件、AI 回复管道都在那边）。
+    if (agent) {
+      const plan = planAgentSend({ intent, body, attachmentIds, targetTaskId, pendingQuestion })
+      if (!plan.ok) { toast('err', plan.reason); return }
+      if (plan.via === 'agent') {
+        const payload = {
+          scope: scopeAtCall as string,
+          conv: convAtCall,
+          body: plan.body,
+          intent: plan.intent,
+          target: plan.targetTaskId === null ? null : { taskId: plan.targetTaskId },
+          ...(plan.questionId === undefined ? {} : { questionId: plan.questionId, questionVersion: plan.questionVersion }),
+        }
+        const encoded = JSON.stringify(payload)
+        if (agentSendRetry.current?.payload !== encoded) agentSendRetry.current = { payload: encoded, id: crypto.randomUUID() }
+        setSending(true)
+        try {
+          await postAgentMessage({ ...payload, clientRequestId: agentSendRetry.current.id })
+          if (identityStale(scopeAtCall, convAtCall, scopeRef.current, activeRef.current)) return
+          agentSendRetry.current = null
+          setDraft('')
+          setPendingQuestion(null)
+          stickRef.current = true
+          await mergeNewest() // 服务端可能已插入收据/答复等**多条**消息 → 直接重读本页，而不是只贴回自己那条
+          void loadConvs()
+          void loadHealth()
+          void loadAgentDetail()
+        } catch (e) {
+          if (!identityStale(scopeAtCall, convAtCall, scopeRef.current, activeRef.current)) {
+            toast('err', sendFailText(e))
+          }
+        } finally {
+          setSending(false)
+        }
+        return
+      }
+      // via === 'chat'（「询问」）：**继续走下面的聊天通道**，附件与 AI 回复管道都在那边。
+      // （这里绝不能 return —— 那会让岗位对话里的"询问"一条也发不出去。）
+    }
+
     setSending(true)
     try {
       const msg = await postChatMessage({
@@ -751,6 +845,30 @@ export function ChatView({ scope, hubMode, spaces, onPickScope, agent }: {
                 })}
               </div>
               <div className="chat-composer">
+                {/* 详情读取失败要说出来：否则「追加要求」的任务下拉是空的，而用户不知道为什么。 */}
+                {agent && agentDetailError && (
+                  <div className="chat-intent-bar error" role="alert">
+                    <span>任务详情读取失败：{agentDetailError}</span>
+                    <button className="btn small" onClick={() => void loadAgentDetail()}>重试</button>
+                  </div>
+                )}
+                {/* C2：待决策问题条 —— 点「回答」把这条问题绑到本次输入上（提交即消解它）。 */}
+                {agent && pendingQuestion && (
+                  <div className="chat-intent-bar answering">
+                    <span>正在回答 {pendingQuestion.taskId} 的待决策：{pendingQuestion.body}</span>
+                    <button className="btn ghost" onClick={() => { setPendingQuestion(null); setIntent('ask') }}>取消</button>
+                  </div>
+                )}
+                {agent && !pendingQuestion && (agentDetail?.questions.filter(q => q.status === 'open').length ?? 0) > 0 && (
+                  <div className="chat-intent-bar">
+                    <span>有 {agentDetail?.questions.filter(q => q.status === 'open').length} 个待决策问题：</span>
+                    {agentDetail?.questions.filter(q => q.status === 'open').map(q => (
+                      <button key={q.id} className="btn small" onClick={() => { setPendingQuestion({ id: q.id, version: q.version, taskId: q.task_id, body: q.body }); setIntent('answer_question') }}>
+                        回答 {q.task_id}
+                      </button>
+                    ))}
+                  </div>
+                )}
                 <textarea
                   value={draft}
                   rows={3}
@@ -779,6 +897,38 @@ export function ChatView({ scope, hubMode, spaces, onPickScope, agent }: {
                   </div>
                 )}
                 <div className="chat-composer-bar">
+                  {/* C2：意图选择（仅岗位对话）。三个选项对应服务端三种**不同后果**，
+                      所以选项文案写的是后果而不是术语：「追加要求」= 下一次执行会带上它。 */}
+                  {agent && (
+                    <select
+                      aria-label="消息意图"
+                      className="chat-intent-select"
+                      value={pendingQuestion ? 'answer_question' : intent}
+                      disabled={pendingQuestion !== null}
+                      title={pendingQuestion ? '正在回答待决策问题；提交后消解该问题' : '这条消息要 Agent 做什么'}
+                      onChange={e => setIntent(e.target.value as AgentIntent)}
+                    >
+                      <option value="ask">询问（模型答问）</option>
+                      <option value="feedback">追加要求（下一轮生效）</option>
+                      <option value="create_task">新建任务（正文作标题）</option>
+                      {pendingQuestion && <option value="answer_question">回答待决策</option>}
+                    </select>
+                  )}
+                  {/* 「追加要求」必须绑定具体任务：服务端没有目标会拒（TARGET_AMBIGUOUS）。
+                      选项只列该岗位自己的任务（详情来自 /api/agents?scope=）。 */}
+                  {agent && intent === 'feedback' && (
+                    <select
+                      aria-label="关联任务"
+                      className="chat-intent-select"
+                      value={targetTaskId}
+                      onChange={e => setTargetTaskId(e.target.value)}
+                    >
+                      <option value="">选择任务…</option>
+                      {agentDetail?.tasks.filter(t => !['done', 'canceled'].includes(t.status)).map(t => (
+                        <option key={t.id} value={t.id}>{t.id} · {t.title}</option>
+                      ))}
+                    </select>
+                  )}
                   <input
                     ref={fileInputRef}
                     type="file"
@@ -786,8 +936,10 @@ export function ChatView({ scope, hubMode, spaces, onPickScope, agent }: {
                     style={{ display: 'none' }}
                     onChange={e => { void pickAttachFiles(e.target.files); e.target.value = '' }}
                   />
-                  <button type="button" className="btn ghost" disabled={attachBusy || sending}
-                    title="添加文本文件作为本次回复上下文（≤10MB、每消息至多 3 个、仅文本类 UTF-8；黑名单类型/二进制会被拒绝）"
+                  <button type="button" className="btn ghost" disabled={attachBusy || sending || (agent !== undefined && intent !== 'ask')}
+                    title={agent !== undefined && intent !== 'ask'
+                      ? '「追加要求 / 新建任务 / 回答待决策」是结构化指令，不能带附件；改用「询问」才可加附件'
+                      : '添加文本文件作为本次回复上下文（≤10MB、每消息至多 3 个、仅文本类 UTF-8；黑名单类型/二进制会被拒绝）'}
                     onClick={() => fileInputRef.current?.click()}>
                     {attachBusy ? '⏳ 上传中…' : '📎 附件'}
                   </button>
@@ -799,7 +951,12 @@ export function ChatView({ scope, hubMode, spaces, onPickScope, agent }: {
                     title={attachFiles.some(a => a.id === undefined || a.error !== undefined) ? '附件未就绪：请等待上传完成或移除失败附件' : undefined}
                     disabled={sending || attachBusy || !canSend(draft, attachFiles.filter(a => a.id !== undefined && a.error === undefined).length) || attachFiles.some(a => a.id === undefined || a.error !== undefined)}
                     onClick={() => void send()}>
-                    {sending ? '发送中…' : '发送 ➤'}
+                    {sending ? '发送中…' : agent
+                      ? (intent === 'feedback' ? '提交追加要求 ➤'
+                        : intent === 'create_task' ? '创建任务 ➤'
+                        : intent === 'answer_question' ? '提交决定 ➤'
+                        : '发送 ➤')
+                      : '发送 ➤'}
                   </button>
                 </div>
               </div>

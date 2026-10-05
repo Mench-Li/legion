@@ -1,8 +1,8 @@
 # BUG-003 · 修法 C 方案（单入口：一个 (空间, 岗位) 只有一条主对话）
 
-> 状态：**C1 已实施并在生产库落地**（2026-10-05）；C2 的**核心必要性已被 C1 的设计消掉**
-> （见 §3「落地记录」），C3 仍是"建议不做"。本文上半部分是**施工前的方案**（保留原样以便对照
-> 当初的判断），下半部分 §3 是**实施记录**：实际改了什么、现场读数、以及施工中被迫多修的两处。
+> 状态：**C1 与 C2 均已实施**（2026-10-05）。C1 已在生产库落地；C2（意图选择 / 控制抽屉 /
+> 死代码复活 + CSS）见 §3.7。C3 仍是"建议不做"。
+> 本文上半部分是**施工前的方案**（保留原样以便对照当初的判断），下半部分 §3 是**实施记录**。
 
 ## 1. 目标与验收
 
@@ -180,8 +180,106 @@ CREATE UNIQUE INDEX idx_agent_main_conversation ON conversations(scope, agent_ro
 
 ## 3.6 剩下的（未做）
 
-- **C2 增强项**：意图选择（`ask`/`feedback`）、控制命令抽屉、把 `AgentConversationPanel` 从死代码
-  接起来（需要补 CSS）。都不是单入口的必需条件。
+- ~~**C2 增强项**：意图选择、控制命令抽屉、把 `AgentConversationPanel` 从死代码接起来（需补 CSS）。~~
+  → **已完成，见 §3.7**（用户点名要做）。
 - **C3 物理合并**：按原判断**不做**（消息 id 关联三处，收益仅是少一行记录）。
 - 历史会话（conv 7/10）保留为可读的历史，标题已写明去向；若将来要彻底归档，再单独评估。
+
+## 3.7 C2 已实施（2026-10-05）：意图选择 / 控制抽屉 / 死代码复活
+
+用户点名的三件事，逐条落地：
+
+### ① 意图选择（ask / feedback / …）—— 在 `ChatView` 的输入区
+
+服务端的意图不是"消息的装饰"，它决定**后果**：追加要求会写 `feedback`（下一轮生效）、
+新建任务会真的建任务、回答待决策会消解那个 question 并把答复写回任务。这三件事
+`/api/chat/messages` **做不到**（它没有 `intent` 这个概念）。
+
+所以一次岗位对话有**两条**通道，路由规则抽成了纯函数 `workbench/src/agentIntent.ts`
+（`planAgentSend`，可单测）：
+
+| 意图 | 通道 | 为什么 |
+| --- | --- | --- |
+| 询问 | `/api/chat/messages` | 人说人话；**附件**与 AI 回复管道都在那边 |
+| 追加要求 | `/api/agent-messages` | 只有它有 `intent`：写 feedback，下一轮生效 |
+| 新建任务 | `/api/agent-messages` | 只有它真的建任务（正文作标题） |
+| 回答待决策 | `/api/agent-messages` | 消解 question + 把答复写回任务（带 `questionId/questionVersion` 做并发保护） |
+
+三条护栏在界面先说清（服务端也会拒，但早说省一次往返）：结构化意图**不许带附件**
+（`agent-messages` 没这个参数，静默丢附件比报错更坏）；追加要求**必须选具体任务**；
+回答待决策**必须带问题身份**。
+
+★ **施工中抓到并修掉一个真 bug**：重构时我在 agent 分支末尾留了一个裸 `return`，
+而「询问」走的正是 `via === 'chat'` 那条路 —— 那会让**岗位对话里的"询问"一条也发不出去**。
+现在 `via === 'chat'` 显式落到下面的聊天通道，并有一句注释写明"这里绝不能 return"。
+
+### ② 控制命令抽屉 —— 接进 `AgentWorkspace` **已有的**那个抽屉
+
+`暂停后续调度 / 恢复 / 停止本次执行 / 核对后重跑` 只有 `/api/agent-commands` 有
+（它们不是消息，是对调度的指令）。
+
+**没有新增抽屉按钮**：`AgentWorkspace` 本来就有「任务清单」抽屉（`agent-context-drawer`
+→ `AgentTasksModal`）。再加一个会让同一页出现两个"打开侧栏"的入口，而它们装的东西高度重叠。
+做法是**一个抽屉、多个页签**：控制（默认）/ 任务清单（原有）/ 产物 / 运行记录 / 规范。
+
+控制的参数（`attemptId / leaseEpoch / taskVersion`）**单点持有**在 `AgentWorkspace`（3s 轮询）：
+两个各自轮询同一端点的副本 = 两个可能不一致的执行身份，而拿错身份会被服务端拒、
+或更糟——作用到**错误的那一轮执行**上。所以 `AgentConversationPanel` 改成**展示型组件**，
+详情由 `AgentWorkspace` 注入。
+
+### ③ 死代码复活 + 补 CSS
+
+`AgentConversationPanel` 上次的死法**不是逻辑错**，是两件不会让任何测试变红的事：
+
+1. **全仓没有任何 import**（没人挂载它）；
+2. 它用的 CSS 类（`.agent-conversation` / `.agent-chat-feed` / …）在样式表里**一个都没有**。
+
+（`tsc` 绿、`vite build` 绿、所有既有测试绿 —— 一直绿到有人打开界面发现是空白。）
+
+现在：挂载点是 `AgentWorkspace` 的侧抽屉；`workspace.css` 补齐了 `agent-panel-*` /
+`agent-drawer-tabs` / `chat-intent-*` 全套样式。
+
+另外**删掉了它自带的聊天界面**（feed + compose）：C 的方向是一个 (空间, 岗位) 一条主对话，
+再挂一套输入框等于把"两条会话"从数据层搬到界面上。它的「回答待决策」移到 `ChatView` 的输入框
+（那边才有草稿），面板只列出问题并指路。
+
+命名踩过一个坑：`.agent-task` 在 `index.css` 里**已存在**（暗色 Agent 卡片的**一行**，
+`display:flex;align-items:baseline`），沿用它会把这边的区块布局压扁 ⇒ 统一改成 `agent-panel-*`。
+
+### 判据（新增 2 个套件，共 18 例，已登记进 CI）
+
+| 套件 | 守什么 |
+| --- | --- |
+| `workbench/scripts/agent-intent.test.mjs`（10 例） | 两条通道路由 + 三条护栏 + 待决策优先于意图 + 空正文 |
+| `workbench/scripts/agent-panel-wiring.test.mjs`（8 例） | 面板**真被挂载**、用到的**每个类都有样式**、**不是**第二个聊天界面（无 textarea/input/发送按钮）、控制命令调用点唯一、发送必须过 `planAgentSend` |
+
+**反向验证**（逐条改坏 → 必须红 → 还原即绿，全部实测）：
+
+| 改坏什么 | 结果 |
+| --- | --- |
+| 摘掉面板的 import | ✅ 红 |
+| 面板类名改错一个字母（类无样式） | ✅ 红（2 例） |
+| 面板里加 `<textarea>` | ✅ 红 |
+| `ChatView` 自己发控制命令 | ✅ 红 |
+| `ChatView` 不再调 `planAgentSend` | ✅ 红 |
+| `postAgentMessage` 被摘掉 | ✅ 红 |
+| 意图下拉退回裸术语（去掉"下一轮生效"） | ✅ 红 |
+| 纯函数：`ask` 也走去 agent-messages | ✅ 红（2 例） |
+| 纯函数：结构化意图不再拦附件 | ✅ 红 |
+
+### 已知边界（如实登记）
+
+- `workbench/scripts/model-api.test.mjs` 有一条**既有红**：「api.ts 里用到的每个 `/api/` 路径
+  都能在路由表里找到」。基线（`31b813fc`）**同样红**，缺失清单里原有 ~20 条
+  （`/api/workflow-packs`、`/api/deliveries`…）。本次新增的 `POST /api/agent-messages` 与
+  `POST /api/agent-commands` **是真实端点**（`team-hub/routes/agents.mjs:7-8`，且
+  `/api/agent-messages` 已实测 HTTP 200），只是平台的路由抽取 `platformHttpRoutes()`
+  看不见 `team-hub/routes/*.mjs` 里**表格驱动**形式的路由 —— 属于该仓库文档记过的
+  「接线没坏、观测点塌了」。**本次不动抽取器**（它牵动平台契约基线，是另一件事），
+  但如实说明我的两条路径被记进了那份既有的缺失清单。
+- `desktop-auth.test.mjs` 的「保护读/写/Host/Origin/代理凭证」1 例也是**既有红**（基线同红）。
+- 面板的 3s 轮询与 `ChatView` 的 3s 轮询各自读一次 `/api/agents?scope=`：`ChatView` 那份只用于
+  意图下拉与待决策条（**只读**），控制参数唯一来源仍只有 `AgentWorkspace` 那一份。
+  若要省这一次请求，应把详情提升到共同父级再注入两边。
+
 

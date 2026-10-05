@@ -883,6 +883,87 @@ export function postChatMessage(input: { conv: number; body: string; kind?: stri
   }).then(res => (res as { task: ChatMessage }).task)
 }
 
+/** 岗位对话的结构化意图（服务端 `agent-conversations.mjs` 的 send() 只认这四个）。 */
+export type AgentIntent = 'ask' | 'feedback' | 'create_task' | 'answer_question'
+
+/** 岗位的只读详情（任务记录 / 待决策问题 / 控制命令历史），`GET /api/agents?scope=`。
+ * 这份数据是**控制抽屉**的输入：没有它就不知道该给哪些任务显示暂停/停止/重跑。 */
+export interface AgentDetail {
+  agentId: string
+  role: string
+  scope: string
+  executionState: string
+  tasks: Array<{
+    id: string; title: string; status: string; version: number; hold: boolean
+    dispatchHoldOwned: boolean; artifacts: unknown[]
+    attempt: { id: string; state: string; lease_epoch: number; external_effect: string | null } | null
+    runBinding: { run_id: string } | null
+  }>
+  questions: Array<{ id: string; task_id: string; body: string; status: string; version: number }>
+  commands: Array<{ id: string; task_id: string; status: string; result: string | null; type: string }>
+}
+
+/** 岗位详情列表（控制抽屉用）。只读，失败由调用方展示。 */
+export function fetchAgentDetails(scope: string): Promise<AgentDetail[]> {
+  return hubRequest('GET', `/api/agents?scope=${encodeURIComponent(scope)}`)
+    .then(res => (res as { agents?: AgentDetail[] }).agents ?? [])
+}
+
+/** 岗位结构化消息（`POST /api/agent-messages`）。
+ *
+ *  ★ 与 `postChatMessage` 的分工（修法 C 之后两者写**同一条主对话**，差别在语义而非落点）：
+ *   · `postChatMessage`  = 人说人话（支持附件、走 AI 回复管道）；
+ *   · `postAgentMessage` = 带意图的结构化消息——**追加要求 / 新建任务 / 回答待决策问题
+ *     只有这条路有**（服务端要靠 intent 决定写 feedback、建任务、还是消解 question）。
+ *
+ *  `clientRequestId` 是**幂等收据**键：同一次提交重发不会产生第二条消息（服务端 agent_request_receipts）。
+ *  所以它必须由调用方在"这次输入"上生成一次并复用，而不是每次请求新生成。 */
+export function postAgentMessage(input: {
+  scope: string
+  conv: number
+  body: string
+  intent: AgentIntent
+  target?: { taskId: string } | null
+  questionId?: string
+  questionVersion?: number
+  clientRequestId: string
+}): Promise<{ messageId: number; feedbackId: string | null; taskId: string | null; convId: number }> {
+  return hubRequest('POST', '/api/agent-messages', {
+    scope: input.scope,
+    conv: input.conv,
+    body: input.body,
+    intent: input.intent,
+    target: input.target ?? null,
+    ...(input.questionId === undefined ? {} : { questionId: input.questionId, questionVersion: input.questionVersion }),
+    by: 'general',
+    clientRequestId: input.clientRequestId,
+  }) as Promise<{ messageId: number; feedbackId: string | null; taskId: string | null; convId: number }>
+}
+
+/** 岗位控制命令（`POST /api/agent-commands`）：暂停后续调度 / 恢复 / 停止本次执行 / 重跑。
+ *
+ *  ★ 这几个动作**只有**这条接口有；`/api/chat/messages` 写不出来（那不是消息，是对调度的指令）。
+ *  服务端按 `attemptId / leaseEpoch / version` 做并发保护：拿着过期的执行身份发命令会被拒，
+ *  所以参数必须取自**刚读到的**详情，而不是界面上缓存的旧值。 */
+export function postAgentCommand(input: {
+  scope: string
+  agentId: string
+  taskId: string
+  taskVersion: number
+  attemptId?: string
+  leaseEpoch?: number
+  runId?: string
+  type: string
+  clientRequestId: string
+  resolutionNote?: string
+}): Promise<unknown> {
+  return hubRequest('POST', '/api/agent-commands', {
+    ...input,
+    by: 'general',
+    ...(input.resolutionNote === undefined ? {} : { confirmedNoExternalEffects: true }),
+  })
+}
+
 /** team-hub v2（S3/S8）：上传对话附件（raw UTF-8 文本 → staged，服务端护栏黑名单/大小/UTF-8 fatal）。
  * 返回 {id,fileName,size} 引用；绑定由 postChatMessage(attachmentIds) 完成。 */
 export async function uploadChatAttachment(input: { scope: string; fileName: string; content: Blob | string }): Promise<ChatAttachmentRef> {

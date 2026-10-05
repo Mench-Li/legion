@@ -196,6 +196,19 @@ export function taskMeta(task) {
 }
 
 /**
+ * 这条任务能不能接受「追加要求」。
+ *
+ * 服务端对已结束的任务会以 `TASK_TERMINAL` 拒（"已完成任务请创建关联的新任务"）。
+ * 界面上放一个按下去必然失败的按钮，与一个点不动的按钮**不是**同一回事：
+ * 前者会让用户以为是自己哪里点错了，然后反复试。
+ *
+ * 判据与服务端一致：`done` / `canceled` 是终态。
+ */
+export function canAppendFeedback(task) {
+  return !['done', 'canceled'].includes(String(task?.status ?? ''))
+}
+
+/**
  * 把「Agent 详情」里的 Attempt 并进「空间看板」的任务行。
  *
  * 两个端点各有一半：`/api/board` 知道**空间里所有**任务但不知道执行到哪一步，

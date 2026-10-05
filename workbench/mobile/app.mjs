@@ -29,6 +29,7 @@ import {
   INTENT_OPTIONS,
   attentionCount,
   boardColumns,
+  canAppendFeedback,
   intentOf,
   isWaitingForNode,
   mergeAttempts,
@@ -280,7 +281,7 @@ function taskCard(t) {
   s.textContent = taskLine(t)
   // 「等电脑领取」是**等待**不是**执行中**。不标出来的话，用户在电脑关机时
   // 会以为任务在跑，于是等下去。
-  if (isWaitingForNode(t) && t.status === 'todo') s.textContent += '（电脑上线后自动开始）'
+  if (isWaitingForNode(t)) s.textContent += '（电脑上线后自动开始）'
   card.appendChild(s)
   const m = document.createElement('div')
   m.className = 'm'
@@ -288,10 +289,17 @@ function taskCard(t) {
   if (m.textContent.length > 0) card.appendChild(m)
   const acts = document.createElement('div')
   acts.className = 'acts'
-  const b1 = document.createElement('button')
-  b1.textContent = '追加要求'
-  b1.addEventListener('click', () => { chooseTaskForFeedback(t.id); focusComposer('feedback') })
-  acts.appendChild(b1)
+  // ★ 「追加要求」只给**还没结束**的任务。
+  //
+  // 已结束的任务上放这个按钮，按下去必然失败（服务端以 TASK_TERMINAL 拒）——
+  // 而一个必然失败的按钮是最坏的一种：用户会以为是自己哪里点错了，
+  // 或者反复试。要改已完成的活，那是**新任务**，不是追加要求。
+  if (canAppendFeedback(t)) {
+    const b1 = document.createElement('button')
+    b1.textContent = '追加要求'
+    b1.addEventListener('click', () => { chooseTaskForFeedback(t.id); focusComposer('feedback') })
+    acts.appendChild(b1)
+  }
   const b2 = document.createElement('button')
   b2.textContent = '问这个 Agent'
   b2.addEventListener('click', () => {

@@ -13,6 +13,7 @@ import {
   IntentError,
   attentionCount,
   boardColumns,
+  canAppendFeedback,
   intentOf,
   isWaitingForNode,
   mergeAttempts,
@@ -172,4 +173,19 @@ test('空输入不炸，也不凭空造行', () => {
   assert.deepEqual(mergeAttempts([], []), [])
   assert.deepEqual(mergeAttempts(undefined, undefined), [])
   assert.equal(mergeAttempts([{ id: 'T-1' }], null).length, 1)
+})
+
+// ── 「追加要求」只给还没结束的任务 ──────────────────────────────────────────
+
+test('已结束的任务不给「追加要求」：按下去必然失败的按钮是最坏的一种', () => {
+  // 服务端对 done/canceled 会以 TASK_TERMINAL 拒（"请创建关联的新任务"）。
+  // 界面上放这个按钮，用户会以为是自己哪里点错了，然后反复试。
+  assert.equal(canAppendFeedback({ status: 'done' }), false)
+  assert.equal(canAppendFeedback({ status: 'canceled' }), false)
+  for (const status of ['todo', 'in_progress', 'in_review', 'blocked', 'backlog']) {
+    assert.equal(canAppendFeedback({ status }), true, `${status} 应当可以追加要求`)
+  }
+  // 判据不依 Attempt：任务级的终态与"本轮跑完了"是两件事。
+  assert.equal(canAppendFeedback({ status: 'in_review', attempt: { state: 'Completed' } }), true)
+  assert.equal(canAppendFeedback(undefined), true, '缺字段时不预先禁用（让服务端说那句话）')
 })

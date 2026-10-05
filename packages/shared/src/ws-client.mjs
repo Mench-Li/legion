@@ -132,7 +132,20 @@ export function connectWebSocket({
     agent: false,
   })
 
-  addTimer(() => finish(WS_CLOSE.NORMAL, WS_CLIENT_CODES.TIMEOUT, { timedOut: true }), timeoutMs)
+  // ★ 握手超时必须在握手**成功**时取消，而不是只在收尾时。
+  //
+  // 只在 `finish()` 里清（原实现）会让这个定时器在连上之后继续倒计时，
+  // 到点就把一条完全正常的连接关掉——症状是"每 N 秒掉线重连一次"，
+  // 而两端日志都写着连接正常。默认 15s，所以只有长连接会暴露它。
+  // Hub 侧的 hello 定时器有过一模一样的缺陷（见 node-gateway.mjs）。
+  let handshakeTimer = addTimer(
+    () => finish(WS_CLOSE.NORMAL, WS_CLIENT_CODES.TIMEOUT, { timedOut: true }), timeoutMs)
+  const clearHandshakeTimer = () => {
+    if (handshakeTimer === null) return
+    clearTimeout(handshakeTimer)
+    timers.delete(handshakeTimer)
+    handshakeTimer = null
+  }
 
   // 服务端用 HTTP 状态码拒绝握手（401/403/426/429/503）时走这里，不是 `upgrade`。
   req.on('response', (res) => {
@@ -173,6 +186,7 @@ export function connectWebSocket({
     }
     socket = sock
     settled = true
+    clearHandshakeTimer()
 
     const decoder = createFrameDecoder({ maxBytes: maxMessageBytes, expectMasked: false })
     socket.on('data', (chunk) => {

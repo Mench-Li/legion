@@ -42,6 +42,11 @@ function fakeRunStore({ claimResults = [] } = {}) {
     transition(args) {
       calls.transition.push(args)
       const row = attempts.get(args.attemptId)
+      // `to` = 阶段推进（Node 报它真的在准备/组装/运行）；`outcome` = 终态。
+      if (args.to !== undefined && args.to !== null) {
+        if (row !== undefined) row.state = args.to
+        return { ok: true, attempt: { attemptId: args.attemptId, state: args.to }, idempotent: false, serverTimeMs: Date.now() }
+      }
       const mapped = { completed: 'Validating', failed: 'RetryableFailure', outcome_unknown: 'UnknownOutcome', cancelled: 'Cancelled' }[args.outcome]
       if (row !== undefined) row.state = mapped
       return { ok: true, attempt: { attemptId: args.attemptId, state: mapped }, serverTimeMs: Date.now() }
@@ -108,6 +113,10 @@ const CLAIM = (over = {}) => ({ attemptId: 'att-1', taskId: 'T-1', scope: 'softw
 
 // ── 主链路 ──────────────────────────────────────────────────────────────────
 
+/** 阶段推进与终态都走 `transition`，用 `outcome` 有没有值区分。 */
+const terminalCall = (calls) => calls.find((c) => c.outcome !== undefined && c.outcome !== null)
+const phaseCalls = (calls) => calls.filter((c) => c.to !== undefined && c.to !== null).map((c) => c.to)
+
 test('派单→执行→进展→终态：整条链走通，且终态用 outcome 直通状态机', async () => {
   const hub = await startHub([CLAIM()])
   const { agent, ledger } = makeAgent(hub, {
@@ -118,12 +127,15 @@ test('派单→执行→进展→终态：整条链走通，且终态用 outcome
   })
   agent.start()
   try {
-    await until(() => hub.runStore.calls.transition.length > 0, { label: '终态上报' })
-    const terminal = hub.runStore.calls.transition[0]
+    await until(() => terminalCall(hub.runStore.calls.transition) !== undefined, { label: '终态上报' })
+    const terminal = terminalCall(hub.runStore.calls.transition)
     assert.equal(terminal.outcome, 'completed')
     assert.equal(terminal.attemptId, 'att-1')
     assert.equal(terminal.leaseEpoch, 1)
     assert.equal(terminal.workerId, `node:${hub.device.nodeId}`)
+    // ★ 阶段必须按状态机要求的顺序上报：跳步会被 Hub 以 TRANSITION_REJECTED 拒掉，
+    //   而症状是"有进展但任务永远不结束"。
+    assert.deepEqual(phaseCalls(hub.runStore.calls.transition), ['PreparingWorkspace', 'BuildingContext', 'Running'])
     // 进展也到了，且带的是**这次运行**的 epoch。
     const progress = hub.runStore.calls.recordRunEvents.find((c) => c.events.some((e) => e.type === 'node.progress'))
     assert.ok(progress, '应有进展事件')
@@ -177,7 +189,8 @@ test('执行失败走 **failure 帧**（而不是伪造成终态）', async () =
     //   把状态改成 RetryableFailure，但**漏掉重试排队与退避**——任务会停在那里，
     //   既不在队列也不在等人工列表里，从任何界面看都只是"失败了"。
     await until(() => hub.runStore.calls.failAndRetry.length > 0, { label: '失败结算' })
-    assert.equal(hub.runStore.calls.transition.length, 0, '失败不该走 transition 路径')
+    // 阶段推进会走 transition（那是另一件事），但**终态**绝不能用 outcome 走 transition。
+    assert.equal(terminalCall(hub.runStore.calls.transition), undefined, '失败不该走带 outcome 的 transition 路径')
     assert.equal(hub.runStore.calls.failAndRetry[0].failureCode, 'EXECUTOR_EXIT_NONZERO')
     assert.equal(ledger.get('att-1').outcome, 'failed')
   } finally { agent.stop(); await hub.stop() }
@@ -196,8 +209,8 @@ test('取消请求会真的停掉本地执行，并把结果报成 cancelled', a
     await until(() => hub.gateway.stats.inFlight > 0, { label: '任务进入在途' })
     const sent = hub.gateway.sendCancel(hub.device.nodeId, { taskId: 'T-1', attemptId: 'att-1', leaseEpoch: 1, reason: '用户从手机取消' })
     assert.equal(sent.sent, true)
-    await until(() => hub.runStore.calls.transition.length > 0, { label: '取消后的终态' })
-    assert.equal(hub.runStore.calls.transition[0].outcome, 'cancelled')
+    await until(() => terminalCall(hub.runStore.calls.transition) !== undefined, { label: '取消后的终态' })
+    assert.equal(terminalCall(hub.runStore.calls.transition).outcome, 'cancelled')
   } finally { agent.stop(); await hub.stop() }
 })
 

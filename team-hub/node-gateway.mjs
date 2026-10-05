@@ -318,6 +318,7 @@ export function createNodeGateway({
         case FRAME_TYPES.HELLO: return onHello(frame, state, io)
         case FRAME_TYPES.HEARTBEAT: return onHeartbeat(frame, state, io)
         case FRAME_TYPES.ACK: return onAck(frame, state, io)
+        case FRAME_TYPES.PHASE: return onPhase(frame, state, io)
         case FRAME_TYPES.PROGRESS: return onProgress(frame, state, io)
         case FRAME_TYPES.TRANSITION: return onTransition(frame, state, io)
         case FRAME_TYPES.FAILURE: return onFailure(frame, state, io)
@@ -458,6 +459,43 @@ export function createNodeGateway({
     if (t === undefined) return
     clearTimeout(t)
     state.ackTimers.delete(attemptId)
+  }
+
+  /**
+   * 执行阶段上报。
+   *
+   * ★ 为什么远端必须报这三个状态，而不能由 gateway 替它推进：
+   *
+   * 状态机为每条边定义了**唯一的合法路径** `Leased → PreparingWorkspace →
+   * BuildingContext → Running → Validating`。远端如果跳过中间态直接报终态
+   * （`transition{outcome:'completed'}` 从 `Leased`），状态机会以
+   * `TRANSITION_REJECTED` 拒绝——实测就是这样：任务停在 `Leased`，
+   * 而进展帧照常写入，从界面看"有进展但永远不结束"。
+   *
+   * 而"准备完了 / 上下文组装好了 / 开跑了"这三件事**只有 Node 知道**：
+   * 是它自己在准备本地工作目录、组装要喂给执行器的上下文、启动执行器。
+   * gateway 替它推进等于把一句没有依据的断言写成事实。
+   *
+   * 因此这里只做**转发**：把 Node 报的阶段交给 `run-store`，由状态机判定
+   * 这条边能不能走。走不了就是 Node 报错了阶段，具名回给它——不替它兜底。
+   */
+  function onPhase(frame, state, io) {
+    const r = runStore.transition({
+      attemptId: frame.attemptId,
+      leaseEpoch: frame.leaseEpoch,
+      workerId: workerIdOf(state.nodeId),
+      to: frame.state,
+      reason: 'node-phase',
+    })
+    recordInScope(frame, state, 'node:phase', { state: frame.state, attemptId: frame.attemptId, idempotent: r.idempotent === true })
+    io.send(FRAME_TYPES.ACK, {
+      requestId: frame.requestId, nodeId: state.nodeId, taskId: frame.taskId, attemptId: frame.attemptId,
+      leaseEpoch: frame.leaseEpoch, accepted: true,
+      // `idempotent` 如实回给 Node：重连后重报同一个阶段是正常路径，
+      // 而"它被当成重复处理了"与"它被当成了错误"要能分开。
+      duplicate: r.idempotent === true,
+      attemptState: r.attempt?.state ?? frame.state, serverTimeMs: clock(),
+    })
   }
 
   /** 进展：写运行事件明细（权威）+ 记一条审计（经 SSE 广播到手机）。 */

@@ -71,6 +71,7 @@ export const FRAME_TYPES = Object.freeze({
   HEARTBEAT_ACK: 'heartbeat.ack',
   DISPATCH: 'dispatch',
   ACK: 'ack',
+  PHASE: 'phase',
   PROGRESS: 'progress',
   TRANSITION: 'transition',
   FAILURE: 'failure',
@@ -78,6 +79,23 @@ export const FRAME_TYPES = Object.freeze({
   CANCEL: 'cancel',
   ERROR: 'error',
 })
+
+/**
+ * Node 可以上报的**执行阶段**。
+ *
+ * ★ 这些名字**逐字取自** `orchestrator/state-machine/states.mjs` 的 Attempt 状态，
+ *   不是另一套词汇。理由：状态机为每条边定义了合法迁移与所需证据
+ *   （`Leased → PreparingWorkspace → BuildingContext → Running → Validating`），
+ *   而远端如果自创一套 `preparing/running`，gateway 就得维护一张翻译表——
+ *   那张表迟早会与状态机漂移，而漂移的表现是"某些任务的回报永远不被采纳"。
+ *
+ * 为什么必须由 Node 上报而不是 gateway 自己推进：**这三个阶段是 Node 真的在做的事**
+ * （准备本地工作目录、组装上下文、调用执行器）。gateway 替它推进等于把
+ * "准备完了"这句话写成了一句无依据的断言。
+ *
+ * 不含 `Queued`/`Leased`（那是 `claim` 的产物）、也不含终态（走 `transition` 帧）。
+ */
+export const NODE_PHASES = Object.freeze(['PreparingWorkspace', 'BuildingContext', 'Running'])
 
 /** 每个类型允许的方向：`node`（Node→Hub）、`hub`（Hub→Node）、`both`。 */
 const FRAME_DIRECTION = Object.freeze({
@@ -87,6 +105,7 @@ const FRAME_DIRECTION = Object.freeze({
   [FRAME_TYPES.HEARTBEAT_ACK]: 'hub',
   [FRAME_TYPES.DISPATCH]: 'hub',
   [FRAME_TYPES.ACK]: 'node',
+  [FRAME_TYPES.PHASE]: 'node',
   [FRAME_TYPES.PROGRESS]: 'node',
   [FRAME_TYPES.TRANSITION]: 'node',
   [FRAME_TYPES.FAILURE]: 'node',
@@ -134,6 +153,7 @@ export const PROTOCOL_CODES = Object.freeze({
   TOO_MANY_ITEMS: 'PROTOCOL_TOO_MANY_ITEMS',
   UNKNOWN_OUTCOME: 'PROTOCOL_UNKNOWN_OUTCOME',
   UNKNOWN_PROGRESS_KIND: 'PROTOCOL_UNKNOWN_PROGRESS_KIND',
+  UNKNOWN_PHASE: 'PROTOCOL_UNKNOWN_PHASE',
   SEQ_INVALID: 'PROTOCOL_SEQ_INVALID',
   SEQ_OUT_OF_ORDER: 'PROTOCOL_SEQ_OUT_OF_ORDER',
   LEASE_EPOCH_MISSING: 'PROTOCOL_LEASE_EPOCH_MISSING',
@@ -252,6 +272,18 @@ const FIELD_RULES = Object.freeze({
     if (typeof f.accepted !== 'boolean') return fail(PROTOCOL_CODES.INVALID_FIELD, 'ack 必须带布尔 accepted')
     // 拒收必须给理由：一个没有理由的"我不接这个活"在 Hub 侧无法处置。
     if (f.accepted === false) return checkString(f, 'reason', { max: LIMITS.reason })
+    return null
+  },
+  [FRAME_TYPES.PHASE]: (f) => {
+    const e = checkString(f, 'taskId', { max: LIMITS.taskId }) ?? checkString(f, 'attemptId', { max: LIMITS.attemptId })
+    if (e) return e
+    const le = checkLeaseEpoch(f)
+    if (le) return le
+    if (!NODE_PHASES.includes(f.state)) {
+      // 具名拒绝：自创阶段名会让状态机收到一条它没有边可走的迁移，
+      // 而那个拒绝发生在 gateway 里、离原因很远。
+      return fail(PROTOCOL_CODES.UNKNOWN_PHASE, `未登记的执行阶段 ${JSON.stringify(f.state)}；合法取值：${NODE_PHASES.join(', ')}`)
+    }
     return null
   },
   [FRAME_TYPES.PROGRESS]: (f) => {

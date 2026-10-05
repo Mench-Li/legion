@@ -77,6 +77,24 @@ test('Sec-WebSocket-Accept 不匹配时**绝不**当成握手成功', async () =
   } finally { server.close() }
 })
 
+test('握手超时在**连上之后**必须被取消（否则每 N 秒掉线一次）', async () => {
+  // ★ 与网关侧 `hello` 定时器同一个缺陷：只在收尾时清除，于是连上之后它继续
+  //   倒计时，到点把正常连接关掉。默认 15s，只有长连接会暴露，
+  //   而两端日志都显示连接正常。
+  const server = await rawServer(okReply)
+  try {
+    const ws = connectWebSocket({ url: `ws://127.0.0.1:${server.port}/node`, timeoutMs: 150 })
+    ws.on('error', () => {})
+    await new Promise((r) => ws.on('open', r))
+    let closed = null
+    ws.on('close', (i) => { closed = i })
+    await new Promise((r) => setTimeout(r, 400))
+    assert.equal(closed, null, `连上之后不应被握手超时关掉；实际关闭原因=${closed?.reason}`)
+    assert.equal(ws.isOpen, true)
+    ws.close()
+  } finally { server.close() }
+})
+
 test('连接超时被报成 TIMEOUT（而不是永远挂着）', async () => {
   // 一个接受连接但什么都不回的服务端（**不**关闭连接：关闭会先触发 socket error，
   // 那测的就是另一条路径了）。

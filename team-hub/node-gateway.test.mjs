@@ -57,7 +57,12 @@ function makeFakeRunStore({ claimResults = [] } = {}) {
       if (row !== undefined && row.leaseEpoch !== args.leaseEpoch) {
         throw Object.assign(new Error('leaseEpoch 已过期'), { code: 'LEASE_EPOCH_STALE' })
       }
-      // 真实 run-store 的语义：`completed` → `Validating`（**不是** `Completed`）。
+      // 与真实 run-store 同样的两种形态：`to` 是**阶段推进**（Node 报它真的在
+      // 准备/组装/运行），`outcome` 是**终态**（走 mapOutcomeToState）。
+      if (args.to !== undefined && args.to !== null) {
+        if (row !== undefined) row.state = args.to
+        return { ok: true, attempt: { attemptId: args.attemptId, state: args.to }, idempotent: false, serverTimeMs: Date.now() }
+      }
       const mapped = { completed: 'Validating', failed: 'RetryableFailure', outcome_unknown: 'UnknownOutcome', cancelled: 'Cancelled' }[args.outcome] ?? null
       if (row !== undefined) row.state = mapped ?? row.state
       return { ok: true, attempt: { attemptId: args.attemptId, state: mapped }, createsNewAttempt: false, serverTimeMs: Date.now() }

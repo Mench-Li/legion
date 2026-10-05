@@ -289,9 +289,26 @@ export function createNodeAgent({
   }
 
   async function runAttempt(frame, workspace, controller) {
+    // ★ 这三个阶段上报是**必需**的，不是装饰。
+    //
+    // Hub 的状态机把执行建模成一条唯一的合法路径：
+    // `Leased → PreparingWorkspace → BuildingContext → Running → Validating`。
+    // 跳过中间态直接报终态会被 `TRANSITION_REJECTED` 拒掉——而症状很隐蔽：
+    // 进展照常写入，任务却永远停在 `Leased`，界面上"有进展但不结束"。
+    //
+    // 上报的时点与**本地真的做了什么**对齐（不是仪式）：下面每一行之前，
+    // 这台机器确实在做对应的事。上报失败（断线）不阻断执行——
+    // 阶段是给 Hub 看的投影，不是本机继续干活的前提。
+    const phase = (state) => { try { send(FRAME_TYPES.PHASE, { taskId: frame.taskId, attemptId: frame.attemptId, leaseEpoch: frame.leaseEpoch, state }) } catch { /* 断线时留待重连对账 */ } }
+
+    phase('PreparingWorkspace')
     ledger.record({ taskId: frame.taskId, attemptId: frame.attemptId, leaseEpoch: frame.leaseEpoch, phase: 'running' })
     let result
     try {
+      // 工作区已在派发时校验过（`onDispatch` 里查了 workspaces 表），
+      // 这里把它作为"上下文组装"的依据报出去：喂给执行器的就是它。
+      phase('BuildingContext')
+      phase('Running')
       result = await executor({
         task: frame.task ?? null,
         attempt: { attemptId: frame.attemptId, attemptNo: frame.attemptNo, leaseEpoch: frame.leaseEpoch },

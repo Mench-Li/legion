@@ -10,6 +10,7 @@ import {
   DEFAULT_SEEN_WINDOW,
   FRAME_TYPES,
   MAX_FRAME_BYTES,
+  NODE_PHASES,
   NODE_PATH,
   PROGRESS_KINDS,
   PROTOCOL_CODES,
@@ -37,6 +38,7 @@ const VALID_FRAMES = Object.freeze({
   [FRAME_TYPES.HEARTBEAT_ACK]: { type: FRAME_TYPES.HEARTBEAT_ACK, requestId: req },
   [FRAME_TYPES.DISPATCH]: { type: FRAME_TYPES.DISPATCH, requestId: req, taskId: 'T-1', attemptId: 'att-1', leaseEpoch: 1 },
   [FRAME_TYPES.ACK]: { type: FRAME_TYPES.ACK, requestId: req, nodeId, taskId: 'T-1', attemptId: 'att-1', leaseEpoch: 1, accepted: true },
+  [FRAME_TYPES.PHASE]: { type: FRAME_TYPES.PHASE, requestId: req, nodeId, taskId: 'T-1', attemptId: 'att-1', leaseEpoch: 1, state: 'PreparingWorkspace' },
   [FRAME_TYPES.PROGRESS]: { type: FRAME_TYPES.PROGRESS, requestId: req, nodeId, eventId: 'ev-1', taskId: 'T-1', attemptId: 'att-1', leaseEpoch: 1, seq: 1, kind: 'step', summary: '正在读取项目文件' },
   [FRAME_TYPES.TRANSITION]: { type: FRAME_TYPES.TRANSITION, requestId: req, nodeId, eventId: 'ev-2', taskId: 'T-1', attemptId: 'att-1', leaseEpoch: 1, seq: 2, outcome: 'completed', artifacts: [{ path: 'src/a.mjs' }] },
   [FRAME_TYPES.FAILURE]: { type: FRAME_TYPES.FAILURE, requestId: req, nodeId, eventId: 'ev-3', taskId: 'T-1', attemptId: 'att-1', leaseEpoch: 1, seq: 3, failureCode: 'tool-crash' },
@@ -125,6 +127,18 @@ test('已协商版本之后，版本不符的帧被拒', () => {
   assert.equal(validateFrame(frame, { version: 1 }).ok, true)
   assert.equal(validateFrame({ ...frame, v: 2 }, { version: 1 }).code, PROTOCOL_CODES.VERSION_UNSUPPORTED)
   assert.equal(validateFrame({ ...frame, v: undefined }, { version: 1 }).code, PROTOCOL_CODES.VERSION_UNSUPPORTED)
+})
+
+test('阶段上报只接受状态机里那几个名字', () => {
+  assert.deepEqual([...NODE_PHASES], ['PreparingWorkspace', 'BuildingContext', 'Running'])
+  // ★ 这些名字**逐字取自**状态机，不是另一套词汇。自创 `preparing` 会让
+  //   状态机收到一条没有边可走的迁移，而拒绝发生在离原因很远的地方。
+  for (const bad of ['preparing', 'Leased', 'Queued', 'Validating', 'completed', null, undefined]) {
+    assert.equal(validateFrame({ ...VALID_FRAMES[FRAME_TYPES.PHASE], state: bad }).code, PROTOCOL_CODES.UNKNOWN_PHASE, `state=${JSON.stringify(bad)} 应被拒`)
+  }
+  for (const good of NODE_PHASES) {
+    assert.equal(validateFrame({ ...VALID_FRAMES[FRAME_TYPES.PHASE], state: good }).ok, true)
+  }
 })
 
 test('缺 leaseEpoch 的回报被拒 —— 这正是"迟到的旧回报"的入口', () => {

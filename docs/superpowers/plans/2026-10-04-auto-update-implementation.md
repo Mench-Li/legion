@@ -1027,14 +1027,42 @@ node scripts/update/verify-host.mjs --origin <生产 origin> --prefix /legion \
 ## 7. 复现证据
 
 ```bash
-# 全部自动更新相关用例（661 条）
+# 全部自动更新相关用例（**662 条**）
+#
+# ★ 下面这份清单与 CI 的 `product-update` 套件**不是**同一份，两者都要跑：
+#   这里多跑了 `launcher.test.mjs` / `desktop-bridge.test.mjs` 等接线层，
+#   而 CI 那份多跑了 `errors` / `integration` / `envelope` 等（见 §7.1）。
+#   两个数字应当各自对得上——`product-update` 是 406。
+#
+# ★ 清单里必须包含 `product/launcher/cli-recovery.test.mjs`：它是恢复入口
+#   （设计 §8 line 190）的 9 条用例。**先前这一行漏了它**，于是按本文档
+#   复现只能得到 653 条，而正文声称 662——一条"照文档跑却对不上数"的复现命令，
+#   比没有复现命令更坏，因为它会让人以为自己环境有问题。
 node --test product/update/*.test.mjs product/upgrade/*.test.mjs \
   desktop/update-*.test.mjs desktop/main.test.mjs \
   scripts/update/*.test.mjs product/launcher/update-gate.test.mjs \
   product/launcher/desktop-bridge.test.mjs product/launcher/desktop-protocol.test.mjs \
   product/launcher/launcher.test.mjs \
-  scripts/update/rotation.test.mjs \
+  product/launcher/cli-recovery.test.mjs \
   desktop/scripts/shell-files.test.mjs desktop/scripts/update-payload.test.mjs
+
+# CI 的 `product-update` 套件那一份（**407 条**）。两份都与上面同一棵树上跑过。
+#
+# ★ 这个数字比 §7.1 里那次全量 CI 的读数（406）**多 1**，差的是
+#   `modules.test.mjs` 里那条"selfCheckAll() 必须覆盖每一个有自检的模块"
+#   ——它是那次 CI 之后才加的。写清楚差在哪，比让两个数字对不上要好。
+node --test product/update/client.test.mjs product/update/errors.test.mjs \
+  product/update/envelope.test.mjs product/update/feed.test.mjs \
+  product/update/extract.test.mjs product/update/zip.test.mjs \
+  product/update/health.test.mjs product/update/platform-build.test.mjs \
+  product/update/install.test.mjs product/update/recovery.test.mjs \
+  product/launcher/cli-recovery.test.mjs product/update/integration.test.mjs \
+  product/update/modules.test.mjs product/upgrade/task-state.test.mjs \
+  product/upgrade/task-readings.test.mjs product/upgrade/preflight.test.mjs \
+  product/launcher/update-gate.test.mjs desktop/update-service.test.mjs \
+  desktop/update-wiring.test.mjs desktop/update-panel.test.mjs \
+  desktop/scripts/shell-files.test.mjs desktop/scripts/update-payload.test.mjs \
+  scripts/update/publish.test.mjs scripts/update/rotation.test.mjs
 
 # 全链路集成（发布 → 托管 → 检查 → 下载 → 事务 → helper → 提交）
 node --test product/update/integration.test.mjs

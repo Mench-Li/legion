@@ -7568,6 +7568,7 @@ function routeHarnessForTask(input) {
 // ════════════════════════════════════════════════════════════════════════════
 import { createIdentityRoutes } from './routes/identity.mjs'
 import { createMobileRoutes } from './routes/mobile.mjs'
+import { createPortalRoutes } from './routes/portal.mjs'
 import { createUserStore } from './user-store.mjs'
 import { createDeviceStore } from './device-store.mjs'
 import { createNodeGateway } from './node-gateway.mjs'
@@ -7783,6 +7784,13 @@ if (REMOTE_AGENT_ENABLED) {
   // 用户就永远拿不到那个能让他登录的页面。
   // 位置最后 unshift ⇒ 数组最前 ⇒ 最先派发。
   router.families.unshift(createMobileRoutes({ root: join(ROOT, 'workbench', 'mobile') }))
+  // 门口（`GET /`）也排在最前：它是**第一个**打开这个 Hub 的人看到的页面。
+  // 排在后面的话会被通用 404 接走，而"发个链接给人"是这个产品被使用的第一步。
+  router.families.unshift(createPortalRoutes({
+    downloadUrl: CFG.values.downloadUrl ?? '',
+    version: CFG.values.desktopVersion ?? '',
+    registration: CFG.values.registration ?? 'closed',
+  }))
 
   nodeGateway.attach(server)
 

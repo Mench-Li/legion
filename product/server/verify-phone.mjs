@@ -161,6 +161,81 @@ if (access === null) { console.log('\n无法继续：登录失败'); process.exi
   check('⑫ 刷新凭据', r.status === 200 && typeof r.json?.accessToken === 'string' && r.json?.refreshToken !== refresh, `${r.status}`)
 }
 
+// ⑫′ 空间看板（新界面「看板」那一页的两个端点）
+{
+  const r = await call('GET', `/api/board?scope=${SPACE}`, { token: access })
+  const list = Array.isArray(r.json) ? r.json : r.json?.tasks ?? []
+  check('⑫′ 空间看板', r.status === 200 && Array.isArray(list), `${r.status} 任务 ${list.length} 条`)
+}
+
+// ⑬ **手机派任务真的能被电脑领走**（整个产品的主标题动作）
+//
+// 这一条与 `mobile-api-contract.test.mjs` 的 ⑯ 是同一件事，但打的是**真实部署**。
+// 形状对但链路不通，与链路通但行为不对，是两种不同的坏法。
+{
+  const a = globalThis.__agentId
+  const c = a === undefined ? null : await call('POST', '/api/agent-conversations', { body: { agentId: a, scope: SPACE, by: 'phone-verify' }, token: access })
+  if (c === null || c.status !== 200) {
+    check('⑬ 手机派任务可被认领', false, '拿不到会话')
+  } else {
+    const sent = await call('POST', '/api/agent-messages', {
+      body: {
+        conv: c.json.convId, scope: SPACE, by: 'phone-verify',
+        body: `验收脚本派的任务 ${new Date().toISOString()}`, intent: 'create_task',
+        clientRequestId: `verify-task-${Date.now()}`,
+      },
+      token: access,
+    })
+    const taskId = sent.json?.taskId
+    check('⑬₁ 派任务建出任务', sent.status === 200 && typeof taskId === 'string', `${sent.status} taskId=${taskId}`)
+    if (typeof taskId === 'string') {
+      // 走**真实的运行时认领路由**：只查 status 会让"状态对了但其它闸门不对"
+      // （写预约、hold、退避闸门）漏过去。
+      const claimed = await call('POST', '/api/runtime/claim', { body: { workerId: 'phone-verify-probe', scope: SPACE }, token: access })
+      const got = claimed.json?.claimed?.taskId
+      check('⑬₂ 它真的可被电脑认领', claimed.status === 200 && got === taskId,
+        `${claimed.status} 领到=${got ?? claimed.json?.reason ?? claimed.json?.code}`)
+      if (got === taskId) {
+        await call('POST', '/api/runtime/release', {
+          body: {
+            attemptId: claimed.json.claimed.attemptId, leaseEpoch: claimed.json.claimed.leaseEpoch,
+            workerId: 'phone-verify-probe', reason: 'phone-verify-release',
+          },
+          token: access,
+        })
+      }
+    }
+  }
+}
+
+// ⑭ 账号体系：注册策略公开可见（登录页靠它决定显不显示「注册」）
+{
+  const r = await call('GET', '/api/identity/status')
+  const mode = r.json?.registration
+  check('⑭ 注册策略可见', r.status === 200 && ['closed', 'invite', 'open'].includes(mode),
+    `${r.status} registration=${mode}`)
+}
+
+// ⑮ 账号体系：会话列表可用（「我的」那一页）
+{
+  const r = await call('GET', '/api/identity/sessions', { token: access })
+  const ok = r.status === 200 && Array.isArray(r.json?.sessions)
+  check('⑮ 会话列表', ok, `${r.status} 共 ${r.json?.sessions?.length ?? '-'} 条，当前=${r.json?.currentSessionId ? '有' : '无'}`)
+}
+
+// ⑯ 管理员能发邀请码（注册闭环的另一半）
+//
+// 只在**确实是管理员**时才验；普通账号跑这一条会 403，而那是对的。
+{
+  const me = await call('GET', '/api/identity/me', { token: access })
+  if (me.json?.systemRole === 'admin') {
+    const r = await call('POST', '/api/identity/invites', { body: { space: SPACE, role: 'member' }, token: access })
+    check('⑯ 管理员可发邀请码', r.status === 200 && typeof r.json?.code === 'string', `${r.status} 码长=${String(r.json?.code ?? '').length}`)
+  } else {
+    check('⑯ 管理员可发邀请码', true, '（这个账号不是管理员，跳过）')
+  }
+}
+
 console.log('')
 const failed = results.filter((x) => !x.ok)
 console.log(failed.length === 0

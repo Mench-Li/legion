@@ -275,6 +275,19 @@ describe('远程 Agent 通道接线', () => {
     assert.equal(body.code, 'REMOTE_AUTH_MISSING')
   })
 
+  it('Hub 门口**免鉴权**可取（发个链接给人，他得先看得懂那是什么）', async () => {
+    // ★ 在这一页之前，`GET /` 回的是 `{"error":"缺少访问令牌"}`——
+    //   一句对机器说的话，而它是每个新用户看到的第一句话。
+    const res = await fetch(`${base}/`)
+    assert.equal(res.status, 200)
+    assert.match(res.headers.get('content-type'), /text\/html/)
+    const html = await res.text()
+    assert.match(html, /Legion/)
+    // 手机端入口与账号说明都要在，否则门口没告诉来人该去哪儿。
+    assert.match(html, /\/mobile\//)
+    assert.match(html, /注册|邀请/)
+  })
+
   it('手机端页面**免鉴权**可取（否则用户拿不到那个能让他登录的页面）', async () => {
     // ★ 静态资源排在门禁**之前**。把登录页也挡在门禁后面是一个死锁：
     //   页面需要令牌才能取，而令牌要靠页面才能拿到。

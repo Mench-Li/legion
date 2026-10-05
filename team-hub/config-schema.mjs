@@ -47,6 +47,19 @@ export const SCHEMA = defineSchema({
       key: 'registration', env: 'LEGION_REGISTRATION', type: 'string', default: 'closed',
       doc: "注册策略：closed（默认，仅邀请）/ invite（需邀请码自助注册）/ open（开放注册）",
     },
+    // Hub 门口（`GET /`）上的桌面版下载地址。
+    //
+    // **默认留空 = 尚未发布**，页面会照实这么写。给一个点开 404 的假链接
+    // 比没有按钮更坏：用户会以为是自己网络或浏览器的问题，然后反复试。
+    // 有稳定下载页或对象存储入口时把它指过去即可，不需要改代码。
+    {
+      key: 'downloadUrl', env: 'LEGION_DOWNLOAD_URL', type: 'string', default: '',
+      doc: '桌面版安装包的下载地址（显示在 Hub 首页）；留空 = 首页如实显示"尚未发布"',
+    },
+    {
+      key: 'desktopVersion', env: 'LEGION_DESKTOP_VERSION', type: 'string', default: '',
+      doc: '桌面版版本号（只用于首页展示，可空）',
+    },
     // ── 附件（P3-2 统一项：附件目录相关限值）──
     { key: 'attachMaxBytes', env: 'CHAT_ATTACH_MAX_BYTES', type: 'int', default: 10 * 1024 * 1024, min: 1, doc: '单附件大小上限（字节）' },
     { key: 'attachMaxPerMsg', env: 'CHAT_ATTACH_MAX_PER_MSG', type: 'int', default: 3, min: 1, doc: '每条消息附件数量上限' },

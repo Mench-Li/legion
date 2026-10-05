@@ -103,6 +103,7 @@ footer textarea { resize:none; max-height:120px; }
   <div id="tabs" role="tablist">
     <button id="tab-board" role="tab" aria-selected="true">看板</button>
     <button id="tab-chat" role="tab" aria-selected="false">对话</button>
+    <button id="tab-account" role="tab" aria-selected="false">我的</button>
   </div>
 </header>
 
@@ -127,8 +128,46 @@ footer textarea { resize:none; max-height:120px; }
     <div id="task-groups" class="groups"></div>
   </div>
   <div id="view-chat" class="hidden">
-    <div id="agent-picker" class="hint">选择 Agent：</div>
     <div id="timeline"></div>
+  </div>
+  <div id="view-account" class="hidden">
+    <div id="account-who" class="hint"></div>
+
+    <div class="group">
+      <h2>改口令</h2>
+      <label>当前口令<input id="pw-current" type="password" autocomplete="current-password" /></label>
+      <label>新口令<input id="pw-new" type="password" autocomplete="new-password" /></label>
+      <div class="hint">至少 8 个字符。改完会把**其它**设备上的登录踢掉，这台保留。</div>
+      <div class="acts"><button class="primary" id="btn-change-pw">改口令</button></div>
+    </div>
+
+    <div class="group">
+      <h2>登录中的设备<span class="n" id="session-count"></span></h2>
+      <div id="sessions"></div>
+    </div>
+
+    <div class="group hidden" id="invite-group">
+      <h2>邀请新成员</h2>
+      <div class="hint">这台 Hub 的注册策略是「<span id="reg-mode"></span>」。生成一个邀请码，发给对方注册。</div>
+      <div class="row" style="display:flex; gap:8px; align-items:flex-end; margin-top:8px;">
+        <select id="invite-role">
+          <option value="member">成员</option>
+          <option value="admin">管理员</option>
+          <option value="viewer">只读</option>
+        </select>
+        <button class="primary" id="btn-invite">生成邀请码</button>
+      </div>
+      <div id="invite-out" class="hidden">
+        <div class="hint" style="margin-top:8px">把这一串发给对方，它只能用一次：</div>
+        <textarea id="invite-code" rows="2" readonly></textarea>
+      </div>
+    </div>
+
+    <div class="group">
+      <h2>关于</h2>
+      <div class="hint" id="about-hub"></div>
+      <div class="acts"><button id="btn-logout-2">退出登录</button></div>
+    </div>
   </div>
 </main>
 

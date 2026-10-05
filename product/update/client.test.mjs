@@ -608,6 +608,64 @@ test('取消一个不存在的操作：明确拒绝而不是静默成功', async
   assert.equal(result.code, 'update-no-download')
 })
 
+test('★★★ 下载期间候选变了 → 丢弃本次下载，绝不"悄悄装另一个版本"（设计 §10 第 4 行）', async (t) => {
+  // ★ 设计 §10 第 4 行的验收是：「重复点击、多个窗口、**下载中发现新版** →
+  //   一次网络/安装事务；**确认目标保持一致**」。§6 line 138 也写着
+  //   「用户确认绑定该身份；发布端变更清单**不替换**正在下载或已下载的目标」。
+  //
+  //   实现是 `client.mjs` 下载完成之后那一次 `sameIdentity(identityOf(candidate),
+  //   targetIdentity)` 比较——**而它此前没有任何用例**（我把 client.test.mjs 里
+  //   "下载期间"相关的 grep 都翻了一遍，只有文件头注释提到过这件事）。
+  //
+  //   ★ 这条判据危险的地方在于它的**两个失败方向不对称**：
+  //     · 判据在 → 一次下载被丢弃，用户重新确认（代价：一包流量）；
+  //     · 判据不在 → 用户看到的是"1.1.0 的说明"，装上去的是 1.2.0。
+  //   而后者在界面上**看不出来**：状态、进度、releaseId 都可能已经更新成新的，
+  //   只有"我点的是那一个"这件事没有被任何人核对。
+  //
+  //   构造：让包慢慢吐（`slowChunks`），在下载途中把**候选换掉**（再走一次
+  //   `check()`，此时托管给出另一个 releaseId 且 sequence 更高），然后等下载
+  //   结束。它必须失败、必须不留就绪态、必须没有 `.part` 残留。
+  const ctx = setup({ slowChunks: 8, packageBytes: Buffer.alloc(64 * 1024, 7) })
+  t.after(() => rmSync(ctx.cacheDir, { recursive: true, force: true }))
+  const client = makeClient(ctx)
+  const first = await client.check()
+  assert.equal(first.outcome, 'available', first.reason)
+  const originalId = first.candidate.releaseId
+  assert.equal(originalId, `rel-${NEXT}`)
+
+  const pending = client.download(first.candidate.releaseId, first.candidate.manifestSha256)
+  await new Promise((resolve) => setTimeout(resolve, 20))
+  assert.equal(client.state(), 'downloading', '下载没有进入 downloading 状态')
+
+  // ── 下载途中，通道前进到一个**新的**发行（更高 sequence + 新 releaseId）──
+  //
+  // ★ 直接把新通道与新发行的文件**装进同一份托管**：这条判据要问的是
+  //   "**同一个**客户端在下载期间候选被换掉会怎样"，所以必须作用在
+  //   **同一个实例**上（用两个实例各测一半，测不出这件事——见 ㉗ 的教训）。
+  const NEW_VERSION = '1.2.0'
+  const newer = setup({ productVersion: NEW_VERSION, sequence: 43, keys: ctx.keys })
+  t.after(() => rmSync(newer.cacheDir, { recursive: true, force: true }))
+  ctx.fetchImpl.files.set('feeds/stable/win-x64.json', newer.fetchImpl.files.get('feeds/stable/win-x64.json'))
+  for (const [k, v] of newer.fetchImpl.files) {
+    if (k.startsWith(`releases/rel-${NEW_VERSION}/`)) ctx.fetchImpl.files.set(k, v)
+  }
+  const second = await client.check()
+  assert.equal(second.outcome, 'available', `换了通道之后应当发现新候选：${second.reason}`)
+  assert.equal(client.candidate().releaseId, `rel-${NEW_VERSION}`,
+    '这一条需要候选真的被换掉，否则它证明不了"下载期间候选变了"')
+
+  const result = await pending
+  assert.equal(result.ok, false, '候选变了却把包交了')
+  assert.equal(result.code, 'update-identity-mismatch', `期望身份不符，实际 ${result.code}：${result.reason}`)
+  assert.match(result.reason, /下载期间/)
+  // ★ 三个"没有悄悄换掉"的读数：不就绪、不留包、不留 .part。
+  assert.equal(client.ready(), null, '候选变了却留下了就绪态')
+  assert.equal(client.snapshot().ready, false)
+  const sweep = client.cache.sweepStaleParts()
+  assert.equal(sweep.removed.length, 0, `丢弃之后留下了 ${sweep.removed.length} 个 .part 文件`)
+})
+
 // ---------------------------------------------------------------------------
 // ⑦ 离线 / 超时 / 缓存头
 // ---------------------------------------------------------------------------

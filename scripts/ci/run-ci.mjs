@@ -1472,7 +1472,10 @@ async function stageTest() {
     { label: 'dsh-models（模型配置桥：宿主地址随部署走、连不上时说得清、宿主鉴权与写入边界）', files: ['workbench/scripts/dsh-models-bridge.test.mjs'], cwd: ROOT },
     //   同一个 Bug #1 的**注入侧**：`DSH_MODELS_BASE_URL` 由 legion-services 按宿主端口派生。
     //   这一侧的失败形状更隐蔽——注入了错的地址，界面还是那句 `fetch failed`。
-    { label: 'legion-services（服务托管插件：宿主地址派生自本次启动的宿主，取不到就**不注入**）', files: ['services-plugin/index.test.mjs'], cwd: ROOT },
+    //   `cordis-startup.test.mjs` 是这一侧的**机制**判据：插件必须声明 `inject = ['webServer']`，
+    //   否则 Cordis 不把宿主端口交给它，注入侧会静默读到 undefined。它是集成用例，
+    //   拿不到 Cordis（宿主提供、未入库）时**跳过并说明**，不假装红也不假装绿。
+    { label: 'legion-services（服务托管插件：宿主地址派生自本次启动的宿主，取不到就**不注入**）', files: ['services-plugin/index.test.mjs', 'services-plugin/cordis-startup.test.mjs'], cwd: ROOT },
     { label: 'hub-event-stream（F-01 scope/游标/信封）', files: ['workbench/scripts/hub-event-stream.test.mjs'], cwd: ROOT, nodeArgs: ['--experimental-strip-types'] },
     // ── 并行任务文件冲突治理（G-mujfc9vi-1 S1–S8）──
     // 每个测试文件都必须显式登记：未登记 = 不存在的断言（本文件 4568 行的完备性检查会拦）。

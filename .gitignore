@@ -60,8 +60,20 @@ scrum/pending-goals.json
 # 因此报了 30+ 条**与提交内容无关**的 FAIL。
 reports/*/
 
+# 实测（2026-10-05）：`reports/web-desktop-full-comparison-2026-10-02.txt` 是 1.5MB 的
+# **机器生成的**逐项对比 dump，与上面那条同一个道理：它不是战斗报告，是量具的输出。
+# 上面那条 `reports/*/` 只挡住子目录，挡不住落在 reports/ 根下的散装产物，所以这里补一条。
+# 已核对：`git ls-files 'reports/*.txt'` 为空 ⇒ 不会出现"已跟踪却被忽略"的歧义。
+reports/*.txt
+
 # 第 118 轮第十二轮（业主确认④）：被引用的"量具"已收进 scripts/probes/ 并跟踪；
 # 剩下的是运行期状态与一次性草稿，明确不进版本控制。
 scratch/
 # 本地界面预览数据库、运行记录及浏览器验证截图
 .interface-preview/
+
+# `.claude/` 是 Agent 工具的本地状态（含 `.claude/worktrees/<task>/` 这种**嵌套 git 工作树**）。
+# 它此前**没有被忽略**，于是 `git status` 一直把它当成一个未跟踪条目挂着；而它里面是一个
+# 完整的仓库检出（自带 `.git`），一旦 `git add` 就会写成一个嵌入式仓库 gitlink（mode 160000），
+# 既拿不回内容、又让 clone 出来的人拿到一个空目录。与仓库内容无关的本地状态一律不入库。
+.claude/

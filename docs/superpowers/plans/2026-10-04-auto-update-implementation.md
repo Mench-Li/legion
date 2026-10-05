@@ -675,6 +675,28 @@ node scripts/update/verify-host.mjs --origin <生产 origin> --prefix /legion \
   > "有开关没接线"与"没要求所以没线"，在源码里长得一模一样，
   > 而它们该做的事相反：前者要接上，后者只需要被说出来。
 
+### 6.1.2 查过而**没有问题**的两处（写下来是为了下次不用再查）
+
+审计里有两处看起来像缺陷、逐条查过之后确认是好的。记在这里，免得下一个人
+（包括我自己）再花一次时间：
+
+1. **桌面协议与 bridge 的覆盖是双向完整的。** 协议表里 12 个类型，bridge 逐个
+   有分支；而"类型在表里、bridge 没有分支"的那条路也不会静默——它落到
+   `desktop-bridge.mjs` 末尾一个**具名拒绝** `UNKNOWN_TYPE`，不是不回应
+   （不回应会让客户端等到超时，症状会指向"Launcher 卡住"）。
+   另一个方向由 `desktop/update-wiring.test.mjs` 的判据守着：**接线层发出的
+   每一条命令都必须被真实协议认得**——⑳ 就是缺了这一条才没被发现。
+2. **`releaseId` 与清单摘要的绑定不缺**（缺的是另一件事，见 §6.1 那一条）。
+   `judgeSequence` 在 `sequence` **相同时**比对 `(releaseId, manifestSha256)`
+   这一对，所以"同一个 sequence 原地换包"会被拒（`feed-sequence-conflict`，
+   `feed.test.mjs` 有判据）。缺的是 `sequence` **前进时**的复用检测——而它的
+   正确修法需要新读数，且**不能**写成"摘要不许变"（见 §6.1 与 §5 的 ㉖ 讨论）。
+
+★ 另外记一条**前存**观察（不是本次改动引入的，也不是缺陷）：
+`product/launcher/desktop-protocol.mjs` 与 `desktop-bridge.mjs` 没有本仓约定的
+装载期 `*_CHECKED` 自检。它们的对齐是由用例守着的（上面第 1 点）。
+补自检是独立的一件事，顺手加会让这份改动的边界说不清。
+
 ## 7. 复现证据
 
 ```bash

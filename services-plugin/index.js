@@ -24,9 +24,6 @@ import { fileURLToPath } from 'node:url'
 
 export const name = '@dsh-external/dsh-legion-services'
 
-// Desktop/web 的宿主地址来自 webServer；Cordis 要求先声明服务依赖。
-export const inject = ['webServer']
-
 const SELF_DIR = dirname(fileURLToPath(import.meta.url))
 const DEFAULT_LEGION_DIR = 'D:/project/DSH/legion'
 

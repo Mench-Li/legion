@@ -556,6 +556,38 @@ function shouldNotify() {
 
 > 一条用不可能输入做的自检，验证的是"这个函数能处理这个不存在的形状"。
 
+**③ 我的用例第一版是空的，而且注释里的风险说错了。** 我在用例里声称"把
+`view.committed === true` 放宽成 `view.finishedPhase !== null` 会让
+`rolled-back`/`recovery-required` **变成可自动恢复**"。**把变异真的跑一遍**才发现
+不会：那个分支在安全档那段代码里排在 `safe-automatic` **之前**，所以放宽它只会让
+后两种拿到一个**错误的理由**（"已经提交：恢复会丢掉提交之后的新写入"），档位仍然
+是 `needs-confirmation`。
+
+于是只断言档位的用例**照样全绿**——它测的是"要问"，而变异改的是"**为什么要问**"。
+判据改成落在 `evidence.committed` 与理由文本上之后，变异才被抓住（1 条红）。
+
+> 一个装错档位的读数会被下一次操作抓到；
+> 一个**说错原因**的读数会被当成依据。
+
+（"既然要丢新写入，那算了"——操作者会基于一个不存在的损失做决定。）
+
+★ 同时补上 safe-automatic 那一档的**第二个**条件：`active !== null` **且**
+`proof.proved`，两个都不可少。只留 `proof.proved` 会让"屏障与备份记录都在、而
+**既没有活动描述符也没有终态记录**"这种日志变成可自动恢复——而那种日志的含义
+恰恰是"**我们不知道那次事务停在哪**"。
+
+> "没有活动事务"与"不知道有没有活动事务"必须是两个读数；
+> 把它们合成一个，就会让"不知道"落进"可以自动动手"。
+
+★★ 做这两轮变异测试时我又踩了一个坑，形状值得记：两次的"恢复"步骤都是
+**重读当前文件再写回**——而那时文件**已经是变异过的**，于是"恢复"变成"再变异
+一次"，第二次变异叠在第一次上面，读数失去意义。
+
+> 一个"从当前位置恢复"的步骤，在当前位置已经被改坏之后，
+> 会把坏状态**固化**下来。
+
+改成从**已知原件**恢复，并在每轮之后核对 `git status` 确认回到 HEAD。
+
 ★ 另外两处由**别的判据**抓出来的自己的错，也一并记下来，因为它们的形状有用：
 
 - **`planRecoveryFromBackups` 的出口形状不一致**：早先"没有备份目录"那条少给了
@@ -925,7 +957,7 @@ node scripts/update/verify-host.mjs --origin <生产 origin> --prefix /legion \
 ## 7. 复现证据
 
 ```bash
-# 全部自动更新相关用例（644 条）
+# 全部自动更新相关用例（647 条）
 node --test product/update/*.test.mjs product/upgrade/*.test.mjs \
   desktop/update-*.test.mjs desktop/main.test.mjs \
   scripts/update/*.test.mjs product/launcher/update-gate.test.mjs \

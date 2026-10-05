@@ -177,6 +177,35 @@ test('发布：上传计划把顺序写死（不可变 → 回读 → 通道）'
   assert.match(plan, /scp/)
 })
 
+test('★★ 上传计划必须先教发布端"怎么知道该用几号 sequence"（设计 §9 第 4 步的"更大的"）', (t) => {
+  // ★ 设计 §9 第 4 步的原话是「对通道发布加锁；生成**更大的** sequence」。
+  //   而 `--sequence` 是显式给的——所以"更大的"这三个字要求发布端**先知道
+  //   当前值**。在此之前计划里只有"第 4 步：确认 sequence 已经推进"，
+  //   也就是**事后**核对：它能在传错之后告诉你错了，但拦不住你把错的那个传上去。
+  //
+  //   而抄错的方向有两种，**都很安静**：
+  //     · 抄小了 → 客户端判 `feed-sequence-regression`，于是没有任何人去取这个
+  //       版本，而发布端看到的一切正常；
+  //     · 抄了同号 → 摘要不同 ⇒ `feed-sequence-conflict`，同样静默。
+  //   两种都不会在发布端报错，只在客户端那一侧表现为"发了新版但没人更新"。
+  //
+  //   > 一条**事后**核对的读数，不能替代一条**事前**取值的方法。
+  const ctx = setup(t)
+  const publish = buildPublish(publishArgs(ctx))
+  const plan = renderUploadPlan(publish, join(ctx.root, 'out'), { target: 'production' })
+  const step0 = plan.indexOf('第 0 步')
+  const step1 = plan.indexOf('第 1 步')
+  assert.ok(step0 >= 0, `计划里没有"先读当前 sequence"这一步：\n${plan}`)
+  assert.ok(step0 < step1, '"读当前 sequence"必须排在上传之前')
+  const step0Text = plan.slice(step0, step1)
+  assert.match(step0Text, /verify-host\.mjs/)
+  assert.equal(/--expect-sequence/.test(step0Text), false,
+    '第 0 步不该带 --expect-sequence：这一步的目的是**取值**，不是核对')
+  assert.match(step0Text, /就是当前值/)
+  // 本次用的号码也要写在计划里（供留档与人工比对）。
+  assert.match(step0Text, new RegExp(`sequence = ${publish.summary.sequence}`))
+})
+
 test('★★★ 上传计划**不能**把目标猜成生产树（原先的默认值就是这个）', (t) => {
   // ★ 这是一个真实的、危险的缺陷：`renderUploadPlan` 原先的签名是
   //   `{ remoteRoot = 'root@117.72.146.36:/srv/legion-updates/production/legion' }`

@@ -49,3 +49,6 @@ scrum/pending-goals.json
 scratch/
 # 本地界面预览数据库、运行记录及浏览器验证截图
 .interface-preview/
+
+# check-pwa.sh 的产物（运行时生成，不入库）
+.pwa-check/

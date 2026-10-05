@@ -8,8 +8,10 @@
 #   目录属于 root 时它会以 SQLite 的 "unable to open database" 失败——
 #   那句话读起来像"库坏了"，真实原因是权限。
 install -d -m 0700 -o legion-hub -g legion-hub /var/lib/legion-hub/backups
+# ★ 口令文件同理要属于备份用户，否则 gpg 之前的可读性检查就会拒。
 openssl rand -base64 48 | tr -dc 'A-Za-z0-9' | head -c 40 > /etc/legion-hub/backup.passphrase
 chmod 600 /etc/legion-hub/backup.passphrase
+chown legion-hub:legion-hub /etc/legion-hub/backup.passphrase
 
 cp /srv/legion-hub/app/product/server/legion-hub-backup.service /etc/systemd/system/
 cp /srv/legion-hub/app/product/server/legion-hub-backup.timer   /etc/systemd/system/

@@ -200,7 +200,31 @@ function main() {
   let finalPath = rawPath
   if (o.passphraseFile !== null) {
     const passPath = resolve(o.passphraseFile)
-    if (!existsSync(passPath)) { warn(`口令文件不存在：${passPath}`); rmSync(rawPath, { force: true }); return 1 }
+    // ★ 「不存在」与「存在但读不了」要分开报——**修法完全不同**。
+    //   不存在 → 生成一个；读不了 → 改所有权/权限。
+    //   合成一句"读取失败"会让人去重新生成一个已经存在的口令，
+    //   而那会让**此前所有备份都解不开**。
+    if (!existsSync(passPath)) {
+      warn(`口令文件不存在：${passPath}`)
+      warn('  生成一个：openssl rand -base64 48 | tr -dc \'A-Za-z0-9\' | head -c 40 > <路径>; chmod 600 <路径>')
+      warn('  ⚠ **不要**在已有备份之后重新生成——那会让此前每一份备份都解不开。')
+      rmSync(rawPath, { force: true })
+      return 1
+    }
+    try {
+      const fd = openSync(passPath, 'r')
+      closeSync(fd)
+    } catch (e) {
+      warn(`口令文件读不了：${passPath}（${e.code ?? e.message}）`)
+      const st = (() => { try { return statSync(passPath) } catch { return null } })()
+      if (st !== null) {
+        warn(`  所有权 uid=${st.uid} gid=${st.gid} mode=${(st.mode & 0o777).toString(8)}；本进程 uid=${process.getuid?.() ?? '?'}`)
+        warn('  备份以非 root 用户运行，所以口令文件要属于它：')
+        warn(`    chown ${process.getuid?.() ?? 'backup-user'} ${passPath} && chmod 600 ${passPath}`)
+      }
+      rmSync(rawPath, { force: true })
+      return 1
+    }
     // ★ 口令与备份同机 = 只挡"备份文件外泄"，挡不住"主机被攻陷"。如实警告。
     if (resolve(dirname(passPath)) === resolve(outDir)) {
       warn('⚠ 口令文件与备份在**同一个目录**：这只能防止备份文件单独外泄，'

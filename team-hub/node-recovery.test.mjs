@@ -8,7 +8,7 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { DatabaseSync } from 'node:sqlite'
 
-import { createNodeRecovery } from './node-recovery.mjs'
+import { RECOVERABLE_STATES, createNodeRecovery } from './node-recovery.mjs'
 
 function makeDb() {
   const db = new DatabaseSync(':memory:')
@@ -62,8 +62,21 @@ test('到期租约被回收，且判定交给仓储（本模块不二次过滤�
   //   删了文件、付了款——两条出口里「可重试」会重复执行，「未知」只是要人对账。
   const verdict = stores.calls.recoverExpired[0].externalEffectPossible
   assert.equal(typeof verdict, 'function')
-  for (const s of ['Leased', 'PreparingWorkspace', 'BuildingContext', 'Running', 'Validating', 'HandingOff', 'AwaitingApproval']) {
+  for (const s of RECOVERABLE_STATES) {
     assert.equal(verdict({ state: s }), true, `${s} 必须按"可能有副作用"处置`)
+  }
+})
+
+test('只扫"节点可能正在执行"的状态：Validating 等**不在**回收范围内', () => {
+  // ★ 实测踩过：把 `Validating` 也扫进去时，一次**成功完成**、正在等验收的任务
+  //   在租约过期后从 `in_review` 掉进了 `blocked`（"结果待确认"）。
+  //   一个已知结果被标成未知，与未知被标成已知是同一类错误，方向相反而已。
+  const db = makeDb()
+  const stores = makeStores()
+  createNodeRecovery({ db, ...stores }).sweepOnce()
+  assert.deepEqual([...stores.calls.recoverExpired[0].states], ['Leased', 'PreparingWorkspace', 'BuildingContext', 'Running'])
+  for (const s of ['Validating', 'HandingOff', 'AwaitingApproval']) {
+    assert.ok(!RECOVERABLE_STATES.includes(s), `${s} 不该由本回收器处理`)
   }
 })
 

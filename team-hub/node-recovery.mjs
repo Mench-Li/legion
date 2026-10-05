@@ -44,6 +44,22 @@ export const RECOVERY_CODES = Object.freeze({
 })
 
 /**
+ * 回收器扫描的 Attempt 状态：**只含"节点可能正在执行"的那几个**。
+ *
+ * 不含 `Validating` / `HandingOff` / `AwaitingApproval`——它们的意思是
+ * "执行已经结束，在等验收 / 交接 / 批准"。对它们而言租约过期**不等于**
+ * "结果不明"：`runResult` 早就落库了。而 `recoveryDecision` 在租约过期时
+ * 一律给 `mark-unknown-outcome`，于是"已完成待验收"会被改写成"结果待确认"。
+ *
+ * 一个**已知结果**被标成未知，与未知被标成已知是同一类错误，方向相反而已。
+ * 实测踩过：验收里一次成功完成的任务，在租约过期后从 `in_review` 掉进了
+ * `blocked`（"结果待确认"）。
+ *
+ * 等人那一段各自有专用路径（审批 TTL 扫描、验收记录、交接），不该由本回收器代劳。
+ */
+export const RECOVERABLE_STATES = Object.freeze(['Leased', 'PreparingWorkspace', 'BuildingContext', 'Running'])
+
+/**
  * 造回收器。
  *
  * @param {object} deps
@@ -60,6 +76,7 @@ export function createNodeRecovery({
   runStore,
   writeIntentStore,
   externalEffectPossible = () => true,
+  recoverableStates = RECOVERABLE_STATES,
   leaseGraceMs = 30_000,
   limit = 50,
   clock = Date.now,
@@ -125,6 +142,9 @@ export function createNodeRecovery({
     try {
       const r = runStore.recoverExpired({
         externalEffectPossible,
+        // 只扫"节点可能正在执行"的状态。见 `RECOVERABLE_STATES` 的注释：
+        // 把 `Validating` 也扫进去会把"已完成待验收"改写成"结果待确认"。
+        states: recoverableStates,
         limit,
       })
       // `recoverExpired` 自己按它的时钟判定；这里只做记账。

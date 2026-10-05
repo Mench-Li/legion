@@ -1,0 +1,27 @@
+fix(remote): 回收器不得把"已完成待验收"改写成"结果待确认"
+
+实测踩到：一次**成功完成**、正在等验收的任务，在租约过期后被回收器从
+`in_review` 掉进了 `blocked`（"结果待确认"）。
+
+根因：`IN_FLIGHT_ATTEMPT_STATES` 里既有"正在执行"（`Leased`/`Running`…），
+也有"执行已结束、在等人"（`Validating` 等验收、`HandingOff` 等交接、
+`AwaitingApproval` 等批准）。对后者而言租约过期**不等于**结果不明——执行早就
+结束了，`runResult` 也落库了。而 `recoveryDecision` 在租约过期时一律给
+`mark-unknown-outcome`。
+
+一个**已知结果**被标成未知，与未知被标成已知是同一类错误，方向相反而已。
+
+改法：
+- `recoverExpired` 新增**可选** `states` 收窄（默认 `null` = 沿用完整集合，
+  既有调用方行为一字不变）。空数组**报错**而不是静默地"成功地什么都没做"
+  （`IN ()` 在 SQLite 里恒为假）。
+- 后台回收器只扫 `Leased`/`PreparingWorkspace`/`BuildingContext`/`Running`——
+  真正可能还在电脑上跑的那几个。等人那一段各自有专用路径
+  （审批 TTL 扫描、验收记录、交接），不该由回收器代劳。
+
+另外修两处测试接线：`agent.test.mjs` 的 hub 夹具要传新的必需注入项
+`prepareContext`（构造期就要求，缺了会抛）。
+
+测试：run-store 45、回收器 9、网关 30、agent 10；本轮共 306 通过。
+另：`run-kill-drill.test.mjs` 在**基线提交**上两条都失败（需要
+`LEGION_WORKSPACE_DIR`，环境依赖），本分支 ① 通过、③ 仍失败——非本次回归。

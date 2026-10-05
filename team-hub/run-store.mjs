@@ -1919,7 +1919,7 @@ export function createRunStore({
    * **缺这个判据就拒绝回收**——猜错的方向是「把一个可能已经付过费的任务重跑一遍」。
    * 本函数因此收的是一个判定函数或一个明确的布尔，而不是一个默认值。
    */
-  function recoverExpired({ externalEffectPossible, scope = null, limit = 50, reason = 'lease-expired' } = {}) {
+  function recoverExpired({ externalEffectPossible, scope = null, limit = 50, reason = 'lease-expired', states = null } = {}) {
     if (typeof externalEffectPossible !== 'function' && typeof externalEffectPossible !== 'boolean') {
       throw new ContractError('EXTERNAL_EFFECT_UNKNOWN',
         'recoverExpired 需要 externalEffectPossible（布尔或 (attempt) => 布尔）。' +
@@ -1930,7 +1930,27 @@ export function createRunStore({
       const atMs = clock()
       // 状态清单由 `IN_FLIGHT_ATTEMPT_STATES` 生成（见文件头那段说明）：
       // 这里要与 `stats()` 的过期租约统计、以及 `metricsCounts()` 用**同一份**集合。
-      const flight = inFlightStatesSql()
+      //
+      // ★ `states` 是一条**可选收窄**，默认 `null` = 沿用上面那份完整集合（既有调用方
+      //   的行为一字不变）。
+      //
+      //   为什么需要它：`IN_FLIGHT_ATTEMPT_STATES` 里既有"正在执行"（`Leased`/
+      //   `Running`…），也有"执行已结束、在等人"（`Validating` 等验收、`HandingOff`
+      //   等交接、`AwaitingApproval` 等批准）。对**后者**而言，租约过期并不意味着
+      //   "结果不明"——执行早就结束了，runResult 也落库了。而 `recoveryDecision`
+      //   在租约过期 + 可能有副作用时一律给 `mark-unknown-outcome`，
+      //   于是"已完成待验收"会被改写成"结果待确认"。
+      //
+      //   一个"已知结果"被标成未知，与"未知被标成已知"是同一类错误，只是方向相反。
+      //   所以后台回收器（`node-recovery.mjs`）**只收窄到真正在执行的那几个状态**，
+      //   把等人那一段留给各自的专用路径（审批 TTL、验收记录、交接）。
+      const flight = states === null
+        ? inFlightStatesSql()
+        : (Array.isArray(states) && states.length > 0
+          ? inFlightStatesSql(states)
+          : (() => { throw new ContractError('BAD_RECOVERY_STATES',
+            'recoverExpired 的 states 要么是 null（用完整在途集合），要么是非空数组：'
+            + '空数组会生成 `IN ()`，而 `IN ()` 在 SQLite 里恒为假——那会让回收"成功地"一条都不动') })())
       const rows = scope === null
         ? db.prepare(
           `SELECT * FROM run_attempts

@@ -607,6 +607,55 @@ test('⑥ 缺少「外部副作用是否可能已发生」时拒绝回收（这�
   } finally { env.cleanup() }
 })
 
+test('⑥ `states` 收窄：只扫点名的状态，其余一概不动', () => {
+  // ★ 这条是为了让**后台回收器**能把"正在执行"与"执行完在等人"分开。
+  //   `Validating` 也在 `IN_FLIGHT_ATTEMPT_STATES` 里（它确实持有租约），
+  //   但它的语义是"执行已结束、等验收"——租约过期不意味着结果不明，
+  //   `runResult` 早就落库了。而 `recoveryDecision` 在租约过期时一律给
+  //   `mark-unknown-outcome`，于是"已完成待验收"会被改写成"结果待确认"。
+  const env = makeEnv()
+  try {
+    env.addTask('t1')
+    const c = env.store.claim({ workerId: 'w1' }).claimed
+    // 走到 Validating（测试环境里 `Running → Validating` 声明要有 runResult，
+    // 所以先把它备上——这条边的证据闸门是另一件事，不该拦住这条用例）。
+    env.store.transition({ attemptId: c.attemptId, leaseEpoch: c.leaseEpoch, workerId: 'w1', to: 'PreparingWorkspace' })
+    env.store.transition({ attemptId: c.attemptId, leaseEpoch: c.leaseEpoch, workerId: 'w1', to: 'BuildingContext' })
+    // `BuildingContext → Running` 要一份真的上下文快照（那是另一条闸门，见 ⑪）。
+    env.freezeContext(c.attemptId)
+    env.store.transition({
+      attemptId: c.attemptId, leaseEpoch: c.leaseEpoch, workerId: 'w1', to: 'Running',
+      context: { runResult: { runId: 'r1', outcome: 'succeeded' } },
+    })
+    env.store.transition({
+      attemptId: c.attemptId, leaseEpoch: c.leaseEpoch, workerId: 'w1', to: 'Validating',
+      context: { runResult: { runId: 'r1', outcome: 'succeeded' } },
+    })
+    env.advance(DEFAULT_LEASE_TTL_MS + 1)
+
+    // 默认（不收窄）：完整在途集合 → 会把它判成 UnknownOutcome。
+    const wide = env.store.recoverExpired({ externalEffectPossible: true })
+    assert.equal(wide.recovered.some((x) => x.attemptId === c.attemptId), true, '不收窄时它确实在扫描范围内')
+
+    // 收窄到"真正在执行"的状态 → 不碰它。
+    const env2 = makeEnv()
+    try {
+      env2.addTask('t2')
+      const c2 = env2.store.claim({ workerId: 'w1' }).claimed
+      env2.store.transition({ attemptId: c2.attemptId, leaseEpoch: c2.leaseEpoch, workerId: 'w1', to: 'PreparingWorkspace' })
+      env2.advance(DEFAULT_LEASE_TTL_MS + 1)
+      const narrow = env2.store.recoverExpired({ externalEffectPossible: true, states: ['Leased', 'Running'] })
+      // PreparingWorkspace 不在点名的两个状态里 → 一条都不动。
+      assert.equal(narrow.recovered.length, 0)
+      assert.equal(env2.store.getAttempt(c2.attemptId).state, 'PreparingWorkspace')
+    } finally { env2.cleanup() }
+
+    // 空数组必须**报错**，不能静默地"成功的什么都没做"。
+    const e = assertRunError(() => env.store.recoverExpired({ externalEffectPossible: true, states: [] }), 'BAD_RECOVERY_STATES')
+    assert.match(e.message, /IN \(\)/)
+  } finally { env.cleanup() }
+})
+
 test('⑥ 未过期的租约不被回收（正常执行中的任务不得被抢走）', () => {
   const env = makeEnv()
   try {

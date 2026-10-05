@@ -67,7 +67,10 @@ async function startHub(claimResults = [], gatewayOptions = {}) {
   const runStore = fakeRunStore({ claimResults })
   const pairing = deviceStore.createPairingCode({ userId: 'user-1', nodeName: '书桌电脑' })
   const device = deviceStore.redeemPairingCode({ code: pairing.code, platform: 'win32' })
-  const gateway = createNodeGateway({ deviceStore, runStore, dispatchPollMs: 30, ...gatewayOptions })
+  // 上下文冻结在真实部署里由 `team-hub/node-context.mjs` 提供（它有自己的一组用例）。
+  // 这里给一个最小替身：本文件要证明的是**电脑侧**的行为，不是 Hub 怎么装配上下文。
+  const prepareContext = gatewayOptions.prepareContext ?? (async () => ({ snapshotHash: 'hash:test' }))
+  const gateway = createNodeGateway({ deviceStore, runStore, prepareContext, dispatchPollMs: 30, ...gatewayOptions })
   const server = http.createServer((req, res) => { res.writeHead(404); res.end() })
   gateway.attach(server)
   server.listen(0, '127.0.0.1')

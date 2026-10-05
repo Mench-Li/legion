@@ -1,0 +1,44 @@
+[Unit]
+Description=Legion Hub 备份异地同步（rclone + 读回验证）
+Documentation=file:///srv/legion-hub/app/product/server/BACKUP.md
+# 排在备份之后：同步的是备份**目录**，本地那份还没造出来时同步没有意义。
+After=legion-hub-backup.service legion-hub.service
+
+[Service]
+Type=oneshot
+User=legion-hub
+Group=legion-hub
+WorkingDirectory=/srv/legion-hub/app
+
+# ★ 备份失败时**不同步**，由 `offsite.mjs` 自己判（`--max-age-hours`）。
+#
+# 这里刻意**不用** `ExecCondition=systemctl is-failed ...`：
+#  · 一个要在服务里跑 `systemctl` 的前置条件依赖 systemd 的 D-Bus 可见性，
+#    而"条件本身跑不起来"与"条件不满足"在日志里长得很像；
+#  · 而且它问的是"上一个单元怎么了"，不是"我手上这份是不是今天的"。
+#    后者才是同步要关心的问题——它同时还挡住"备份单元成功但库根本没被写"这类情形。
+#
+# 判据是**最新那份备份的 mtime**：备份单元失败之后，同步照常会把上一次的旧文件
+# 传过去并报成功，于是异地多了一份"看起来是今天的"备份，而它其实是三天前的。
+Environment=RCLONE_CONFIG=/var/lib/legion-hub/rclone.conf
+# 可选的覆盖项（不设也行）：
+#   LEGION_OFFSITE_REMOTE=legion-offsite:legion-hub
+#   LEGION_OFFSITE_KEEP=3
+EnvironmentFile=-/etc/legion-hub/offsite.env
+
+ExecStart=/usr/bin/node /srv/legion-hub/app/product/server/offsite.mjs \
+  --dir /var/lib/legion-hub/backups \
+  --remote ${LEGION_OFFSITE_REMOTE} \
+  --passphrase-file /var/lib/legion-hub/backup.passphrase \
+  --keep ${LEGION_OFFSITE_KEEP}
+
+ProtectSystem=strict
+ProtectHome=true
+# PrivateTmp：读回验证会往 /tmp 下解密一份完整库，那份东西不该让别的东西看见。
+PrivateTmp=true
+# 要能读库目录、写 /tmp 里自己的那份临时解密文件
+ReadWritePaths=/var/lib/legion-hub
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target

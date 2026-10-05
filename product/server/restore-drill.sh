@@ -14,11 +14,26 @@
 # 去读它——那才是"恢复"的定义，不是"文件能打开"。
 #
 # 用法：bash product/server/restore-drill.sh [备份文件] [口令文件]
+#       bash product/server/restore-drill.sh --from-remote <rclone 远端> [口令文件]
+#
+# `--from-remote` 演练的是**异地那一份**：从远端把最新一份拉回来再走同一条链。
+# 本地那份能恢复，不代表远端那份也能——它们之间差着上传、差着远端的存储语义，
+# 而"传上去了"看起来与"取得回来"一模一样。这一个开关就是用来把那句话证伪的。
 # ============================================================================
 set -euo pipefail
 
-BACKUP="${1:-}"
-PASS_FILE="${2:-/etc/legion-hub/backup.passphrase}"
+BACKUP=""
+PASS_FILE=""
+FROM_REMOTE=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --from-remote) FROM_REMOTE="${2:-}"; shift 2 ;;
+    -h|--help) sed -n '3,20p' "$0"; exit 0 ;;
+    -*) echo "未知参数：$1（--help 看用法）" >&2; exit 2 ;;
+    *) if [ -z "$BACKUP" ]; then BACKUP="$1"; elif [ -z "$PASS_FILE" ]; then PASS_FILE="$1"; else echo "多余参数：$1" >&2; exit 2; fi; shift ;;
+  esac
+done
+: "${PASS_FILE:=/etc/legion-hub/backup.passphrase}"
 APP_DIR="${LEGION_APP_DIR:-/srv/legion-hub/app}"
 DRILL_DIR="$(mktemp -d /tmp/legion-restore-XXXXXX)"
 PORT="${DRILL_PORT:-18787}"
@@ -28,6 +43,17 @@ cleanup() {
   rm -rf "$DRILL_DIR"
 }
 trap cleanup EXIT
+
+# 异地演练：先从远端把最新一份拉回来，再按同一条链恢复。
+if [ -n "$FROM_REMOTE" ]; then
+  command -v rclone >/dev/null 2>&1 || { echo "没找到 rclone（--from-remote 需要它）" >&2; exit 1; }
+  echo "⓪ 从远端取最新一份：$FROM_REMOTE"
+  NEWEST="$(rclone lsf "$FROM_REMOTE/" --files-only --include 'team-*.db.gpg' | sort | tail -1)"
+  test -n "$NEWEST" || { echo "远端没有 team-*.db.gpg —— 异地备份其实没有做成" >&2; exit 1; }
+  echo "   $NEWEST"
+  rclone copyto "$FROM_REMOTE/$NEWEST" "$DRILL_DIR/$NEWEST" --checksum
+  BACKUP="$DRILL_DIR/$NEWEST"
+fi
 
 # 没给备份文件就挑最近的一份。
 if [ -z "$BACKUP" ]; then

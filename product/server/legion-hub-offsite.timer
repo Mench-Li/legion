@@ -1,0 +1,15 @@
+[Unit]
+Description=每天把 Legion Hub 的最新备份同步到异地
+
+[Timer]
+# 03:47 —— 排在 03:17 那次备份之后（给它半小时：读整个库 + gpg + 读回验证）。
+# 同样避开整点：整点是一天里最挤的一刻，而这一步要下载回一份完整库。
+OnCalendar=*-*-* 03:47:00
+# 机器在 03:47 关过机时，开机后补跑一次（否则"那天没同步"会静默发生）。
+Persistent=true
+# 随机延迟：以后有多台 Legion 时，不要让它们同时冲同一个远端（对象存储的限流
+# 往往就卡在这一点上）。
+RandomizedDelaySec=600
+
+[Install]
+WantedBy=timers.target

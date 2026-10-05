@@ -254,6 +254,9 @@ cloudflared service uninstall
 - **单一监督者**：只用 systemd。**不要**再用 PM2/nohup 起第二个 Hub——
   两个进程写同一个 SQLite 会以 `audit.seq` 唯一约束冲突的形式表现出来。
 - 备份：`sqlite3 team.db ".backup '/path/backup.db'"`（WAL 下不要直接拷文件）。
+  真正在用的是 `backup.mjs`（`VACUUM INTO` 一致快照 + 读回验证 + gpg 加密，
+  `legion-hub-backup.timer` 每天 03:17），以及把它同步到异地的 `offsite.mjs`
+  （`legion-hub-offsite.timer` 每天 03:47）——见 [BACKUP.md](BACKUP.md)。
 - 健康：`/api/identity/status`（免鉴权）；`systemctl status legion-hub`。
 - 日志：`journalctl -u legion-hub -f`。日志**不含**令牌与密钥原文。
 - 证书：Cloudflare 自动续期，服务器上没有需要续的证书。

@@ -757,12 +757,13 @@ node scripts/update/verify-host.mjs --origin <生产 origin> --prefix /legion \
 ## 7. 复现证据
 
 ```bash
-# 全部自动更新相关用例（599 条）
+# 全部自动更新相关用例（617 条）
 node --test product/update/*.test.mjs product/upgrade/*.test.mjs \
   desktop/update-*.test.mjs desktop/main.test.mjs \
   scripts/update/*.test.mjs product/launcher/update-gate.test.mjs \
   product/launcher/desktop-bridge.test.mjs product/launcher/desktop-protocol.test.mjs \
   product/launcher/launcher.test.mjs \
+  scripts/update/rotation.test.mjs \
   desktop/scripts/shell-files.test.mjs desktop/scripts/update-payload.test.mjs
 
 # 全链路集成（发布 → 托管 → 检查 → 下载 → 事务 → helper → 提交）
@@ -785,7 +786,7 @@ node --test desktop/scripts/shell-files.test.mjs
 node scripts/ci/run-ci.mjs
 ```
 
-### 7.1 全量 CI 的实际读数（`fc94ad8e`，57 分钟）
+### 7.1 全量 CI 的实际读数（`723b36b5`，65 分钟）
 
 ```
 syntax PASS   env FAIL   boundary FAIL   deps PASS   build PASS
@@ -796,10 +797,14 @@ test   FAIL   smoke PASS  stage PASS      doc PASS
 
 ```
 PASS product-update（自动更新：协议验签、下载缓存、状态机、事务与恢复）
-     exit=0 tests=344 pass=344 fail=0 skipped=0
+     exit=0 tests=361 pass=361 fail=0 skipped=0
 ```
 
-`test` 阶段在这一台机器上共 **44 个套件红**（243 个套件绿）。这 44 个**不属于
+★ 那 361 条与我在本地按**同一份文件清单**跑出来的数字**逐字相同**。这一点值得
+单独记：门禁跑的是它自己在 `run-ci.mjs` 里列的清单，而"我本地跑过了"通常指的
+是另一个集合。两个数字对上，才说明"我验证过的"与"门禁验证的"是同一件事。
+
+`test` 阶段在这一台机器上共 **45 个套件红**（242 个套件绿）。这 45 个**不属于
 本分支**，判据分两层：
 
 **① 与我的改动相邻的那些，逐条在基点 `a8ff20de` 上对过账，读数完全相同。**
@@ -812,9 +817,24 @@ PASS product-update（自动更新：协议验签、下载缓存、状态机、�
 | `scripts/ci/dsh-boundary.mjs` | **8 处**违规 | **8 处**违规 |
 | `scripts/config/scan.mjs --check` | **187 项** | **187 项** |
 
+`product-launcher` 这个套件（396 条、386 过、**10 失败**）里的 10 条正好就是上表
+前两行那 10 条；而**本轮新加的两条 launcher 用例在这个套件里是过的**：
+
+```
+✔ suspendClaiming／resumeClaiming：只有真正**在跑**时才认为"停掉/恢复"成功
+✔ suspendClaiming：本次启动**不含** orchestrator → skipped 而不是失败
+```
+
 这几条是"我可能碰到的地方"，所以**必须**逐条对账，而不是"看起来像环境问题"。
 它们全部是**真进程／真 DSH 检出／真浏览器**那一类，在本机同时跑几十个真进程时
-超时被杀（`test` 阶段 3 430 秒里有相当一部分是 300 秒超时）。
+超时被杀（`test` 阶段 3 766 秒里有相当一部分是 300 秒超时）。
+
+★ 另有一条**与门禁清单有关**的读数：`套件清单不完备：33 个 *.test.mjs 不会被
+任何套件执行`。那 33 个里**没有一个是本分支新增的**——本轮新加的
+`product/update/feed.test.mjs`、`product/update/errors.test.mjs`、
+`product/update/integration.test.mjs`、`desktop/update-wiring.test.mjs`、
+`scripts/update/rotation.test.mjs` 逐个查过，全部已登记。
+"新增用例必须登记，否则它等于不存在"这件事这次做到了。
 
 **② 其余的红灯分布在我**完全没有碰过**的目录**：`team-hub/routes`、
 `workbench/scripts`、`runtime/contracts`、`run-plane`、`route-family`、

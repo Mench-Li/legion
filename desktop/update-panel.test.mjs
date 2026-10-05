@@ -464,17 +464,29 @@ test('★★★★ 状态机里的**每一个**状态都必须在面板里有文
   assert.deepEqual(extra, [], `面板里有状态机不认识的状态名：${extra.join(' / ')}`)
 })
 
-test('★★★ `source-unsupported` 与 `up-to-date` 的文案必须不同（用户该做的事相反）', async () => {
+test('★★★ `source-unsupported` 的**状态文案**必须与 `up-to-date` 不同', async () => {
+  // ★ 这条第一版写错了：它断言 `describeLastCheck` 在
+  //   `lastCheck.outcome === 'source-unsupported'` 时的输出——而那个值
+  //   **没有任何生产者**（`client.mjs` 只在成功路径写 `lastCheck`，写的是
+  //   `outcome: 'ok'`）。也就是说那条用例断言的是一个永远不会发生的输入，
+  //   而它当时是**绿的**。
+  //
+  //   > 一条喂给"永远不会出现的值"的用例，它的绿与"这条路径被覆盖了"
+  //   > 没有任何关系。
+  //
+  //   用户真正看到的那句话走的是**状态文案**（`projectView` 读 `state`，
+  //   而 `state` 由客户端的 `setState('check-source-unsupported')` 置出）。
+  //   所以这里断言那一张表。
   const { STATE_TEXT, describeLastCheck } = await import('./update-panel.mjs')
   assert.notEqual(STATE_TEXT['source-unsupported'], STATE_TEXT['up-to-date'],
     '"有一个你装不上的新版"与"没有新版"被说成了同一句话')
   assert.match(STATE_TEXT['source-unsupported'], /不支持/)
-  // ★ 也**不是**失败：归到失败会让用户去点重试，而重试得到同一个答案。
-  assert.equal(
-    describeLastCheck({ lastCheck: { atMs: Date.UTC(2026, 9, 6, 12), outcome: 'source-unsupported' } }),
-    describeLastCheck({ lastCheck: { atMs: Date.UTC(2026, 9, 6, 12), outcome: 'source-unsupported' } }),
-  )
-  const line = describeLastCheck({ lastCheck: { atMs: Date.UTC(2026, 9, 6, 12), outcome: 'source-unsupported' } })
-  assert.match(line, /不支持/, `上次检查那一行没有说明原因：${line}`)
-  assert.equal(/失败/.test(line), false, `把"装不上"说成了"失败"：${line}`)
+  // ★ 也**不是**失败：归到失败文案会让用户去点重试，而重试得到同一个答案。
+  assert.equal(/失败/.test(STATE_TEXT['source-unsupported']), false,
+    `把"装不上"说成了"失败"：${STATE_TEXT['source-unsupported']}`)
+  assert.notEqual(STATE_TEXT['source-unsupported'], STATE_TEXT['check-failed'])
+  // ★ 而"上次检查"那一行**不该**为它开分支——见 `update-panel.mjs` 里
+  //   `describeLastCheck` 的注释：`lastCheck.outcome` 只可能是 `'ok'`。
+  const line = describeLastCheck({ lastCheck: { atMs: Date.UTC(2026, 9, 6, 12), outcome: 'ok' } })
+  assert.equal(/不支持/.test(line), false, '上次检查那一行出现了"不支持"——那是从哪来的？')
 })

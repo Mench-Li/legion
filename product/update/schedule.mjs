@@ -52,6 +52,20 @@ export const CHECK_OUTCOMES = Object.freeze([
   'available',
   /** 没有新版（含"通道指向更旧版本"的撤回清单情形）。 */
   'up-to-date',
+  /**
+   * ★ 通道上**有**新版，但发行方声明不支持从本机这个版本升
+   *   （设计 §5 的 `supportedFromVersions`）。
+   *
+   *   与 `up-to-date` 分开：用户该做的事相反（一个什么都不用做，
+   *   一个要先升到声明的那个版本）。
+   *
+   *   ★ 退避上它算**非失败**：`consecutiveFailures` 归零（见 scheduler 里
+   *     `else if (result.outcome !== 'cancelled') consecutiveFailures = 0`）。
+   *     这不是"顺手"，而是对的——检查本身成功了、结论也明确；
+   *     算成失败会让调度器在一次正常的"版本太旧"结论上退避，
+   *     而退避的用途是"托管可能出问题了，别一直打它"。
+   */
+  'source-unsupported',
   /** 网络/校验失败。 */
   'failed',
   /** 被取消（退出、手动取消）。**不进退避**。 */

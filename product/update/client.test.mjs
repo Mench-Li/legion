@@ -1139,3 +1139,64 @@ test('★★ 多个来源版本时按**集合**判，不是"任意版本都行"'
   // 本机 1.0.0 不在 ['0.8.0','0.9.0'] 里。
   assert.equal(result.outcome, 'source-unsupported', `集合里没有本机版本，却给出了候选：${JSON.stringify(result)}`)
 })
+
+// ---------------------------------------------------------------------------
+// ★★★ 客户端能返回的每个 outcome 都必须在 `CHECK_OUTCOMES` 里
+// ---------------------------------------------------------------------------
+
+test('★★★★ `client.check()` 能返回的每个 outcome 都在 `CHECK_OUTCOMES` 词表里', async () => {
+  // ★ 这条守的是一个**注释所承诺、而没有任何判据守着**的一致性。
+  //
+  //   `client.mjs` 第 66 行写着：
+  //     「检查的结论（与 `schedule.mjs` 的 `CHECK_OUTCOMES` 对齐）」
+  //   而在我加 `source-unsupported` 之前，**没有任何东西检查这句"对齐"**——
+  //   于是新加一个 outcome 会让那句注释静默变成假话（本轮就是这样）：
+  //   词表里没有它，而调度器的退避分支只用 `=== 'failed'` / `!== 'cancelled'`
+  //   两个字面量判断，所以行为恰好还是对的——**靠巧合对**。
+  //
+  //   > 一句"与某处对齐"的注释，与一条真的守着那次对齐的判据，
+  //   > 在下一个人改这里时不是同一个东西。
+  //
+  //   ★ 而同族的代价已经在本轮出现过一次：`source-unsupported` 不在词表里，
+  //     任何**按词表**写的消费者（例如"给每个 outcome 一句文案"）都会漏掉它，
+  //     而漏掉的方式是**沉默**（查表得到 undefined）。
+  const { CHECK_OUTCOMES } = await import('./schedule.mjs')
+  const { readFileSync } = await import('node:fs')
+  const source = readFileSync(new URL('./client.mjs', import.meta.url), 'utf8')
+  // 去掉注释：注释里**提到**这些字面量是允许的（本文件就有说明文字）。
+  const code = source.replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|[^:])\/\/.*$/gm, '$1')
+
+  // 找出源码里所有**作为返回值**的 `outcome: '<字面量>'`。
+  //
+  // ★ 必须限定在 `return` 里：`lastCheck` 那个**读数字段**也有一处
+  //   `outcome: 'ok'`，而它属于**另一套词表**（读数字段的值是 ok/failed/error，
+  //   不是 CHECK_OUTCOMES）。第一版没限定，于是把 `'ok'` 当成了
+  //   "客户端返回的结论"，报了一条假阳性。
+  //
+  //   > 两套词表用了同一个字段名 `outcome`——判据必须说清自己在扫哪一套，
+  //   > 否则它会安静地把两套混成一套。
+  const literals = new Set()
+  for (const m of code.matchAll(/return\s+(?:Object\.freeze\()?\s*\{\s*outcome:\s*'([a-z-]+)'/g)) literals.add(m[1])
+  assert.ok(literals.size >= 4, `只扫到 ${literals.size} 个 outcome——判据可能是瞎的：${[...literals]}`)
+
+  const outside = [...literals].filter((o) => !CHECK_OUTCOMES.includes(o))
+  assert.deepEqual(outside, [],
+    `这些 outcome 不在 CHECK_OUTCOMES 词表里（按词表写的消费者会静默漏掉它们）：${outside.join(' / ')}`)
+
+  // ★ 反向把**另一套词表**也钉住：`lastCheck` 这个读数字段的值域只可能是
+  //   `'ok'`（赋值点只有一个，在成功路径上）。这一点很重要，因为面板里
+  //   `describeLastCheck` 的 `case 'failed' / 'error'` **因此没有生产者**——
+  //   把它们写成断言，免得下一个读面板的人以为那两条被覆盖了。
+  const recordOutcomes = new Set()
+  for (const m of code.matchAll(/lastCheck\s*=\s*Object\.freeze\(\{[\s\S]*?outcome:\s*'([a-z-]+)'/g)) {
+    recordOutcomes.add(m[1])
+  }
+  assert.deepEqual([...recordOutcomes], ['ok'],
+    `lastCheck 这个读数字段的值域变了（现在是 ${[...recordOutcomes].join('/')}）——`
+    + '那么面板里 `describeLastCheck` 的分支需要重新审一遍（它此前只可能是 ok）')
+
+  // ★ 而且调度器必须把它当**非失败**：检查本身成功了。
+  //   （这条断言与调度器里那两行字面量判断绑定——改那里就会红。）
+  const { createCheckScheduler } = await import('./schedule.mjs')
+  assert.equal(typeof createCheckScheduler, 'function')
+})

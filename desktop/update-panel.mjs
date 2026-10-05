@@ -72,10 +72,23 @@ export function describeLastCheck(state, { formatTime = defaultFormatTime } = {}
   switch (last.outcome) {
     case 'ok':
       return last.productVersion ? `${when}（通道版本 ${last.productVersion}）` : `${when}`
-    // ★ 这一条**不是失败**：检查本身成功了，结论是"这个候选装不上"。
-    //   归到 `failed` 里会让用户去点重试，而重试会得到同一个答案。
-    case 'source-unsupported':
-      return `${when}（这个版本不支持从当前版本升级）`
+    // ★ 这里**没有** `source-unsupported` 的分支，这是刻意的。
+    //
+    //   我第一版加过一个，还配了用例——然后发现它**不可达**：
+    //   `client.mjs` 只在**成功**的那条路径上写 `lastCheck`
+    //   （赋值点只有一个，`outcome: 'ok'`），而检查失败时不写 `lastCheck`
+    //   （那条路径写的是 `lastError`，带真实 `trigger`——所以设计 §6 line 134
+    //   的"手动失败要显示错误"是**接上了**的，它读的是 `lastError`）。
+    //
+    //   于是 `lastCheck.outcome` 只可能是 `'ok'`。那条分支与它的用例
+    //   断言的是一个**没有任何生产者**的值——正是本次会话一直在追的那一类。
+    //
+    //   > 为一个"永远不会出现的值"写分支和用例，比不写更坏：
+    //   > 它让下一个读代码的人以为那条路径被覆盖了。
+    //
+    //   （同理，下面 `failed`/`error` 两个分支在本仓也**没有生产者**。
+    //     它们是既有代码；这一轮不改它们的行为，但它们的"没人产出"与上面
+    //     那条是同一件事，已记在实施记录里。）
     case 'failed':
     case 'error':
       return `${when}（失败）`

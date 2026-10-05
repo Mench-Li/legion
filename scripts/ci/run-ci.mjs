@@ -1508,6 +1508,13 @@ async function stageTest() {
     // 交付（w/T-178，11 个域内文件）判成"越域"拦在 in_review。用例含真实 git 仓库的行为对照，
     // 并断言"切片自己真改的域外文件仍然抓得到"（修判据不许把闸门改瞎）。
     { label: 'branch-scope（BUG-008：域闸门只算分支自己的改动，三点 diff）', files: ['plugins/tests/branch-scope.test.mjs'], cwd: ROOT, nodeArgs: ['--experimental-strip-types'] },
+    // ── BUG-009：三处"配置看起来合法、行为是坏的"护栏 ──
+    //   a 建任务时拒绝"声明域全是 gitignored 路径"（T-179 因此干完 5 小时却交付不了）；
+    //   b staleMinutes 必须 > workerTimeoutMs/60000（原先只是注释，不满足会出现两个写者）；
+    //   c 进 in_review 释放写入预约（T-184 曾被一个**已交付**的任务挡在 waiting-file 40 分钟）。
+    { label: 'config-sanity（BUG-009-b：staleMinutes 与 workerTimeoutMs 的硬关系，启动时校正）', files: ['plugins/tests/config-sanity.test.mjs'], cwd: ROOT, nodeArgs: ['--experimental-strip-types'] },
+    { label: 'file-domain-guard（BUG-009-a：声明域全是 gitignored ⇒ 拒绝建任务；探测不可知则放行）', files: ['team-hub/file-domain-guard.test.mjs'], cwd: ROOT },
+    { label: 'in-review-releases-reservation（BUG-009-c：进 in_review 释放写入预约，且不放松"未确认停止"）', files: ['team-hub/in-review-releases-reservation.test.mjs'], cwd: ROOT },
     { label: 'legacy-convergence（S6 唯一集成入口/模式收敛/回滚）', files: ['plugins/tests/legacy-convergence.test.mjs'], cwd: ROOT, nodeArgs: ['--experimental-strip-types'] },
     { label: 'delivery-ui（S7 交付/调度徽标前端纯函数）', files: ['workbench/scripts/delivery-ui.test.mjs'], cwd: ROOT, nodeArgs: ['--experimental-strip-types'] },
     // `dual-write-smoke` 守「两个进程同时启动、迁移同一新库」的**行为**，

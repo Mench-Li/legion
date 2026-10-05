@@ -86,6 +86,7 @@ import { createSliceOrchestration } from './sliceOrchestration.js'
 import { decideProductionTool, type GrantedWrite } from './productionWriteGuard.js'
 import { planTimeoutSettlement, workerStoppedWithin, TIMEOUT_SETTLE_GRACE_MS } from './timeoutSettlement.js'
 import { branchOwnChangesRefspec } from './branchScope.js'
+import { resolveStaleMinutes } from './configSanity.js'
 import { parseExternalWorkerReport } from '../../runtime/adapters/dsh/external-agent.mjs'
 // PRT-108 棘轮：provider 目录读取与外部 Agent 接线一律经适配层，插件不再直接依赖执行面服务。
 // 见 runtime/adapters/dsh/subagent-client.mjs 的文件头（为什么这 5 个调用点必须下沉）。
@@ -538,6 +539,24 @@ function spaceWorker(ctx: AppContext, config: Config): void {
   // 而不是让守护带着一个它自己都不知道的预算继续跑。
   logConfigOnce(log)
 
+  // ── BUG-009-b：staleMinutes 必须 > workerTimeoutMs/60000 ──────────────────────────
+  // 这条关系原先只是字段注释、schema 没有任何强制。不满足时的症状很远：回收器在 worker
+  // **还活着**的时候把任务释放回 todo ⇒ 另一个 worker 认领 ⇒ 两个写者改同一片文件。
+  // 处置：启动时校正 + **打印一行**（静默改配置比不校正更坏），并把校正后的值贯穿两个消费者
+  // （心跳 writeDaemonStatus 与 createReclamation 的 release-stale）。
+  const staleVerdict = resolveStaleMinutes({
+    workerTimeoutMs: config.workerTimeoutMs,
+    staleMinutes: config.staleMinutes,
+  })
+  if (staleVerdict.adjusted) {
+    log(`★ 配置自洽校正（BUG-009-b）：staleMinutes ${config.staleMinutes} → ${staleVerdict.staleMinutes}`
+      + `（必须 > workerTimeoutMs/60000 = ${staleVerdict.needed - 1}；原值会让租约回收器在 worker`
+      + ` 超时之前就把它释放回 todo，于是同一个任务可能有两个写者）`)
+  }
+  const effectiveConfig: Config = staleVerdict.adjusted
+    ? { ...config, staleMinutes: staleVerdict.staleMinutes }
+    : config
+
   /** 看板动态事件流：追加结构化事件到 scrum/activity.jsonl（serve.mjs 经 SSE 推给看板）。 */
   const activityFile = join(config.scrumDir, 'activity.jsonl')
   const activity = (kind: string, taskId: string, text: string): void => {
@@ -928,7 +947,7 @@ function spaceWorker(ctx: AppContext, config: Config): void {
         isolate: config.isolate,
         intervalMs: config.intervalMs,
         workerTimeoutMs: config.workerTimeoutMs,
-        staleMinutes: config.staleMinutes,
+        staleMinutes: effectiveConfig.staleMinutes,
         taskTtlMinutes: config.taskTtlMinutes,
         scope,
         paused: readControlPaused(),
@@ -3066,7 +3085,7 @@ function spaceWorker(ctx: AppContext, config: Config): void {
   // 探测成功、applyPipeline() 换流水线来源）；`scope` / `config` / `mediating` 传值（const /
   // 身份稳定的集合，与 mediation.ts 一致）；重启标志 `boot` 由本实例持有（见该模块文件头）。
   const reclamation = createReclamation({
-    config, log, scope,
+    config: effectiveConfig, log, scope,
     useHub: () => useHub,
     isPipeline: () => isPipeline,
     hubPost, runTaskctl, activity, mediating,

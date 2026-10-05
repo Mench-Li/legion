@@ -637,6 +637,14 @@ export const SCHEMA = defineSchema({
     'AGENT_REQUEST_FAILED',
     'BAD_AGENT_SELECTION_SNAPSHOT',
     'WORKFLOW_PACK_NOT_INSTALLABLE',
+    // BUG-009-a：建任务时的**文件域可交付性**判决码（team-hub/file-domain-guard.mjs）。
+    // 形状全大写 + 下划线，所以扫描器会当成疑似 env 键 —— 它们是判决结果的名字，不是配置。
+    //   DOMAIN_ALL_IGNORED    — 声明的域**全部**被 .gitignore 忽略 ⇒ 拒绝建任务（交付不了）
+    //   DOMAIN_PARTLY_IGNORED — 只有一部分被忽略 ⇒ 放行 + 告警（临时区 + 交付区是合法写法）
+    //   DOMAIN_OK             — 全部可交付
+    //   NO_DOMAIN             — 没声明域，不参与判定
+    //   UNKNOWN               — 探不到 git（没绑定 / 非 git 仓库 / 命令出错）⇒ **不知道**，放行
+    'DOMAIN_ALL_IGNORED', 'DOMAIN_PARTLY_IGNORED', 'DOMAIN_OK', 'NO_DOMAIN', 'UNKNOWN',
   ],
   // team-hub 的 CHAT_ 前缀覆盖了插件的提示词预算变量（CHAT_CTX_*）：它们是**插件**读的配置，
   // team-hub 不读，登记为外来变量，避免误报成「拼写错误」（P3-4）。

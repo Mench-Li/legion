@@ -570,6 +570,13 @@ async function stageTest() {
         //   少了这条，`envelope.applyTrustUpdate()` 就是一个生产里调用方数为 0
         //   的函数——那种东西与不存在的函数在部署上是同一个东西。
         'scripts/update/rotation.test.mjs',
+        // ★ 「装完之后核对」的判据（设计 §10 验收表第 ①③⑨ 行的**离线可判**部分）。
+        //   设计 §10 说真机验收不能被测试替身替代；而真机验收里有一半是
+        //   "在真机上取读数、然后**离线判定**"——那一半做成一条命令，
+        //   验收记录就不再依赖"人眼比对两份目录列表"。
+        //   其中最有价值的一条是把本模块与 `extract.verifyExtractedTree()`
+        //   **对拍**：刻意分开的两处实现不能对同一份输入给出相反结论。
+        'scripts/update/verify-install.test.mjs',
         // ★ 托管 nginx 配置**生成器**的判据。仓库里原先只有"核对托管对不对"的
         //   `verify-host.mjs`，没有任何东西能把它**建对**——那份配置只存在于
         //   托管机的 `/etc/nginx/sites-available/` 上。加了这个生成器之后，

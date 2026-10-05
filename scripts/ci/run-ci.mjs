@@ -531,6 +531,12 @@ async function stageTest() {
         'desktop/scripts/shell-files.test.mjs',
         'desktop/scripts/update-payload.test.mjs',
         'scripts/update/publish.test.mjs',
+        // ★ 公钥轮换的端到端判据（设计 §5 line 128 + §10 验收表第 8 行）：
+        //   rotate 签增量 → apply 落到随包信任表 → **新钥匙签的清单能被接受**，
+        //   并有"不在表里的钥匙""重放同 sequence""新钥匙给自己背书"三条负向。
+        //   少了这条，`envelope.applyTrustUpdate()` 就是一个生产里调用方数为 0
+        //   的函数——那种东西与不存在的函数在部署上是同一个东西。
+        'scripts/update/rotation.test.mjs',
       ],
       cwd: ROOT,
     },

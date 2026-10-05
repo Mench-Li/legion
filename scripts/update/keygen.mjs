@@ -31,7 +31,9 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 
 import { keyFingerprint, generateReleaseKeyPair, signTrustUpdate, serializeEnvelope } from '../../product/update/envelope.mjs'
-import { updateTrustPath, buildTrustTable } from './trust-file.mjs'
+import {
+  applyTrustUpdateToTable, buildTrustTable, readTrustTable, updateTrustPath, writeTrustTable,
+} from './trust-file.mjs'
 
 function parseArgs(argv) {
   const args = new Map()
@@ -145,7 +147,55 @@ function commandRotate(args) {
   return 0
 }
 
-const COMMANDS = Object.freeze({ new: commandNew, trust: commandTrust, rotate: commandRotate })
+/**
+ * `apply` —— 把 `rotate` 签出来的增量应用到随包信任表上。
+ *
+ * 设计 §5 line 128 的顺序是「先通过旧信任根签名的**客户端更新**预置新公钥，
+ * 再切换发布签名」。`rotate` 只做了前半句的签名；本条命令做的是"预置"——
+ * 产出一份新的 `update-trust.json`，它随下一版客户端一起打包。
+ *
+ * ★ 没有这条命令，`rotate` 的输出就没有任何消费者，而
+ *   `envelope.applyTrustUpdate()` 会变成一个"生产里调用方数为 0"的函数。
+ */
+function commandApply(args) {
+  const trustPath = args.get('trust')
+  const updatePath = args.get('update')
+  for (const [flag, value] of [['--trust', trustPath], ['--update', updatePath]]) {
+    if (typeof value !== 'string' || value === '') return fail(`apply 需要 ${flag}`)
+  }
+  const current = readTrustTable(trustPath)
+  if (current.ok !== true) return fail(current.reason)
+
+  const applied = applyTrustUpdateToTable({
+    table: current.table,
+    updateBytes: readFileSync(updatePath),
+    nowMs: Date.now(),
+  })
+  if (applied.ok !== true) {
+    return fail(`增量没有被接受（${applied.code}）：${applied.reason}\n`
+      + `  当前信任表 sequence=${current.table.sequence}，钥匙 ${current.table.keys.map((k) => k.keyId).join(', ') || '（空）'}`)
+  }
+
+  const out = args.get('out')
+  const reading = {
+    keyIds: applied.table.keys.map((key) => key.keyId),
+    added: applied.added,
+    revoked: applied.revoked,
+    previousSequence: applied.previousSequence,
+    sequence: applied.table.sequence,
+  }
+  if (typeof out === 'string' && out !== 'true') {
+    writeTrustTable(out, applied.table)
+    process.stdout.write(`${JSON.stringify({ ...reading, out }, null, 2)}\n`)
+  } else {
+    process.stdout.write(`${JSON.stringify(applied.table, null, 2)}\n`)
+  }
+  return 0
+}
+
+const COMMANDS = Object.freeze({
+  new: commandNew, trust: commandTrust, rotate: commandRotate, apply: commandApply,
+})
 
 export function main(argv = process.argv.slice(2)) {
   const [command, ...rest] = argv

@@ -180,4 +180,69 @@ describe('账号体系（注册 / 登录 / 改口令）', () => {
     assert.equal(blob.includes('soldier-password'), false, '审计里不许出现口令')
     assert.equal(blob.includes('brand-new-password'), false)
   })
+
+  it('★ 自助注册的成员走完主线：看得到空间 → 派得出任务 → 电脑真的能认领', async () => {
+    // 这条把三件事钉在一起：注册、看板、派单。
+    //
+    // 分开测各自都能绿，而合起来才是产品的主线——**一个注册完却看不到空间
+    // 或派不出活的新用户，与一个注册失败的新用户，在他的体验里是同一件事**。
+    // 而且这两处的失败都不报错：看板会画一个空列表，派单会回一条看着挺对的回执。
+    //
+    // 另一条口径：注册**不**给系统管理员，也不给 owner，只给 `member`——
+    // 而 `member` 必须够用。如果它连派活都不行，那"开放注册"就是个假入口。
+    mod.db.prepare('INSERT INTO roster (scope, role, name, kind, avatar, sort) VALUES (?,?,?,?,?,?)')
+      .run('default', 'coder', '编码兵', 'agent', '🤖', 2)
+    mod.agentConversations.syncRoster()
+
+    const reg = await post('/api/identity/register', {
+      name: '自助注册的成员', password: 'selfserve-password-1', space: 'default', label: '验收',
+    })
+    assert.equal(reg.status, 200, reg.text.slice(0, 200))
+    const token = reg.json.accessToken
+    // 注册响应**不**带 systemRole（它只回会话与空间归属），所以"注册不给管理员"
+    // 这条要从 `/me` 读——注册响应里读不到，不代表那条性质成立或失败。
+    const me = await get('/api/identity/me', { token })
+    assert.equal(me.status, 200)
+    assert.equal(me.json.systemRole, 'none', '自助注册**不**给系统管理员：否则任何人都能注册成主人')
+
+    // ① 看得到自己加入的空间（注册时给的那个），而不是一片空。
+    const spaces = await get('/api/spaces', { token })
+    assert.equal(spaces.status, 200, spaces.text.slice(0, 160))
+    assert.ok(
+      (spaces.json.spaces ?? []).some((s) => s.id === 'default'),
+      '注册后应当看得到自己加入的空间——看不到的话"注册成功"是空的',
+    )
+
+    // ② 看得到那个空间里的 Agent。
+    const agents = await get('/api/agents?scope=default', { token })
+    assert.equal(agents.status, 200, agents.text.slice(0, 160))
+    const agentId = agents.json.agents?.[0]?.agentId
+    assert.equal(typeof agentId, 'string', '该空间应当有可对话的 Agent')
+
+    const conv = await post('/api/agent-conversations', { agentId, scope: 'default', by: 'selfserve' }, { token })
+    assert.equal(conv.status, 200, conv.text.slice(0, 160))
+
+    // ③ 派得出任务。
+    const sent = await post('/api/agent-messages', {
+      conv: conv.json.convId, scope: 'default', by: 'selfserve',
+      body: '验收：自助注册的成员派一条任务', intent: 'create_task',
+      clientRequestId: `selfserve-${Date.now()}`,
+    }, { token })
+    assert.equal(sent.status, 200, sent.text.slice(0, 200))
+    const taskId = sent.json.taskId
+    assert.equal(typeof taskId, 'string', 'create_task 应回一个新任务 id')
+
+    // ④ ★ 而且**真的可被认领**——用机器令牌走真实认领路由。
+    //    只看 `status === 'todo'` 会让"状态对了但其它闸门不对"漏过去。
+    const claimed = await post('/api/runtime/claim', { workerId: 'selfserve-probe', scope: 'default' }, { token: HUB_TOKEN })
+    assert.equal(claimed.status, 200, claimed.text.slice(0, 200))
+    assert.equal(
+      claimed.json.claimed?.taskId, taskId,
+      `自助注册的成员派的任务必须真的能被电脑认领；拿到 ${JSON.stringify(claimed.json.claimed)}，reason=${claimed.json.reason}`,
+    )
+    await post('/api/runtime/release', {
+      attemptId: claimed.json.claimed.attemptId, leaseEpoch: claimed.json.claimed.leaseEpoch,
+      workerId: 'selfserve-probe', reason: 'selfserve-release',
+    }, { token: HUB_TOKEN })
+  })
 })

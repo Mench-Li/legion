@@ -183,3 +183,45 @@ describe('设备一节（「连接与令牌」里）', () => {
     assert.match(panel, /'在线' : '离线'/)
   })
 })
+
+describe('忘记口令（账号恢复）', () => {
+  const view = read('workbench/src/components/LoginView.tsx')
+  const panel = read('workbench/src/components/AccountPanel.tsx')
+  const identity = read('workbench/src/identity.ts')
+
+  test('⑮ 登录页有「忘记口令？」入口，且**不受注册策略影响**', () => {
+    // 忘了口令与能不能注册是两件事。一个只在开放注册的 Hub 上才出现的
+    // "忘记口令"会让人觉得"这里不支持找回"。
+    assert.match(view, /忘记口令？/)
+    assert.match(view, /redeemPasswordReset/)
+    // 注册按钮有 canRegister 前提，而这个不该有。
+    const switcher = view.slice(view.indexOf('忘记口令？') - 400, view.indexOf('忘记口令？'))
+    assert.doesNotMatch(switcher.slice(-260), /canRegister &&/, '找回入口不该被注册策略挡住')
+  })
+
+  test('⑯ 重置页要重置码与新口令，并说清"所有登录都会退出"', () => {
+    assert.match(view, /重置码/)
+    assert.match(view, /新口令/)
+    // 不说的话，用户会被"登录失效"吓一跳。
+    assert.match(view, /所有\*\*登录都会退出|所有.*登录都会退出/)
+  })
+
+  test('⑰ 管理员那节能签发，并说明"签发不解停用"', () => {
+    assert.match(panel, /口令重置/)
+    assert.match(panel, /createPasswordReset/)
+    // 顺手解停用会让"停用"被一条别的路径悄悄撤销——那不是管理员按下按钮时想做的事。
+    assert.match(panel, /签发\*\*本身不改变\*\*账号的启用状态|签发.*不改变.*启用状态/)
+  })
+
+  test('⑱ 用户列表只对管理员拉（非管理员去读会 403，而那会污染这一节）', () => {
+    assert.match(panel, /if \(info\.systemRole === 'admin'\) setUsers/)
+  })
+
+  test('⑲ 重置那条路走的是免登录接口', () => {
+    const fn = /export async function redeemPasswordReset[\s\S]*?\n}/.exec(identity)?.[0] ?? ''
+    assert.ok(fn.length > 0, '找不到 redeemPasswordReset')
+    assert.match(fn, /postJson/)
+    // 不带 token：进不来的人正是要用它的人。
+    assert.doesNotMatch(fn, /token: getAccessToken\(\)/)
+  })
+})

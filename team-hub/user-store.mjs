@@ -93,7 +93,13 @@ export const IDENTITY_CODES = Object.freeze({
   SPACE_NOT_FOUND: 'IDENTITY_SPACE_NOT_FOUND',
   SPACE_REQUIRED: 'IDENTITY_SPACE_REQUIRED',
   REGISTRATION_RATE_LIMITED: 'IDENTITY_REGISTRATION_RATE_LIMITED',
+  RESET_NOT_FOUND: 'IDENTITY_RESET_NOT_FOUND',
+  RESET_CONSUMED: 'IDENTITY_RESET_CONSUMED',
+  RESET_EXPIRED: 'IDENTITY_RESET_EXPIRED',
 })
+
+/** 口令重置码的有效期。短是**故意的**：它是一条带外传递的凭据。 */
+export const RESET_TTL_MS = 30 * 60 * 1000
 
 /** 自助注册的滑动窗口与上限。见 `registrationAllowed` 里"为什么是全局"那段。 */
 export const REGISTRATION_WINDOW_MS = 60 * 60 * 1000
@@ -252,6 +258,11 @@ export function createUserStore({ db, withTx, clock = Date.now, key = '', audit 
     CREATE TABLE IF NOT EXISTS hub_registrations (
       id TEXT PRIMARY KEY, user_id TEXT, space TEXT NOT NULL, at_ms INTEGER NOT NULL);
     CREATE INDEX IF NOT EXISTS idx_hub_registrations_at ON hub_registrations(at_ms);
+    -- 一次性口令重置码。**只存哈希**，明文只在签发那一次返回（与邀请码同一口径）。
+    CREATE TABLE IF NOT EXISTS hub_password_resets (
+      id TEXT PRIMARY KEY, user_id TEXT NOT NULL, code_hash TEXT NOT NULL UNIQUE,
+      created_by TEXT NOT NULL, created_at_ms INTEGER NOT NULL, expires_at_ms INTEGER NOT NULL,
+      consumed_at_ms INTEGER);
   `)
 
   const record = (action, scope, detail, actor) => {
@@ -365,6 +376,105 @@ export function createUserStore({ db, withTx, clock = Date.now, key = '', audit 
       record('identity:invite-accept', fresh.space, { userId, role: fresh.role }, userId)
       return { userId, name: clean, space: fresh.space, role: fresh.role }
     })
+  }
+
+  // ── 口令重置（忘记口令 / 账号恢复）──────────────────────────────────────
+  //
+  // ## 为什么必须有它
+  //
+  // 在此之前，全仓**只有**自助改口令（要记得原口令）与 `rebootstrap.sh`
+  // （清整库）。也就是说：忘了口令 = 账号报废 + 整库重来。
+  //
+  //   > 一个"忘了口令就只能把库推倒重来"的账号体系，
+  //   > 与一个"还没有账号体系"的系统，在用户丢掉口令那天是同一个东西——
+  //   > 只不过前者会连别人的数据一起推倒。
+  //
+  // 自托管的 Hub 没有邮件通道，所以恢复走**带外**：管理员生成一次性码，
+  // 亲口/当面/别的渠道给用户。这与邀请码是同一套形状（一次性、短时、只存哈希），
+  // 不引第二条传递通道。
+
+  /** 生成一枚重置码。**明文只在这里返回一次**。只有系统管理员能签发。 */
+  function createPasswordReset({ by, userId, ttlMs = RESET_TTL_MS, random = randomBytes }) {
+    const admin = requireSystemAdmin(by)
+    // ★ 用 `userRow` 而不是 `requireUser`：**允许给已停用的账号签发**。
+    //
+    //   `requireUser` 会以「账号已停用」拒掉，于是"停用"变成一条单向路——
+    //   管理员想让人回来时，连重置码都开不出来。
+    //   签发是管理员的显式动作，而它本身**不改变停用状态**（见下）。
+    const target = userRow(userId)
+    if (target === null) fail(IDENTITY_CODES.USER_NOT_FOUND, '用户不存在', 404)
+    const code = Buffer.from(random(24)).toString('base64url')
+    const at = now()
+    return withTx(() => {
+      const resetId = id('reset')
+      db.prepare('INSERT INTO hub_password_resets VALUES(?,?,?,?,?,?,NULL)')
+        .run(resetId, target.id, hashSecret(code), admin.id, at, at + ttlMs)
+      record('identity:password-reset-issue', 'global', { resetId, userId: target.id }, admin.id)
+      return { code, userId: target.id, userName: target.name, expiresAtMs: at + ttlMs }
+    })
+  }
+
+  /**
+   * 用重置码改口令。**消费这条码、改哈希、撤销该用户全部会话**，同一个事务。
+   *
+   * 为什么撤销**全部**会话（与自助改口令"保留当前"相反）：这条路上的前提是
+   * "原凭据可能已经不可信"——用户进不来，我们无从判断此刻哪些会话是他本人的。
+   * 宁可让他重新登一次，也不要留下一个可能是别人的会话。
+   *
+   * 返回会话（而不是"改好了请去登录"）：与注册同一条理由——他刚设完口令，
+   * 再让他打一遍是最容易放弃的一步，而在手机上尤其如此。
+   */
+  async function redeemPasswordReset({ name, code, newPassword, label = '' }) {
+    const clean = validateName(name)
+    validatePassword(newPassword)
+    if (typeof code !== 'string' || code.trim().length === 0) {
+      fail(IDENTITY_CODES.INVALID_INPUT, '重置码必填')
+    }
+    const row = db.prepare('SELECT * FROM hub_password_resets WHERE code_hash=?').get(hashSecret(code.trim()))
+    // 「码不对」与「码不是你的」分开报会泄露"这个码存在"。
+    if (!row) fail(IDENTITY_CODES.RESET_NOT_FOUND, '重置码无效', 404)
+    if (row.consumed_at_ms !== null) fail(IDENTITY_CODES.RESET_CONSUMED, '重置码已被使用', 409)
+    if (row.expires_at_ms <= now()) fail(IDENTITY_CODES.RESET_EXPIRED, '重置码已过期，请让管理员重新生成', 410)
+    const user = userRow(row.user_id)
+    // 用户名对不上就当作"码无效"：**不**说"这个码属于别人"。
+    if (user === null || nameKey(clean) !== user.name_key) fail(IDENTITY_CODES.RESET_NOT_FOUND, '重置码无效', 404)
+
+    const hash = await hashPassword(newPassword)
+    const at = now()
+    const done = withTx(() => {
+      // 事务内重新判定：两个并发请求可能都通过了上面那次检查。
+      const fresh = db.prepare('SELECT * FROM hub_password_resets WHERE id=?').get(row.id)
+      if (!fresh || fresh.consumed_at_ms !== null) fail(IDENTITY_CODES.RESET_CONSUMED, '重置码已被使用', 409)
+      // ★ **不**顺手 `disabled_at_ms=NULL`。
+      //
+      //   顺手解停会让"停用"被一条别的路径悄悄撤销——而管理员停用一个人
+      //   （多半是因为某种封禁）之后，一个重置动作就把他放回来了，
+      //   这不是他按下"生成重置码"时想做的事。
+      //
+      //   > 一个"改口令顺带解停用"的动作，与一个"改口令"的动作，
+      //   > 在管理员按下按钮那一刻看起来一模一样。
+      db.prepare('UPDATE hub_users SET password_hash=? WHERE id=?').run(hash, user.id)
+      db.prepare('UPDATE hub_user_sessions SET revoked_at_ms=? WHERE user_id=? AND revoked_at_ms IS NULL').run(at, user.id)
+      const used = db.prepare('UPDATE hub_password_resets SET consumed_at_ms=? WHERE id=? AND consumed_at_ms IS NULL').run(at, row.id)
+      if (Number(used.changes) !== 1) fail(IDENTITY_CODES.RESET_CONSUMED, '重置码已被使用', 409)
+      clearFailures(user.name_key)
+      record('identity:password-reset-redeem', 'global', { resetId: row.id }, user.id)
+      return { userId: user.id, name: user.name }
+    })
+    const session = issueSession(done.userId, { label })
+    return { ...session, ...done }
+  }
+
+  function listPasswordResets({ by, userId = null }) {
+    requireSystemAdmin(by)
+    const rows = userId === null
+      ? db.prepare('SELECT id,user_id,created_by,created_at_ms,expires_at_ms,consumed_at_ms FROM hub_password_resets ORDER BY created_at_ms DESC LIMIT 50').all()
+      : db.prepare('SELECT id,user_id,created_by,created_at_ms,expires_at_ms,consumed_at_ms FROM hub_password_resets WHERE user_id=? ORDER BY created_at_ms DESC LIMIT 50').all(userId)
+    // **不返回** code_hash：那是一枚凭据的哈希，界面不需要它。
+    return rows.map((r) => ({
+      resetId: r.id, userId: r.user_id, createdAt: iso(r.created_at_ms),
+      expiresAt: iso(r.expires_at_ms), consumed: r.consumed_at_ms !== null,
+    }))
   }
 
   /** 邀请码与刷新凭据都只存哈希：库被读走不等于能直接用。 */
@@ -889,6 +999,7 @@ export function createUserStore({ db, withTx, clock = Date.now, key = '', audit 
     isBootstrapped, bootstrapOwner,
     createInvite, acceptInvite,
     register, changePassword,
+    createPasswordReset, redeemPasswordReset, listPasswordResets,
     // 诊断与用例用：闸门当前读数（不写、不需要就能读）。
     registrationGate: () => registrationAllowed(),
     login, refresh, upgradePassword,

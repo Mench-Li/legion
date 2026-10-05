@@ -322,6 +322,56 @@ export async function createInvite(space: string, role: string): Promise<string>
   return r.code ?? ''
 }
 
+/**
+ * 口令重置。**只有系统管理员能签发**——它是一条能接管账号的凭据。
+ *
+ * ## 为什么必须有它
+ *
+ * 在此之前，全仓只有自助改口令（要记得原口令）。忘了口令 = 账号报废。
+ * 自托管的 Hub 没有邮件通道，所以恢复走**带外**：管理员生成一次性码，
+ * 自己想办法给到用户。
+ *
+ *   > 一个"忘了口令就只能把库推倒重来"的账号体系，
+ *   > 与一个"还没有账号体系"的系统，在用户丢掉口令那天是同一个东西。
+ */
+export async function createPasswordReset(userId: string): Promise<{ code: string; userName: string; expiresAtMs: number }> {
+  const r = await postJson<{ code?: string; userName?: string; expiresAtMs?: number }>(
+    '/api/identity/password/reset-code', { userId }, { token: getAccessToken() },
+  )
+  return { code: r.code ?? '', userName: r.userName ?? '', expiresAtMs: r.expiresAtMs ?? 0 }
+}
+
+/**
+ * 用管理员给的**一次性重置码**设新口令。免登录。
+ *
+ * 返回一个会话：与注册同一条理由——他刚设完口令，再让他打一遍是最容易放弃的
+ * 一步，而在手机上尤其如此。
+ */
+export async function redeemPasswordReset(input: { name: string; code: string; newPassword: string }): Promise<Session & MeInfo> {
+  const r = await postJson<{ accessToken: string; refreshToken: string; userId: string; name: string; roles?: MeInfo['roles']; systemRole?: MeInfo['systemRole'] }>(
+    '/api/identity/password/reset',
+    { ...input, label: browserLabel() },
+  )
+  rememberName(r.name)
+  return {
+    accessToken: r.accessToken, refreshToken: r.refreshToken,
+    userId: r.userId, name: r.name,
+    roles: r.roles ?? [], systemRole: r.systemRole ?? 'none',
+  }
+}
+
+export interface UserRow {
+  userId: string
+  name: string
+  systemRole: string
+  disabled: boolean
+}
+
+export async function listUsers(): Promise<UserRow[]> {
+  const r = await getJson<{ users?: UserRow[] }>('/api/identity/users', { token: getAccessToken() })
+  return r.users ?? []
+}
+
 // ── 设备（执行节点）────────────────────────────────────────────────────────
 //
 // ## 为什么这一节必须存在，而不只是"顺手加个列表"

@@ -16,6 +16,15 @@ import { SCHEMA } from './config-schema.mjs'
 const tmpRoot = mkdtempSync(join(tmpdir(), 'legion-register-'))
 const HUB_TOKEN = 'hub-machine-token-for-tests'
 const IDENTITY_KEY = 'identity-signing-key-for-tests-0123456789'
+
+/**
+ * 管理员**当前**的口令。放模块作用域，因为下面的用例分组会各自用它。
+ *
+ * 这个文件里的用例顺序跑；中间若有哪一步把管理员口令改掉，后面还写死初始口令的
+ * 分组就会以一个 401 失败——而报出来像"权限不够"，真正的原因只是
+ * "口令在前面被改过了"。做成一个共享值，这条耦合就是**显式**的。
+ */
+const ADMIN = { name: 'owner', password: 'owner-password' }
 let mod
 let base = ''
 
@@ -248,5 +257,67 @@ describe('账号体系（注册 / 登录 / 改口令）', () => {
       attemptId: claimed.json.claimed.attemptId, leaseEpoch: claimed.json.claimed.leaseEpoch,
       workerId: 'selfserve-probe', reason: 'selfserve-release',
     }, { token: HUB_TOKEN })
+  })
+})
+
+describe('口令重置（忘记口令 / 账号恢复）', () => {
+  const st = {}
+
+  it('管理员给某人签发重置码', async () => {
+    const reg = await post('/api/identity/register', { name: '忘了口令的人', password: 'forgotten-password', space: 'default' })
+    assert.equal(reg.status, 200, reg.text.slice(0, 160))
+    st.userId = reg.json.userId
+
+    const login = await post('/api/identity/login', { name: ADMIN.name, password: ADMIN.password })
+    assert.equal(login.status, 200, `管理员登录失败：${login.text.slice(0, 200)}`)
+    st.adminToken = login.json.accessToken
+
+    const issued = await post('/api/identity/password/reset-code', { userId: st.userId }, { token: st.adminToken })
+    assert.equal(issued.status, 200, issued.text.slice(0, 200))
+    st.code = issued.json.code
+    assert.equal(typeof st.code, 'string')
+    assert.ok(st.code.length > 20)
+  })
+
+  it('★ 用它的那条路**免登录**——进不来的人正是要用它的人', async () => {
+    const r = await post('/api/identity/password/reset', {
+      name: '忘了口令的人', code: st.code, newPassword: 'brand-new-password',
+    })
+    assert.equal(r.status, 200, r.text.slice(0, 200))
+    assert.equal(typeof r.json.accessToken, 'string', '直接给会话，不是"改好了请去登录"')
+    // 新口令能登、旧口令不能。
+    assert.equal((await post('/api/identity/login', { name: '忘了口令的人', password: 'brand-new-password' })).status, 200)
+    assert.equal((await post('/api/identity/login', { name: '忘了口令的人', password: 'forgotten-password' })).status, 401)
+  })
+
+  it('一次性：同一个码再来一次是 409', async () => {
+    const again = await post('/api/identity/password/reset', {
+      name: '忘了口令的人', code: st.code, newPassword: 'third-new-password',
+    })
+    assert.equal(again.status, 409, again.text.slice(0, 160))
+    assert.equal(again.json.code, 'IDENTITY_RESET_CONSUMED')
+  })
+
+  it('普通用户签不出来（它是一条能接管账号的凭据）', async () => {
+    const plain = await post('/api/identity/login', { name: '忘了口令的人', password: 'brand-new-password' })
+    const r = await post('/api/identity/password/reset-code', { userId: st.userId }, { token: plain.json.accessToken })
+    assert.equal(r.status, 403)
+    assert.equal(r.json.code, 'IDENTITY_FORBIDDEN')
+  })
+
+  it('码不对 / 用户名不对 → 都是 404「重置码无效」', async () => {
+    // 分开报等于告诉对方"这个码存在，只是不是你的"。
+    const bad = await post('/api/identity/password/reset', { name: '忘了口令的人', code: 'not-a-real-code', newPassword: 'whatever-password' })
+    assert.equal(bad.status, 404)
+    assert.equal(bad.json.code, 'IDENTITY_RESET_NOT_FOUND')
+  })
+
+  it('读重置记录要管理员，且列表里不含码', async () => {
+    const ok = await get('/api/identity/password/resets', { token: st.adminToken })
+    assert.equal(ok.status, 200)
+    assert.ok(Array.isArray(ok.json.resets))
+    assert.equal(JSON.stringify(ok.json).includes(st.code), false, '列表里不许出现明文码')
+    const anon = await get('/api/identity/password/resets')
+    assert.equal(anon.status, 401)
   })
 })

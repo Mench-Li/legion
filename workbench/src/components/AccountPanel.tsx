@@ -3,14 +3,16 @@ import {
   changePassword,
   clearSession,
   createInvite,
+  createPasswordReset,
   fetchMe,
+  listUsers,
   hasSession,
   IdentityRequestError,
   listSessions,
   logout,
   revokeSession,
 } from '../identity'
-import type { MeInfo, SessionRow } from '../identity'
+import type { MeInfo, SessionRow, UserRow } from '../identity'
 import { toast } from './Toast'
 
 /**
@@ -36,6 +38,8 @@ export function AccountPanel(): React.JSX.Element | null {
   const [next, setNext] = useState('')
   const [busy, setBusy] = useState(false)
   const [invite, setInvite] = useState('')
+  const [users, setUsers] = useState<UserRow[] | null>(null)
+  const [reset, setReset] = useState<{ code: string; userName: string; expiresAtMs: number } | null>(null)
   const [loaded, setLoaded] = useState(false)
 
   const active = hasSession()
@@ -46,6 +50,9 @@ export function AccountPanel(): React.JSX.Element | null {
       const [info, s] = await Promise.all([fetchMe(), listSessions()])
       setMe(info)
       setSessions({ rows: s.sessions.filter(r => r.revoked !== true), currentId: s.currentSessionId })
+      // 用户列表只对系统管理员有意义，也只有他们读得到——非管理员去读会 403，
+      // 而那会污染这一节的错误提示（"我的会话"是好的，只是用户列表读不到）。
+      if (info.systemRole === 'admin') setUsers(await listUsers().catch(() => null))
     } catch (e) {
       // 一次读失败不该把这一节整个抹掉——那会让人以为"我的账号没了"。
       // 说清楚读不到，并留着上一次的读数。
@@ -84,6 +91,15 @@ export function AccountPanel(): React.JSX.Element | null {
       const space = me?.roles[0]?.space ?? 'default'
       setInvite(await createInvite(space, 'member'))
       toast('ok', `邀请码已生成，只能用一次；对方在注册页填它即可加入「${space}」。`)
+    } catch (e) { toast('err', e instanceof IdentityRequestError ? e.message : String(e)) } finally { setBusy(false) }
+  }
+
+  async function issueReset(userId: string): Promise<void> {
+    setBusy(true)
+    try {
+      setReset(await createPasswordReset(userId))
+      setInvite('')
+      toast('ok', '重置码已生成，只能用一次。把它给到那个人。')
     } catch (e) { toast('err', e instanceof IdentityRequestError ? e.message : String(e)) } finally { setBusy(false) }
   }
 
@@ -147,6 +163,47 @@ export function AccountPanel(): React.JSX.Element | null {
                 : <button className="btn" disabled={busy} onClick={() => void revoke(s.sessionId)}>退出这台</button>}
             </div>
           ))}
+        </section>
+      )}
+
+      {me?.systemRole === 'admin' && (
+        <section className="panel settings-card">
+          <h2>口令重置</h2>
+          <p className="settings-runtime-status">
+            有人忘了口令时，在这里签发一枚**一次性**重置码，把它给到那个人
+            （Hub 没有邮件通道，怎么给他由你决定）。他用它自己设新口令，
+            改完**他名下所有登录都会退出**。
+          </p>
+          <p className="settings-runtime-status">
+            码只有 30 分钟有效，且只能用一次；签发**本身不改变**账号的启用状态——
+            要恢复一个被停用的账号，请单独把它启用。
+          </p>
+          {/* 停用的账号也列出来：给停用的人签发重置码是合法动作
+              （正是"想让他回来"时要做的那一步），而**签发本身不解停用**。 */}
+          {(users ?? []).map(u => (
+            <div key={u.userId} className="settings-session-row">
+              <div>
+                <strong>{u.name}</strong>
+                <p className="settings-runtime-status">
+                  {u.systemRole === 'admin' ? '系统管理员' : '普通成员'}{u.disabled ? '　已停用' : ''}
+                </p>
+              </div>
+              <div className="settings-row-actions">
+                <button className="btn" disabled={busy} onClick={() => void issueReset(u.userId)}>生成重置码</button>
+              </div>
+            </div>
+          ))}
+          {(users ?? []).length === 0 && <p className="settings-runtime-status">读不到用户列表。</p>}
+          {reset !== null && (
+            <>
+              <label>{reset.userName} 的重置码（只显示这一次）
+                <input readOnly value={reset.code} onFocus={e => e.target.select()} />
+              </label>
+              <p className="settings-runtime-status">
+                有效至 {new Date(reset.expiresAtMs).toLocaleTimeString()}，只能用一次。
+              </p>
+            </>
+          )}
         </section>
       )}
 

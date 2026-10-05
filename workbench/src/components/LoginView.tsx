@@ -4,6 +4,7 @@ import {
   lastName,
   login,
   probeIdentity,
+  redeemPasswordReset,
   register,
   rememberName,
   saveSession,
@@ -39,10 +40,11 @@ interface LoginViewProps {
 
 export function LoginView({ status, onSignedIn }: LoginViewProps): React.JSX.Element {
   const canRegister = status.registration === 'open' || status.registration === 'invite'
-  const [mode, setMode] = useState<'login' | 'register'>('login')
+  const [mode, setMode] = useState<'login' | 'register' | 'reset'>('login')
   const [name, setName] = useState(lastName())
   const [password, setPassword] = useState('')
   const [code, setCode] = useState('')
+  const [newPassword, setNewPassword] = useState('')
   const [space, setSpace] = useState('default')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
@@ -56,13 +58,17 @@ export function LoginView({ status, onSignedIn }: LoginViewProps): React.JSX.Ele
   async function submit(): Promise<void> {
     setError('')
     setNotice('')
-    if (name.trim().length === 0 || password.length === 0) {
-      setError('请填写用户名与口令')
-      return
-    }
+    if (name.trim().length === 0) { setError('请填写用户名'); return }
+    if (mode === 'reset') {
+      if (code.trim().length === 0 || newPassword.length === 0) { setError('请填写重置码与新口令'); return }
+    } else if (password.length === 0) { setError('请填写口令'); return }
     setBusy(true)
     try {
-      const session = mode === 'register'
+      const session = mode === 'reset'
+        // 忘记口令：拿管理员给的一次性码换新口令。这条路**免登录**——
+        // 进不来的人正是要用它的人。
+        ? await redeemPasswordReset({ name: name.trim(), code: code.trim(), newPassword })
+        : mode === 'register'
         // 空间留空时**不传**这个字段，让服务端解析——见上面输入框那段注释。
         // 传一个硬编码的 'default' 会在一个不叫 default 的 Hub 上必然失败，
         // 而失败信息只有"空间不存在"。
@@ -108,16 +114,33 @@ export function LoginView({ status, onSignedIn }: LoginViewProps): React.JSX.Ele
                 onKeyDown={e => { if (e.key === 'Enter') void submit() }}
               />
             </label>
-            <label className="login-field">
-              <span>口令</span>
-              <input
-                type="password"
-                value={password}
-                autoComplete={mode === 'register' ? 'new-password' : 'current-password'}
-                onChange={e => setPassword(e.target.value)}
-                onKeyDown={e => { if (e.key === 'Enter') void submit() }}
-              />
-            </label>
+            {mode === 'reset' ? (
+              <>
+                <label className="login-field">
+                  <span>重置码</span>
+                  <input value={code} autoCapitalize="off" onChange={e => setCode(e.target.value)} />
+                </label>
+                <label className="login-field">
+                  <span>新口令</span>
+                  <input type="password" autoComplete="new-password" value={newPassword}
+                    onChange={e => setNewPassword(e.target.value)} />
+                </label>
+                {/* 把"会发生什么"说出来：改完所有登录都退出，包括他现在这台——
+                    不说的话，他会被"登录失效"吓一跳。 */}
+                <p className="login-hint">至少 8 个字符。设好之后你名下**所有**登录都会退出，包括这台。</p>
+              </>
+            ) : (
+              <label className="login-field">
+                <span>口令</span>
+                <input
+                  type="password"
+                  value={password}
+                  autoComplete={mode === 'register' ? 'new-password' : 'current-password'}
+                  onChange={e => setPassword(e.target.value)}
+                  onKeyDown={e => { if (e.key === 'Enter') void submit() }}
+                />
+              </label>
+            )}
 
             {mode === 'register' && (
               <>
@@ -142,10 +165,10 @@ export function LoginView({ status, onSignedIn }: LoginViewProps): React.JSX.Ele
             )}
 
             <button className="login-submit" disabled={busy} onClick={() => void submit()}>
-              {busy ? '处理中…' : mode === 'register' ? '注册并登录' : '登录'}
+              {busy ? '处理中…' : mode === 'register' ? '注册并登录' : mode === 'reset' ? '设新口令并登录' : '登录'}
             </button>
 
-            {canRegister && (
+            {canRegister && mode !== 'reset' && (
               <button
                 className="login-switch"
                 onClick={() => { setMode(mode === 'register' ? 'login' : 'register'); setError('') }}
@@ -153,6 +176,15 @@ export function LoginView({ status, onSignedIn }: LoginViewProps): React.JSX.Ele
                 {mode === 'register' ? '已有账号，去登录' : '注册新账号'}
               </button>
             )}
+            {/* 入口**一直在**（不受注册策略影响）：忘了口令与能不能注册是两件事，
+                而一个只在开放注册的 Hub 上才出现的"忘记口令"会让人觉得
+                "这里不支持找回"。 */}
+            <button
+              className="login-switch"
+              onClick={() => { setMode(mode === 'reset' ? 'login' : 'reset'); setError(''); setCode(''); setNewPassword('') }}
+            >
+              {mode === 'reset' ? '返回登录' : '忘记口令？'}
+            </button>
           </>
         )}
 

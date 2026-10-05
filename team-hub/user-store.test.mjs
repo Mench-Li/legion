@@ -656,3 +656,136 @@ test('注册被拒时不留半条记账（否则闸门会自己把自己关掉�
   assert.equal(Number(db.prepare('SELECT COUNT(*) AS n FROM hub_registrations').get().n), mid,
     '失败的注册不许记账——否则连续失败会把闸门自己关掉')
 })
+
+// ── 口令重置（忘记口令 / 账号恢复） ─────────────────────────────────────────
+//
+// 在这之前，全仓**只有**自助改口令（要记得原口令）与 `rebootstrap.sh`（清整库）。
+// 也就是说：忘了口令 = 账号报废 + 整库重来。
+
+test('管理员签发重置码；用户用它改口令并直接拿到会话', async () => {
+  const { store, owner } = await bootstrapped()
+  await store.register({ name: '忘了口令的人', password: 'forgotten-password', registration: 'open' })
+  const target = store.listUsers().find((u) => u.name === '忘了口令的人')
+
+  const issued = store.createPasswordReset({ by: owner.userId, userId: target.userId })
+  assert.equal(typeof issued.code, 'string')
+  assert.ok(issued.code.length > 20)
+  assert.equal(issued.userName, '忘了口令的人')
+
+  const r = await store.redeemPasswordReset({ name: '忘了口令的人', code: issued.code, newPassword: 'brand-new-password' })
+  assert.equal(r.userId, target.userId)
+  // 与注册同一条理由：刚设完口令再让他打一遍，是最容易放弃的一步。
+  assert.equal(store.verifyAccessToken(r.accessToken).ok, true)
+  // 新口令能登，旧口令不能。
+  assert.equal((await store.login({ name: '忘了口令的人', password: 'brand-new-password' })).userId, target.userId)
+  assert.equal(await codeOf(() => store.login({ name: '忘了口令的人', password: 'forgotten-password' })),
+    IDENTITY_CODES.INVALID_CREDENTIALS)
+})
+
+test('重置码一次性：用过就废', async () => {
+  const { store, owner } = await bootstrapped()
+  await store.register({ name: '甲', password: 'good-password', registration: 'open' })
+  const target = store.listUsers().find((u) => u.name === '甲')
+  const { code } = store.createPasswordReset({ by: owner.userId, userId: target.userId })
+  await store.redeemPasswordReset({ name: '甲', code, newPassword: 'first-new-password' })
+  assert.equal(await codeOf(() => store.redeemPasswordReset({ name: '甲', code, newPassword: 'second-new-password' })),
+    IDENTITY_CODES.RESET_CONSUMED)
+  // 第二次没生效：口令还是第一次设的那个。
+  assert.equal((await store.login({ name: '甲', password: 'first-new-password' })).userId, target.userId)
+})
+
+test('重置码会过期', async () => {
+  const clock = { now: 1_700_000_000_000 }
+  const { store, owner } = await bootstrapped({ clock })
+  await store.register({ name: '乙', password: 'good-password', registration: 'open' })
+  const target = store.listUsers().find((u) => u.name === '乙')
+  const { code } = store.createPasswordReset({ by: owner.userId, userId: target.userId })
+  clock.now += 30 * 60 * 1000 + 1000
+  assert.equal(await codeOf(() => store.redeemPasswordReset({ name: '乙', code, newPassword: 'brand-new-password' })),
+    IDENTITY_CODES.RESET_EXPIRED)
+})
+
+test('★ 只有系统管理员能签发（它是一条能接管账号的凭据）', async () => {
+  const { store, owner } = await bootstrapped()
+  await store.register({ name: '普通人', password: 'good-password', registration: 'open' })
+  const plain = store.listUsers().find((u) => u.name === '普通人')
+  assert.equal(await codeOf(() => store.createPasswordReset({ by: plain.userId, userId: plain.userId })),
+    IDENTITY_CODES.FORBIDDEN)
+  // 也读不到别人的重置记录。
+  assert.equal(await codeOf(() => store.listPasswordResets({ by: plain.userId })), IDENTITY_CODES.FORBIDDEN)
+  assert.ok(store.listPasswordResets({ by: owner.userId }).length === 0)
+})
+
+test('用户名对不上 → 一律"重置码无效"（不说"这个码是别人的"）', async () => {
+  const { store, owner } = await bootstrapped()
+  await store.register({ name: '丙', password: 'good-password', registration: 'open' })
+  await store.register({ name: '丁', password: 'good-password', registration: 'open' })
+  const bing = store.listUsers().find((u) => u.name === '丙')
+  const { code } = store.createPasswordReset({ by: owner.userId, userId: bing.userId })
+  // 拿丙的码去改丁的口令：报的必须是"码无效"，而不是"这个码不属于你"——
+  // 后者等于告诉对方"这个码存在，只是不是你的"。
+  assert.equal(await codeOf(() => store.redeemPasswordReset({ name: '丁', code, newPassword: 'brand-new-password' })),
+    IDENTITY_CODES.RESET_NOT_FOUND)
+})
+
+test('★ 重置后**所有**会话失效（与自助改口令"保留当前"相反）', async () => {
+  // 这条路上的前提是"原凭据可能已经不可信"——用户进不来，我们无从判断此刻
+  // 哪些会话是他本人的。宁可让他重新登一次。
+  const { store, owner } = await bootstrapped()
+  await store.register({ name: '戊', password: 'good-password', registration: 'open' })
+  const target = store.listUsers().find((u) => u.name === '戊')
+  const thief = await store.login({ name: '戊', password: 'good-password', label: '别人的设备' })
+  assert.equal(store.verifyAccessToken(thief.accessToken).ok, true)
+
+  const { code } = store.createPasswordReset({ by: owner.userId, userId: target.userId })
+  const r = await store.redeemPasswordReset({ name: '戊', code, newPassword: 'brand-new-password' })
+  assert.equal(store.verifyAccessToken(thief.accessToken).ok, false, '别人的会话必须当场失效')
+  assert.equal(store.verifyAccessToken(thief.accessToken).code, IDENTITY_CODES.SESSION_REVOKED)
+  // 而新会话是好的。
+  assert.equal(store.verifyAccessToken(r.accessToken).ok, true)
+})
+
+test('停用与重置各管各的：重置**不**顺手解停用', async () => {
+  // 顺手解停会让"停用"被一条别的路径悄悄撤销——而管理员停用一个人
+  // （多半是某种封禁）之后，一个重置动作就把他放回来了，那不是他按下
+  // "生成重置码"时想做的事。
+  const { store, owner } = await bootstrapped()
+  await store.register({ name: '己', password: 'good-password', registration: 'open' })
+  const target = store.listUsers().find((u) => u.name === '己')
+  await store.setUserDisabled({ by: owner.userId, userId: target.userId, disabled: true })
+
+  // 但**签发**要能签：否则"停用"成了一条单向路，管理员想让人回来时连码都开不出来。
+  const { code } = store.createPasswordReset({ by: owner.userId, userId: target.userId })
+  await store.redeemPasswordReset({ name: '己', code, newPassword: 'brand-new-password' })
+  // 口令确实改了，但账号**仍然停用**。
+  assert.equal(await codeOf(() => store.login({ name: '己', password: 'brand-new-password' })),
+    IDENTITY_CODES.INVALID_CREDENTIALS, '停用的账号登不进来')
+
+  // 管理员显式恢复之后才进得来。
+  await store.setUserDisabled({ by: owner.userId, userId: target.userId, disabled: false })
+  assert.equal((await store.login({ name: '己', password: 'brand-new-password' })).userId, target.userId)
+})
+
+test('重置也清掉登录失败锁定（否则"救回来了但登不进"）', async () => {
+  const { store, owner } = await bootstrapped()
+  await store.register({ name: '庚', password: 'good-password', registration: 'open' })
+  const target = store.listUsers().find((u) => u.name === '庚')
+  for (let i = 0; i < 12; i += 1) await codeOf(() => store.login({ name: '庚', password: 'wrong-password' }))
+  assert.equal(await codeOf(() => store.login({ name: '庚', password: 'good-password' })), IDENTITY_CODES.ACCOUNT_LOCKED)
+  const { code } = store.createPasswordReset({ by: owner.userId, userId: target.userId })
+  await store.redeemPasswordReset({ name: '庚', code, newPassword: 'brand-new-password' })
+  assert.equal((await store.login({ name: '庚', password: 'brand-new-password' })).userId, target.userId)
+})
+
+test('列表不含 code_hash（那是凭据的哈希，界面不需要它）', async () => {
+  const { store, owner } = await bootstrapped()
+  await store.register({ name: '辛', password: 'good-password', registration: 'open' })
+  const target = store.listUsers().find((u) => u.name === '辛')
+  const { code } = store.createPasswordReset({ by: owner.userId, userId: target.userId })
+  const rows = store.listPasswordResets({ by: owner.userId })
+  assert.equal(rows.length, 1)
+  assert.equal(rows[0].consumed, false)
+  const blob = JSON.stringify(rows)
+  assert.equal(blob.includes(code), false, '列表里不许出现明文码')
+  assert.equal(blob.includes(store._internals.hashSecret(code)), false, '也不许出现它的哈希')
+})

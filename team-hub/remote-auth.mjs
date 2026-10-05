@@ -50,6 +50,9 @@ export const PUBLIC_PATHS = Object.freeze(new Set([
   //   为了让"关掉的注册"返回 403 而不是 401，而把它从公开名单里拿掉——
   //   那时用户看到的是"缺少访问令牌"，他会去查登录、而问题在注册策略上。
   '/api/identity/register',
+  // 用重置码改口令：**进不来的人正是要用它的人**，与接受邀请同一个道理。
+  // 重置码本身就是凭据（一次性、短时、只有管理员能签发）。
+  '/api/identity/password/reset',
   // 首次初始化：库为空时的唯一入口；非空库时它自己会拒（见 user-store 的
   // `ALREADY_BOOTSTRAPPED`）。它额外要求 Hub 管理令牌，所以不构成公开注册口。
   '/api/identity/bootstrap',

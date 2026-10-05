@@ -213,6 +213,37 @@ export function createIdentityRoutes({
     },
 
     // ── 用户与邀请（管理） ──────────────────────────────────────────────────
+    // ── 口令重置（忘记口令 / 账号恢复）──────────────────────────────────────
+    {
+      method: 'POST',
+      path: '/api/identity/password/reset-code',
+      async run(req, res, { url }) {
+        // 签发只给系统管理员：这是一条**能接管账号**的凭据，不是自助动作。
+        await withUser(req, res, url, async (me) => {
+          const body = await readBody(req)
+          return userStore.createPasswordReset({ by: me.userId, userId: requireString(body, 'userId') })
+        })
+      },
+    },
+    {
+      method: 'GET',
+      path: '/api/identity/password/resets',
+      async run(req, res, { url }) {
+        await withUser(req, res, url, (me) => ({
+          resets: userStore.listPasswordResets({ by: me.userId, userId: url?.searchParams?.get('userId') ?? null }),
+        }))
+      },
+    },
+    {
+      method: 'POST',
+      path: '/api/identity/password/reset',
+      async run(req, res) {
+        // 免登录：进不来的人正是要用它的人（与接受邀请同一个道理）。
+        await withoutUser(req, res, (body) => userStore.redeemPasswordReset({
+          name: body?.name, code: body?.code, newPassword: body?.newPassword, label: body?.label ?? '',
+        }))
+      },
+    },
     {
       method: 'GET',
       path: '/api/identity/users',

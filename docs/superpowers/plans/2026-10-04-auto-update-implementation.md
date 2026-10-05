@@ -96,7 +96,7 @@
 
 写下来是因为它们的形状比"改对了"更值得留下来。
 
-一共四十条。①～⑩ 是各层实现里的具体错误（错读一个头、前缀不一致、跨不过
+一共四十一条。①～⑩ 是各层实现里的具体错误（错读一个头、前缀不一致、跨不过
 进程边界、手写清单漏了文件……）；**⑪～㉓ 属于同一类**，它们不是"某个函数
 写错了"，而是**判据/承诺与它的输入之间那条线从来没有接上**——⑪～⑱ 与
 ⑲～㉓ 都是这一类，区别只在于**被谁发现**：⑪～⑯ 是全链路用例与接线层用例
@@ -887,7 +887,7 @@ internal + http + 显式允许  → ok
 
 **㊲ 桌面那一半的门禁展示从来没有被 CI 跑过——而我一直在声称它通过了。**
 
-CI 里有一条判据会报"哪些 `*.test.mjs` 不会被任何套件执行"（上一次完整跑报 33 个）。
+CI 里有一条判据会报"哪些 `*.test.mjs` 不会被任何套件执行"（当时那一次完整跑报 33 个；现在是 **28** 个，见下）。
 我把那一整张名单逐条对过，确认**我新加的文件一个都不在里面**——然后就停在那里了。
 
 ★ 停在那里是错的。我把那份名单里**我一直在跑的**文件挑出来看了一眼：
@@ -922,11 +922,48 @@ product/launcher/desktop-protocol.test.mjs  ← 在名单里
 修法：把它登记进 `product-update` 套件（16 条、0.9 秒、不需要 DSH 检出/网络，
 所以登记是安全的）。套件从 424 条变成 **440** 条。
 
-★ 另外三个（`platform-filter` / `desktop-bridge` / `desktop-protocol`）**没有**登记：
-它们与自动更新无关（`desktop-protocol.test.mjs` 里 `update`/`升级` 关键字出现 **0** 次），
-把它们塞进 `product-update` 会是**为了减少那个计数**而登记——而那正是那条判据
-（"套件清单不完备"）最不该被对付的方式。它们该归的套件（一个通用的 `desktop` 套件）
-**目前不存在**，这是本仓前存的覆盖缺口，已如实记在 §6.1。
+★ 原文在这里写的是：
+
+> 「另外三个（`platform-filter` / `desktop-bridge` / `desktop-protocol`）**没有**登记：
+> 它们与自动更新无关（`desktop-protocol.test.mjs` 里 `update`/`升级` 关键字出现
+> **0** 次）……把它们塞进 `product-update` 会是**为了减少那个计数**而登记——
+> 而那正是那条判据（"套件清单不完备"）最不该被对付的方式。」
+
+**这段话的顾虑是对的，而它的结论是错的**（见 §5 的 ㊷）——错在**判据**：
+
+| | 原文用的判据 | 正确的判据 |
+|---|---|---|
+| 问的是 | **文件名/关键字里有没有 `update`** | **更新链路会不会走到它** |
+| 这次的结果 | 三个全判"无关" | 三个里**三个都有关** |
+
+> 一条按**名字**下的结论，与一条按**调用链**下的结论，
+> 在"它到底属不属于这件事"上不是同一个东西。
+
+逐条核过调用链之后：
+
+| 文件 | 真实的关联 |
+|---|---|
+| `product/launcher/desktop-bridge.test.mjs` | `desktop/main.mjs:14` 装载 bridge → 交给 `update-wiring.mjs:620` 的 `readLauncherPorts()` → **健康探针规格的端口项** |
+| `product/launcher/desktop-protocol.test.mjs` | 上面那座桥说的是这个协议（`desktop-bridge.mjs:9` import 它）——桥读不出来就是"探针不知道该探哪" |
+| `desktop/scripts/platform-filter.test.mjs` | x64 打包剔除 ARM64 二进制，代码原话是"让**签名的发行清单**准确描述 x64 安装器真正能交付的东西"——与更新客户端校验**闭包**依赖同一条性质 |
+| `desktop/scripts/prepare-payload.test.mjs` | 载荷里的 dsh 家族必须**逐层钉死**版本——直接顶着设计 §5 的 `dshPatchBindings`（客户端预检要拿装上之后的 `dshVersion` 比对） |
+
+四个文件都实测是绿的（3 + 14 条），登记它们**只减不减**红。
+
+★★ 关于那句"为了减少计数而登记"的顾虑——**它是必须保留的**，因为它是这条判据
+唯一的敌人。区别在于：
+
+> "为了让那个数字变小而登记"与"因为链路真的走到它而登记"，
+> 在动作上完全一样，区别全在**能不能指出一条可证伪的理由**。
+
+所以我把理由**写进了 `run-ci.mjs` 的注释里、并且写的是调用链的具体位置**
+（`main.mjs:14` → `update-wiring.mjs:620` → `healthProbeSpec.ports`）——
+下一个读它的人可以顺着那几行去验证我有没有说谎。另外两个
+（`platform-filter` / `prepare-payload`）我**没有**塞进 `product-update`，
+而是单开了一个具名的套件（`desktop-payload-packaging`）：那个套件的名字本身
+就说明它守什么，读者不会在一个"协议与状态机"的套件里突然看见打包脚本。
+
+未登记数：**33 → 32**（㊲）→ **30**（打包那两个）→ **28**（桥那两个）。
 
 **㊳ 一张"如实记下的缺口"清单，在同一个会话里**自己**变成了不实。**
 §6.1 里有一条写着：
@@ -1101,7 +1138,61 @@ if (args.get('files') === true) { ... }   // ← 永远为假
 ★ 顺带全仓扫了一遍 `args.get(...) === true`：production 代码里**没有**第二处
 （只剩用例注释里提到那个反例写法）。
 
-### 5.2 ⑲～㊶ 是怎么找到的：**逐条对照设计**
+**㊷ 我用"关键字计数"判"这个文件属不属于本目标"——四个文件里判错了四个。**
+
+CI 有一条判据报"哪些 `*.test.mjs` 不会被任何套件执行"。㊲ 之后我在 §6.1 里写下：
+
+> | `desktop/scripts/platform-filter.test.mjs` | 无关（打包平台的过滤） |
+> | `product/launcher/desktop-bridge.test.mjs` | 无关（里面提到 `update` 的 3 处都是 `credentialUpdatedAt`） |
+> | `product/launcher/desktop-protocol.test.mjs` | **无关**（`update`/`升级` 关键字出现 **0** 次） |
+
+**四条判定全是错的。** 而错的不是结论的胆量，是**判据**：
+
+| | 我用的判据 | 应该用的判据 |
+|---|---|---|
+| 问的是 | **文件名/关键字里有没有 `update`** | **更新链路会不会走到它** |
+
+逐行核调用链之后：
+
+```
+desktop/main.mjs:14      按路径装载 product/launcher/desktop-bridge.mjs
+        │                        │
+        │                        └─ desktop-bridge.mjs:9 import desktop-protocol.mjs
+        ▼
+   update-wiring.mjs:620  const resolvedPorts = ports ?? await readLauncherPorts({ bridge })
+        │
+        ▼
+   健康探针规格的端口项（healthProbeSpec.ports）
+```
+
+而另外两个顶着的是**同一性质的另外两个端点**：
+`platform-filter` 让"签名清单描述的东西 = x64 安装器交付的东西"（与客户端校验
+**闭包**依赖同一条性质）；`prepare-payload` 把载荷里的 dsh 家族**逐层钉死**版本
+（顶着设计 §5 的 `dshPatchBindings`——客户端预检要拿装上之后的 `dshVersion` 比对）。
+载荷若漂了版本，**绑定形同虚设**。
+
+> 一条按**名字**下的结论，与一条按**调用链**下的结论，
+> 在"它到底属不属于这件事"上不是同一个东西。
+
+★★ 而这一条里有一句我**必须留着**的话。原文的顾虑是：
+
+> 把它们塞进 `product-update` 会是**为了减少那个计数**而登记——
+> 而那正是那条判据最不该被对付的方式。
+
+**这个顾虑是对的。** 而"为了让数字变小而登记"与"因为链路真的走到它而登记"，
+在**动作**上完全一样——区别全在于**能不能指出一条可证伪的理由**。所以：
+
+1. 理由写进了 `run-ci.mjs` 的注释，写的是**具体行号**
+   （`main.mjs:14` → `update-wiring.mjs:620` → `healthProbeSpec.ports`），
+   下一个读它的人可以顺着去验证我有没有说谎；
+2. 其中两个我**没有**塞进 `product-update`，而是单开具名套件
+   `desktop-payload-packaging`——读者不会在一个叫"协议与状态机"的套件里
+   突然看见打包脚本。
+
+未登记数：**33 → 32**（㊲）→ **30** → **28**（本条）。四次下降用的是**三个不同的判据**，
+而其中两次是"把上一个判据换掉"换来的——这一点比数字本身重要。
+
+### 5.2 ⑲～㊷ 是怎么找到的：**逐条对照设计**
 ⑪～⑱ 是被用例逼出来的（写用例 → 发现生产缺东西）。⑲～㉗ 不全是——它们是**拿着
 设计文档一行一行核对实现**找出来的。两种方法各有盲区：
 
@@ -1113,9 +1204,9 @@ if (args.get('files') === true) { ... }   // ← 永远为假
 ⑲ 与 ⑳ 落在第一张表的右边：**没有任何用例会去测一个谁都没实现的要求**。
 所以下一步的验证方式也必须是"对照文档"，而不只是"再写点用例"。
 
-## 5.0 一个反复出现的模式（二十五个缺陷同源）
+## 5.0 一个反复出现的模式（二十六个缺陷同源）
 
-⑪ 到 ㊶ 里的二十六个是同一个模式：**一个判据（或一个承诺）需要一个读数，
+⑪ 到 ㊷ 里的二十七个是同一个模式：**一个判据（或一个承诺）需要一个读数，
 而那个读数在真实链路上不存在。**（⑧ 的 `{teamHubPort}` 未展开是它的变体。）
 
 | # | 判据 / 承诺 | 缺的读数 | 症状 | 方向 |
@@ -1322,25 +1413,42 @@ node scripts/update/verify-host.mjs --origin <生产 origin> --prefix /legion \
   （号更小）被客户端拒——**不会**产生"半个通道"，因为通道清单是**单对象替换**。
   所以缺的是"两次发布互相踩"的效率问题，不是数据完整性问题。
 - **本仓没有通用的 `desktop` 套件，于是 `desktop/` 下有几个用例文件没人跑**
-  （前存缺口，不是本次引入的）。CI 里那条"套件清单不完备"的判据会报它们，
-  上一次完整跑报 **33** 个；本次 ㊲ 把其中**属于本目标**的那个登记进了
-  `product-update`（`desktop/main.test.mjs`），剩 **32** 个。
+  （前存缺口，不是本次引入的）。CI 里那条"套件清单不完备"的判据会报它们。
+  这条缺口的读数一路在降，而**每一次降都是因为换了一个更对的判据**：
 
-  剩下的 32 个里，与 `desktop/`、`product/launcher/` 相邻的是这三个：
+  | 时点 | 未登记数 | 判据是什么 |
+  |---|---|---|
+  | 上一次完整跑 | **33** | —— |
+  | ㊲ | 32 | "我新加的登记了吗" → 发现 `desktop/main.test.mjs` 在名单里 |
+  | §5 ㊷（打包那两个） | 30 | "**链路会不会走到它**"（不是"名字里有没有 update"） |
+  | §5 ㊷（桥那两个） | **28** | 同上 |
 
-  | 文件 | 与自动更新有关吗 |
+  ★ 原文在这里写的是「剩下的 32 个里，与 `desktop/`、`product/launcher/` 相邻的是
+  这三个」并逐条判为"无关"——**那三条判定全是错的**（见 §5 的 ㊷）。原文用的
+  判据是**关键字计数**：
+
+  > 「`product/launcher/desktop-protocol.test.mjs`：**无关**（`update`/`升级`
+  > 关键字出现 **0** 次）」
+
+  一个文件的关键字出现 0 次，与"更新链路不会走到它"，是两件事：
+
+  | 文件 | 真实的关联（逐行核过） |
   |---|---|
-  | `desktop/scripts/platform-filter.test.mjs` | 无关（打包平台的过滤） |
-  | `product/launcher/desktop-bridge.test.mjs` | 无关（里面提到 `update` 的 3 处都是 `credentialUpdatedAt`） |
-  | `product/launcher/desktop-protocol.test.mjs` | **无关**（`update`/`升级` 关键字出现 **0** 次） |
+  | `product/launcher/desktop-bridge.test.mjs` | `desktop/main.mjs:14` 装载 bridge → `update-wiring.mjs:620` 的 `readLauncherPorts()` → **健康探针规格的端口项** |
+  | `product/launcher/desktop-protocol.test.mjs` | 那座桥说的就是这个协议（`desktop-bridge.mjs:9` import）——桥读不出来就是"探针不知道该探哪" |
+  | `desktop/scripts/platform-filter.test.mjs` | x64 打包剔除 ARM64 二进制，让**签名清单**准确描述安装器真正交付的东西——与客户端校验**闭包**依赖同一条性质 |
+  | `desktop/scripts/prepare-payload.test.mjs` | 载荷里的 dsh 家族必须**逐层钉死**版本——顶着设计 §5 的 `dshPatchBindings` |
 
-  ★ 它们**没有**被登记进 `product-update`，这是刻意的：
+  四者都已登记（前者进 `product-update`，后两者进新建的
+  `desktop-payload-packaging` 套件），且都实测是绿的。
+
+  ★ 而原文那句顾虑必须留着，因为它是这条判据唯一的敌人：
 
   > 为了减少那个计数而登记，正是那条判据最不该被对付的方式。
 
-  而它们该归的套件（一个通用的 `desktop` 套件）**不存在**。所以这一条不是
-  "我漏了"，而是"本仓缺一个归属"——记在这里是为了下一次有人看到那张 32 个的
-  名单时，能直接分辨"哪些是没人管的、哪些只是没配 DSH_CHECKOUT"。
+  区别全在于**能不能指出一条可证伪的理由**。所以我写的是调用链的**具体行号**
+  （`main.mjs:14` → `update-wiring.mjs:620` → `healthProbeSpec.ports`），
+  下一个读它的人可以顺着去验证我有没有说谎。
 - **`releaseId` 被复用没有专门的读数**。设计 §5 line 78：「`releaseId` 唯一且
   不可覆盖；同版本不同字节也必须使用不同 `releaseId`，并**禁止客户端把它当成
   常规同版本更新**」。客户端持久化的只有**通道 sequence** 高水位
@@ -1483,7 +1591,7 @@ node scripts/update/verify-host.mjs --origin <生产 origin> --prefix /legion \
 # ★ 下面这份清单与 CI 的 `product-update` 套件**不是**同一份，两者都要跑：
 #   这里多跑了 `launcher.test.mjs` / `desktop-bridge.test.mjs` 等接线层，
 #   而 CI 那份多跑了 `errors` / `integration` / `envelope` 等（见 §7.1）。
-#   两个数字应当各自对得上——`product-update` 是 **462**。
+#   两个数字应当各自对得上——`product-update` 是 **476**。
 #
 # ★ 清单里必须包含 `product/launcher/cli-recovery.test.mjs`：它是恢复入口
 #   （设计 §8 line 190）的 9 条用例。**先前这一行漏了它**，于是按本文档
@@ -1497,7 +1605,7 @@ node --test product/update/*.test.mjs product/upgrade/*.test.mjs \
   product/launcher/cli-recovery.test.mjs \
   desktop/scripts/shell-files.test.mjs desktop/scripts/update-payload.test.mjs
 
-# CI 的 `product-update` 套件那一份（**462 条**）。两份都与上面同一棵树上跑过。
+# CI 的 `product-update` 套件那一份（**476 条**）。两份都与上面同一棵树上跑过。
 #
 # ★ 与 §7.1 里那次全量 CI 的读数（406）不同，差的是三次之后才加的东西：
 #   `modules.test.mjs` 的"selfCheckAll() 必须覆盖每一个有自检的模块"、
@@ -1678,7 +1786,7 @@ git worktree remove <tmp> --force
 已修）。剩下的 ~30 个仍然只有"与我自己上一次跑相比没变"这一层**弱证据**——
 它们大多需要真机进程/真 DSH 检出/真浏览器，本机单独跑也未必复现。
 
-★ 而"套件清单不完备"那一条（未登记用例）现在是 **32 个**：本分支**新增的 24 个
+★ 而"套件清单不完备"那一条（未登记用例）现在是 **28 个**：本分支**新增的 24 个
 用例文件全部已登记**（逐个核过），而 `desktop/main.test.mjs` 是本次**登记掉**的
 那一个（33 → 32）。
 
@@ -1699,8 +1807,8 @@ git worktree remove <tmp> --force
 它们全部是**真进程／真 DSH 检出／真浏览器**那一类，在本机同时跑几十个真进程时
 超时被杀（`test` 阶段 4 261 秒里有相当一部分是 300 秒超时）。
 
-★ 另有一条**与门禁清单有关**的读数：`套件清单不完备：33 个 *.test.mjs 不会被
-任何套件执行`。那 33 个里**没有一个是本分支新增的**——本轮新加的
+★ 另有一条**与门禁清单有关**的读数：`套件清单不完备：28 个 *.test.mjs 不会被
+任何套件执行`。那 28 个里**没有一个是本分支新增的**——本轮新加的
 `product/update/feed.test.mjs`、`product/update/errors.test.mjs`、
 `product/update/integration.test.mjs`、`desktop/update-wiring.test.mjs`、
 `scripts/update/rotation.test.mjs` 逐个查过，全部已登记。

@@ -7710,10 +7710,13 @@ if (REMOTE_AGENT_ENABLED) {
     json, readBody, authorized, requireString,
     userStore, deviceStore, remoteAuthEnabled: REMOTE_AUTH_ENABLED,
     gateway: nodeGateway,
+    // 注册策略从**配置**来，不从请求体来。见 `/api/identity/register` 的注释。
+    registration: CFG.values.registration ?? 'closed',
   }))
   router.list.push(
     { family: 'identity', method: 'GET', path: '/api/identity/status' },
     { family: 'identity', method: 'POST', path: '/api/identity/login' },
+    { family: 'identity', method: 'POST', path: '/api/identity/register' },
     { family: 'identity', method: 'POST', path: '/api/devices/pair' },
   )
 

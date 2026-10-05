@@ -30,6 +30,7 @@ function errorResponse(store, e) {
 export function createIdentityRoutes({
   json, readBody, authorized, requireString,
   userStore, deviceStore, remoteAuthEnabled = false, gateway = undefined,
+  registration = 'closed',
 }) {
   for (const [name, fn] of Object.entries({ json, readBody, authorized, requireString })) {
     if (typeof fn !== 'function') throw new TypeError(`createIdentityRoutes 缺注入项：${name}`)
@@ -94,6 +95,10 @@ export function createIdentityRoutes({
           bootstrapped: userStore.isBootstrapped(),
           remoteAuthRequired: remoteAuthEnabled === true,
           protocolVersion: 1,
+          // 注册策略**公开**：登录页要靠它决定显不显示"注册"。
+          // 一个不公开的开关会让前端只能猜，而猜错的两种方向都坏：
+          // 猜"能注册"给用户一个必然 403 的按钮；猜"不能"则永远没有注册入口。
+          registration,
         })
       },
     },
@@ -131,6 +136,24 @@ export function createIdentityRoutes({
       path: '/api/identity/invites/accept',
       async run(req, res) { await withoutUser(req, res, (body) => userStore.acceptInvite(body)) },
     },
+    {
+      method: 'POST',
+      path: '/api/identity/register',
+      async run(req, res) {
+        // ★ 策略从**注入的配置**来，不从请求体来。
+        //   一个"由调用方声明这次注册适用哪条策略"的接口，等于没有策略——
+        //   攻击者只要在请求里写 `registration: 'open'`。
+        //   所以这里覆盖掉 body 里可能带的同名字段。
+        await withoutUser(req, res, (body) => userStore.register({
+          name: body?.name,
+          password: body?.password,
+          space: body?.space,
+          code: body?.code,
+          label: body?.label ?? '',
+          registration,
+        }))
+      },
+    },
 
     // ── 自己的身份与会话 ────────────────────────────────────────────────────
     {
@@ -149,6 +172,25 @@ export function createIdentityRoutes({
       path: '/api/identity/sessions',
       async run(req, res, { url }) {
         await withUser(req, res, url, (me) => ({ sessions: userStore.listSessions(me.userId), currentSessionId: me.sessionId }))
+      },
+    },
+    {
+      method: 'POST',
+      path: '/api/identity/password',
+      async run(req, res, { url }) {
+        // 只改**自己**的口令：要改别人的得走管理员那条（本节暂不提供，
+        // 因为"管理员重置用户口令"需要一个只在带外可见的一次性口令通道，
+        // 那是另一件事，不该顺手加一个接口）。
+        await withUser(req, res, url, async (me) => {
+          const body = await readBody(req)
+          return userStore.changePassword({
+            userId: me.userId,
+            currentPassword: requireString(body, 'currentPassword'),
+            newPassword: requireString(body, 'newPassword'),
+            // 保留当前会话，理由见 `changePassword` 的注释。
+            exceptSessionId: me.sessionId,
+          })
+        })
       },
     },
     {

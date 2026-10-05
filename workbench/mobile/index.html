@@ -55,23 +55,41 @@ main { flex:1; overflow-y:auto; -webkit-overflow-scrolling:touch; padding: 12px 
 .msg[data-source="agent"] .body { border-left:3px solid var(--line); }
 .tag { font-size:11px; padding:1px 7px; border-radius:999px; border:1px solid var(--line); color:var(--muted); }
 .tag.progress{color:var(--accent);border-color:var(--accent)} .tag.command{color:var(--warn);border-color:var(--warn)}
+.tag.create_task{color:var(--ok);border-color:var(--ok)}
 .taskref { color: var(--accent); text-decoration:none; }
 .groups { display:flex; flex-direction:column; gap:8px; }
-.group h2 { font-size:13px; color:var(--muted); margin:0 0 6px; font-weight:600; }
-.task { background:var(--panel); border:1px solid var(--line); border-radius:12px; padding:10px 12px; margin-bottom:8px; }
-.task .t { font-weight:600; }
+.group h2 { font-size:13px; color:var(--muted); margin:0 0 6px; font-weight:600;
+  display:flex; align-items:baseline; gap:6px; }
+.group h2 .n { color:var(--fg); }
+.task { background:var(--panel); border:1px solid var(--line); border-radius:12px;
+  padding:10px 12px; margin-bottom:8px; }
+.task .t { font-weight:600; overflow-wrap:anywhere; }
 .task .s { font-size:12px; color:var(--muted); margin-top:2px; }
-footer { padding: 10px 14px calc(var(--safe-bottom) + 10px); background: var(--panel); border-top:1px solid var(--line); }
+.task .m { font-size:12px; color:var(--muted); margin-top:2px; }
+.task .acts { display:flex; gap:8px; margin-top:8px; }
+.task .acts button { min-height:34px; padding:4px 10px; font-size:13px; }
+footer { padding: 8px 14px calc(var(--safe-bottom) + 10px); background: var(--panel); border-top:1px solid var(--line); }
 footer .row { display:flex; gap:8px; align-items:flex-end; }
 footer textarea { resize:none; max-height:120px; }
 #screen-login { padding: 24px 18px; display:flex; flex-direction:column; gap:12px; }
 #screen-login h2 { margin:0; font-size:20px; }
 .hint { font-size:13px; color:var(--muted); }
 .error-box { background:#3a1a1a; border:1px solid #7f2b2b; color:#ffd7d7; padding:10px 12px; border-radius:10px; font-size:14px; }
+.notice-box { background:#3a331a; border:1px solid #7f6a2b; color:#ffeec2; padding:10px 12px; border-radius:10px; font-size:14px; }
 .hidden { display:none !important; }
 #tabs { display:flex; gap:6px; margin-top:8px; }
-#tabs button { flex:1; min-height:38px; padding:6px 8px; font-size:14px; }
+#tabs button { flex:1; min-height:38px; padding:6px 8px; font-size:14px; position:relative; }
 #tabs button[aria-selected="true"] { background:var(--accent); border-color:var(--accent); color:#0b1020; font-weight:600; }
+#tabs button .badge { position:absolute; top:-6px; right:-4px; background:var(--warn); color:#3a2a00;
+  border-radius:999px; font-size:11px; font-weight:700; padding:0 6px; line-height:16px; min-width:16px; }
+/* 意图选择：三个 chip，选中的那个要一眼看出来——它决定"这句话会不会变成任务"。 */
+#intents { display:flex; gap:6px; margin-bottom:8px; }
+#intents button { flex:1; min-height:34px; padding:4px 6px; font-size:13px; border-radius:999px; }
+#intents button[aria-pressed="true"] { background:var(--accent); border-color:var(--accent); color:#0b1020; font-weight:600; }
+#intent-hint { font-size:12px; color:var(--muted); margin-bottom:6px; }
+#target-row { display:flex; gap:8px; margin-bottom:8px; }
+#target-row select { flex:1; min-height:38px; }
+.viewtitle { font-size:13px; color:var(--muted); margin:0 0 8px; }
 </style>
 </head>
 <body>
@@ -83,37 +101,48 @@ footer textarea { resize:none; max-height:120px; }
   </div>
   <div id="status"><span class="dot muted"></span><span class="label">连接中…</span><span class="detail"></span></div>
   <div id="tabs" role="tablist">
-    <button id="tab-chat" role="tab" aria-selected="true">对话</button>
-    <button id="tab-tasks" role="tab" aria-selected="false">任务</button>
+    <button id="tab-board" role="tab" aria-selected="true">看板</button>
+    <button id="tab-chat" role="tab" aria-selected="false">对话</button>
   </div>
 </header>
 
 <section id="screen-login">
-  <h2>登录 Legion Hub</h2>
-  <div class="hint">用你在指挥台上建好的账号登录。Hub 地址默认取当前站点。</div>
+  <h2 id="auth-title">登录 Legion</h2>
+  <div class="hint" id="auth-hint">用你的 Legion 账号登录。Hub 地址默认取当前站点。</div>
   <label>用户名<input id="login-name" autocomplete="username" autocapitalize="off" /></label>
   <label>口令<input id="login-password" type="password" autocomplete="current-password" /></label>
-  <div class="hint" id="bootstrap-hint" hidden>这台 Hub 还没有初始化：请在服务器上用 <code>bootstrap-hub.sh</code> 之外的方式建第一个账号，或点下面的初始化（需要 Hub 管理令牌）。</div>
+  <label id="register-invite-row" class="hidden">邀请码<input id="register-invite" autocapitalize="off" /></label>
+  <div class="hint hidden" id="password-hint">口令至少 8 个字符。</div>
   <button class="primary" id="btn-login">登录</button>
+  <button id="btn-register" class="hidden">注册新账号</button>
+  <div class="hint" id="auth-switch"></div>
+  <div class="hint" id="bootstrap-hint" hidden>这台 Hub 还没有初始化：请在服务器上建第一个管理员账号。</div>
   <div id="login-error" class="error-box hidden"></div>
+  <div id="login-notice" class="notice-box hidden"></div>
 </section>
 
 <main id="main" class="hidden">
-  <div id="view-chat">
+  <div id="view-board">
+    <p class="viewtitle" id="board-scope"></p>
+    <div id="task-groups" class="groups"></div>
+  </div>
+  <div id="view-chat" class="hidden">
     <div id="agent-picker" class="hint">选择 Agent：</div>
     <div id="timeline"></div>
-  </div>
-  <div id="view-tasks" class="hidden">
-    <div id="task-groups" class="groups"></div>
   </div>
 </main>
 
 <footer id="composer" class="hidden">
+  <div id="intents" role="group" aria-label="消息意图"></div>
+  <div id="intent-hint"></div>
+  <div id="target-row">
+    <select id="agent-select" aria-label="目标 Agent"></select>
+    <select id="task-select" class="hidden" aria-label="目标任务"></select>
+  </div>
   <div class="row">
     <textarea id="composer-input" rows="1" placeholder="给 Agent 发消息…"></textarea>
     <button class="primary" id="btn-send">发送</button>
   </div>
-  <div class="hint" id="composer-hint">消息会以「提问」语义发出；需要改任务请用指挥台。</div>
 </footer>
 
 <script type="module" src="./app.mjs"></script>

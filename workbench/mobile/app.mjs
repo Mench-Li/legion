@@ -17,12 +17,28 @@
 // SSE 用 `Last-Event-ID` 由浏览器自动续传，另有 `sinceSeq` 兜底。
 // 事件帧只是**通知**，真正的内容永远回 Hub 读一遍——这样"通知丢了"不会变成
 // "界面上缺了一条"，最多是"晚一会儿才看到"。
+//
+// ## 两个视图：看板与对话
+//
+// 看板回答"**这个空间里有什么事**"，对话回答"**这个 Agent 在做什么**"。
+// 只给对话的手机端有一个很安静的坏处：用户看得见 Agent 说了什么，
+// 却看不见任务卡在哪——而"我要下个任务"的前提恰恰是前者。
 // ============================================================================
 import {
-  TIMELINE_CODES,
+  DEFAULT_INTENT,
+  INTENT_OPTIONS,
+  attentionCount,
+  boardColumns,
+  intentOf,
+  isWaitingForNode,
+  mergeAttempts,
+  planSend,
+  taskLine,
+  taskMeta,
+} from './board.mjs'
+import {
   deriveConnectionState,
   mergeTimeline,
-  pendingTasks,
   timelineEntry,
 } from './timeline.mjs'
 
@@ -46,11 +62,18 @@ const state = {
   scope: localStorage.getItem(LS_SCOPE) ?? null,
   convId: null,
   timeline: [],
+  /** 空间看板的任务（`/api/board`），与当前 Agent 的 Attempt 合并后渲染。 */
   tasks: [],
   cursor: null,
   conn: deriveConnectionState({ hubReachable: false }),
   sse: null,
-  view: 'chat',
+  view: 'board',
+  intent: DEFAULT_INTENT,
+  /** 「追加要求」针对的任务 id；由看板卡片按钮或下拉框选择。 */
+  targetTaskId: null,
+  /** 能力发现的结果。决定登录页显示"登录"还是"注册+登录"。 */
+  identity: { bootstrapped: null, registration: 'closed' },
+  authMode: 'login',
 }
 
 // ── HTTP ────────────────────────────────────────────────────────────────────
@@ -107,7 +130,7 @@ function clearSession() {
   localStorage.removeItem(LS_REFRESH)
 }
 
-// ── 渲染 ────────────────────────────────────────────────────────────────────
+// ── 渲染：状态条 ────────────────────────────────────────────────────────────
 
 function setConnection(input) {
   state.conn = deriveConnectionState(input)
@@ -117,8 +140,38 @@ function setConnection(input) {
   el.querySelector('.detail').textContent = state.conn.detail
 }
 
+// ── 渲染：对话 ──────────────────────────────────────────────────────────────
+
+/**
+ * 一条消息的作者与来源标签。
+ *
+ * 语义标签（`semanticType`）**直接显示**对意图最要紧的那一个：`create_task`
+ * 的消息是"我在这里下过一个任务"的凭据。把它画成一个普通的气泡，
+ * 用户就分不出"我说了一句话"与"我派了一个活"——而这两件事的后果完全不同。
+ */
+function timelineMetaFor(entry) {
+  const who = entry.source === 'user' ? '我' : (entry.author || '系统')
+  const tagText = entry.kind === 'create_task' ? '派任务'
+    : entry.source === 'user' ? '我说'
+      : entry.source === 'progress' ? '进展'
+        : entry.source === 'command' ? '系统' : '回复'
+  const tagClass = entry.kind === 'create_task' ? 'create_task'
+    : entry.source === 'progress' ? 'progress'
+      : entry.source === 'command' ? 'command' : ''
+  return { who, tagText, tagClass }
+}
+
 function renderTimeline() {
   const root = $('timeline')
+  if (state.timeline.length === 0) {
+    const p = document.createElement('div')
+    p.className = 'hint'
+    p.textContent = state.agents.length === 0
+      ? '这个空间下还没有 Agent。'
+      : '还没有消息。用下面输入框给这个 Agent 派一个任务试试。'
+    root.replaceChildren(p)
+    return
+  }
   const frag = document.createDocumentFragment()
   for (const e of state.timeline) {
     const wrap = document.createElement('div')
@@ -128,19 +181,20 @@ function renderTimeline() {
     wrap.dataset.source = e.source
     const meta = document.createElement('div')
     meta.className = 'meta'
+    const { who, tagText, tagClass } = timelineMetaFor(e)
     const author = document.createElement('span')
-    author.textContent = e.source === 'user' ? '我' : (e.author || '系统')
+    author.textContent = who
     meta.appendChild(author)
     const tag = document.createElement('span')
-    tag.className = `tag ${e.source === 'progress' ? 'progress' : e.source === 'command' ? 'command' : ''}`
-    tag.textContent = e.source === 'user' ? '我说' : e.source === 'progress' ? '进展' : e.source === 'command' ? '系统' : '回复'
+    tag.className = `tag ${tagClass}`
+    tag.textContent = tagText
     meta.appendChild(tag)
     if (e.openableTask) {
       const a = document.createElement('a')
       a.className = 'taskref'
       a.href = `#task-${encodeURIComponent(e.taskId)}`
       a.textContent = e.taskId
-      a.addEventListener('click', (ev) => { ev.preventDefault(); showView('tasks') })
+      a.addEventListener('click', (ev) => { ev.preventDefault(); void openTask(e.taskId) })
       meta.appendChild(a)
     }
     wrap.appendChild(meta)
@@ -154,7 +208,7 @@ function renderTimeline() {
       for (const o of e.options) {
         const b = document.createElement('button')
         b.textContent = o
-        b.addEventListener('click', () => send(o))
+        b.addEventListener('click', () => void send(o, 'answer_question'))
         opts.appendChild(b)
       }
       wrap.appendChild(opts)
@@ -162,71 +216,42 @@ function renderTimeline() {
     frag.appendChild(wrap)
   }
   root.replaceChildren(frag)
-  if (state.timeline.length === 0) {
-    const p = document.createElement('div')
-    p.className = 'hint'
-    p.textContent = '还没有消息。'
-    root.replaceChildren(p)
-  }
   $('main').scrollTop = $('main').scrollHeight
 }
 
-function renderAgents() {
-  const picker = $('agent-picker')
-  picker.replaceChildren()
-  if (state.agents.length === 0) {
-    picker.textContent = '这个空间下还没有 Agent。'
-    return
-  }
-  const sel = document.createElement('select')
-  for (const a of state.agents) {
-    const o = document.createElement('option')
-    o.value = a.agentId
-    o.textContent = `${a.name}（${a.role}）`
-    if (a.agentId === state.agentId) o.selected = true
-    sel.appendChild(o)
-  }
-  sel.addEventListener('change', async () => {
-    state.agentId = sel.value
-    localStorage.setItem(LS_AGENT, state.agentId)
-    state.timeline = []
-    state.cursor = null
-    await openConversation()
-  })
-  picker.appendChild(sel)
-}
+// ── 渲染：看板 ──────────────────────────────────────────────────────────────
 
-function renderTasks() {
+function renderBoard() {
   const root = $('task-groups')
-  const g = pendingTasks(state.tasks)
-  const sections = [
-    ['需要你处理', g.awaiting, 'warn'],
-    ['执行中', g.running, 'busy'],
-    ['排队等待', g.queued, 'muted'],
-  ]
+  const { columns, unknown } = boardColumns(state.tasks)
   const frag = document.createDocumentFragment()
   let any = false
-  for (const [title, list, tone] of sections) {
-    if (list.length === 0) continue
+  for (const col of columns) {
+    if (col.count === 0) continue
     any = true
     const box = document.createElement('div')
     box.className = 'group'
     const h = document.createElement('h2')
-    h.textContent = `${title}（${list.length}）`
+    h.textContent = col.title
+    const n = document.createElement('span')
+    n.className = 'n'
+    n.textContent = String(col.count)
+    h.appendChild(n)
     box.appendChild(h)
-    for (const t of list) {
-      const card = document.createElement('div')
-      card.className = 'task'
-      const name = document.createElement('div')
-      name.className = 't'
-      name.textContent = `${t.id} ${t.title ?? ''}`
-      card.appendChild(name)
-      const s = document.createElement('div')
-      s.className = 's'
-      // 展示"任务状态 + 本轮 Attempt 状态"两件事，并明确它们不是同一件事。
-      s.textContent = `任务：${t.status ?? '—'}　本轮：${t.attempt?.state ?? '尚无执行记录'}`
-      if (tone === 'muted' && (t.attempt?.state ?? null) === null) s.textContent += '（等电脑领取）'
-      card.appendChild(s)
+    for (const t of col.tasks) box.appendChild(taskCard(t))
+    frag.appendChild(box)
+  }
+  if (unknown.length > 0) {
+    any = true
+    const box = document.createElement('div')
+    box.className = 'group'
+    const h = document.createElement('h2')
+    // 不认识的状态照实说。悄悄丢掉的后果是"状态机加了状态、手机上少了任务"。
+    h.textContent = '未识别的状态'
+    box.appendChild(h)
+    for (const t of unknown) {
+      const card = taskCard(t)
+      card.querySelector('.s').textContent = `库里的状态：${t.status}`
       box.appendChild(card)
     }
     frag.appendChild(box)
@@ -234,20 +259,151 @@ function renderTasks() {
   if (!any) {
     const p = document.createElement('div')
     p.className = 'hint'
-    p.textContent = '没有待办任务。'
+    p.textContent = '这个空间还没有任务。用下面输入框派一个。'
     frag.appendChild(p)
   }
   root.replaceChildren(frag)
 }
 
+function taskCard(t) {
+  const card = document.createElement('div')
+  card.className = 'task'
+  card.id = `card-${t.id}`
+  const name = document.createElement('div')
+  name.className = 't'
+  name.textContent = `${t.id} ${t.title ?? ''}`
+  card.appendChild(name)
+  const s = document.createElement('div')
+  s.className = 's'
+  s.textContent = taskLine(t)
+  // 「等电脑领取」是**等待**不是**执行中**。不标出来的话，用户在电脑关机时
+  // 会以为任务在跑，于是等下去。
+  if (isWaitingForNode(t) && t.status === 'todo') s.textContent += '（电脑上线后自动开始）'
+  card.appendChild(s)
+  const m = document.createElement('div')
+  m.className = 'm'
+  m.textContent = taskMeta(t)
+  if (m.textContent.length > 0) card.appendChild(m)
+  const acts = document.createElement('div')
+  acts.className = 'acts'
+  const b1 = document.createElement('button')
+  b1.textContent = '追加要求'
+  b1.addEventListener('click', () => { chooseTaskForFeedback(t.id); focusComposer('feedback') })
+  acts.appendChild(b1)
+  const b2 = document.createElement('button')
+  b2.textContent = '问这个 Agent'
+  b2.addEventListener('click', () => {
+    const owner = state.agents.find((a) => a.role === (t.role ?? t.soldier))
+    if (owner !== undefined) void selectAgent(owner.agentId)
+    showView('chat')
+  })
+  acts.appendChild(b2)
+  card.appendChild(acts)
+  return card
+}
+
+/** 高亮某条任务的卡片（派单/追加之后，让用户看得见它落在哪）。 */
+function highlightTask(taskId) {
+  const el = $(`card-${taskId}`)
+  if (el === null) return
+  el.scrollIntoView({ block: 'center', behavior: 'smooth' })
+  el.style.borderColor = 'var(--accent)'
+  setTimeout(() => { el.style.borderColor = '' }, 2500)
+}
+
+async function openTask(taskId) {
+  showView('board')
+  await refreshTasks()
+  highlightTask(taskId)
+}
+
+// ── 渲染：目标选择（Agent / 任务）──────────────────────────────────────────
+
+function renderTargets() {
+  const sel = $('agent-select')
+  sel.replaceChildren()
+  if (state.agents.length === 0) {
+    const o = document.createElement('option')
+    o.textContent = '这个空间下还没有 Agent'
+    o.value = ''
+    sel.appendChild(o)
+    sel.disabled = true
+  } else {
+    sel.disabled = false
+    for (const a of state.agents) {
+      const o = document.createElement('option')
+      o.value = a.agentId
+      o.textContent = `${a.name}（${a.role}）`
+      if (a.agentId === state.agentId) o.selected = true
+      sel.appendChild(o)
+    }
+  }
+  const tsel = $('task-select')
+  tsel.replaceChildren()
+  const active = state.tasks.filter((t) => !['done', 'canceled'].includes(String(t.status)))
+  for (const t of active) {
+    const o = document.createElement('option')
+    o.value = t.id
+    o.textContent = `${t.id} ${t.title ?? ''}`.slice(0, 40)
+    if (t.id === state.targetTaskId) o.selected = true
+    tsel.appendChild(o)
+  }
+  // 「追加要求」必须选一条任务；没有活动任务时把这一条意图**关掉**而不是
+  // 让它发出去被服务端拒——一个按下去必然失败的按钮是最坏的一种。
+  const feedbackBtn = $('intents').querySelector('[data-intent="feedback"]')
+  if (feedbackBtn !== null) {
+    const usable = active.length > 0
+    feedbackBtn.disabled = !usable
+    feedbackBtn.title = usable ? '' : '当前没有可追加要求的活动任务'
+  }
+  if (state.targetTaskId === null && active.length > 0) state.targetTaskId = active[0].id
+}
+
+/** 意图 chip：点一下切换，并把后果写在下面一行。 */
+function renderIntents() {
+  const box = $('intents')
+  box.replaceChildren()
+  for (const o of INTENT_OPTIONS) {
+    const b = document.createElement('button')
+    b.textContent = o.label
+    b.dataset.intent = o.id
+    b.setAttribute('aria-pressed', String(state.intent === o.id))
+    b.addEventListener('click', () => focusComposer(o.id))
+    box.appendChild(b)
+  }
+  const cur = intentOf(state.intent) ?? INTENT_OPTIONS[0]
+  $('intent-hint').textContent = cur.hint
+  const needsTask = cur.needsTask === true
+  $('task-select').classList.toggle('hidden', !needsTask)
+  // 意图决定"这句话会不会变成任务"，所以它必须影响占位符——用户不该靠
+  // 记住 chip 的位置来判断自己正在做什么。
+  $('composer-input').placeholder = cur.id === 'create_task'
+    ? '描述要做的事，电脑上线后会领取执行…'
+    : cur.id === 'feedback' ? '给这条任务补充要求（下一轮执行时生效）…' : '问状态、要解释…'
+}
+
+function focusComposer(intent) {
+  state.intent = intent
+  renderIntents()
+  renderTargets()
+  $('composer-input').focus()
+}
+
+function chooseTaskForFeedback(taskId) {
+  state.targetTaskId = taskId
+  const tsel = $('task-select')
+  for (const o of tsel.options) o.selected = o.value === taskId
+}
+
+// ── 视图切换 ────────────────────────────────────────────────────────────────
+
 function showView(view) {
   state.view = view
+  $('view-board').classList.toggle('hidden', view !== 'board')
   $('view-chat').classList.toggle('hidden', view !== 'chat')
-  $('view-tasks').classList.toggle('hidden', view !== 'tasks')
-  $('composer').classList.toggle('hidden', view !== 'chat')
+  $('tab-board').setAttribute('aria-selected', String(view === 'board'))
   $('tab-chat').setAttribute('aria-selected', String(view === 'chat'))
-  $('tab-tasks').setAttribute('aria-selected', String(view === 'tasks'))
-  if (view === 'tasks') void refreshTasks()
+  if (view === 'board') void refreshTasks()
 }
 
 // ── 数据 ────────────────────────────────────────────────────────────────────
@@ -255,7 +411,14 @@ function showView(view) {
 async function refreshStatus() {
   try {
     const s = await api('/api/identity/status', { auth: false })
+    state.identity = {
+      bootstrapped: s.bootstrapped === true,
+      // 老 Hub 没有这个字段时按 `closed` 处理：**不要**因为字段缺失就把
+      // 注册入口显示出来——那会在一个不支持注册的服务端上给用户一个死按钮。
+      registration: typeof s.registration === 'string' ? s.registration : 'closed',
+    }
     if (s.bootstrapped === false) $('bootstrap-hint').hidden = false
+    renderAuth()
     return true
   } catch {
     // **不吞**：返回值决定界面说"Hub 不可达"还是"未登录"。
@@ -266,6 +429,28 @@ async function refreshStatus() {
   }
 }
 
+/**
+ * 登录页：显示"登录"还是"注册+登录"。
+ *
+ * 判据是**服务端说它支持什么**，不是前端猜。`closed` 时注册入口整个不出现——
+ * 一个点下去会被 403 的按钮，比没有这个按钮更坏。
+ */
+function renderAuth() {
+  const canRegister = state.identity.registration === 'open' || state.identity.registration === 'invite'
+  const registerBtn = $('btn-register')
+  registerBtn.classList.toggle('hidden', !canRegister)
+  const registering = state.authMode === 'register'
+  $('auth-title').textContent = registering ? '注册 Legion' : '登录 Legion'
+  $('btn-login').textContent = registering ? '注册并登录' : '登录'
+  registerBtn.textContent = registering ? '已有账号，去登录' : '注册新账号'
+  $('password-hint').classList.toggle('hidden', !registering)
+  $('register-invite-row').classList.toggle('hidden', !(registering && state.identity.registration === 'invite'))
+  $('auth-hint').textContent = registering
+    ? (state.identity.registration === 'invite' ? '这台 Hub 需要邀请码。' : '填一个用户名与口令即可开始。')
+    : '用你的 Legion 账号登录。Hub 地址默认取当前站点。'
+  $('auth-switch').textContent = canRegister ? '' : ''
+}
+
 async function loadAgents() {
   const r = await api(`/api/agents?scope=${encodeURIComponent(state.scope)}`)
   state.agents = r.agents ?? []
@@ -273,7 +458,17 @@ async function loadAgents() {
     state.agentId = state.agents[0].agentId
     localStorage.setItem(LS_AGENT, state.agentId)
   }
-  renderAgents()
+  renderTargets()
+}
+
+async function selectAgent(agentId) {
+  if (agentId === state.agentId) return
+  state.agentId = agentId
+  localStorage.setItem(LS_AGENT, agentId)
+  state.timeline = []
+  state.cursor = null
+  renderTargets()
+  await openConversation()
 }
 
 async function openConversation() {
@@ -295,13 +490,38 @@ async function refreshTimeline() {
   renderTimeline()
 }
 
+/**
+ * 看板刷新：**两个端点**各取一半。
+ *
+ * `/api/board` 给空间里所有任务（含别的岗位的），`/api/agent-detail` 给当前
+ * Agent 的 Attempt。只用前者会看不见"执行到哪一步"，只用后者会看不见别的岗位
+ * 的任务——而"这个空间里有什么事"正是看板要回答的那个问题。
+ */
 async function refreshTasks() {
-  if (state.agentId === null) return
-  const r = await api(`/api/agent-detail?agentId=${encodeURIComponent(state.agentId)}&scope=${encodeURIComponent(state.scope)}`)
-  state.tasks = r.agent?.tasks ?? []
-  const active = state.tasks.find((t) => !['done', 'canceled'].includes(t.status))
+  if (state.scope === null) return
+  const board = await api(`/api/board?scope=${encodeURIComponent(state.scope)}`)
+  let detail = []
+  if (state.agentId !== null) {
+    const d = await api(`/api/agent-detail?agentId=${encodeURIComponent(state.agentId)}&scope=${encodeURIComponent(state.scope)}`).catch(() => null)
+    detail = d?.agent?.tasks ?? []
+  }
+  state.tasks = mergeAttempts(Array.isArray(board) ? board : (board.tasks ?? []), detail)
+  renderBoard()
+  renderTargets()
+  const badge = attentionCount(state.tasks)
+  const tab = $('tab-board')
+  const old = tab.querySelector('.badge')
+  if (old !== null) old.remove()
+  if (badge > 0) {
+    const b = document.createElement('span')
+    b.className = 'badge'
+    b.textContent = String(badge)
+    tab.appendChild(b)
+  }
+
   const presence = await api('/api/devices/presence').catch(() => ({ presence: [] }))
   const anyOnline = (presence.presence ?? []).some((p) => p.online === true)
+  const active = state.tasks.find((t) => !['done', 'canceled'].includes(String(t.status)))
   setConnection({
     hubReachable: true,
     // 没有设备时是"未知"而不是"离线"：`presence` 里没有行不代表电脑关了，
@@ -309,28 +529,60 @@ async function refreshTasks() {
     nodeOnline: (presence.presence ?? []).length === 0 ? null : anyOnline,
     activeTaskState: active?.attempt?.state ?? null,
   })
-  renderTasks()
 }
 
-async function send(text, intent = 'ask') {
-  if (state.convId === null || text.trim().length === 0) return
+// ── 发送 ────────────────────────────────────────────────────────────────────
+
+async function send(text, intentOverride = null) {
+  const intent = intentOverride ?? state.intent
+  let plan
+  try {
+    plan = planSend({
+      intent,
+      body: text,
+      // 「追加要求」的目标：下拉框是权威（用户可能刚改过），state 只是初值。
+      taskId: intentOf(intent)?.needsTask === true ? ($('task-select').value || state.targetTaskId) : null,
+    })
+  } catch (e) {
+    showLoginError(e.message)
+    return
+  }
+  if (state.convId === null) { showLoginError('还没有选中 Agent'); return }
   $('btn-send').disabled = true
   try {
-    await api('/api/agent-messages', {
+    const r = await api('/api/agent-messages', {
       method: 'POST',
       body: {
-        conv: state.convId, scope: state.scope, by: 'mobile', body: text.trim(), intent,
+        conv: state.convId, scope: state.scope, by: 'mobile', body: plan.body, intent: plan.intent.id,
+        ...(plan.taskId === null ? {} : { target: { taskId: plan.taskId } }),
         // 客户端幂等键：网络重试不会重复创建消息（服务端按 scope+actor+requestId 去重）。
         clientRequestId: `mobile-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
       },
     })
     $('composer-input').value = ''
     await refreshTimeline()
+    // 派了任务就切到看板并高亮它——"我派的活去哪了"必须在同一屏回答，
+    // 否则用户只能自己猜它有没有生效。
+    if (plan.intent.id === 'create_task') {
+      showView('board')
+      await refreshTasks()
+      if (typeof r?.taskId === 'string') highlightTask(r.taskId)
+      notice(`已派任务 ${r?.taskId ?? ''}：电脑上线后会领取执行。`)
+    } else if (plan.intent.id === 'feedback') {
+      notice(`要求已记到 ${plan.taskId}，下一轮执行时生效。`)
+    }
   } catch (e) {
     showLoginError(e.message)
   } finally {
     $('btn-send').disabled = false
   }
+}
+
+function notice(message) {
+  const box = $('login-notice')
+  box.textContent = message
+  box.classList.remove('hidden')
+  setTimeout(() => { box.classList.add('hidden') }, 6000)
 }
 
 // ── 事件流 ──────────────────────────────────────────────────────────────────
@@ -344,7 +596,6 @@ function connectStream() {
   params.set('token', state.access)
   const es = new EventSource(`${hubBase()}/api/events?${params}`)
   state.sse = es
-  es.onopen = () => { }
   es.onmessage = () => {
     // ★ 事件帧只当通知：内容一律回 Hub 读。这样"事件丢了"最多是晚一会儿看到，
     //   而不是界面上一段缺失。
@@ -357,33 +608,53 @@ function connectStream() {
   }
 }
 
-// ── 登录 ────────────────────────────────────────────────────────────────────
+// ── 登录 / 注册 ─────────────────────────────────────────────────────────────
 
 function showLoginError(message) {
   const box = $('login-error')
   box.textContent = message
   box.classList.remove('hidden')
+  setTimeout(() => { box.classList.add('hidden') }, 8000)
+}
+
+async function postIdentity(path, body) {
+  const r = await fetch(hubBase() + path, {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(body),
+  })
+  const j = await r.json().catch(() => null)
+  if (!r.ok || j?.ok !== true) {
+    const err = new Error(j?.error ?? `请求失败（HTTP ${r.status}）`)
+    err.code = j?.code ?? null
+    throw err
+  }
+  return j
 }
 
 async function doLogin() {
   const name = $('login-name').value.trim()
   const password = $('login-password').value
+  const registering = state.authMode === 'register'
   if (name.length === 0 || password.length === 0) { showLoginError('请填写用户名与口令'); return }
   $('btn-login').disabled = true
   try {
-    const r = await fetch(hubBase() + '/api/identity/login', {
-      method: 'POST', headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ name, password, label: `手机 ${navigator.platform ?? ''}`.trim() }),
-    })
-    const j = await r.json()
-    if (!r.ok || j.ok !== true) { showLoginError(j?.error ?? `登录失败（HTTP ${r.status}）`); return }
+    const j = registering
+      // 服务端把"注册并登录"做成**一个**事务性动作：建用户与发会话要么都成、
+      // 要么都不成。分成两步的版本会在中间失败时留下一个"注册成功但登不进"的账号。
+      ? await postIdentity('/api/identity/register', {
+        name, password,
+        space: state.scope ?? 'default',
+        code: $('register-invite').value.trim() || undefined,
+        label: `手机 ${navigator.platform ?? ''}`.trim(),
+      })
+      : await postIdentity('/api/identity/login', { name, password, label: `手机 ${navigator.platform ?? ''}`.trim() })
     state.access = j.accessToken
     state.refresh = j.refreshToken
     sessionStorage.setItem(SS_ACCESS, state.access)
     localStorage.setItem(LS_REFRESH, state.refresh)
     await enterApp(j)
   } catch (e) {
-    showLoginError(`无法连接 Hub：${e.message}`)
+    showLoginError(e.message)
   } finally {
     $('btn-login').disabled = false
   }
@@ -392,6 +663,7 @@ async function doLogin() {
 async function enterApp(me) {
   $('screen-login').classList.add('hidden')
   $('main').classList.remove('hidden')
+  $('composer').classList.remove('hidden')
   $('title').textContent = `Legion · ${me.name ?? ''}`
   // 空间：优先用户自己上次选的，否则用他有权限的第一个。
   if (state.scope === null) {
@@ -399,7 +671,9 @@ async function enterApp(me) {
     state.scope = info.roles?.[0]?.space ?? 'default'
     localStorage.setItem(LS_SCOPE, state.scope)
   }
+  $('board-scope').textContent = `空间：${state.scope}`
   setConnection({ hubReachable: true, nodeOnline: null })
+  renderIntents()
   try {
     await loadAgents()
     await openConversation()
@@ -408,6 +682,7 @@ async function enterApp(me) {
     // 空间没有 Agent 不是致命错误：界面照常显示，让用户去任务页看。
     console.warn('初始化失败', e)
   }
+  showView('board')
 }
 
 function doLogout() {
@@ -422,6 +697,12 @@ function doLogout() {
 function bind() {
   $('btn-login').addEventListener('click', () => { void doLogin() })
   $('login-password').addEventListener('keydown', (e) => { if (e.key === 'Enter') void doLogin() })
+  $('register-invite').addEventListener('keydown', (e) => { if (e.key === 'Enter') void doLogin() })
+  $('btn-register').addEventListener('click', () => {
+    state.authMode = state.authMode === 'register' ? 'login' : 'register'
+    $('login-error').classList.add('hidden')
+    renderAuth()
+  })
   $('btn-logout').addEventListener('click', doLogout)
   $('btn-refresh').addEventListener('click', () => { void refreshTimeline(); void refreshTasks() })
   $('btn-send').addEventListener('click', () => { void send($('composer-input').value) })
@@ -432,8 +713,10 @@ function bind() {
     e.target.style.height = 'auto'
     e.target.style.height = `${Math.min(120, e.target.scrollHeight)}px`
   })
+  $('tab-board').addEventListener('click', () => showView('board'))
   $('tab-chat').addEventListener('click', () => showView('chat'))
-  $('tab-tasks').addEventListener('click', () => showView('tasks'))
+  $('agent-select').addEventListener('change', (e) => { void selectAgent(e.target.value) })
+  $('task-select').addEventListener('change', (e) => { state.targetTaskId = e.target.value })
   window.addEventListener('online', () => { setConnection({ hubReachable: true, nodeOnline: null }) })
   window.addEventListener('offline', () => { setConnection({ hubReachable: false }) })
 }
@@ -456,6 +739,7 @@ function registerServiceWorker() {
 async function main() {
   bind()
   registerServiceWorker()
+  renderIntents()
   const reachable = await refreshStatus()
   if (state.access !== null) {
     // 已有会话：直接进（令牌可能过期，`api` 会自动刷新一次）。
@@ -481,4 +765,4 @@ if (typeof document !== 'undefined' && document.getElementById('screen-login') !
   void main()
 }
 
-export { state, doLogin, refreshTimeline, mergeTimeline, timelineEntry, pendingTasks, TIMELINE_CODES }
+export { state, doLogin, refreshTimeline, refreshTasks, send, focusComposer, mergeTimeline, timelineEntry, taskLine, boardColumns }

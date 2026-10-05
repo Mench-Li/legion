@@ -367,3 +367,153 @@ test('缺少签名密钥时构造直接失败（不留一个"能跑但没签名"
   assert.throws(() => createUserStore({ db, withTx: (fn) => fn(), key: '' }), /HMAC key/)
   assert.throws(() => createUserStore({ db, withTx: (fn) => fn(), key: 'too-short' }), /HMAC key/)
 })
+
+// ── 自助注册与改口令（账号体系） ────────────────────────────────────────────
+//
+// 这一组守的是"给别人用的那套流程"。它与邀请制的差别不在实现，在**默认值**：
+// 邀请制默认关着（没有邀请码就进不来），而注册入口一旦默认打开，
+// 与"忘了设策略"在出事那天是同一个东西。
+
+// 复用文件顶部那个 `codeOf`（它已经是 async 的，本组全用它）。
+const codeOfAsync = codeOf
+
+test('注册默认是 closed：没显式开就进不来', async () => {
+  const { store } = await bootstrapped()
+  // 不传 registration → 默认 closed。
+  assert.equal(await codeOfAsync(() => store.register({ name: '新同学', password: 'good-password' })),
+    IDENTITY_CODES.REGISTRATION_CLOSED)
+  // 显式写 closed 也一样。
+  assert.equal(await codeOfAsync(() => store.register({ name: '新同学', password: 'good-password', registration: 'closed' })),
+    IDENTITY_CODES.REGISTRATION_CLOSED)
+})
+
+test('策略必须落在枚举里：写错的名字不能静默当成"可以注册"', async () => {
+  const { store } = await bootstrapped()
+  assert.equal(await codeOfAsync(() => store.register({ name: 'x', password: 'good-password', registration: 'OPEN' })),
+    IDENTITY_CODES.INVALID_INPUT)
+  assert.equal(await codeOfAsync(() => store.register({ name: 'x', password: 'good-password', registration: 'yes' })),
+    IDENTITY_CODES.INVALID_INPUT)
+})
+
+test('open 策略：注册即登录，拿到的是可用令牌而不是"请去登录"', async () => {
+  const { store } = await bootstrapped()
+  const r = await store.register({ name: '新同学', password: 'good-password', registration: 'open', space: 'default', label: '手机' })
+  assert.equal(r.name, '新同学')
+  assert.equal(r.space, 'default')
+  assert.equal(r.role, 'member')
+  assert.equal(r.via, 'open')
+  // 令牌当场就能用——分成两步的版本会留下"账号存在但我进不去"的中间态。
+  const verified = store.verifyAccessToken(r.accessToken)
+  assert.equal(verified.ok, true)
+  assert.equal(verified.userId, r.userId)
+  assert.equal(verified.name, '新同学')
+})
+
+test('open 策略**不**授予 owner：否则任何人都能注册成空间主人', async () => {
+  const { store, owner } = await bootstrapped()
+  await store.register({ name: '新同学', password: 'good-password', registration: 'open', space: 'default' })
+  const users = store.listUsers()
+  const fresh = users.find((u) => u.name === '新同学')
+  assert.equal(fresh.systemRole, 'none')
+  assert.equal(store.roleIn(fresh.userId, 'default'), 'member')
+  // 主人还是原来那一个。
+  assert.equal(store.isSystemAdmin(owner.userId), true)
+})
+
+test('open 策略下重名被拒，且与登录用同一套归一（"Admin" 与 "admin " 是同一个）', async () => {
+  const { store } = await bootstrapped()
+  await store.register({ name: 'Neo', password: 'good-password', registration: 'open' })
+  assert.equal(await codeOfAsync(() => store.register({ name: 'neo', password: 'other-password', registration: 'open' })),
+    IDENTITY_CODES.NAME_TAKEN)
+  assert.equal(await codeOfAsync(() => store.register({ name: '  Neo  ', password: 'other-password', registration: 'open' })),
+    IDENTITY_CODES.NAME_TAKEN)
+})
+
+test('invite 策略：没有邀请码进不来，有码才注册成功', async () => {
+  const { store, owner } = await bootstrapped()
+  assert.equal(await codeOfAsync(() => store.register({ name: '小兵', password: 'good-password', registration: 'invite' })),
+    IDENTITY_CODES.INVITE_REQUIRED)
+  assert.equal(await codeOfAsync(() => store.register({ name: '小兵', password: 'good-password', registration: 'invite', code: '   ' })),
+    IDENTITY_CODES.INVITE_REQUIRED)
+
+  const invite = store.createInvite({ by: owner.userId, space: 'default', role: 'member' })
+  const r = await store.register({ name: '小兵', password: 'good-password', registration: 'invite', code: invite.code })
+  assert.equal(r.via, 'invite')
+  assert.equal(r.role, 'member')
+  assert.equal(store.verifyAccessToken(r.accessToken).ok, true)
+  // 邀请码一次性：同一个码再注册一次不成立。
+  assert.equal(await codeOfAsync(() => store.register({ name: '另一个', password: 'good-password', registration: 'invite', code: invite.code })),
+    IDENTITY_CODES.INVITE_CONSUMED)
+})
+
+test('口令强度与用户名规则对注册同样生效（不是只有登录那条路管）', async () => {
+  const { store } = await bootstrapped()
+  assert.equal(await codeOfAsync(() => store.register({ name: '短口令', password: 'short', registration: 'open' })),
+    IDENTITY_CODES.INVALID_INPUT)
+  assert.equal(await codeOfAsync(() => store.register({ name: '   ', password: 'good-password', registration: 'open' })),
+    IDENTITY_CODES.INVALID_INPUT)
+})
+
+test('改口令：必须给对原口令，错了不许改', async () => {
+  const { store, owner } = await bootstrapped()
+  assert.equal(await codeOfAsync(() => store.changePassword({
+    userId: owner.userId, currentPassword: '想错了', newPassword: 'brand-new-password',
+  })), IDENTITY_CODES.WRONG_PASSWORD)
+  // 原口令仍然有效 —— 一次失败的修改不能把账号弄坏。
+  const again = await store.login({ name: 'owner', password: 'owner-password' })
+  assert.equal(again.userId, owner.userId)
+})
+
+test('改口令成功后：新口令能登，旧口令不能', async () => {
+  const { store, owner } = await bootstrapped()
+  await store.changePassword({ userId: owner.userId, currentPassword: 'owner-password', newPassword: 'brand-new-password' })
+  assert.equal(await codeOfAsync(() => store.login({ name: 'owner', password: 'owner-password' })),
+    IDENTITY_CODES.INVALID_CREDENTIALS)
+  const ok = await store.login({ name: 'owner', password: 'brand-new-password' })
+  assert.equal(ok.userId, owner.userId)
+})
+
+test('改口令必须撤销**其它**会话，但保留当前这一个', async () => {
+  // 改口令的第一动机通常是"我怀疑别人在用我的账号"。只改哈希不踢会话的话，
+  // 那个人的令牌照样有效到过期为止 —— 用户会以为他做完了。
+  const { store, owner } = await bootstrapped()
+  const other = await store.login({ name: 'owner', password: 'owner-password', label: '别的设备' })
+  const current = await store.login({ name: 'owner', password: 'owner-password', label: '本机' })
+  const r = await store.changePassword({
+    userId: owner.userId, currentPassword: 'owner-password', newPassword: 'brand-new-password',
+    exceptSessionId: current.sessionId,
+  })
+  assert.equal(r.changed, true)
+  // 别处那个令牌当场失效。
+  assert.equal(store.verifyAccessToken(other.accessToken).ok, false)
+  assert.equal(store.verifyAccessToken(other.accessToken).code, IDENTITY_CODES.SESSION_REVOKED)
+  // 自己这个还在（把人一起踢掉，他会以为改口令失败了）。
+  assert.equal(store.verifyAccessToken(current.accessToken).ok, true)
+})
+
+test('新口令与旧口令相同 → 拒绝（否则用户会以为改成功了）', async () => {
+  const { store, owner } = await bootstrapped()
+  assert.equal(await codeOfAsync(() => store.changePassword({
+    userId: owner.userId, currentPassword: 'owner-password', newPassword: 'owner-password',
+  })), IDENTITY_CODES.INVALID_INPUT)
+})
+
+test('被停用的账号不能改口令', async () => {
+  const { store, owner } = await bootstrapped()
+  await store.setUserDisabled({ by: owner.userId, userId: owner.userId, disabled: true })
+  assert.equal(await codeOfAsync(() => store.changePassword({
+    userId: owner.userId, currentPassword: 'owner-password', newPassword: 'brand-new-password',
+  })), IDENTITY_CODES.FORBIDDEN)
+})
+
+test('注册与改口令都进审计（谁在什么时候开了账号/换了口令）', async () => {
+  const log = []
+  const { store, owner } = await bootstrapped({ auditLog: log })
+  await store.register({ name: '新同学', password: 'good-password', registration: 'open' })
+  await store.changePassword({ userId: owner.userId, currentPassword: 'owner-password', newPassword: 'brand-new-password' })
+  assert.ok(log.some((e) => e.action === 'identity:register'))
+  assert.ok(log.some((e) => e.action === 'identity:password-change'))
+  // 审计里不许出现口令原文。
+  assert.equal(JSON.stringify(log).includes('good-password'), false)
+  assert.equal(JSON.stringify(log).includes('brand-new-password'), false)
+})

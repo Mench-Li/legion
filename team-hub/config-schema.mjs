@@ -35,6 +35,18 @@ export const SCHEMA = defineSchema({
       key: 'claimScope', env: 'LEGION_NODE_CLAIM_SCOPE', type: 'string', default: '',
       doc: 'Node 网关认领任务时限定到某个空间；留空 = 不限（单机部署的安全做法是限定）',
     },
+    // 注册策略。**默认 `closed`**，要开放必须显式写出来。
+    //
+    // 默认值不是随手定的：一个默认开放的注册端点，与一个"忘了设策略"的部署，
+    // 在出事那天是同一个东西——只是没人会去查一个一直好好的开关。
+    //   closed —— 只能由管理员造邀请；
+    //   invite —— 自助注册，但必须有邀请码；
+    //   open   —— 任何人可注册（自建/内网演示；公网请三思）。
+    // 枚举值由 `user-store.mjs` 的 `REGISTRATION_MODES` 定义，两处由用例断言一致。
+    {
+      key: 'registration', env: 'LEGION_REGISTRATION', type: 'string', default: 'closed',
+      doc: "注册策略：closed（默认，仅邀请）/ invite（需邀请码自助注册）/ open（开放注册）",
+    },
     // ── 附件（P3-2 统一项：附件目录相关限值）──
     { key: 'attachMaxBytes', env: 'CHAT_ATTACH_MAX_BYTES', type: 'int', default: 10 * 1024 * 1024, min: 1, doc: '单附件大小上限（字节）' },
     { key: 'attachMaxPerMsg', env: 'CHAT_ATTACH_MAX_PER_MSG', type: 'int', default: 3, min: 1, doc: '每条消息附件数量上限' },

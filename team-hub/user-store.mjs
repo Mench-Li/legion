@@ -87,7 +87,26 @@ export const IDENTITY_CODES = Object.freeze({
   USER_NOT_FOUND: 'IDENTITY_USER_NOT_FOUND',
   FORBIDDEN: 'IDENTITY_FORBIDDEN',
   KEY_REQUIRED: 'IDENTITY_KEY_REQUIRED',
+  REGISTRATION_CLOSED: 'IDENTITY_REGISTRATION_CLOSED',
+  INVITE_REQUIRED: 'IDENTITY_INVITE_REQUIRED',
+  WRONG_PASSWORD: 'IDENTITY_WRONG_PASSWORD',
 })
+
+/**
+ * 注册策略。**默认 `closed`**。
+ *
+ * 默认值不是随手定的：一个默认开放的注册端点，与一个"忘了设策略"的部署，
+ * 在出事那天是同一个东西——只是没人会去查一个一直好好的开关。
+ * 要开放注册必须**明确写出来**。
+ *
+ *   · `closed` —— 只能由管理员造邀请（当前的唯一路径）；
+ *   · `invite` —— 自助注册，但必须有邀请码（注册页会多一个输入框）；
+ *   · `open`   —— 任何人可注册（自建/内网演示用；公网请三思）。
+ */
+export const REGISTRATION_MODES = Object.freeze(['closed', 'invite', 'open'])
+
+/** 自助注册时给新用户的空间角色。与邀请的默认一致。 */
+const DEFAULT_REGISTER_ROLE = 'member'
 
 export class IdentityError extends Error {
   constructor(code, message, status = 400) {
@@ -608,6 +627,117 @@ export function createUserStore({ db, withTx, clock = Date.now, key = '', audit 
     return row
   }
 
+  // ── 自助注册 ──────────────────────────────────────────────────────────────
+
+  /**
+   * 注册并直接登录（**一个**事务性动作）。
+   *
+   * ## 为什么注册要顺带发会话，而不是"注册成功，请去登录"
+   *
+   * 分成两步的版本有一个安静的坏形态：注册成功之后、登录之前，用户处在一个
+   * "账号存在但我进不去"的状态。在手机上尤其明显——他要重新输一遍刚打过的口令，
+   * 而任何一步出错（口令打错、网络断）都会让他以为**注册失败了**，于是换个名字
+   * 再注册一遍。然后两个账号都在。
+   *
+   * ## 三条闸门，缺一不可
+   *
+   * ① **策略允许**（`registration`）：默认 `closed`，此时这个函数直接拒绝。
+   *    策略由调用方从配置解出来传进来——仓储不认识环境变量。
+   * ② **邀请码**（策略为 `invite` 时）：复用 `acceptInvite` 那一条，
+   *    消费与建用户同一个事务，邀请码一次性。
+   * ③ **用户名没被占**：与登录用同一个 `name_key`（大小写/空白归一），
+   *    所以"Admin"与"admin "不会变成两个账号——那正是账号接管最常见的入口。
+   *
+   * ## 空间角色
+   *
+   * `open` 策略下没有邀请码可带空间，用调用方给的 `space`（默认 `default`）并
+   * 授予 `member`。**不**授予 owner：第一个 owner 只能由 `bootstrapOwner` 产生，
+   * 否则任何人都能注册成某个空间的主人。
+   */
+  async function register({ name, password, space, code, registration = 'closed', label = '' } = {}) {
+    if (!REGISTRATION_MODES.includes(registration)) {
+      fail(IDENTITY_CODES.INVALID_INPUT, `registration 必须是 ${REGISTRATION_MODES.join(' / ')} 之一`)
+    }
+    if (registration === 'closed') {
+      fail(IDENTITY_CODES.REGISTRATION_CLOSED, '这台 Hub 未开放注册，请向管理员索取邀请码', 403)
+    }
+    const clean = validateName(name)
+    validatePassword(password)
+
+    // `invite` 策略直接复用接受邀请那一条：那里已经处理了"消费与建用户同一事务"
+    // 与并发下的二次判定。另写一条会在两处出现两个"邀请码能不能用"的判定，
+    // 而它们迟早会漂移。
+    if (registration === 'invite') {
+      if (typeof code !== 'string' || code.trim().length === 0) {
+        fail(IDENTITY_CODES.INVITE_REQUIRED, '这台 Hub 需要邀请码才能注册', 403)
+      }
+      const created = await acceptInvite({ code: code.trim(), name: clean, password })
+      const session = issueSession(created.userId, { label })
+      record('identity:register', created.space, { userId: created.userId, via: 'invite' }, created.userId)
+      return { ...session, userId: created.userId, name: created.name, space: created.space, role: created.role, via: 'invite' }
+    }
+
+    const cleanSpace = space === undefined || space === null || String(space).trim() === ''
+      ? 'default'
+      : validateSpace(String(space).trim())
+    const hash = await hashPassword(password)
+    const at = now()
+    const userId = withTx(() => {
+      // 事务内再查一次：两个并发注册都通过了上面的检查时，唯一约束只会让一个成功，
+      // 但那时抛出的是 SQLite 的 UNIQUE 错误，用户看到的是"数据库错误"。
+      if (db.prepare('SELECT id FROM hub_users WHERE name_key=?').get(nameKey(clean))) {
+        fail(IDENTITY_CODES.NAME_TAKEN, '该用户名已被占用', 409)
+      }
+      const newId = id('user')
+      try {
+        db.prepare('INSERT INTO hub_users VALUES(?,?,?,?,?,NULL,?)').run(newId, clean, nameKey(clean), hash, at, 'none')
+      } catch (e) {
+        if (String(e?.message ?? '').includes('UNIQUE')) fail(IDENTITY_CODES.NAME_TAKEN, '该用户名已被占用', 409)
+        throw e
+      }
+      db.prepare('INSERT INTO hub_space_roles VALUES(?,?,?,?,?)').run(newId, cleanSpace, DEFAULT_REGISTER_ROLE, newId, at)
+      record('identity:register', cleanSpace, { userId: newId, via: 'open' }, newId)
+      return newId
+    })
+    const session = issueSession(userId, { label })
+    return { ...session, userId, name: clean, space: cleanSpace, role: DEFAULT_REGISTER_ROLE, via: 'open' }
+  }
+
+  /**
+   * 改口令。**必须给原口令**，且成功后撤销**其它**会话。
+   *
+   * 撤销其它会话不是可选项：改口令的第一动机通常是"我怀疑别人在用我的账号"，
+   * 而只改哈希不踢会话的话，那个人的令牌**照样有效到过期为止**——
+   * 用户会以为他做完了，而实际上什么都没挡住。
+   *
+   * 保留当前会话：把人也一起踢掉，他会以为改口令失败了（要重新登录），
+   * 而在手机上重新登录正是最容易放弃的一步。
+   */
+  async function changePassword({ userId, currentPassword, newPassword, exceptSessionId = null } = {}) {
+    const row = requireUser(userId)
+    if (typeof currentPassword !== 'string' || currentPassword.length === 0) {
+      fail(IDENTITY_CODES.INVALID_INPUT, '请输入当前口令')
+    }
+    validatePassword(newPassword)
+    const verified = await verifyPassword(currentPassword, row.password_hash)
+    if (verified.ok !== true) fail(IDENTITY_CODES.WRONG_PASSWORD, '当前口令不正确', 401)
+    if (currentPassword === newPassword) {
+      fail(IDENTITY_CODES.INVALID_INPUT, '新口令与当前口令相同')
+    }
+    const hash = await hashPassword(newPassword)
+    return withTx(() => {
+      db.prepare('UPDATE hub_users SET password_hash=? WHERE id=?').run(hash, userId)
+      const at = now()
+      const sql = exceptSessionId === null
+        ? 'UPDATE hub_user_sessions SET revoked_at_ms=? WHERE user_id=? AND revoked_at_ms IS NULL'
+        : 'UPDATE hub_user_sessions SET revoked_at_ms=? WHERE user_id=? AND revoked_at_ms IS NULL AND id<>?'
+      const args = exceptSessionId === null ? [at, userId] : [at, userId, exceptSessionId]
+      const res = db.prepare(sql).run(...args)
+      record('identity:password-change', 'global', { revokedSessions: Number(res.changes) }, userId)
+      return { userId, changed: true, revokedOtherSessions: Number(res.changes) }
+    })
+  }
+
   /**
    * 造邀请的门槛：**系统管理员**，或**该空间的** admin/owner。
    *
@@ -657,6 +787,7 @@ export function createUserStore({ db, withTx, clock = Date.now, key = '', audit 
   return {
     isBootstrapped, bootstrapOwner,
     createInvite, acceptInvite,
+    register, changePassword,
     login, refresh, upgradePassword,
     verifyAccessToken, touchSession,
     revokeSession, revokeAllSessions, listSessions,

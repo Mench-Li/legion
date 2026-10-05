@@ -391,6 +391,27 @@ describe('手机端接口契约（照 app.mjs 的顺序）', () => {
     })
   })
 
+  it('⑰ 看板视图要的两个端点，同一用户都取得到（缺一半就看不出"执行到哪一步"）', async () => {
+    // 看板是**两个端点拼出来的**：
+    //   · `/api/board` 给空间里所有任务（含别的岗位的）；
+    //   · `/api/agent-detail` 给当前 Agent 的 Attempt。
+    // 只用前者会看不见执行到哪一步，只用后者会看不见别的岗位的任务。
+    // 任一条 401/403，看板就退化成"一列任务名"——而它不会报错，只是什么都不说。
+    const board = await call('GET', `/api/board?scope=${ctx.scope}`, { token: ctx.access })
+    assert.equal(board.status, 200, `看板读不到：${board.status} ${board.text.slice(0, 160)}`)
+    const list = Array.isArray(board.json) ? board.json : board.json.tasks ?? []
+    assert.ok(Array.isArray(list), '看板应是任务数组（或 {tasks:[]}）')
+    for (const t of list) {
+      // 看板卡片要渲染的字段。缺了不会报错，只会画出一个空行。
+      assert.equal(typeof t.id, 'string')
+      assert.equal(typeof t.status, 'string', `任务 ${t.id} 缺 status，列不出状态`)
+    }
+
+    const detail = await call('GET', `/api/agent-detail?agentId=${encodeURIComponent(ctx.agentId)}&scope=${ctx.scope}`, { token: ctx.access })
+    assert.equal(detail.status, 200, `Agent 详情读不到：${detail.status} ${detail.text.slice(0, 160)}`)
+    assert.ok(Array.isArray(detail.json.agent?.tasks), '详情应带 tasks（手机从这里拿 attempt.state）')
+  })
+
   it('⑫ 刷新凭据能换新令牌（手机会话过 15 分钟靠它）', async () => {
     const r = await call('POST', '/api/identity/refresh', { body: { refreshToken: ctx.refresh } })
     assert.equal(r.status, 200)

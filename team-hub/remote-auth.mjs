@@ -42,6 +42,14 @@ export const PUBLIC_PATHS = Object.freeze(new Set([
   '/api/identity/refresh',
   // 接受邀请：被邀请的人此刻还没有账号，邀请码本身就是凭据。
   '/api/identity/invites/accept',
+  // 注册：与它同一个道理——注册的人此刻还没有账号。
+  //
+  // ★ 把它放在公开名单里**不等于**开放注册：真正的开关是配置里的
+  //   `LEGION_REGISTRATION`（默认 `closed`），由 `routes/identity.mjs` 在
+  //   路由里判。门禁与策略是**两件事**，混起来会得到一个很坏的中间态：
+  //   为了让"关掉的注册"返回 403 而不是 401，而把它从公开名单里拿掉——
+  //   那时用户看到的是"缺少访问令牌"，他会去查登录、而问题在注册策略上。
+  '/api/identity/register',
   // 首次初始化：库为空时的唯一入口；非空库时它自己会拒（见 user-store 的
   // `ALREADY_BOOTSTRAPPED`）。它额外要求 Hub 管理令牌，所以不构成公开注册口。
   '/api/identity/bootstrap',

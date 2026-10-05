@@ -157,6 +157,28 @@ function main() {
   const outDir = resolve(o.out)
   mkdirSync(outDir, { recursive: true, mode: 0o700 })
 
+  // ★ 先确认**能不能写**，再动手。
+  //
+  // 不查这一步的话，失败会长成 `SQLITE_ERROR: unable to open database` +
+  // 一个指向 `VACUUM INTO` 的堆栈——它读起来像"库坏了"，而真实原因是
+  // "备份目录属于 root，而本进程是 legion-hub"。实测踩过：`systemctl start`
+  // 只报 `status=1`，得翻 journal 才看到那句 SQLite 错误。
+  //
+  // 备份是以**非 root 用户**（systemd unit 里写死 legion-hub）跑的，
+  // 所以这是一个会真实发生的配置缺口，不是理论问题。
+  try {
+    const probe = join(outDir, `.write-probe-${process.pid}`)
+    const fd = openSync(probe, 'w')
+    closeSync(fd)
+    unlinkSync(probe)
+  } catch (e) {
+    warn(`备份目录不可写：${outDir}（${e.code ?? e.message}）`)
+    warn(`  所有权：${(() => { try { const s = statSync(outDir); return `uid=${s.uid} gid=${s.gid} mode=${(s.mode & 0o777).toString(8)}` } catch { return '?' } })()}`)
+    warn('  备份以非 root 用户运行（systemd unit 里是 legion-hub），所以这个目录要属于它：')
+    warn(`    install -d -m 0700 -o legion-hub -g legion-hub ${outDir}`)
+    return 1
+  }
+
   const base = `team-${stamp()}.db`
   const rawPath = join(outDir, base)
   const encPath = `${rawPath}.gpg`

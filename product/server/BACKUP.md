@@ -4,7 +4,10 @@
 
 ```bash
 # 服务器上
-install -d -m 0700 /var/lib/legion-hub/backups
+# ★ `-o/-g` 不能省：备份以非 root 用户（systemd unit 里是 legion-hub）运行，
+#   目录属于 root 时它会以 SQLite 的 "unable to open database" 失败——
+#   那句话读起来像"库坏了"，真实原因是权限。
+install -d -m 0700 -o legion-hub -g legion-hub /var/lib/legion-hub/backups
 openssl rand -base64 48 | tr -dc 'A-Za-z0-9' | head -c 40 > /etc/legion-hub/backup.passphrase
 chmod 600 /etc/legion-hub/backup.passphrase
 
@@ -12,6 +15,7 @@ cp /srv/legion-hub/app/product/server/legion-hub-backup.service /etc/systemd/sys
 cp /srv/legion-hub/app/product/server/legion-hub-backup.timer   /etc/systemd/system/
 systemctl daemon-reload
 systemctl enable --now legion-hub-backup.timer
+systemctl start legion-hub-backup.service   # 立刻验一次，别等明天
 systemctl list-timers legion-hub-backup.timer
 ```
 

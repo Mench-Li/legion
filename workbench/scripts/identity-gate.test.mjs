@@ -143,3 +143,43 @@ describe('账号面板（「连接与令牌」里那一节）', () => {
     assert.match(panel, /这台（现在）/)
   })
 })
+
+describe('设备一节（「连接与令牌」里）', () => {
+  const panel = read('workbench/src/components/DevicePanel.tsx')
+  const identity = read('workbench/src/identity.ts')
+
+  test('⑩ 只在真的用账号体系时渲染（本机单机部署不出现）', () => {
+    assert.match(panel, /const active = hasSession\(\)/)
+    assert.match(panel, /if \(!active && loaded\) return null/)
+  })
+
+  test('⑪ 三件事都在：生成配对码 / 换令牌 / 撤销', () => {
+    for (const fn of ['makeCode', 'rotate', 'revoke']) {
+      assert.ok(panel.includes(`function ${fn}(`), `设备面板缺 ${fn}`)
+    }
+  })
+
+  test('⑫ ★ 换令牌读的是 deviceToken，不是 token', () => {
+    // `device-store.mjs` 的 rotateToken 返回 `{ nodeId, deviceToken }`。
+    // 读错名字的后果**不是报错**，而是一个空字符串——界面上得到一个空输入框，
+    // 而"令牌是空的"与"令牌没显示出来"看起来一模一样。
+    assert.match(identity, /deviceToken \?\? ''/)
+    const fn = /export async function rotateDeviceToken[\s\S]*?\n}/.exec(identity)?.[0] ?? ''
+    assert.ok(fn.length > 0, '找不到 rotateDeviceToken')
+    assert.match(fn, /deviceToken/)
+    assert.doesNotMatch(fn, /r\.token\b/, '不许读 r.token —— 那个字段不存在')
+  })
+
+  test('⑬ 配对码要有名字，且明说只能用一次', () => {
+    // 默认成随机 id 会让"我在撤销哪一台"变成一个要猜的问题。
+    assert.match(panel, /给这台电脑起个名字/)
+    assert.match(panel, /只能用一次/)
+  })
+
+  test('⑭ 设备状态是**三**种：在线 / 离线 / 还没连过', () => {
+    // 刚配好对、还没启动那台电脑上的 Legion 时显示"离线"，会让人以为配对失败了，
+    // 然后去重配一次——而那一遍会造出第二台设备。
+    assert.match(panel, /'还没连过'/)
+    assert.match(panel, /'在线' : '离线'/)
+  })
+})

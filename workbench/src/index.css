@@ -3655,3 +3655,8 @@ body {
 .settings-session-row:first-of-type { border-top: 0; }
 .settings-session-row strong { font-weight: 600; }
 .settings-session-row .settings-runtime-status { margin: 2px 0 0; font-size: 12px; }
+
+/* 设备行右侧的两个动作。与 `.settings-session-row` 同一套布局，
+ * 但动作有两个，所以要换行而不是挤压——挤压会让「撤销」贴到「换令牌」上，
+ * 而这两个按钮的后果完全不同（一个只是换凭据，一个把那台机器踢下线）。 */
+.settings-row-actions { display: flex; gap: 8px; flex-wrap: wrap; justify-content: flex-end; }

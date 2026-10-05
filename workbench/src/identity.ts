@@ -322,6 +322,63 @@ export async function createInvite(space: string, role: string): Promise<string>
   return r.code ?? ''
 }
 
+// ── 设备（执行节点）────────────────────────────────────────────────────────
+//
+// ## 为什么这一节必须存在，而不只是"顺手加个列表"
+//
+// 在这之前，**把一台电脑接到 Hub 上只有一条路**：在服务器上跑
+// `product/server/make-pairing-code.sh`。也就是说，一个刚在手机上注册完的用户
+// **没有任何办法**让自己电脑上的 Legion 连上来——他能看见空间、能看见 Agent，
+// 而任务永远停在"等电脑领取"，界面上的措辞还是对的。
+//
+//   > 一个"能注册、能登录、但永远连不上自己电脑"的产品，
+//   > 与一个还没做完的产品，在用户那边是同一个东西——
+//   > 只不过前者每一步看起来都成功了。
+
+export interface DeviceRow {
+  nodeId: string
+  name: string
+  platform: string
+  capabilities: string[]
+  createdAt: string
+  revoked: boolean
+  lastSeenAt: string | null
+  presence: { online: boolean; stale?: boolean; lastHeartbeatAt: string | null } | null
+}
+
+export async function listDevices(): Promise<DeviceRow[]> {
+  const r = await getJson<{ devices?: DeviceRow[] }>('/api/devices', { token: getAccessToken() })
+  return r.devices ?? []
+}
+
+/**
+ * 造一个配对码。**明文只在这里出现一次**（库里只存哈希）。
+ *
+ * `nodeName` 是给人看的标签（"我的台式机"），它出现在设备列表与会话列表里，
+ * 所以要求用户起一个能认得出的名字——而不是默认成某个随机 id，
+ * 让"我在撤销哪一台"变成一个要猜的问题。
+ */
+export async function createPairingCode(nodeName: string): Promise<{ code: string; nodeName: string; expiresAtMs: number }> {
+  const r = await postJson<{ code?: string; nodeName?: string; expiresAtMs?: number }>(
+    '/api/devices/pairing', { nodeName }, { token: getAccessToken() },
+  )
+  return { code: r.code ?? '', nodeName: r.nodeName ?? nodeName, expiresAtMs: r.expiresAtMs ?? 0 }
+}
+
+export async function revokeDevice(nodeId: string): Promise<void> {
+  await postJson('/api/devices/revoke', { nodeId }, { token: getAccessToken() })
+}
+
+/** 换设备令牌。**旧令牌当场失效**，那台电脑要用新令牌重连。 */
+export async function rotateDeviceToken(nodeId: string): Promise<string> {
+  // ★ 字段名是 `deviceToken`（`device-store.mjs` 的 `rotateToken` 返回
+  // `{ nodeId, deviceToken }`），不是 `token`。读错名字的后果不是报错，
+  // 而是一个**空字符串**——界面上会得到一个空的输入框，
+  // 而"令牌是空的"与"令牌没显示出来"看起来一模一样。
+  const r = await postJson<{ deviceToken?: string }>('/api/devices/rotate', { nodeId }, { token: getAccessToken() })
+  return r.deviceToken ?? ''
+}
+
 /** 会话标签：在"登录中的设备"那一列里区分开不同浏览器。 */
 function browserLabel(): string {
   const ua = typeof navigator === 'undefined' ? '' : navigator.userAgent

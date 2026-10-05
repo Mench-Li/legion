@@ -284,3 +284,39 @@ test('★ 渲染结果把"其余路径"和"目录索引"都堵上', () => {
   assert.equal((config.match(/try_files \$uri =404;/g) ?? []).length, 2,
     'try_files 的处数不对（feeds 与 releases 各一处）')
 })
+
+test('★★ `/healthz` 也必须声明 no-store（`evaluateResponse` 覆盖不到它）', () => {
+  // ★ 这一条是我用一次**打偏了的变异**换来的。
+  //
+  //   我本想验证"生成器与验证器接缝"那条用例，于是把 `FEED_CACHE_CONTROL`
+  //   的 `add_header` 行改成一条混合指令。但 `renderServerBlock` 里
+  //   `FEED_CACHE_CONTROL` 出现在**两处** add_header（healthz 与 feeds），
+  //   而 `String.replace` 不带 `g` 只换第一处——**改中的是 healthz**。
+  //
+  //   于是那条"接缝"用例照样全绿（它只读 feeds/releases 两个 location），
+  //   而我一度以为"这条判据守不住"。真相是**变异打偏了**。
+  //
+  //   > 一次"没被抓住"的变异，先要排除"变异本身没打中"——
+  //   > 否则会把"我改错了地方"读成"判据是空的"。
+  //
+  //   ★ 而它顺带暴露了一个**真的**覆盖缺口：`/healthz` 的 no-store
+  //     不在 `evaluateResponse` 的覆盖范围内——那个函数只认
+  //     `feeds/` 与 `releases/` 两类路径（连 `/healthz` 都会被
+  //     `HOST_CODES.BAD_PATH` 具名拒掉）。所以健康检查的缓存头
+  //     此前**没有任何机械判据**，而它在真实托管上是验过的（200|no-store）。
+  //
+  //     一条"只在真实机器上验过一次、代码里没人守"的性质，
+  //     会在下一次改配置时安静地消失。
+  for (const name of TREE_NAMES) {
+    const tree = treeOf(name).tree
+    const config = renderServerBlock({ tree, serverName: '117.72.146.36' }).config
+    const start = config.indexOf('location = /healthz {')
+    assert.ok(start >= 0, `${name}：没有健康检查块`)
+    const block = config.slice(start, config.indexOf('\n    }', start))
+    assert.ok(block.includes(`add_header Cache-Control "${FEED_CACHE_CONTROL}" always;`),
+      `${name}：/healthz 没有声明 ${FEED_CACHE_CONTROL}——健康检查的响应会被中间层缓存`)
+    // 而且它**不许**是别的缓存头（比如发行文件那条 immutable）。
+    assert.equal(block.includes(RELEASE_CACHE_CONTROL), false,
+      `${name}：/healthz 声明了发行文件那条缓存头`)
+  }
+})

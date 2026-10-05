@@ -795,9 +795,9 @@ node scripts/update/verify-host.mjs --origin <生产 origin> --prefix /legion \
   > "有开关没接线"与"没要求所以没线"，在源码里长得一模一样，
   > 而它们该做的事相反：前者要接上，后者只需要被说出来。
 
-### 6.1.2 查过而**没有问题**的四处（写下来是为了下次不用再查）
+### 6.1.2 查过而**没有问题**的五处（写下来是为了下次不用再查）
 
-审计里有四处看起来像缺陷、逐条查过之后确认是好的。记在这里，免得下一个人
+审计里有五处看起来像缺陷、逐条查过之后确认是好的。记在这里，免得下一个人
 （包括我自己）再花一次时间：
 
 1. **桌面协议与 bridge 的覆盖是双向完整的。** 协议表里 12 个类型，bridge 逐个
@@ -829,6 +829,29 @@ node scripts/update/verify-host.mjs --origin <生产 origin> --prefix /legion \
    （设计 §7 line 57），三个方向都有具名判据。
    这不是"某处写了 if"，而是"**那个值根本没有流到那两个操作里**"——
    对"永远不许"这类要求来说，这比一条 if 更强。
+5. **设计 §5 line 114 的一致性循环里，有三个字段在真实链路上"到不了"——
+   但**各自有更早的判据拦着**，所以不是缺陷。** 用探针把五个字段的分歧各造
+   一遍，实测出**实际**的拦截者：
+
+   | 分歧 | 实际拦截者 |
+   |---|---|
+   | `release.channel=canary` | `release-identity-mismatch`（**就是那个循环**） |
+   | `feed.productVersion=1.2.0` | `release-identity-mismatch`（**同一个循环**） |
+   | `release.platform=linux` | `release-bad-field`（`KNOWN_PLATFORMS` 白名单，更早） |
+   | `release.arch=arm64` | `release-unsupported-platform`（更早） |
+   | `feed.platform`/`feed.arch` | `feed-bad-field`（通道清单与本机平台/架构是否一致，更早） |
+   | `releaseId`（两个方向） | `feed-bad-path`（`manifestPath` 里嵌了 releaseId，更早） |
+
+   ★ 结论有两层。**第一层（安全性）**：五个字段全都被拦，没有裸的。
+   **第二层（用例怎么写）**：只有 `channel`/`productVersion` 会真的走到那个
+   循环，所以用例**只断言那两个**，另写一条把平台/架构的边界记清楚。
+
+   把到不了的那三个也写进用例，会得到三条"由别的判据满足"的绿灯——
+   它们看起来在守这条循环，实际没有：
+
+   > 一条由**别的判据**满足的断言，比没有断言更糟：
+   > 它让人以为这条路径被守住了。
+
 
 ★ 另外记一条**前存**观察（不是本次改动引入的，也不是缺陷）：
 `product/launcher/desktop-protocol.mjs` 与 `desktop-bridge.mjs` 没有本仓约定的
@@ -838,7 +861,7 @@ node scripts/update/verify-host.mjs --origin <生产 origin> --prefix /legion \
 ## 7. 复现证据
 
 ```bash
-# 全部自动更新相关用例（641 条）
+# 全部自动更新相关用例（643 条）
 node --test product/update/*.test.mjs product/upgrade/*.test.mjs \
   desktop/update-*.test.mjs desktop/main.test.mjs \
   scripts/update/*.test.mjs product/launcher/update-gate.test.mjs \

@@ -85,10 +85,41 @@ node --test plugins/tests/chat-replies-agent.test.mjs       # 6 例（新增 2 �
 
 连带不回归：`chat-responder` / `chat-error-classifier` / `chat-context` 共 **33 例**全绿。
 
+## 5.1 ★★ 宿主重启后的活体验证（2026-10-05 10:56）——**同一条消息的前后对照**
+
+宿主于 **10:55:09** 重启（晚于 `plugins/lib/index.js` 的构建时间 10:16:00 ⇒ 新代码已加载），
+随后重试那条**从未成功过**的 `msg 165`（「什么进展了」）：
+
+```bash
+node docs/bugs/BUG-002-live-verify.mjs --conv 25 --scope software --retry 165 --timeout 240
+```
+
+守护日志留下了**同一失败形态**的前后两条对照——这是判据里最有价值的一段，因为它证明
+"成功"不是因为这次恰好拿到了结构化结果，而正是回落那一段在起作用：
+
+```text
+01:24:32  chat-responder：消息 165 标记失败（AI 回复失败：原因暂不可识别。…）      ← 旧代码
+01:29:31  chat-responder：消息 165 标记失败（AI 回复失败：原因暂不可识别。…）      ← 旧代码
+02:56:15  chat-responder：消息 165 未拿到结构化结果（stopReason=error），已回落用文本输出作答（744 字）  ← 新代码
+02:56:15  chat-responder：已回复消息 165（agent:software:coder，provider=fjd-ds，model=deepseek-v4-flash-openai）
+```
+
+| 项 | 读数 |
+| --- | --- |
+| 触发条件 | `stopReason=error` + 无结构化结果——**与当初失败时完全同一形态** |
+| 旧代码的结果 | 判失败，744 字的答案被丢弃（两次） |
+| 新代码的结果 | `已回落用文本输出作答（744 字）` ⇒ **回写成功** |
+| 回写作者 | `agent:software:coder`（岗位身份，非旧守护的 `software-assistant`） |
+| 会话落库 | `msg=228 author=agent:software:coder aiModel=deepseek-v4-flash-openai replyTo=165` |
+| 源消息终态 | `aiStatus=replied` |
+
+即：**判据不只看"这次成功了"，而是看"当初那个确切的失败形态现在走的是回落分支"**。
+
 ## 6. 边界
 
 - **生效需要宿主重启**：实测确认宿主**不热重载**守护插件——重建 `lib/` 之后重试 `msg 165`
-  仍然走旧代码（同样的 `empty-other` 文案）。这与 BUG-002 第二半同一次重启即可一并生效。
+  仍然走旧代码（同样的 `empty-other` 文案）。**已于 2026-10-05 10:55 重启并复验通过**（见 §5.1）。
+  这与 BUG-002 第二半同一次重启一并生效。
 - 本修复**不改变**失败分类器的五类枚举（有单测钉着），也不改变"什么时候判失败"的语义边界。
 - 落回文本意味着回答**没有** `{reply}` 的形状约束。对"对话回复"这个用途是等价的（内容就是答案）；
   若将来这个通道要承载结构化字段（如引用事件 ID），那时应当**先让提示词与 outputSchema 一致**，

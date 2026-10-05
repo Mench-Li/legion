@@ -143,6 +143,45 @@ export function attentionCount(tasks = []) {
   return (tasks ?? []).filter((t) => ['blocked', 'in_review'].includes(t?.status)).length
 }
 
+// ── 视角筛选（与指挥台的「任务视角」同一条轴）────────────────────────────────
+//
+// 手机端此前只有"按状态分列"这一种看法，而指挥台的任务中心还有**另一条轴**：
+// 全部 / 工作中 / 待我决定 / 待办 / 已完成。少这一条，同一批任务在两端的
+// 读法就不一样——用户在指挥台习惯了"点一下只看要我决定的"，到手机上找不到。
+//
+//   > 一个"手机能看任务"的看板，与一个"手机能和指挥台一样看任务"的看板，
+//   > 在只有单一轴的版本里长得一模一样——直到用户想筛一下。
+//
+// ★ 这份状态归属必须与 `workbench/src/components/TaskCenterView.tsx` 的
+//   `TC_VIEWS` **逐字一致**。两地镜像会漂移，所以有一条用例直接读那个文件的
+//   源码来对（`workbench/scripts/mobile-board-parity.test.mjs`）——
+//   不靠人记得同步。
+export const BOARD_VIEWS = Object.freeze([
+  Object.freeze({ id: 'all', label: '全部', statuses: [] }),
+  Object.freeze({ id: 'busy', label: '工作中', statuses: ['in_progress'] }),
+  Object.freeze({ id: 'decide', label: '待我决定', statuses: ['in_review', 'blocked'] }),
+  Object.freeze({ id: 'todo', label: '待办', statuses: ['backlog', 'todo'] }),
+  Object.freeze({ id: 'done', label: '已完成', statuses: ['done'] }),
+])
+
+export const DEFAULT_VIEW = 'all'
+
+export function viewOf(id) {
+  return BOARD_VIEWS.find((v) => v.id === id) ?? null
+}
+
+/**
+ * 按视角筛选。`all`（或认不出的 id）返回全部——**不丢任务**。
+ *
+ * 认不出的 id 退回 `all` 而不是返回空列表：一个"筛没了"的界面，用户会以为
+ * 任务丢了，而真实原因只是一个没见过的查询串。
+ */
+export function applyView(tasks = [], viewId = DEFAULT_VIEW) {
+  const view = viewOf(viewId)
+  if (view === null || view.statuses.length === 0) return Object.freeze([...(tasks ?? [])])
+  return Object.freeze((tasks ?? []).filter((t) => view.statuses.includes(String(t?.status ?? ''))))
+}
+
 // ── 任务的动态（进展）──────────────────────────────────────────────────────
 
 /**

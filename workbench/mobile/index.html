@@ -82,6 +82,13 @@ footer textarea { resize:none; max-height:120px; }
 #tabs button[aria-selected="true"] { background:var(--accent); border-color:var(--accent); color:#0b1020; font-weight:600; }
 #tabs button .badge { position:absolute; top:-6px; right:-4px; background:var(--warn); color:#3a2a00;
   border-radius:999px; font-size:11px; font-weight:700; padding:0 6px; line-height:16px; min-width:16px; }
+/* 任务视角：与指挥台「任务中心」同一条轴（全部/工作中/待我决定/待办/已完成）。
+   横向可滚，不换行——手机上换行会把看板往下推一大截。 */
+#board-views { display:flex; gap:6px; overflow-x:auto; padding-bottom:8px; margin-bottom:4px;
+  scrollbar-width:none; -webkit-overflow-scrolling:touch; }
+#board-views::-webkit-scrollbar { display:none; }
+#board-views button { flex:none; min-height:32px; padding:4px 12px; font-size:13px; border-radius:999px; white-space:nowrap; }
+#board-views button[aria-selected="true"] { background:var(--accent); border-color:var(--accent); color:#0b1020; font-weight:600; }
 /* 意图选择：三个 chip，选中的那个要一眼看出来——它决定"这句话会不会变成任务"。 */
 #intents { display:flex; gap:6px; margin-bottom:8px; }
 #intents button { flex:1; min-height:34px; padding:4px 6px; font-size:13px; border-radius:999px; }
@@ -125,6 +132,7 @@ footer textarea { resize:none; max-height:120px; }
 <main id="main" class="hidden">
   <div id="view-board">
     <p class="viewtitle" id="board-scope"></p>
+    <div id="board-views" role="tablist" aria-label="任务视角"></div>
     <div id="task-groups" class="groups"></div>
   </div>
   <div id="view-chat" class="hidden">

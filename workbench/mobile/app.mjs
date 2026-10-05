@@ -25,12 +25,16 @@
 // 却看不见任务卡在哪——而"我要下个任务"的前提恰恰是前者。
 // ============================================================================
 import {
+  BOARD_VIEWS,
   DEFAULT_INTENT,
+  DEFAULT_VIEW,
   INTENT_OPTIONS,
+  applyView,
   attentionCount,
   boardColumns,
   canAppendFeedback,
   intentOf,
+  viewOf,
   isWaitingForNode,
   mergeAttempts,
   planSend,
@@ -70,6 +74,8 @@ const state = {
   sse: null,
   view: 'board',
   intent: DEFAULT_INTENT,
+  /** 任务视角（与指挥台任务中心同一条轴）。 */
+  boardView: DEFAULT_VIEW,
   /** 「追加要求」针对的任务 id；由看板卡片按钮或下拉框选择。 */
   targetTaskId: null,
   /** 能力发现的结果。决定登录页显示"登录"还是"注册+登录"。 */
@@ -224,11 +230,51 @@ function renderTimeline() {
 
 // ── 渲染：看板 ──────────────────────────────────────────────────────────────
 
+/** 视角 chip：与指挥台任务中心同一条轴。见 board.mjs 的 BOARD_VIEWS。 */
+function renderBoardViews() {
+  const box = $('board-views')
+  box.replaceChildren()
+  for (const v of BOARD_VIEWS) {
+    const b = document.createElement('button')
+    b.textContent = v.label
+    b.setAttribute('aria-selected', String(state.boardView === v.id))
+    b.addEventListener('click', () => { state.boardView = v.id; renderBoardViews(); renderBoard() })
+    box.appendChild(b)
+  }
+}
+
 function renderBoard() {
   const root = $('task-groups')
-  const { columns, unknown } = boardColumns(state.tasks)
+  const shown = applyView(state.tasks, state.boardView)
   const frag = document.createDocumentFragment()
   let any = false
+
+  if (state.boardView !== 'all') {
+    // ★ 选中某个视角时给**平铺列表**，不按状态分列。
+    //
+    // 视角已经把状态收窄过一次了（比如「待我决定」= in_review + blocked），
+    // 再分列会得到两列各一条，而手机上那两列的高度加起来比列表还高——
+    // 信息量没增加，滚动距离翻了倍。
+    const box = document.createElement('div')
+    box.className = 'group'
+    const h = document.createElement('h2')
+    h.textContent = viewOf(state.boardView)?.label ?? ''
+    const n = document.createElement('span'); n.className = 'n'; n.textContent = String(shown.length)
+    h.appendChild(n)
+    box.appendChild(h)
+    if (shown.length === 0) {
+      const p = document.createElement('div')
+      p.className = 'hint'
+      p.textContent = `这个视角下没有任务。（共 ${state.tasks.length} 条，切到「全部」看）`
+      box.appendChild(p)
+    }
+    for (const t of shown) box.appendChild(taskCard(t))
+    frag.appendChild(box)
+    root.replaceChildren(frag)
+    return
+  }
+
+  const { columns, unknown } = boardColumns(shown)
   for (const col of columns) {
     if (col.count === 0) continue
     any = true
@@ -632,6 +678,7 @@ async function refreshTasks() {
     detail = d?.agent?.tasks ?? []
   }
   state.tasks = mergeAttempts(Array.isArray(board) ? board : (board.tasks ?? []), detail)
+  renderBoardViews()
   renderBoard()
   renderTargets()
   const badge = attentionCount(state.tasks)

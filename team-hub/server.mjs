@@ -7569,6 +7569,7 @@ function routeHarnessForTask(input) {
 import { createIdentityRoutes } from './routes/identity.mjs'
 import { createMobileRoutes } from './routes/mobile.mjs'
 import { createPortalRoutes } from './routes/portal.mjs'
+import { createReleaseRoutes, latestInstaller } from './routes/releases.mjs'
 import { createUserStore } from './user-store.mjs'
 import { createDeviceStore } from './device-store.mjs'
 import { createNodeGateway } from './node-gateway.mjs'
@@ -7784,10 +7785,31 @@ if (REMOTE_AGENT_ENABLED) {
   // 用户就永远拿不到那个能让他登录的页面。
   // 位置最后 unshift ⇒ 数组最前 ⇒ 最先派发。
   router.families.unshift(createMobileRoutes({ root: join(ROOT, 'workbench', 'mobile') }))
+
+  // 发布目录托管（`GET /legion/*`）。
+  //
+  // 只在**显式配了** `LEGION_RELEASES_DIR` 时注册：没配就让 `/legion/*` 落到
+  // 通用 404，而不是挂一个空目录上去——"200 但是空的"与"还没有发布"在界面上
+  // 长得一样，而前者会让排障的人去查缓存。
+  const releasesDir = String(CFG.values.releasesDir ?? '').trim()
+  if (releasesDir.length > 0) {
+    router.families.unshift(createReleaseRoutes({ root: releasesDir }))
+  }
+
   // 门口（`GET /`）也排在最前：它是**第一个**打开这个 Hub 的人看到的页面。
   // 排在后面的话会被通用 404 接走，而"发个链接给人"是这个产品被使用的第一步。
+  //
+  // 下载地址的取法：**显式配置优先**；没配就**从发布目录里现找**最新的一份安装包。
+  // 后者不是便利，是那条纪律的落地——门口页只链接**确实存在**的文件。
+  // 让运营者手填一个 URL，就等于把这个保证换成了"希望他填对了"。
+  const explicitDownload = String(CFG.values.downloadUrl ?? '').trim()
+  const foundInstaller = explicitDownload.length === 0 && releasesDir.length > 0
+    ? latestInstaller(releasesDir)
+    : null
   router.families.unshift(createPortalRoutes({
-    downloadUrl: CFG.values.downloadUrl ?? '',
+    downloadUrl: explicitDownload.length > 0
+      ? explicitDownload
+      : foundInstaller === null ? '' : `/legion/releases/${encodeURIComponent(foundInstaller.releaseId)}/Legion-Setup-win-x64.exe`,
     version: CFG.values.desktopVersion ?? '',
     registration: CFG.values.registration ?? 'closed',
   }))

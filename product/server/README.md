@@ -267,6 +267,21 @@ cloudflared service uninstall
   ```
 
   默认 `closed` 是有意的：没设策略的 Hub 不应该自动变成一个人人可注册的公开服务。
+- **安装包下载**：Hub 可以自己托管发布目录，省掉一个对象存储。
+  把 `LEGION_RELEASES_DIR` 指到一个含 `feeds/` 与 `releases/` 的目录
+  （结构见 [桌面自动更新设计](../../docs/superpowers/specs/2026-10-02-legion-desktop-auto-update-design.md) §4），
+  然后 `GET /legion/*` 就能取到；通道清单 `no-store`、发布目录长缓存、支持 Range 续传。
+  留空 = 不托管（`/legion/*` 落到通用 404）。
+
+  ```
+  LEGION_RELEASES_DIR=/var/lib/legion-hub/releases
+  ```
+
+  **门口页会自动挑出最新那一份安装包**并链接过去（按 mtime）；没有安装包时
+  如实写「尚未发布」。这条路刻意不让运营者手填 URL——手填就把
+  「只链接确实存在的文件」换成了「希望他填对了」。
+  `LEGION_DOWNLOAD_URL` 仍然存在，用于把下载指向**别的**主机（对象存储/CDN），
+  显式配置优先。
 - 门口：`GET /` 是产品首页（手机端入口 + 下载入口 + 注册说明），**免鉴权**。
   在此之前它回的是 `{"error":"缺少访问令牌"}`——那是每个新用户看到的第一句话。
 - 验收：`node product/server/verify-phone.mjs <baseUrl>`（照手机端的顺序打一串

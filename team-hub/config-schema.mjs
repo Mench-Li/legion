@@ -60,6 +60,16 @@ export const SCHEMA = defineSchema({
       key: 'desktopVersion', env: 'LEGION_DESKTOP_VERSION', type: 'string', default: '',
       doc: '桌面版版本号（只用于首页展示，可空）',
     },
+    // 发布目录：其下应有 `feeds/` 与 `releases/`（结构见桌面自动更新设计 §4）。
+    //
+    // **默认留空 = 不托管**（这一族根本不注册，`/legion/*` 落到通用 404）。
+    // 不默认指向仓库里的 `releases/`：那个目录被 gitignore，默认指过去只会让
+    // 一台刚部署的 Hub 挂上一个空目录，而"空目录"与"还没发布"在门口页上
+    // 长得一样。要让 Hub 托管，显式写出来。
+    {
+      key: 'releasesDir', env: 'LEGION_RELEASES_DIR', type: 'path', default: '',
+      doc: '发布目录（含 feeds/ 与 releases/）；留空 = Hub 不托管安装包下载',
+    },
     // ── 附件（P3-2 统一项：附件目录相关限值）──
     { key: 'attachMaxBytes', env: 'CHAT_ATTACH_MAX_BYTES', type: 'int', default: 10 * 1024 * 1024, min: 1, doc: '单附件大小上限（字节）' },
     { key: 'attachMaxPerMsg', env: 'CHAT_ATTACH_MAX_PER_MSG', type: 'int', default: 3, min: 1, doc: '每条消息附件数量上限' },

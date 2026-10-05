@@ -359,6 +359,10 @@ export const SCHEMA = defineSchema({
     'EXECUTOR_OUTPUT_TOO_LARGE', 'EXECUTOR_SPAWN_FAILED', 'EXECUTOR_TIMEOUT',
     'NODE_ATTEMPT_ALREADY_RUNNING', 'NODE_EXECUTOR_MISSING', 'NODE_VERSION_REJECTED', 'NODE_WORKSPACE_NOT_AUTHORIZED',
     'LEASE_EPOCH_STALE', 'LEASE_EXPIRED', 'LEASE_NOT_HELD',
+    // 这两个是**从 Hub 的错误码里读回来的**：Hub 拒绝阶段上报时用它告诉本机停手
+    // （`BuildingContext → Running` 要求先有上下文快照）。跨端约定的字符串，
+    // 不是本地常量——所以和上面那三个 LEASE_* 放在一起。
+    'EVIDENCE_MISSING', 'TRANSITION_REJECTED',
 
     // Desktop bridge/protocol and local HTTP guard error codes, not environment keys.
     'BAD_ID', 'BAD_JSON', 'BAD_PAYLOAD', 'BAD_REQUEST', 'BAD_VERSION',

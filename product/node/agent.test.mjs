@@ -272,6 +272,45 @@ test('重连后把未收尾的尝试对账上去，且对账只带身份不带�
   } finally { agent.stop(); await hub.stop() }
 })
 
+test('Hub 拒绝阶段上报时停手（不干那种结果注定上报不出去的活）', async () => {
+  // ★ 实测过的死锁：`BuildingContext → Running` 要求先有一份上下文快照落库
+  //   （`requiresPersist:['attempt','contextSnapshot']`）。快照不存在时 Hub 拒绝
+  //   阶段上报，而本机若照旧把执行器跑完，结果**永远上报不出去**——
+  //   `BuildingContext → Validating` 根本没有边，任务卡在 `BuildingContext`，
+  //   执行器白跑一趟，副作用却已经发生了。
+  const hub = await startHub([CLAIM()])
+  // 让 Hub 对阶段帧回一条"被拒"的错误帧（与真实 EVIDENCE_MISSING 同形）。
+  const originalOnPhase = hub.gateway.connections
+  hub.runStore.transition = (args) => {
+    hub.runStore.calls.transition.push(args)
+    if (args.to !== undefined && args.to !== null) {
+      const err = Object.assign(new Error('迁移 BuildingContext → Running 声明要先落库的证据不存在：contextSnapshot'), { code: 'EVIDENCE_MISSING' })
+      throw err
+    }
+    return { ok: true, attempt: { attemptId: args.attemptId, state: 'Validating' } }
+  }
+  const { agent, ledger } = makeAgent(hub, {
+    executor: nodeScript(`
+      console.log(JSON.stringify({ type: 'progress', kind: 'step', summary: '不该跑到这里' }));
+      console.log(JSON.stringify({ type: 'result', outcome: 'completed', summary: '不该跑到这里' }));
+    `),
+  })
+  agent.start()
+  try {
+    // 阶段被拒 → 本机停手 → 走 cancelled（`BuildingContext → Cancelled` 是合法边）。
+    await until(() => terminalCall(hub.runStore.calls.transition) !== undefined, { label: '停手后的终态', timeoutMs: 6000 })
+    const terminal = terminalCall(hub.runStore.calls.transition)
+    assert.equal(terminal.outcome, 'cancelled', '阶段被拒后应停下并按 cancelled 收尾，而不是硬跑完')
+    // 停止**不是瞬时的**：拒绝要一次往返才到，执行器可能已经吐出第一行。
+    // 所以断言的是"它没有跑完"，而不是"它一行都没跑"——后者在真实网络上
+    // 依赖一个不存在的时序保证，写成那样只会变成一个偶发红灯。
+    assert.ok(hub.runStore.calls.recordRunEvents.length <= 1,
+      `应尽快停手，实际发出 ${hub.runStore.calls.recordRunEvents.length} 条进展`)
+    assert.equal(ledger.get('att-1').outcome, 'cancelled')
+    void originalOnPhase
+  } finally { agent.stop(); await hub.stop() }
+})
+
 test('同一 attempt 的序号跨多次进展单调递增（不会被 Hub 当成重放）', async () => {
   const hub = await startHub([CLAIM()])
   const { agent } = makeAgent(hub, {

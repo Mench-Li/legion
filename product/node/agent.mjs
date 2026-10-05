@@ -222,13 +222,30 @@ export function createNodeAgent({
 
   function onError(frame) {
     log('error', `Hub 拒绝：${frame.code} ${frame.message ?? ''}`)
-    // 与租约相关的拒绝同样要停手（错误帧里可能带着 expired attempt 的身份）。
+    // 与租约相关的拒绝：立即停手（租约已经不归你了，继续跑产生的副作用无法归属）。
     if (['LEASE_EPOCH_STALE', 'LEASE_EXPIRED', 'LEASE_NOT_HELD'].includes(frame.code)) {
       for (const [attemptId, entry] of [...running]) {
         if (frame.attemptId !== undefined && frame.attemptId !== attemptId) continue
         stats.aborted += 1
         entry.controller.abort()
         running.delete(attemptId)
+      }
+      return
+    }
+    // ★ 阶段被拒（`TRANSITION_REJECTED` / `EVIDENCE_MISSING`）也要停手。
+    //
+    // 状态机为每条边定义了证据要求：`BuildingContext → Running` 要求先有一份
+    // 上下文快照落库。那份快照不存在时 Hub 会拒绝阶段上报——如果本机继续把
+    // 执行器跑完，结果**永远上报不出去**（`BuildingContext → Validating` 根本没有边），
+    // 于是任务卡在 `BuildingContext`，执行器白跑一趟，而副作用已经发生了。
+    //
+    // 停手之后走 abort 路径：执行器被杀 → 报 `cancelled`，而
+    // `BuildingContext → Cancelled` 是合法边，任务能干净收尾。
+    if (frame.code === 'TRANSITION_REJECTED' || frame.code === 'EVIDENCE_MISSING') {
+      for (const [attemptId, entry] of [...running]) {
+        stats.aborted += 1
+        log('warn', `阶段被拒，停止执行 ${attemptId}：${frame.code}`)
+        entry.controller.abort()
       }
     }
   }
@@ -296,19 +313,17 @@ export function createNodeAgent({
     // 跳过中间态直接报终态会被 `TRANSITION_REJECTED` 拒掉——而症状很隐蔽：
     // 进展照常写入，任务却永远停在 `Leased`，界面上"有进展但不结束"。
     //
-    // 上报的时点与**本地真的做了什么**对齐（不是仪式）：下面每一行之前，
-    // 这台机器确实在做对应的事。上报失败（断线）不阻断执行——
-    // 阶段是给 Hub 看的投影，不是本机继续干活的前提。
-    const phase = (state) => { try { send(FRAME_TYPES.PHASE, { taskId: frame.taskId, attemptId: frame.attemptId, leaseEpoch: frame.leaseEpoch, state }) } catch { /* 断线时留待重连对账 */ } }
+    // 阶段上报：把"本机真的在做哪一步"告诉 Hub。上报失败（断线）不阻断执行——
+    // 阶段是给 Hub 看的投影，而 Hub 若**拒绝**某个阶段会回一条 error 帧，
+    // 那时由 `onError` 停手（见那里的注释：不能干那种结果无法上报的活）。
+    const advance = (state) => send(FRAME_TYPES.PHASE, { taskId: frame.taskId, attemptId: frame.attemptId, leaseEpoch: frame.leaseEpoch, state })
 
-    phase('PreparingWorkspace')
+    advance('PreparingWorkspace')
     ledger.record({ taskId: frame.taskId, attemptId: frame.attemptId, leaseEpoch: frame.leaseEpoch, phase: 'running' })
     let result
     try {
-      // 工作区已在派发时校验过（`onDispatch` 里查了 workspaces 表），
-      // 这里把它作为"上下文组装"的依据报出去：喂给执行器的就是它。
-      phase('BuildingContext')
-      phase('Running')
+      advance('BuildingContext')
+      advance('Running')
       result = await executor({
         task: frame.task ?? null,
         attempt: { attemptId: frame.attemptId, attemptNo: frame.attemptNo, leaseEpoch: frame.leaseEpoch },

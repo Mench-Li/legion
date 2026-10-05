@@ -240,33 +240,101 @@
   - [x] Node 运行时（v24.21.0）、系统用户、数据目录、密钥、systemd 单元
   - [x] Hub 上线并绑回环；`/api/identity/status` 200；无令牌读端点 401；机器令牌 200
   - [x] 云厂商拦截的实测与规避（见下「部署实录」）
-  - [x] Cloudflare 隧道连接器上线（4 条连接，lax）——**服务器主动出站**
-  - [ ] Cloudflare 侧 Public Hostname（需在面板操作，见 `product/server/README.md`）
-  - [ ] 公网端到端验收（手机登录、电脑配对、一次真实任务）
+  - [x] 云入口改用**公网 IP + 自签 CA**（只开 443）：手机页面公网 200、证书链 OpenSSL 验签 OK
+  - [x] 首次初始化（系统管理员）与**电脑配对**（公网 HTTPS 兑换配对码）
+  - [x] Node 出站连接、派发、进展回报、阶段上报、出境策略在真实链路上生效
+  - [ ] **上下文快照**：远端路径接上下文组装，才能合法进入 `Running`（见下）
+  - [ ] 远端 Node 参与**写入预约**生命周期（见下）
   - [ ] 备份与恢复演练
 
 ## 6.1 部署实录（2026-10-04/05）
 
-服务器 `117.72.146.36`（Ubuntu 24.04.2，2 vCPU / 3.9 GB）。
+服务器 `117.72.146.36`（Ubuntu 24.04.2，2 vCPU / 3.9 GB，nginx 1.24.0）。
 
-- **Node**：官方 apt 源里没有满足 `node:sqlite` 的版本，改用 NodeSource 装到 v24.21.0。
-- **证书签发的两次失败与根因**（这是本次部署最有价值的一条发现）：
-  - Certbot HTTP-01 失败：CA 从公网访问 `http://117.72.146.36.sslip.io/.well-known/...`
-    得到 **403**，响应头 `Server: JDTP`，正文是"网页禁止访问"的跳转脚本。
-  - 同一路径从服务器本机带同样 Host 请求，nginx 正常 200；同一时刻用裸 IP 作 Host
-    请求 80 端口也正常。→ 拦截条件是「80 端口 + 未备案域名的 Host」。
-  - 改用 acme.sh 的 **TLS-ALPN-01**（走 443）：CA 回报 `Connection reset by peer`。
-  - 为进一步定位，在服务器上临时起监听并从公网对比：
-    裸 TCP 连接正常；普通 TLS 握手（带域名 SNI）**成功**；
-    带 `-alpn acme-tls/1` 的握手**被重置**。→ 443 上针对性拦了 ACME 校验。
-  - 结论：**未备案域名在这台服务器上拿不到 Let's Encrypt 证书**（两种校验都被拦）。
-- **规避**：改用 **Cloudflare Tunnel**（服务器主动出站连 Cloudflare，公网入口在
-  Cloudflare 侧，证书由 Cloudflare 提供）。实测 `pkg.cloudflare.com` 在该网络下超时，
-  故 cloudflared 走 GitHub release 静态二进制（`/usr/local/bin`）。
-- **必须如实记录的边界**：`sslip.io` 类域名无法完成 ICP 备案，而境内服务器的网站需
-  备案是运营者的合规义务。隧道只是让技术链路在**当前**拦截策略下可用，不改变合规状态。
-  长期方案是自有已备案域名，或把入口移到境外节点。
+### 证书签发的两次失败与根因（本次最有价值的一条发现）
 
+- Certbot HTTP-01 失败：CA 从公网访问 `http://117.72.146.36.sslip.io/.well-known/…`
+  得到 **403**，响应头 `Server: JDTP`，正文是"网页禁止访问"的跳转脚本。
+- 同一路径从服务器本机带同样 Host 请求，nginx 正常 200；同一时刻用裸 IP 作 Host
+  请求 80 端口也正常。→ 拦截条件是「80 端口 + **未备案域名**的 Host」。
+- 改用 acme.sh 的 **TLS-ALPN-01**（走 443）：CA 回报 `Connection reset by peer`。
+- 进一步定位（在服务器上临时起监听，从公网对比）：裸 TCP 正常；普通 TLS 握手
+  （带域名 SNI）**成功**；带 `-alpn acme-tls/1` 的握手**被重置**。
+  → 443 上针对性拦了 ACME 校验。
+- **结论：未备案域名在这台服务器上拿不到 Let's Encrypt 证书**（两种校验都被拦）。
+
+### 采用方案与它的边界
+
+先用 **Cloudflare Tunnel**（服务器主动出站，公网入口在 Cloudflare 侧）。
+实测 `pkg.cloudflare.com` 在该网络下超时，故 cloudflared 走 GitHub release 静态二进制。
+隧道令牌写入后连接器上线（4 条连接，lax），但 **Cloudflare Zero Trust 需要绑定支付方式**，
+运营者无法进入面板添加 Public Hostname——日志因此停在
+`No ingress rules were defined … will return 503`。
+
+改用**公网 IP 过渡入口**（`product/server/setup-ip-entry.sh`）：
+**只开 443**，用自签 CA 签发服务器证书（加密，但浏览器不默认信任）。
+刻意**不**开 80 明文入口：只开 80 在功能上"完全可用"，而那正是危险之处——
+登录口令与会话令牌会明文过网且没有任何提示。
+
+> 途中踩到并修掉的一个真实回归：一开始 80/443 都开了，而 80 端口上既有的
+> `legion-updates` 站点用的也是这个裸 IP 作 `server_name`。两个站点抢同一个名字，
+> nginx 只让其中一个生效，实测把既有站点的 `/healthz` 从 200 变成 **401**。
+> 现在 Hub 只占 443，`/healthz` 已恢复 200（并入验证清单）。
+
+**必须如实记录的边界**：裸 IP 与 `sslip.io` 类域名都无法完成 ICP 备案，而境内服务器
+上的网站需备案是运营者的合规义务。当前方案只让技术链路在**当前**拦截策略下可用，
+**不改变合规状态**。长期方案：自有已备案域名（然后走 `setup-tls.sh`），
+或把入口移到境外节点。
+
+### 已完成的验收
+
+| 项 | 结果 |
+| --- | --- |
+| Hub 独立于 DSH 运行 | ✅ 零第三方依赖，systemd 托管，只绑 `127.0.0.1:8787` |
+| 远程门禁 | ✅ 无令牌 `/api/board` → 401；机器令牌 → 200；`/api/identity/status` 公开 |
+| 手机页面 | ✅ `https://117.72.146.36/mobile/` → 200（公网实测） |
+| 证书链 | ✅ OpenSSL 验签 `Verification: OK`（Windows schannel 需装证书到系统store） |
+| 首次初始化 | ✅ 库空时用机器令牌建第一个系统管理员（口令只落 0600 文件，不进对话记录） |
+| 设备配对 | ✅ 电脑经公网 HTTPS 兑换配对码 → 拿到设备令牌（`NODE_EXTRA_CA_CERTS` 指自签 CA） |
+| Node 出站长连接 | ✅ 注册成功、心跳稳定、presence 在线；掉线自动重连 |
+| 派发 | ✅ `node:dispatch` → `node:dispatch-ack`（审计可见） |
+| 进展回报 | ✅ `node:progress` seq 1..4 入库 |
+| **出境策略在真实链路上生效** | ✅ 含私钥块的进展到达 Hub 时是 `[已拦下：包含私钥块]` |
+| 阶段上报 | ✅ `node:phase PreparingWorkspace` / `BuildingContext` 已入库 |
+| 失败与对账路径 | ✅ 租约过期 → `UnknownOutcome`（不自动重跑）；人工对账 → `RetryableFailure` → 新尝试入队 |
+
+### 尚未打通：上下文快照（阻塞 `Running`）
+
+远端尝试目前**到不了 `Running`**。状态机为 `BuildingContext → Running` 声明了
+`requiresPersist: ['attempt','contextSnapshot']`，而 `run-store` 的 `EVIDENCE_CHECKS`
+**真的核验**它（`run_context_snapshots` 里该 attempt 至少一行）。远端 Node 没有走
+上下文组装流程，因此没有快照，Hub 以 `EVIDENCE_MISSING: contextSnapshot` 拒绝。
+
+这不是"绕过一下就好"的事：那张快照有 23 列（含 `final_text`、`snapshot_hash`、
+token 计数、候选/纳入/排除计数、`payload_json`），**伪造一行等于把"没人组装过上下文"
+写成"组装过了"**——正是本方案一路在避免的那种绿灯。
+
+所以远端路径要接的是**真正的上下文组装**（`assembleContext` / `contextStore` /
+来源收集 / 分词器）。已做的两件相关的事：
+
+- **不再死锁**：阶段被 Hub 拒绝时本机**停手**并按 `cancelled` 收尾
+  （`BuildingContext → Cancelled` 是合法边）。原实现会照旧跑完执行器，
+  而结果永远上报不出去（`BuildingContext → Validating` 没有边），
+  于是任务卡住、执行器白跑、副作用已经发生。
+- **拒绝在 Hub 侧可见**：网关把被拒的帧写进审计（`node:frame-rejected`），
+  此前它只回给 Node，Hub 侧完全看不到。
+
+另外还记录两个已修的接线缺口：
+
+- **写入预约未结清**：`finishTaskReservationInTx` 只在**看板迁移**
+  （`in_review`/`done`/`canceled`）时被调用，而 `run-store` 的 `projectToTask` 是
+  直接 `UPDATE tasks.status`。于是远端尝试走到终态、看板被投影成 `in_review` 时，
+  预约没被结清，下一条任务一直看到 `SINGLE_WRITER_REQUIRED`。
+  远端 Node 目前**没有参与预约生命周期**——这是下一件要接的事。
+- **认领被阻塞时不可见**：`claim` 在有别的任务占着单写者位时**正常返回**
+  `claimed:null, reason:'file-contention'`，原实现直接 `continue`，于是
+  "节点就绪、任务待办、但什么都不派发"在日志/审计/读数里全都没有痕迹。
+  现在会记 `blockedClaims` 并 warn 一次（同一种阻塞只说一次）。
 
 ## 7. 未决
 

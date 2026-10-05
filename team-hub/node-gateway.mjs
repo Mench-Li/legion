@@ -332,10 +332,20 @@ export function createNodeGateway({
           io.send(FRAME_TYPES.ERROR, { requestId: frame.requestId, code: PROTOCOL_CODES.UNKNOWN_TYPE, message: `Hub 不处理 ${frame.type}` })
       }
     } catch (e) {
-      // 仓储抛出的具名拒绝（epoch 过期、状态机不许、租约不属于你）在这里转成一条
+      // 仓储抛出的具名拒绝（epoch 过期、状态机不许、缺证据）在这里转成一条
       // 可诊断的错误帧，**并让 Node 停手**——不是静默吞掉继续等下一个帧。
+      //
+      // 同时记一条审计：这些拒绝在 Hub 侧原来是**看不见的**（只回给了 Node），
+      // 于是"远端一直在报错、Hub 只在节点日志里能看出"变成了唯一线索。
+      record(state.nodeId, state.scopes.get(frame.attemptId) ?? null, 'node:frame-rejected', frame.taskId ?? null, {
+        type: frame.type, code: e?.code ?? GATEWAY_CODES.STORE_REJECTED,
+        stateMachineCode: e?.stateMachineCode ?? null,
+        missing: e?.missing ?? null,
+        message: e instanceof Error ? e.message.slice(0, 300) : String(e),
+      })
       io.send(FRAME_TYPES.ERROR, {
         requestId: frame.requestId,
+        attemptId: frame.attemptId ?? null,
         code: e?.code ?? GATEWAY_CODES.STORE_REJECTED,
         message: e instanceof Error ? e.message : String(e),
       })

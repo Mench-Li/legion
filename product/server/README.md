@@ -83,6 +83,18 @@ bash product/server/setup-tunnel.sh
 脚本从 `/usr/local/bin` 装 cloudflared（**不走官方 apt 源**：实测该源在本机网络下超时）、
 装 systemd 服务、并提示"同一隧道不要有第二个连接器"。
 
+**隧道面板里的 Service 端口必须是 `127.0.0.1:8787`**（Hub 的端口）。
+填成别的（例如面板默认的 `3000`）时，公网会返回 **502**，而服务器日志里是：
+
+```
+Unable to reach the origin service ... dial tcp 127.0.0.1:3000: connect: connection refused
+```
+
+`setup-ip-entry.sh` 里有一段**只为 3000 而存在**的 nginx origin 别名——
+如果你不想改面板，它能让 `localhost:3000` 也能用。把面板改成 `127.0.0.1:8787`
+之后，删掉那段 `listen 3000` 的 server 块即可（两个入口同时存在迟早会有人问
+"3000 是什么"）。
+
 ### ④ 初始化第一个账号
 
 库为空时，用 Hub 机器令牌建第一个**系统管理员**：

@@ -7588,7 +7588,7 @@ const IDENTITY_KEY = String(CFG.values.identityKey ?? '')
 const REMOTE_AUTH_ENABLED = REMOTE_AGENT_ENABLED && String(CFG.values.remoteAuth ?? '') === '1'
 
 export const userStore = REMOTE_AGENT_ENABLED
-  ? createUserStore({ db, withTx, key: IDENTITY_KEY, audit })
+  ? createUserStore({ db, withTx, key: IDENTITY_KEY, audit, registrationMax: CFG.values.registrationMax })
   : null
 export const deviceStore = REMOTE_AGENT_ENABLED
   ? createDeviceStore({ db, withTx, audit })

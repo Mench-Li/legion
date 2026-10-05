@@ -202,7 +202,7 @@ export async function login(name: string, password: string): Promise<Session & M
  * 分成两步会留下"账号存在但我进不去"的中间态——而用户会以为注册失败，
  * 换个名字再来一遍，然后两个账号都在。
  */
-export async function register(input: { name: string; password: string; space: string; code?: string }): Promise<Session & MeInfo> {
+export async function register(input: { name: string; password: string; /** 留空 = 让服务端解析（只有一个空间时它自己选，多个时具名拒绝）。 */ space?: string; code?: string }): Promise<Session & MeInfo> {
   const r = await postJson<{ accessToken: string; refreshToken: string; userId: string; name: string; roles?: MeInfo['roles']; systemRole?: MeInfo['systemRole'] }>(
     '/api/identity/register',
     { ...input, label: browserLabel() },

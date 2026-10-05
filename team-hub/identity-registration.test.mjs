@@ -30,6 +30,10 @@ before(async () => {
   mod = await import('./server.mjs')
   await new Promise((resolve) => mod.server.listen(0, '127.0.0.1', resolve))
   base = `http://127.0.0.1:${mod.server.address().port}`
+  // 自助注册现在会**真的去查**目标空间是否存在（见 user-store 的
+  // `resolveRegistrationSpace`）。建一个 `default`，否则所有注册用例都会以
+  // `SPACE_NOT_FOUND` 失败——而那报出来像"注册坏了"，其实是夹具少了一个空间。
+  mod.db.prepare("INSERT OR IGNORE INTO spaces (id, name) VALUES ('default', '默认空间')").run()
 })
 
 after(() => {

@@ -90,7 +90,14 @@ export const IDENTITY_CODES = Object.freeze({
   REGISTRATION_CLOSED: 'IDENTITY_REGISTRATION_CLOSED',
   INVITE_REQUIRED: 'IDENTITY_INVITE_REQUIRED',
   WRONG_PASSWORD: 'IDENTITY_WRONG_PASSWORD',
+  SPACE_NOT_FOUND: 'IDENTITY_SPACE_NOT_FOUND',
+  SPACE_REQUIRED: 'IDENTITY_SPACE_REQUIRED',
+  REGISTRATION_RATE_LIMITED: 'IDENTITY_REGISTRATION_RATE_LIMITED',
 })
+
+/** 自助注册的滑动窗口与上限。见 `registrationAllowed` 里"为什么是全局"那段。 */
+export const REGISTRATION_WINDOW_MS = 60 * 60 * 1000
+export const REGISTRATION_MAX_PER_WINDOW = 20
 
 /**
  * 注册策略。**默认 `closed`**。
@@ -202,7 +209,7 @@ const DUMMY_HASH = `scrypt$${SCRYPT_PARAMS.N}$${SCRYPT_PARAMS.r}$${SCRYPT_PARAMS
  *   而"没有签名的令牌"与"任何人都能伪造的令牌"是同一个东西。
  * @param {Function} [deps.audit] `(actor, scope, action, taskId, detail)`，可缺省
  */
-export function createUserStore({ db, withTx, clock = Date.now, key = '', audit = null } = {}) {
+export function createUserStore({ db, withTx, clock = Date.now, key = '', audit = null, registrationMax = REGISTRATION_MAX_PER_WINDOW } = {}) {
   if (db === undefined || db === null) throw new TypeError('createUserStore 需要 db')
   if (typeof withTx !== 'function') throw new TypeError('createUserStore 需要 withTx')
   if (typeof key !== 'string' || key.length < 16) {
@@ -233,6 +240,18 @@ export function createUserStore({ db, withTx, clock = Date.now, key = '', audit 
     CREATE TABLE IF NOT EXISTS hub_login_failures (
       name_key TEXT PRIMARY KEY, failures INTEGER NOT NULL, window_started_ms INTEGER NOT NULL, locked_until_ms INTEGER);
     CREATE INDEX IF NOT EXISTS idx_hub_sessions_user ON hub_user_sessions(user_id);
+    -- 注册事件的**只追加**流水，用来算滑动窗口内的注册量。见 registrationAllowed。
+    --
+    -- 为什么不复用 hub_login_failures：那一张记的是"某个用户名连续失败了几次"
+    -- （按 name_key 归并、失败才写、成功就清）。而注册要限的是**整体速率**——
+    -- 攻击面恰恰是"每次换一个新用户名"，按名字归并的计数对它恒为 1。
+    --
+    --   > 一个"按用户名限速"的注册闸门，
+    --   > 与一个"完全不限速"的注册闸门，在批量注册面前是同一个东西——
+    --   > 因为批量注册从来不重复用同一个名字。
+    CREATE TABLE IF NOT EXISTS hub_registrations (
+      id TEXT PRIMARY KEY, user_id TEXT, space TEXT NOT NULL, at_ms INTEGER NOT NULL);
+    CREATE INDEX IF NOT EXISTS idx_hub_registrations_at ON hub_registrations(at_ms);
   `)
 
   const record = (action, scope, detail, actor) => {
@@ -667,6 +686,8 @@ export function createUserStore({ db, withTx, clock = Date.now, key = '', audit 
     // `invite` 策略直接复用接受邀请那一条：那里已经处理了"消费与建用户同一事务"
     // 与并发下的二次判定。另写一条会在两处出现两个"邀请码能不能用"的判定，
     // 而它们迟早会漂移。
+    //
+    // 邀请制**天然**限速：邀请码一次性、短时、由人签发。所以闸门只加在 `open` 上。
     if (registration === 'invite') {
       if (typeof code !== 'string' || code.trim().length === 0) {
         fail(IDENTITY_CODES.INVITE_REQUIRED, '这台 Hub 需要邀请码才能注册', 403)
@@ -677,9 +698,21 @@ export function createUserStore({ db, withTx, clock = Date.now, key = '', audit 
       return { ...session, userId: created.userId, name: created.name, space: created.space, role: created.role, via: 'invite' }
     }
 
-    const cleanSpace = space === undefined || space === null || String(space).trim() === ''
-      ? 'default'
-      : validateSpace(String(space).trim())
+    // ── `open` 策略的两道闸门 ────────────────────────────────────────────────
+    //
+    // ① 速率。见 `registrationAllowed` 与那张表的注释：按名字归并的计数挡不住
+    //    批量注册，而批量注册从来不重复用同一个名字。
+    const gate = registrationAllowed()
+    if (gate.allowed !== true) {
+      fail(IDENTITY_CODES.REGISTRATION_RATE_LIMITED, gate.message, 429)
+    }
+    // ② 目标空间**必须真的存在**。
+    //
+    // 只做 `validateSpace`（那是正则）会让"打错一个字母"通过：返回 200、发令牌、
+    // 进主界面，然后 `/api/spaces` 里什么都没有。而那个界面与"注册成功、但还没人
+    // 拉你进空间"**长得一模一样**——所以用户不会来报 bug，他会以为是自己没被邀请。
+    const cleanSpace = resolveRegistrationSpace(space)
+
     const hash = await hashPassword(password)
     const at = now()
     const userId = withTx(() => {
@@ -696,11 +729,79 @@ export function createUserStore({ db, withTx, clock = Date.now, key = '', audit 
         throw e
       }
       db.prepare('INSERT INTO hub_space_roles VALUES(?,?,?,?,?)').run(newId, cleanSpace, DEFAULT_REGISTER_ROLE, newId, at)
+      // 记账必须在**同一个事务**里：分开写会让"闸门看到 0 条"与"用户已建出来"
+      // 之间出现一个窗口，而并发注册恰好都落在那个窗口里。
+      db.prepare('INSERT INTO hub_registrations VALUES(?,?,?,?)').run(id('reg'), newId, cleanSpace, at)
       record('identity:register', cleanSpace, { userId: newId, via: 'open' }, newId)
       return newId
     })
     const session = issueSession(userId, { label })
     return { ...session, userId, name: clean, space: cleanSpace, role: DEFAULT_REGISTER_ROLE, via: 'open' }
+  }
+
+  /**
+   * 目标空间解析：显式给了就必须存在；没给就**只在唯一时**替用户选。
+   *
+   * 没给且存在多个空间时**拒绝**而不是挑一个：挑第一个会把用户静默丢进一个
+   * 他不知道自己为什么在那儿的空间，而他之后做的每件事都落在那儿。
+   */
+  function resolveRegistrationSpace(space) {
+    const given = space === undefined || space === null ? '' : String(space).trim()
+    const count = () => {
+      try { return Number(db.prepare('SELECT COUNT(*) AS n FROM spaces').get().n) } catch { return 0 }
+    }
+    const exists = (id) => {
+      try { return db.prepare('SELECT id FROM spaces WHERE id=?').get(id) !== undefined } catch { return false }
+    }
+    if (given !== '') {
+      const clean = validateSpace(given)
+      if (!exists(clean)) {
+        // 不列出可用空间：这个接口**免鉴权**，而列出来就是在向匿名访问者广播
+        // 这台 Hub 上有什么。速率闸门挡的是量，不是"该不该说"。
+        fail(IDENTITY_CODES.SPACE_NOT_FOUND, `空间「${clean}」不存在。请向管理员确认空间 ID，或让他发一个邀请码给你。`, 404)
+      }
+      return clean
+    }
+    const n = count()
+    if (n === 1) return db.prepare('SELECT id FROM spaces LIMIT 1').get().id
+    if (n === 0) fail(IDENTITY_CODES.SPACE_NOT_FOUND, '这台 Hub 上还没有任何空间，请联系管理员先建一个。', 409)
+    fail(IDENTITY_CODES.SPACE_REQUIRED, '这台 Hub 上有多个空间，请在注册时说明要加入哪一个。', 409)
+  }
+
+  /**
+   * 注册速率闸门：滑动窗口里数 `hub_registrations`。
+   *
+   * ## 为什么是**全局**而不是按 IP
+   *
+   * 部署形态是"Hub 绑回环 + 反代"（见 `deploy` 那一节），于是
+   * `req.socket.remoteAddress` 恒为反代自己的地址；而要拿真实来源得信
+   * `X-Forwarded-For`，那要求"谁是可信代理"是配置出来的——**没配就信它，
+   * 等于让任何调用方自带一个 IP**。
+   *
+   *   > 一个"信一个没人验证过的 X-Forwarded-For"的按 IP 限速，
+   *   > 与一个完全不限速的注册端点，在攻击者面前是同一个东西——
+   *   > 只不过前者多了一行看起来很安全的代码。
+   *
+   * 所以这里按**全局**算：自托管的 Hub 上，"一小时内新开了几个账号"本身就是
+   * 一个有意义的读数，而合法的注册（自己 + 几个朋友）远远到不了上限。
+   */
+  function registrationAllowed() {
+    const windowMs = REGISTRATION_WINDOW_MS
+    const max = registrationMax
+    // `<= 0` = **关掉闸门**（明确写出来才算，不给"忘了配"留一条静默放行的路）。
+    if (!Number.isFinite(max) || max <= 0) return { allowed: true, message: '', recent: 0, max }
+    const at = now()
+    let recent = 0
+    try {
+      recent = Number(db.prepare('SELECT COUNT(*) AS n FROM hub_registrations WHERE at_ms > ?').get(at - windowMs).n)
+    } catch { return { allowed: true, message: '', recent: 0, max } }
+    if (recent < max) return { allowed: true, message: '', recent, max }
+    const hours = Math.round(windowMs / 3_600_000)
+    return {
+      allowed: false, recent, max,
+      message: `这台 Hub 在最近 ${hours} 小时内已经新开了 ${recent} 个账号（上限 ${max}），暂时不再接受自助注册。`
+        + '请联系管理员，或稍后再试。管理员可以把上限调高（LEGION_REGISTRATION_MAX）。',
+    }
   }
 
   /**
@@ -788,6 +889,8 @@ export function createUserStore({ db, withTx, clock = Date.now, key = '', audit 
     isBootstrapped, bootstrapOwner,
     createInvite, acceptInvite,
     register, changePassword,
+    // 诊断与用例用：闸门当前读数（不写、不需要就能读）。
+    registrationGate: () => registrationAllowed(),
     login, refresh, upgradePassword,
     verifyAccessToken, touchSession,
     revokeSession, revokeAllSessions, listSessions,

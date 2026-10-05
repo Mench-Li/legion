@@ -63,7 +63,14 @@ export function LoginView({ status, onSignedIn }: LoginViewProps): React.JSX.Ele
     setBusy(true)
     try {
       const session = mode === 'register'
-        ? await register({ name: name.trim(), password, space: space.trim() || 'default', ...(code.trim() ? { code: code.trim() } : {}) })
+        // 空间留空时**不传**这个字段，让服务端解析——见上面输入框那段注释。
+        // 传一个硬编码的 'default' 会在一个不叫 default 的 Hub 上必然失败，
+        // 而失败信息只有"空间不存在"。
+        ? await register({
+          name: name.trim(), password,
+          ...(space.trim() ? { space: space.trim() } : {}),
+          ...(code.trim() ? { code: code.trim() } : {}),
+        })
         : await login(name.trim(), password)
       // ★ 先落盘再回调：父组件一旦把界面切成主界面，它发出的每一个请求都
       //   立刻需要这个令牌。反过来（先切界面再存）会有一帧的 401。
@@ -123,8 +130,12 @@ export function LoginView({ status, onSignedIn }: LoginViewProps): React.JSX.Ele
                 )}
                 {status.registration === 'open' && (
                   <label className="login-field">
-                    <span>加入的空间</span>
-                    <input value={space} autoCapitalize="off" onChange={e => setSpace(e.target.value)} />
+                    {/* 留空 = 让服务端解析。Hub 上只有一个空间时它自己选；
+                        有多个时会具名拒绝并要求说清是哪一个——**不**静默挑一个，
+                        挑错会把用户此后做的每件事都落在他没想要的空间里。 */}
+                    <span>加入的空间（可留空）</span>
+                    <input value={space} autoCapitalize="off" placeholder="只有一个空间时留空即可"
+                      onChange={e => setSpace(e.target.value)} />
                   </label>
                 )}
               </>

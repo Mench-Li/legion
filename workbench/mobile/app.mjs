@@ -816,7 +816,10 @@ async function doLogin() {
       // 要么都不成。分成两步的版本会在中间失败时留下一个"注册成功但登不进"的账号。
       ? await postIdentity('/api/identity/register', {
         name, password,
-        space: state.scope ?? 'default',
+        // 空间**只在已经知道一个**时才带上：服务端在只有一个空间时会自己解析，
+        // 多个空间时会具名拒绝并让人说清是哪一个。硬编码 'default' 的版本在
+        // 一个不叫 default 的 Hub 上必然失败，而失败信息只有"空间不存在"。
+        ...(state.scope === null ? {} : { space: state.scope }),
         code: $('register-invite').value.trim() || undefined,
         label: `手机 ${navigator.platform ?? ''}`.trim(),
       })

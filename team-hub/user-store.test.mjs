@@ -24,6 +24,17 @@ const KEY = 'test-signing-key-0123456789'
 /** 内存库 + 与 server.mjs 同形的 withTx（同样用 BEGIN IMMEDIATE + SAVEPOINT 嵌套）。 */
 function makeStore({ clock = { now: Date.now() }, auditLog = null } = {}) {
   const db = new DatabaseSync(':memory:')
+  // `spaces` 表：**注册要查它**（`resolveRegistrationSpace`）。
+  //
+  // 复刻 `server.mjs` 里那张表的最小形状。不给它的话，"注册到不存在的空间"
+  // 会以 `SPACE_NOT_FOUND` 失败，而那时用例报出来的是一句读起来像
+  // "注册坏了"的话——真正的原因只是夹具少了一张表。
+  //
+  // 默认放一个 `default`：绝大多数用例关心的是账号，不是空间解析。
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS spaces (id TEXT PRIMARY KEY, name TEXT, local_dir TEXT, private INTEGER DEFAULT 0);
+    INSERT INTO spaces (id, name) VALUES ('default', '默认空间');
+  `)
   let depth = 0
   const withTx = (mutate) => {
     const nested = depth > 0
@@ -516,4 +527,132 @@ test('注册与改口令都进审计（谁在什么时候开了账号/换了口�
   // 审计里不许出现口令原文。
   assert.equal(JSON.stringify(log).includes('good-password'), false)
   assert.equal(JSON.stringify(log).includes('brand-new-password'), false)
+})
+
+// ── 注册的两道闸门（速率 / 目标空间） ────────────────────────────────────────
+//
+// 这一组补的都是"接口在，但没人在它前面拦一下"那一类。两条各自都有一个
+// **不报错**的坏形态：一条是任何人都能批量造账号，另一条是新用户注册成功
+// 之后什么都看不到。
+
+test('目标空间不存在 → 具名拒绝，而不是"成功但什么都看不到"', async () => {
+  const { store } = await bootstrapped()
+  // 只做 validateSpace（那是正则）时，"打错一个字母"会通过：返回 200、发令牌、
+  // 进主界面，然后 /api/spaces 里什么都没有——而那个界面与"注册成功、但还没人
+  // 拉你进空间"长得一模一样，所以用户不会来报 bug。
+  assert.equal(await codeOf(() => store.register({
+    name: '打错了', password: 'good-password', registration: 'open', space: 'defualt',
+  })), IDENTITY_CODES.SPACE_NOT_FOUND)
+  // 而且**没有**留下半个账号。
+  assert.equal(store.listUsers().some((u) => u.name === '打错了'), false)
+})
+
+test('目标空间存在 → 正常注册', async () => {
+  const { store } = await bootstrapped()
+  const r = await store.register({ name: '正常', password: 'good-password', registration: 'open', space: 'default' })
+  assert.equal(r.space, 'default')
+  assert.equal(r.role, 'member')
+})
+
+test('没给空间：**唯一**时替用户选，多个时拒绝（不静默挑一个）', async () => {
+  const { store, db } = await bootstrapped()
+  // 唯一 → 自动落进去
+  const one = await store.register({ name: '唯一空间', password: 'good-password', registration: 'open' })
+  assert.equal(one.space, 'default')
+
+  // 多个 → 拒绝。挑第一个会把用户静默丢进一个他不知道自己为什么在那儿的空间，
+  // 而他之后做的每件事都落在那儿。
+  db.prepare("INSERT INTO spaces (id, name) VALUES ('second', '第二个')").run()
+  assert.equal(await codeOf(() => store.register({
+    name: '没说清', password: 'good-password', registration: 'open',
+  })), IDENTITY_CODES.SPACE_REQUIRED)
+  // 说清了就行
+  const two = await store.register({ name: '说清了', password: 'good-password', registration: 'open', space: 'second' })
+  assert.equal(two.space, 'second')
+})
+
+test('一个空间都没有 → 明确说"先建一个"，不是一句校验失败', async () => {
+  const ctx = makeStore()
+  const owner = await ctx.store.bootstrapOwner({ name: 'owner', password: 'owner-password', authorized: true })
+  assert.ok(owner)
+  ctx.db.prepare('DELETE FROM spaces').run()
+  assert.equal(await codeOf(() => ctx.store.register({
+    name: '来得太早', password: 'good-password', registration: 'open',
+  })), IDENTITY_CODES.SPACE_NOT_FOUND)
+})
+
+test('★ 速率闸门：滑动窗口内开够上限之后，自助注册被拒', async () => {
+  const { store } = await bootstrapped()
+  // 上限本身要能读到（否则下面那条循环的上界是猜的）。
+  const gate = store.registrationGate()
+  assert.equal(gate.allowed, true)
+  assert.equal(gate.max, 20)
+  assert.equal(gate.recent, 0)
+
+  for (let i = 0; i < gate.max; i += 1) {
+    await store.register({ name: `批量${i}`, password: 'good-password', registration: 'open' })
+  }
+  assert.equal(store.registrationGate().allowed, false)
+  const err = await (async () => { try { await store.register({ name: '再来一个', password: 'good-password', registration: 'open' }) } catch (e) { return e } })()
+  assert.equal(err.code, IDENTITY_CODES.REGISTRATION_RATE_LIMITED)
+  assert.equal(err.status, 429)
+  // 消息里要有**可执行**的信息：现在是多少、上限多少、怎么办。
+  assert.match(err.message, /上限 20/)
+  assert.match(err.message, /管理员/)
+})
+
+test('速率闸门按**全局**算：换名字绕不过去', async () => {
+  // 这正是它不复用 hub_login_failures 的理由——那张表按用户名归并，
+  // 而批量注册从来不重复用同一个名字。
+  const { store } = await bootstrapped()
+  const max = store.registrationGate().max
+  for (let i = 0; i < max; i += 1) {
+    await store.register({ name: `路人甲${i}`, password: 'good-password', registration: 'open' })
+  }
+  assert.equal(await codeOf(() => store.register({
+    name: '全新的名字', password: 'good-password', registration: 'open',
+  })), IDENTITY_CODES.REGISTRATION_RATE_LIMITED)
+})
+
+test('滑动窗口会过期：窗口之外的那些不算数', async () => {
+  const clock = { now: 1_700_000_000_000 }
+  const { store } = await bootstrapped({ clock })
+  const max = store.registrationGate().max
+  for (let i = 0; i < max; i += 1) {
+    await store.register({ name: `旧账${i}`, password: 'good-password', registration: 'open' })
+  }
+  assert.equal(store.registrationGate().allowed, false)
+  // 跨过一个完整窗口后应当又能注册——否则闸门就成了"永久关停"，
+  // 而那是另一个决定，不该由限速顺手做掉。
+  clock.now += 60 * 60 * 1000 + 1000
+  assert.equal(store.registrationGate().allowed, true)
+  const back = await store.register({ name: '窗口之后', password: 'good-password', registration: 'open' })
+  assert.equal(back.space, 'default')
+})
+
+test('邀请制**不**受速率闸门影响：邀请码本身就是一次性的、由人签发的', async () => {
+  const { store, owner } = await bootstrapped()
+  const max = store.registrationGate().max
+  // 把窗口塞满
+  for (let i = 0; i < max; i += 1) {
+    await store.register({ name: `占满${i}`, password: 'good-password', registration: 'open' })
+  }
+  assert.equal(store.registrationGate().allowed, false)
+  // 邀请那条路照常走：闸门加在 open 上是有意的——邀请制天然限速，
+  // 而给它也加一道会在"管理员连续拉几个同事进来"时误伤。
+  const invite = store.createInvite({ by: owner.userId, space: 'default', role: 'member' })
+  const r = await store.register({ name: '被邀请的', password: 'good-password', registration: 'invite', code: invite.code })
+  assert.equal(r.via, 'invite')
+})
+
+test('注册被拒时不留半条记账（否则闸门会自己把自己关掉）', async () => {
+  const { store, db } = await bootstrapped()
+  const before = Number(db.prepare('SELECT COUNT(*) AS n FROM hub_registrations').get().n)
+  // 名字被占 → 事务回滚 → 记账也不该留下
+  await store.register({ name: '占位', password: 'good-password', registration: 'open' })
+  const mid = Number(db.prepare('SELECT COUNT(*) AS n FROM hub_registrations').get().n)
+  assert.equal(mid, before + 1)
+  await codeOf(() => store.register({ name: '占位', password: 'good-password', registration: 'open' }))
+  assert.equal(Number(db.prepare('SELECT COUNT(*) AS n FROM hub_registrations').get().n), mid,
+    '失败的注册不许记账——否则连续失败会把闸门自己关掉')
 })

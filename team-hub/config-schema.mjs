@@ -52,6 +52,18 @@ export const SCHEMA = defineSchema({
     // **默认留空 = 尚未发布**，页面会照实这么写。给一个点开 404 的假链接
     // 比没有按钮更坏：用户会以为是自己网络或浏览器的问题，然后反复试。
     // 有稳定下载页或对象存储入口时把它指过去即可，不需要改代码。
+    // 自助注册的速率闸门：一小时内最多新开几个账号。见 user-store 的 registrationAllowed。
+    //
+    // **是全局的，不是按 IP**：部署形态是"Hub 绑回环 + 反代"，于是
+    // `req.socket.remoteAddress` 恒为反代自己；要拿真实来源得信 X-Forwarded-For，
+    // 而那要求"谁是可信代理"是配置出来的——没配就信它，等于让调用方自带一个 IP。
+    // 自托管 Hub 上，"一小时内新开了几个账号"本身就有意义，而合法注册远到不了上限。
+    // 设 0 = 关掉闸门（明确写出来才算）。
+    {
+      key: 'registrationMax', env: 'LEGION_REGISTRATION_MAX', type: 'int',
+      default: 20, min: 0, max: 10000,
+      doc: '自助注册速率上限（每小时新开账号数）；0 = 关掉闸门。仅对 open 策略生效',
+    },
     {
       key: 'downloadUrl', env: 'LEGION_DOWNLOAD_URL', type: 'string', default: '',
       doc: '桌面版安装包的下载地址（显示在 Hub 首页）；留空 = 首页如实显示"尚未发布"',

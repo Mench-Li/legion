@@ -205,4 +205,128 @@ server {
 }
 ```
 
+---
+
+## 执行结果（2026-10-06/07）：域名的可信 HTTPS 入口
+
+本节记录**实际做完的事**与一个**推翻了原计划的实测结论**。
+
+### 做完的事
+
+| # | 动作 | 结果 |
+|---|---|---|
+| 1 | Cloudflare 建 A 记录 `updates.legion-si.online` → `117.72.146.36`（灰云） | ✓ 1.1.1.1 / 8.8.8.8 均解析到该 IP |
+| 2 | `acme.sh` 用 **DNS-01（dns_cf）** 签证书 | ✓ `CN=updates.legion-si.online`，Let's Encrypt YE2，至 **2027-01-04**；SAN 正确 |
+| 3 | 装证书到 `/etc/legion-updates/certs/` + 装续期 cron | ✓ 下次续期 **2026-12-05**（按 ARI 窗口） |
+| 4 | nginx 站点配置**改用仓库生成器**重新生成并落盘 | ✓ `nginx -t` 通过，reload 成功（旧配置已备份为 `legion-updates.bak.20261007-000143`） |
+| 5 | 源站侧回读（`--resolve` 到 127.0.0.1） | ✓ 见下表 |
+
+**源站侧回读**（引导计划第 4 步的四条判据 + 缓存策略）：
+
+| 判据 | 结果 |
+|---|---|
+| `/legion/feeds/…`（**生产前缀**） | **200** ← 修好了（见下节） |
+| 通道清单 `Cache-Control` | `no-store` ✓ |
+| 发行文件 `Cache-Control` | `public, max-age=31536000, immutable` ✓ |
+| GET / HEAD / POST | 200 / 200 / **403** ✓ |
+| 目录索引 | 404 ✓ |
+| 证书校验（**不加** `-k`） | `tls_verify=0` ✓ |
+
+★ 第 4 步用的是 `scripts/update/host-config.mjs`（仓库里的生成器），**不是**手写配置。
+它从 `UPLOAD_TARGETS` 的磁盘根与 URL 前缀、以及 `host.mjs` 的两个缓存常量**推**出
+配置；生产树不给 `--tls-cert` 时它会**具名拒绝**（`host-config-tls-required`）。
+★ 顺带修掉了它注释里记着的那处不一致（见下节）。
+
+### ★★★ 实测结论：**灰云直连在这个源站上不可能工作（ICP 备案拦截）**
+
+原计划（方案 B）是"灰云 A 记录 + 源站 Let's Encrypt 证书，客户端直连 443"。
+**这条路径被实测否掉了。**
+
+同一个源站 IP，逐个换 TLS 的 SNI：
+
+| SNI | 结果 |
+|---|---|
+| `www.baidu.com` / `qq.com` / `www.taobao.com` | **握手成功** ← 都**已备案** |
+| `example.com` / `github.com` | **ECONNRESET** ← 都**未备案** |
+| `updates.legion-si.online` / `legion-si.online` | **ECONNRESET** ← 都**未备案** |
+
+而**同一个域名打到 Cloudflare 边缘就成功**（`104.21.75.194` + SNI
+`legion-si.online` → 握手通过）。80 端口上的对应现象早已记过：域名 Host →
+`403 Server: JDTP`，裸 IP Host → `200 nginx`。
+
+三条合起来说明：**京东云在源站边界按 SNI 里的域名做备案校验**——
+未备案域名指向境内 IP 时，TLS 握手被 reset、HTTP 被 403。
+
+★ 两个必须说清的边界：
+
+1. **这不是缺陷，是合规约束。** 与 `product/server/issue-cert.sh` 里记的
+   「`sslip.io` 这类域名无法完成 ICP 备案……它不改变合规状态」是同一件事，
+   只是那次只发现在 80 端口上。
+2. **从主机自身回环测不出来。** 从主机连自己的公网 IP 时流量不经过
+   那道边界（实测该路径下带 SNI 正常、`tls_verify=0`）。**所以"从主机测通了"
+   不能证明客户端可用**——这一次差点因此误判。
+   > 一次"从服务器自己测通"的成功，不能证明"从外面进来"能成功。
+
+### 因此剩余的唯一可行路径：**Cloudflare 隧道**（与 hub 相同）
+
+`legion-si.online`（hub）现在就是这么工作的：客户端 → Cloudflare → `cloudflared`
+隧道 → `127.0.0.1:8787`。隧道是**服务器主动向外**建的连接，因此不经过那道
+入站边界，也就没有备案问题。
+
+**为什么不能用"橙云 A 记录 + CF 回源"**：那种模式下 Cloudflare 边缘会带
+`SNI=updates.legion-si.online` 回源到境内 IP，**同样会撞上备案校验**。
+
+**要做的（需要隧道权限，当前 token 没有）**：
+
+1. 在 Cloudflare 控制台 → Zero Trust → Networks → Tunnels → 选那条既有隧道
+   （id `81dba534-2221-4107-bd9b-ebdc8468bd67`）→ **Public Hostname** 加一条：
+   - Hostname: `updates.legion-si.online`
+   - Service: **`https://localhost:443`**（用我们刚签的那张真证书）
+   - ★ 不要指向 `http://localhost:80`：那个 server 块是 **301 跳转**，
+     经隧道会变成**无限重定向**。
+2. 该操作会自动把 DNS 记录改成指向隧道的**代理 CNAME**；
+   若提示冲突，先删掉那条灰云 A 记录（已备案之后再改回来）。
+3. 之后把 `update-config.example.json` 的 stable/canary `origin` 填成
+   `https://updates.legion-si.online`，`prefix` 保持 `/legion`。
+
+★ 我刚用的那个 Cloudflare token 只有 `Zone:DNS:Edit` + `Zone:Read`，
+**改不了隧道配置**（`/accounts/…/cfd_tunnel` 返回 Authentication error）。
+要让我全做完，需要一个带 `Account → Cloudflare Tunnel → Edit` 的 token；
+否则上面第 1 步请你在控制台点一下。
+
+### 顺带修掉的一处不一致：生产前缀 `/legion` 在托管上 404
+
+`host-config.mjs` 的注释早就记着这个缺口，本轮在真机上**复现并修掉**：
+
+```
+（修之前，用探针文件实证）
+/legion/feeds/__probe.json              → 404   ← UPLOAD_TARGETS 声明的**生产**前缀
+/production/legion/feeds/__probe.json   → 200   ← 文件真的在这里
+磁盘 /srv/legion-updates/legion/…       → 不存在（nginx 会映射到这里）
+磁盘 /srv/legion-updates/production/legion/… → 存在
+```
+
+原因是托管上那份配置是**测试期手写**的：`root /srv/legion-updates` +
+`location ~ ^/(test|production)/legion/`。而生成器的做法是给每棵树各自的
+`root`（生产树 `root /srv/legion-updates/production`），于是 URI `/legion/feeds/x`
+落到 `/srv/legion-updates/production/legion/feeds/x` —— 正确。
+
+> 两个各自都对的东西，可以在**接缝处**对不上——
+> 而接缝处没有测试时，它会在第一次真发布时才说话。
+
+★ 这次落盘还带来一处**收紧**：旧配置在明文 HTTP 上同时暴露
+`/production/legion/…`；新配置里 80 只服务**测试树**，
+`/production/legion/feeds/…` 现在返回 **404**（已实测）。
+
+### 仍未做
+
+- 上面那条隧道 Public Hostname（需要权限，见上）。
+- ★★ 与更新无关但值得尽快处理：`cloudflared.service` 的 `ExecStart` 指向
+  `--token-file /etc/cloudflared/token`，而**该文件不存在**。隧道进程现在跑着，
+  但**一旦重启（或机器重启）就会失败**——届时 `legion-si.online` 会整体下线。
+- 若希望**彻底摆脱 Cloudflare 依赖**（灰云直连），唯一的路是给该域名做
+  **ICP 备案**；备案通过后，本轮已经建好的 A 记录 + Let's Encrypt 证书 + nginx
+  443 站点**就是**正确形态，不需要重做。
+
+
 

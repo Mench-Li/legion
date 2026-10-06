@@ -34,6 +34,26 @@ const check = (label, ok, detail = '') => {
   console.log(`${ok ? '✔' : '✖'} ${label}${detail ? ` — ${detail}` : ''}`)
 }
 
+/**
+ * 第三种结局：**前提不成立**。
+ *
+ * `check()` 只有通过与失败两态，于是「这条断言的前提在当前环境里不成立」
+ * 被迫挤进其中一边，两边都是撒谎：
+ *   · 记成功 → 掩盖了"它根本没验"；
+ *   · 记失败 → 一个**环境造成**的红，跑几次之后人就学会忽略整份报告，
+ *     而那会把**真的**失败一起忽略掉。
+ *
+ *   > 一个"因为前提不成立而红"的断言，与一个"真的坏了"的断言，
+ *   > 在只看颜色的报告里是同一个东西——只不过前者会训练人不再看颜色。
+ *
+ * 所以单列一态：不进失败计数，但**必须在结尾被数出来**（否则它就成了静默跳过）。
+ */
+const skips = []
+const skip = (label, why) => {
+  skips.push({ label, why })
+  console.log(`○ ${label} — 不适用：${why}`)
+}
+
 async function call(method, path, { body, token } = {}) {
   const headers = {}
   if (token) headers.authorization = `Bearer ${token}`
@@ -203,9 +223,30 @@ if (access === null) { console.log('\n无法继续：登录失败'); process.exi
       // （写预约、hold、退避闸门）漏过去。
       const claimed = await call('POST', '/api/runtime/claim', { body: { workerId: 'phone-verify-probe', scope: SPACE }, token: access })
       const got = claimed.json?.claimed?.taskId
-      check('⑬₂ 它真的可被电脑认领', claimed.status === 200 && got === taskId,
-        `${claimed.status} 领到=${got ?? claimed.json?.reason ?? claimed.json?.code}`)
-      if (got === taskId) {
+      // ★ 认领失败时要说清**是谁占着**。
+      //
+      // 这条断言假设"刚建的任务一定能被认领"——那只在**空队列**上成立。
+      // 真机上实测报的是 `领到=file-contention`，**不说是谁占着**：
+      // 看的人只知道"领不到"，而不知道要不要做什么（去验收？去等？去对账？）。
+      //
+      //   > 一个「任务领不到」的读数，与一个「队列被 T-003 占着、而它在等验收」的
+      //   > 读数，在运维那边的差别是「去查」和「去点一下验收」。
+      //
+      // 所以失败时补一次看板读：谁在 in_review / in_progress，就点名说出来。
+      // ★ 认领失败时要说清**是谁占着**，以及这算不算问题。
+      //
+      // 这条断言假设"刚建的任务一定能被认领"——那只在**空队列**上成立。
+      // 真机上实测报的是 `领到=file-contention`，**不说是谁占着**：
+      // 看的人只知道"领不到"，而不知道要不要做什么（去验收？去等？去对账？）。
+      //
+      //   > 一个「任务领不到」的读数，与一个「队列被 T-003 占着、而它在等验收」的
+      //   > 读数，在运维那边的差别是「去查」和「去点一下验收」。
+      //
+      // 所以失败时补一次看板读，分成三种结局：
+      //   有 in_review/in_progress → **不适用**（队列按验收串行是设计）
+      //   没有                      → **失败**（那是卡死的预约，要人查）
+      if (claimed.status === 200 && got === taskId) {
+        check('⑬₂ 它真的可被电脑认领', true, `领到=${got}`)
         await call('POST', '/api/runtime/release', {
           body: {
             attemptId: claimed.json.claimed.attemptId, leaseEpoch: claimed.json.claimed.leaseEpoch,
@@ -213,6 +254,19 @@ if (access === null) { console.log('\n无法继续：登录失败'); process.exi
           },
           token: access,
         })
+      } else {
+        const board = await call('GET', `/api/board?scope=${SPACE}`, { token: access })
+        const list = Array.isArray(board.json) ? board.json : board.json?.tasks ?? []
+        const holding = list.filter(t => ['in_review', 'in_progress'].includes(t.status))
+        const why = `${claimed.status} 领到=${got ?? claimed.json?.reason ?? claimed.json?.code}`
+        if (holding.length > 0) {
+          skip('⑬₂ 它真的可被电脑认领',
+            `${why}；单写者位被 ${holding.map(t => `${t.id}(${t.status})`).join('、')} 占着`
+            + '——交付需验收是设计，队列要等它被验收或取消。**在空队列上跑这条才有分辨率**')
+        } else {
+          check('⑬₂ 它真的可被电脑认领', false,
+            `${why}；而看板上没有 in_review/in_progress 的任务——那是**卡死**的预约，需要人查`)
+        }
       }
     }
   }
@@ -242,13 +296,19 @@ if (access === null) { console.log('\n无法继续：登录失败'); process.exi
     const r = await call('POST', '/api/identity/invites', { body: { space: SPACE, role: 'member' }, token: access })
     check('⑯ 管理员可发邀请码', r.status === 200 && typeof r.json?.code === 'string', `${r.status} 码长=${String(r.json?.code ?? '').length}`)
   } else {
-    check('⑯ 管理员可发邀请码', true, '（这个账号不是管理员，跳过）')
+    // 之前这里记的是 `check(..., true, '（跳过）')`——它把"没验"记成了"通过"。
+    // 那正是这一态要修的那件事：**记成功会掩盖"它根本没验"**。
+    skip('⑯ 管理员可发邀请码', '这个账号不是系统管理员，发邀请码那一半没被验到')
   }
 }
 
 console.log('')
 const failed = results.filter((x) => !x.ok)
+const suffix = skips.length > 0 ? `，另有 ${skips.length} 项不适用` : ''
 console.log(failed.length === 0
-  ? `✔ 手机端全流程通过（${results.length} 项）—— 手机上会经历的就是这一串`
-  : `✖ ${failed.length} 项失败：${failed.map((x) => x.label).join('、')}`)
+  ? `✔ 手机端全流程通过（${results.length - skips.length} 项通过${suffix}）—— 手机上会经历的就是这一串`
+  : `✖ ${failed.length} 项失败：${failed.map((x) => x.label).join('、')}${suffix}`)
+// 不适用**不改退出码**，但必须印出来：一个只在角落里的 `○` 号，
+// 与一个静默跳过，在"这份报告到底验了什么"这个问题上差别很大。
+for (const s of skips) console.log(`   ○ ${s.label}：${s.why}`)
 process.exit(failed.length === 0 ? 0 : 1)

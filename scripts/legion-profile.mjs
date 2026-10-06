@@ -464,8 +464,29 @@ export const PATCH_ENTRIES = Object.freeze([
     // 声明"这一行必须在场的那几个值"。**刻意不钉 maxWorkers 的具体数字**：
     // web 档案里用户手写的是 2、本脚本给新档案默认 1，两者都是合法意图
     // ——一个把用户既有意图判成"过时"的判据，比没有判据更坏（它会教人忽略这行输出）。
-    ensure: ['maxWorkers: [0-9]+', "scope: 'software'", "hubUrl: 'http://127.0.0.1:8787'"],
-    config: (root, { maxWorkers = 1 } = {}) => ({
+    //
+    // ★ hub 那三个值**由 `hub` 参数决定**，而不是写死本机。
+    //
+    //   写死本机意味着"启动 Legion → 它拉起 DSH → worker 认领本机 hub"是唯一
+    //   可达的形态。而远程 Agent 架构要求 worker 连**服务器**——那时它得能被
+    //   指过去，而不是让人去手改用户 DSH 档案（那是**错的层**：Legion 自己
+    //   拉起的 DSH 用的是 Legion 管理的档案，不是用户的 `~/.dsh/profiles/*`）。
+    ensure: (hub) => [
+      'maxWorkers: [0-9]+',
+      `scope: '${hub.scope}'`,
+      `hubUrl: '${hub.url}'`,
+      // ★ `hubToken` 只断言**键在场**，不断言它的值。
+      //
+      //   两个理由，各自都够：
+      //   ① **别把令牌打进日志。** `planProfile` 会把"缺哪一项"原样打出来
+      //      （`s.missing.join(' / ')`），而那一行会进终端与 CI 日志。把值写进
+      //      ensure，等于让一次「这一行过时了」的输出顺带泄露一枚 Hub 凭据。
+      //   ② 令牌会**轮换**，而轮换不该让这一行被报成"配置过时"——
+      //      旧值留在 ensure 里，换个令牌就会一直报一条其实没问题的告警，
+      //      而"一直报但其实没问题"的告警会教人忽略这一整类输出。
+      'hubToken: ',
+    ],
+    config: (root, { maxWorkers = 1, hub = DEFAULT_HUB } = {}) => ({
       role: 'soldier-auto',
       intervalMs: 30000,
       // ★ 默认 1，不是 web 档案里那份 2：**两个宿主会同时活着**（用户明确要求 web 与
@@ -485,17 +506,54 @@ export const PATCH_ENTRIES = Object.freeze([
       denyTools: [],
       rolesFile: `${root.replace(/\\/g, '/')}/roles.json`,
       logFile: `${defaultDshHome().replace(/\\/g, '/')}/super-injector/dsh-scrum-worker.log`,
-      hubUrl: 'http://127.0.0.1:8787',
-      hubToken: '',
-      scope: 'software',
-      primaryScope: 'software',
+      hubUrl: hub.url,
+      hubToken: hub.token,
+      scope: hub.scope,
+      primaryScope: hub.scope,
       mediateMergeFails: false,
     }),
   }),
 ])
 
-export function entryObjectsFor(root, { maxWorkers = 1 } = {}) {
-  return PATCH_ENTRIES.map((e) => ({ id: e.id, name: e.name, ensure: e.ensure ?? [], config: e.config(root, { maxWorkers }) }))
+/**
+ * hub 连接目标的默认值：**本机**。
+ *
+ * 保持不变是刻意的——绝大多数部署就是本机单机，"什么都不配"必须仍然得到
+ * 一个能用的东西。要连服务器是**显式**的事（`--hub-url` 或环境变量）。
+ */
+export const DEFAULT_HUB = Object.freeze({ url: 'http://127.0.0.1:8787', token: '', scope: 'software' })
+
+/**
+ * 从命令行/环境变量解出 hub 目标。
+ *
+ * 优先级：CLI > 环境变量 > 默认（本机）。
+ *
+ * ★ `scope` 的默认值是 `software`（与既有部署一致），但**连远程时必须显式给**——
+ *   远端 Hub 上的空间名与本机 `roles.json` 的 `name` 通常不同，而配错的后果是
+ *   "worker 认领不到任何任务，而日志一切正常"（实测踩过：`.legion-profile.mjs`
+ *   里那份写死的 `software` 与远端空间 `default` 对不上）。
+ */
+export function resolveHub({ hubUrl = null, hubToken = null, scope = null, env = process.env } = {}) {
+  const pick = (cli, key, fallback) => {
+    if (typeof cli === 'string' && cli.trim() !== '') return cli.trim()
+    const v = env[key]
+    if (typeof v === 'string' && v.trim() !== '') return v.trim()
+    return fallback
+  }
+  return Object.freeze({
+    url: pick(hubUrl, 'LEGION_HUB_URL_FOR_NODE', DEFAULT_HUB.url),
+    token: pick(hubToken, 'LEGION_HUB_TOKEN_FOR_NODE', DEFAULT_HUB.token),
+    scope: pick(scope, 'LEGION_HUB_SCOPE_FOR_NODE', DEFAULT_HUB.scope),
+  })
+}
+
+export function entryObjectsFor(root, { maxWorkers = 1, hub = DEFAULT_HUB } = {}) {
+  return PATCH_ENTRIES.map((e) => ({
+    id: e.id,
+    name: e.name,
+    ensure: typeof e.ensure === 'function' ? e.ensure(hub) : (e.ensure ?? []),
+    config: e.config(root, { maxWorkers, hub }),
+  }))
 }
 
 // ── 接线（可复用实现，CLI 只是它的一层壳）────────────────────────────────────
@@ -555,7 +613,7 @@ export function restoreProfile({ profileDir, dryRun = false, log = () => {} }) {
 
 // ── CLI ─────────────────────────────────────────────────────────────────────
 function parseArgv(argv = process.argv.slice(2)) {
-  const out = { mode: 'verify', profiles: [], dryRun: false, root: null, dshHome: null, json: false }
+  const out = { mode: 'verify', profiles: [], dryRun: false, root: null, dshHome: null, json: false, hubUrl: null, hubToken: null, scope: null }
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i]
     if (a === '--verify') out.mode = 'verify'
@@ -567,6 +625,10 @@ function parseArgv(argv = process.argv.slice(2)) {
     else if (a.startsWith('--profile=')) out.profiles.push(...a.slice(10).split(',').map((s) => s.trim()).filter(Boolean))
     else if (a === '--root') out.root = argv[++i]
     else if (a === '--dsh-home') out.dshHome = argv[++i]
+    // 远程 hub：不指定时用环境变量，再不然就是本机（DEFAULT_HUB）。
+    else if (a === '--hub-url') out.hubUrl = argv[++i]
+    else if (a === '--hub-token') out.hubToken = argv[++i]
+    else if (a === '--scope') out.scope = argv[++i]
     else if (a === '--help' || a === '-h') out.help = true
     else throw new Error(`未知参数：${a}`)
   }
@@ -594,11 +656,17 @@ async function main() {
   try { opts = parseArgv() } catch (e) { console.error(`参数错误：${e.message}`); process.exit(2) }
   if (opts.help) {
     console.log('用法：node scripts/legion-profile.mjs [--verify|--wire|--restore] [--profile web,desktop] [--dry-run] [--json] [--root <仓库根>] [--dsh-home <DSH_HOME>]')
+    console.log('      [--hub-url <http(s)://…>] [--hub-token <令牌>] [--scope <空间名>]')
+    console.log('      不指定 hub 时按环境变量 LEGION_HUB_URL_FOR_NODE / LEGION_HUB_TOKEN_FOR_NODE / LEGION_HUB_SCOPE_FOR_NODE，')
+    console.log('      再不然就是本机 http://127.0.0.1:8787 + software（既有部署的行为一字不变）。')
     return
   }
   const root = opts.root ? resolve(opts.root) : repoRootOf()
   const dshHome = opts.dshHome ? resolve(opts.dshHome) : defaultDshHome()
-  const entries = entryObjectsFor(root)
+  // hub 目标：CLI > 环境变量 > 本机默认。默认**不变**——绝大多数部署就是本机，
+  // "什么都不配"必须仍然得到一个能用的东西；连服务器是显式的事。
+  const hub = resolveHub({ hubUrl: opts.hubUrl, hubToken: opts.hubToken, scope: opts.scope })
+  const entries = entryObjectsFor(root, { hub })
   const say = (m) => { if (!opts.json) console.log(m) }
 
   const report = { root, dshHome, mode: opts.mode, dryRun: opts.dryRun, profiles: [] }

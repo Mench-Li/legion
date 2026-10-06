@@ -26,6 +26,7 @@ import {
   planProfile,
   renderYamlValue,
   repoRootOf,
+  resolveHub,
   restoreProfile,
   wireProfile,
   yamlInsertBlock,
@@ -180,4 +181,46 @@ test('⑩ 档案没有 package.json 时 wire 不写任何东西', () => {
     assert.equal(w.exists, false)
     assert.deepEqual(w.steps, {})
   } finally { f.cleanup() }
+})
+
+// ── hub 目标可配：默认本机，连远程是显式的事 ─────────────────────────────────
+//
+// 在这个之前，worker 的 `hubUrl`/`hubToken`/`scope` 是**写死本机**的，
+// 于是"启动 Legion → 它拉起 DSH → worker 认领任务"只有本机这一种形态。
+// 而远程 Agent 架构要求 worker 连**服务器**——那时得能指过去，
+// 而不是让人去手改用户自己的 DSH 档案（那是**错的层**：Legion 拉起的 DSH
+// 用的是 Legion 管理的档案）。
+
+test('默认仍是本机：什么都不配的行为一字不变', () => {
+  const hub = resolveHub({ env: {} })
+  assert.deepEqual({ ...hub }, { url: 'http://127.0.0.1:8787', token: '', scope: 'software' })
+})
+
+test('CLI > 环境变量 > 默认', () => {
+  const env = { LEGION_HUB_URL_FOR_NODE: 'https://from-env', LEGION_HUB_SCOPE_FOR_NODE: 'from-env-scope' }
+  assert.equal(resolveHub({ env }).url, 'https://from-env')
+  assert.equal(resolveHub({ env }).scope, 'from-env-scope')
+  // CLI 给值时压过环境变量
+  assert.equal(resolveHub({ hubUrl: 'https://from-cli', scope: 'default', env }).url, 'https://from-cli')
+  assert.equal(resolveHub({ hubUrl: 'https://from-cli', scope: 'default', env }).scope, 'default')
+})
+
+test('远程 hub 会进 config，也进 ensure（否则会被报成"配置过时"）', () => {
+  const hub = resolveHub({ hubUrl: 'https://legion-si.online', hubToken: 'tok', scope: 'default', env: {} })
+  const w = entryObjectsFor('/repo', { hub }).find((e) => e.id === 'legion-scrum-worker')
+  assert.equal(w.config.hubUrl, 'https://legion-si.online')
+  assert.equal(w.config.hubToken, 'tok')
+  assert.equal(w.config.scope, 'default')
+  assert.equal(w.config.primaryScope, 'default')
+  assert.ok(w.ensure.includes("hubUrl: 'https://legion-si.online'"))
+  assert.ok(w.ensure.includes("scope: 'default'"))
+})
+
+test('★ ensure 里**不含令牌明文**（否则一次"过时"告警就泄露一枚凭据）', () => {
+  // planProfile 会把"缺哪一项"原样打进终端与 CI 日志（`s.missing.join(' / ')`）。
+  const hub = resolveHub({ hubUrl: 'https://x', hubToken: 'SUPERSECRET', scope: 'default', env: {} })
+  const w = entryObjectsFor('/repo', { hub }).find((e) => e.id === 'legion-scrum-worker')
+  assert.ok(!JSON.stringify(w.ensure).includes('SUPERSECRET'), 'ensure 不许带令牌值')
+  // 但"这个键在场"仍然要断言
+  assert.ok(w.ensure.some((r) => /^hubToken:/.test(r)))
 })

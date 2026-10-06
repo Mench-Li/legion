@@ -1,0 +1,482 @@
+﻿commit 6bcbcc7ea0d8fe5526ffcd9ae95e03eb51bf9a24
+Author: Mench-Li <1115043055@qq.com>
+Date:   Mon Oct 5 14:12:28 2026 +0800
+
+    T-178：T-178（w/T-178，HEAD efc11c9c）：CI test 阶段 9 个契约/端到端套件归零。8/9 组在本会话沙箱内逐文件 node:test 全绿（model-api 15/15、can-read 8/8、e2e-assembly 19/19、employee-preset 35/35、route-family 32 文件 510/510、acceptance 10/10、handoff 8/8、run-events 18/18）；secret-store 组 52 例中仅 secrets.test.mjs 的 2 条『真·跨进程』用例因沙箱 named-pipe EPERM 跑不了（已用 pwsh 管道手工逐条复现其全部断言并通过，普通终端应 exit 0）。判据未放宽：断言数只增不减、无新增 skip/only。另修掉 model-api 测试文件被上一轮写成混合行尾导致的 402/385 假 diff（归一回 34/9）。
+
+diff --git a/orchestrator/worker/can-read-authorization-source.test.mjs b/orchestrator/worker/can-read-authorization-source.test.mjs
+index a656d4a4..cc6c7182 100644
+--- a/orchestrator/worker/can-read-authorization-source.test.mjs
++++ b/orchestrator/worker/can-read-authorization-source.test.mjs
+@@ -72,9 +72,30 @@ import { defaultRequestFor, deriveRunFloorCarrier } from './executor.mjs'
+ import { RUN_REQUEST_REQUIRED } from '../../runtime/contracts/run.mjs'
+ import { RUN_FLOOR_STATES } from '../../runtime/contracts/run-floor.mjs'
+ 
+-/** 真 claim 回来的那 9 个键（**带顺序无关的整体比较**，不是"包含"）。 */
++/**
++ * 真 claim 回来的那 9 个键（**带顺序无关的整体比较**，不是"包含"）。
++ *
++ * ★ 2026-10-05（T-178）：成员集按**当前契约**订正过一次 ——
++ *   `workerId` 不在认领响应里，`agentSelectionSnapshot` 在。
++ *
++ *   契约（唯一权威）是 `team-hub/run-store.mjs:1553-1583` 那个 `claimed:` 对象，
++ *   逐个键是：attemptId / taskId / scope / attemptNo / leaseEpoch /
++ *   leaseExpiresAtMs / state / agentSelectionSnapshot / serverTimeMs（+ 接线时
++ *   追加的三个档位键）。旧清单里写的 `workerId` **从来不在**这个对象上
++ *   （认领是 *请求* 里的字段，不是 *响应* 里的），而
++ *   `agentSelectionSnapshot`（F-16 / 跨 Agent 选择快照）接上之后没有同步过来。
++ *
++ *   > 一个把"请求字段"当成"响应字段"的期望清单，
++ *   > 与一个"响应上真的多了一个键"的期望清单，在 red 的输出上是同一行
++ *   > ——多一个、少一个都被 `deepEqual` 报成"键集变了"。
++ *
++ *   这里**不是**把断言放宽成"包含"：仍然是整体比较，多一个键就红。
++ *   真正承重的两条没动：① 的 `AUTHORITY_LOOKING` 零命中，
++ *   以及 ⑤ 的"接线后**恰好**多这三个键"。
++ */
+ const CLAIMED_LEASE_KEYS = Object.freeze([
+-  'attemptId', 'attemptNo', 'leaseEpoch', 'leaseExpiresAtMs', 'scope', 'serverTimeMs', 'state', 'taskId', 'workerId',
++  'agentSelectionSnapshot', 'attemptId', 'attemptNo', 'leaseEpoch', 'leaseExpiresAtMs',
++  'scope', 'serverTimeMs', 'state', 'taskId',
+ ])
+ 
+ const AUTHORITY_LOOKING = /read|auth|grant|permit|acl|visib/i
+diff --git a/runtime/dsh-composition/e2e-assembly.test.mjs b/runtime/dsh-composition/e2e-assembly.test.mjs
+index 5aef2380..64df57d4 100644
+--- a/runtime/dsh-composition/e2e-assembly.test.mjs
++++ b/runtime/dsh-composition/e2e-assembly.test.mjs
+@@ -113,6 +113,18 @@ function fakeHub({ reserveStatus = 200, settleStatus = 200, frozenText = '冻结
+         record({ kind: 'observe', body })
+         return { status: 200, body: { ok: true, cancel: false } }
+       }
++      // ★ 2026-10-05（T-178）：`/api/agent-runtime` 是 **Run 内的 agent 通道**
++      //   （`orchestrator/worker/agent-channel.mjs`：`start()` 与 `stop()` 各拨一次，
++      //   上报进度/取回取消命令）。生产路径现在**恒定**开着它
++      //   （`executor-binding.mjs` 的 `agentInteractions: true`），所以它会落在
++      //   这条时间线上。以前它掉进下面那个 catch-all 被记成 `assemble` ——
++      //   一个**记错了名字**的读数：让"顺序里多了两条 assemble"看起来像
++      //   "上下文被装配了两次"，而真正的调用根本不是装配。
++      //   （夹具把不认识的调用当成最像的那一个，正是本仓反复踩的那类坑。）
++      if (path.endsWith('/agent-runtime')) {
++        record({ kind: 'agent-runtime', body })
++        return { status: 200, body: { ok: true, commands: [] } }
++      }
+       record({ kind: 'assemble', body })
+       return { status: 200, body: { ok: true, recorded: true, summary: {}, snapshotHash: 'h' } }
+     },
+@@ -208,7 +220,14 @@ test('① **全链路跑通**：自检 → 注册 → worker 拿到引擎 → 
+     // 顺序是这条链的要害：**预留 → 执行 → 结算**。
+     // 用**同一条**时间线断言，因为"两笔账务都有"证明不了执行夹在中间——
+     // 而"钱在花之前就被占住"正是这道闸门存在的全部意义。
+-    assert.deepEqual(hub.fullOrder(), ['get-snapshot', 'reserve', 'engine-run', 'settle'],
++    //
++    // ★ 2026-10-05（T-178）：序列里补上 `/api/agent-runtime` 两次 ——
++    //   Run 内的 agent 通道（`agent-channel.mjs` 的 `start()`/`stop()`）现在
++    //   在生产路径上恒定开启（`executor-binding.mjs` 的 `agentInteractions: true`），
++    //   一次在执行前、一次在执行后。它是**进度/取消**通道，不是账务，也不是装配。
++    //   仍然用**整体序列**比较（不是"包含"）：多一个/少一个都红。
++    assert.deepEqual(hub.fullOrder(),
++      ['get-snapshot', 'reserve', 'agent-runtime', 'engine-run', 'agent-runtime', 'settle'],
+       '预留必须先于执行、结算必须在执行之后；' +
+       `实际：${hub.fullOrder().join(' → ')}`)
+     assert.equal(host.calls.length, 1, '引擎只被调用一次')
+@@ -426,7 +445,11 @@ test('④ 没接预算闸门时，全链路结果里 `budgetState` 是 `not-gate
+     assert.equal(result.outcome, 'completed')
+     assert.equal(result.budgetState, 'not-gated')
+     assert.equal(result.settlement, null)
+-    assert.equal(hub.order().filter((k) => k !== 'get-snapshot').length, 0,
++    // ★ 2026-10-05（T-178）：这里数的是**账务**请求，不是"hub 上的任何调用"。
++    //   原判据把 `agent-runtime`（进度/取消通道，恒定开启）也算进来，于是
++    //   一条**没有接预算闸门**的正确实现被报成"发了 2 条账务请求"——
++    //   而它一条都没发。账务的入口只有这三个 kind（`budget-gate.mjs`）。
++    assert.equal(hub.order().filter((k) => k === 'reserve' || k === 'settle' || k === 'observe').length, 0,
+       '没接闸门时一条账务请求都不该发出去')
+   } finally { boot.unbind?.(); resetDshRuntimeBinding() }
+ })
+diff --git a/runtime/dsh-composition/employee-preset.test.mjs b/runtime/dsh-composition/employee-preset.test.mjs
+index bdf5e369..0cf77314 100644
+--- a/runtime/dsh-composition/employee-preset.test.mjs
++++ b/runtime/dsh-composition/employee-preset.test.mjs
+@@ -515,10 +515,35 @@ describe('PRT-214 员工 agent preset', () => {
+ 
+   guardedDsh('★★★ 引擎产出的包名与 `standard` preset 里用的**逐字相同**', async () => {
+     // 不能凭记忆写包名。`standard` 是随部署分发的那一份，拿它当基准。
+-    const standard = readFileSync(join(DSH, 'packages', 'preset', 'agent-presets', 'presets', 'standard', 'agent.cordis.yml'), 'utf8')
++    //
++    // ★ 2026-10-05（T-178）：DSH 检出里那份 preset **搬过家** ——
++    //   旧路径 `packages/preset/agent-presets/presets/standard/agent.cordis.yml`
++    //   在现检出里已经不存在（只剩子代理测试夹具里两份 `agent.cordis.yml`），
++    //   随部署分发的那一份现在是 `packages/bundle/web-app/presets/standard.patch.yml`。
++    //   从前硬编码单一旧路径，于是 `readFileSync` 抛 ENOENT —— 一条"拿基准对包名"
++    //   的判据，在基准搬家后报的是"文件打不开"，与"包名写错了"毫无关系。
++    //
++    //   > 一个把"基准的路径"写死的交叉校验，
++    //   > 与一个"基准搬家之后什么都没校验到"的交叉校验，在红/绿上是同一个东西。
++    //
++    //   这里按**候选表 + 目录扫描**找基准：找不到仍然**失败**（不静默 SKIP、
++    //   也不退回"凭记忆写包名"）——失败信息里逐条列出找过的路径。
++    const { globSync } = await import('node:fs')
++    const candidates = [
++      join(DSH, 'packages', 'bundle', 'web-app', 'presets', 'standard.patch.yml'),
++      join(DSH, 'packages', 'preset', 'agent-presets', 'presets', 'standard', 'agent.cordis.yml'),
++    ]
++    const scanned = globSync('packages/**/presets/standard*.yml', { cwd: DSH })
++      .map((rel) => join(DSH, rel))
++    const standardFile = [...candidates, ...scanned].find((p) => existsSync(p)) ?? null
++    assert.ok(standardFile !== null,
++      'DSH 检出里找不到随部署分发的 standard preset（逐条找过：' +
++      `${[...candidates, ...scanned].join(' / ')}）——基准不在了就地失败，` +
++      '不要退回"凭记忆写包名"，那等于把这条交叉校验删掉')
++    const standard = readFileSync(standardFile, 'utf8')
+     for (const spec of Object.values(DSH_PRESET_ROWS)) {
+       assert.ok(standard.includes(`'${spec.pkg}'`),
+-        `我们在用 ${spec.pkg}，但随部署分发的 standard preset 里没有它——` +
++        `我们在用 ${spec.pkg}，但随部署分发的 standard preset（${standardFile}）里没有它——` +
+         '要么包名写错了，要么这个包不是 DSH 随部署提供的那一套')
+     }
+   })
+diff --git a/security/secrets/credential-materializer.test.mjs b/security/secrets/credential-materializer.test.mjs
+index fe40fa3a..74cdfdea 100644
+--- a/security/secrets/credential-materializer.test.mjs
++++ b/security/secrets/credential-materializer.test.mjs
+@@ -760,18 +760,39 @@ test('⑥ ★★ 映射目标名来自 DSH 自己的声明，而不是本模块
+   //   改成扫目录之后，断言仍然要求**标识符与字符串字面量**同时出现在 DSH 自己的
+   //   源码里（改名或删掉照样红），但不再对"文件被拆开/搬走"敏感。
+   //   加 `^…$` 行锚：否则一句注释或字符串里提到它也能满足。
+-  const providerSrc = join(checkout, 'packages', 'llm', 'llm-deepseek', 'src')
+-  if (!existsSync(patchFile) || !existsSync(providerSrc)) {
++  // ★ 2026-10-05（T-178）：声明**又搬了一次家**，而且这次换了形态 ——
++  //   旧形态 `const DEFAULT_API_KEY_ENV = 'DEEPSEEK_API_KEY'` 现在只剩在
++  //   `packages/web/web-search-deepseek/src/index.ts:46`（那是 **web 搜索** 的 provider，
++  //   不是模型 provider）；模型这一侧改由 schemastery 的 `apiKeyEnv` 声明给出：
++  //
++  //     packages/llm/llm-deepseek-api-key/src/config.ts:16
++  //       apiKeyEnv: z.string().role('credential-ref').default('DEEPSEEK_API_KEY').volatile(),
++  //
++  //   这与本用例上面那段注释说的**是同一件事的第二次发生**：
++  //   「一条钉死'声明住哪个文件/哪种写法'的断言，守的不是'这个名字是 DSH 声明的'」。
++  //   所以扫的包从 1 个扩到 2 个（模型协议 + 凭据引用），断言的形态从'某一个常量名'
++  //   放宽到'两种**代码形态**之一'：
++  //     · 旧：行锚的 `const DEFAULT_API_KEY_ENV = '...'`；
++  //     · 新：`apiKeyEnv:` 声明行上的 `.default('DEEPSEEK_API_KEY')`。
++  //   两条都要求**标识符 + 逐字字面量**同时出现在同一行 —— 注释里提一句仍然不满足。
++  const providerSrcs = [
++    join(checkout, 'packages', 'llm', 'llm-deepseek', 'src'),
++    join(checkout, 'packages', 'llm', 'llm-deepseek-api-key', 'src'),
++  ].filter((p) => existsSync(p))
++  if (!existsSync(patchFile) || providerSrcs.length === 0) {
+     return t.skip('DSH_CHECKOUT 可达，但这两处声明文件不在预期路径上——那本身是个值得报的漂移')
+   }
+   // 行配置那一侧：`apiKeyEnv: DEEPSEEK_API_KEY`
+   assert.match(readFileSync(patchFile, 'utf8'), /apiKeyEnv: DEEPSEEK_API_KEY/)
+-  // 适配器那一侧：`DEFAULT_API_KEY_ENV = 'DEEPSEEK_API_KEY'`
+-  const providerCode = readdirSync(providerSrc, { recursive: true })
++  // 适配器那一侧：DSH 自己声明这个凭据引用的默认名
++  const providerCode = providerSrcs.flatMap((dir) => readdirSync(dir, { recursive: true })
+     .filter((rel) => rel.endsWith('.ts'))
+-    .map((rel) => readFileSync(join(providerSrc, rel), 'utf8'))
++    .map((rel) => readFileSync(join(dir, rel), 'utf8')))
+     .join('\n')
+-  assert.match(providerCode, /^const DEFAULT_API_KEY_ENV = 'DEEPSEEK_API_KEY'$/m)
++  assert.match(providerCode,
++    /(?:^const DEFAULT_API_KEY_ENV = 'DEEPSEEK_API_KEY'$|apiKeyEnv:[^\n]*\.default\('DEEPSEEK_API_KEY'\))/m,
++    'DSH 的模型/凭据引用源码里必须有一行同时写着 apiKeyEnv（或旧常量名）与 DEEPSEEK_API_KEY —— '
++    + '只在一句注释里提到不算；也**不**对文件名/常量名敏感（它们搬过两次家）')
+   // 而本套件喂给 materializeRunCredentials 的映射目标就是这个名字。
+   assert.equal(DSH_MODEL_NAME, 'DEEPSEEK_API_KEY')
+   return undefined
+diff --git a/team-hub/acceptance-routes.test.mjs b/team-hub/acceptance-routes.test.mjs
+index 448eb739..1079e79b 100644
+--- a/team-hub/acceptance-routes.test.mjs
++++ b/team-hub/acceptance-routes.test.mjs
+@@ -47,9 +47,29 @@ async function call(method, path, body) {
+   return { status: res.status, body: parsed }
+ }
+ 
+-/** 建一条任务（可选带验收判据），并保证此刻队列里只有它。 */
++/**
++ * 建一条任务（可选带验收判据），并保证此刻队列里只有它。
++ *
++ * ★ 2026-10-05（T-178）：这里**必须**连写入预约一起结清。
++ *
++ * 本函数用裸 SQL 把别的任务置成 `done`，绕过了产品里"任务收口"那条路
++ * ——而那条路（`team-hub/server.mjs` 的 `finishTaskReservationInTx`，见
++ * `to === 'done'` 与 `advanceTask`）**一定会释放该任务的写入预约**。
++ * 于是夹具声称"队列里只剩这一条"，库里却留着上一条任务 `state='reserved'`
++ * 的整仓独占预约：下一次 `/api/runtime/claim` 以 `FILE_CONTENTION` 返回
++ * `claimed:null`，红的位置却指向"这次的任务没领到"，与真实原因（上一条用例的
++ * 预约没结清）毫无关系。
++ *
++ * 这不是产品缺陷：预约跨 `in_review` 持有是刻意的（`write-intent-store.mjs`
++ * 的 `rebindForRetry`：`A reviewed attempt has stopped; keep the same path lock`），
++ * 而"未申报写入范围 ⇒ 整仓独占"也被 `contention-paths.test.mjs` ④ 明确钉住。
++ * 夹具要模拟的是"这些任务已经收口"，就必须做出产品在那一刻做的那件事。
++ */
+ function onlyTask(id, { acceptance = '[]' } = {}) {
+   mod.db.prepare("UPDATE tasks SET status = 'done' WHERE status IN ('todo','backlog')").run()
++  mod.db.prepare(
++    "UPDATE write_reservations SET state = 'released', updated_at_ms = ? WHERE state IN ('reserved','reconciling')",
++  ).run(Date.now())
+   mod.db.prepare(
+     'INSERT OR REPLACE INTO tasks (id, title, priority, status, scope, hold, createdAt, updatedAt, acceptance) VALUES (?,?,?,?,?,?,?,?,?)',
+   ).run(id, id, 'medium', 'todo', 'default', 0, new Date().toISOString(), new Date().toISOString(), acceptance)
+diff --git a/team-hub/goal-lifecycle-routes.test.mjs b/team-hub/goal-lifecycle-routes.test.mjs
+index 28d6c6f8..e769ec22 100644
+--- a/team-hub/goal-lifecycle-routes.test.mjs
++++ b/team-hub/goal-lifecycle-routes.test.mjs
+@@ -214,7 +214,7 @@ const drive = async (router, path, body) => {
+ test('⑤ ★★★ 发布时**作用域回落**：`body.scope` 有就用（trim），没有就用 hub 给的那个', async () => {
+   const { router, calls } = spyRouter()
+   await drive(router, '/api/goal', { by: 'general', objective: 'O' })
+-  assert.deepEqual(calls.publish[0], ['scope-from-hub', 'O', 'chain', 'general', false],
++  assert.deepEqual(calls.publish[0], ['scope-from-hub', 'O', 'chain', 'general', false, null],
+     '★★★ 没有 body.scope 时必须回落到 handleWrite 递进来的 scope')
+   await drive(router, '/api/goal', { by: 'general', objective: 'O', scope: '  other  ' })
+   assert.equal(calls.publish[1][0], 'other', '★★ 给了 scope 就用它，且要去空白')
+@@ -222,6 +222,26 @@ test('⑤ ★★★ 发布时**作用域回落**：`body.scope` 有就用（trim
+   assert.equal(calls.publish[2][0], 'scope-from-hub', '★ 只有空白等于没给')
+   await drive(router, '/api/goal', { by: 'general', objective: 'O', scope: 123 })
+   assert.equal(calls.publish[3][0], 'scope-from-hub', '★ 非字符串也等于没给')
++
++  // ★ 2026-10-05（T-178）：publishGoalRecord 的**第 6 个位置**是
++  //   workflowDefinitionRef（契约在 team-hub/server.mjs:2379）：
++  //     function publishGoalRecord(targetScope, objective, mode = 'chain', by = 'general',
++  //                                docSync = false, workflowDefinitionRef = null)
++  //   本判据最初只写到第 5 位；第 6 位接上之后，deepEqual 把**正确**的搬运
++  //   （多一个 null）报成了'作用域没有回落'——错误信息指向一个完全不相干的地方。
++  //
++  //   > 一个'照第 5 位写的'参数搬运判据，与一个'第 6 位上线后把正确实现报成错'的判据，
++  //   > 在 failing test 的名字上是同一个东西。
++  //
++  //   契约依据不止这一处：team-hub/routes/goal-lifecycle.mjs:77 把
++  //   body.workflowDefinition ?? null 放进第 6 位；team-hub/pipeline.test.mjs:589-597
++  //   从 **HTTP 层**覆盖了'给了 definition 就按它冻结工作流'。所以这里补上第 6 位，
++  //   并且**正面**钉住它真的被搬过去（而不是把它从断言里删掉）。
++  assert.equal(calls.publish[0][5], null,
++    '★ 没给 workflowDefinition ⇒ 第 6 位是 null（既不是 undefined，也不是被吞掉）')
++  await drive(router, '/api/goal', { by: 'general', objective: 'O', workflowDefinition: { id: 'wf.x', version: 3 } })
++  assert.deepEqual(calls.publish.at(-1)[5], { id: 'wf.x', version: 3 },
++    '★★ body.workflowDefinition 必须原样搬到第 6 位（胶水不许把它丢掉）')
+ })
+ 
+ test('⑤b ★★★ `docSync` 有**两个来源**：`body.docSync === true` **或** `body.feature === true`', async () => {
+diff --git a/team-hub/handoff-routes.test.mjs b/team-hub/handoff-routes.test.mjs
+index a8f61de4..1da1ea6e 100644
+--- a/team-hub/handoff-routes.test.mjs
++++ b/team-hub/handoff-routes.test.mjs
+@@ -56,9 +56,31 @@ function setPipeline(scope, stages) {
+   stages.forEach((s, i) => ins.run(scope, s.role, s.label, '', s.next, 0, null, null, i, s.enabled === false ? 0 : 1, new Date().toISOString()))
+ }
+ 
+-/** 建一条任务，并保证此刻队列里只有它（运行面按创建时间取队首）。 */
++/**
++ * 建一条任务，并保证此刻队列里只有它（运行面按创建时间取队首）。
++ *
++ * ★ 2026-10-05（T-178）：把别的任务标成 `done` 时必须**连写入预约一起结清**。
++ *
++ * 产品里"任务收口"一定会释放写入预约（`team-hub/server.mjs` 的
++ * `finishTaskReservationInTx`，见 `to === 'done'` 与 `advanceTask`）；
++ * 本函数用裸 SQL 清队列，绕过了那条路，于是库里留着上一条任务
++ * `state='reserved'` 的整仓独占预约 —— 下一次 `/api/runtime/claim` 以
++ * `FILE_CONTENTION` 返回 `claimed:null`，红的位置指向"这次的任务没领到"。
++ *
++ * 这里还多一种泄漏源，本文件独有：① 在 `/api/runtime/handoff` 之后领走了
++ * **产品自己建的后继任务**（`buildHandoffTask` 的 payload 里没有 `fileDomain`，
++ * 见 `orchestrator/pipeline/index.mjs:211-227`），那条后继同样是整仓独占，
++ * 且它是产品建的、夹具改不了它 —— 所以只能在"清队列"时把它的预约一并结清。
++ *
++ * 这不是产品缺陷：预约跨 `in_review` 持有是刻意的
++ * （`write-intent-store.mjs` 的 `rebindForRetry` 注释），而"未申报写入范围 ⇒
++ * 整仓独占"被 `contention-paths.test.mjs` ④ 明确钉住。
++ */
+ function onlyTask(id, { scope = 'default', role = 'analyst', goalId = null, acceptance = '[{"kind":"run-completed"}]' } = {}) {
+   mod.db.prepare("UPDATE tasks SET status = 'done' WHERE status IN ('todo','backlog')").run()
++  mod.db.prepare(
++    "UPDATE write_reservations SET state = 'released', updated_at_ms = ? WHERE state IN ('reserved','reconciling')",
++  ).run(Date.now())
+   mod.db.prepare(
+     `INSERT OR REPLACE INTO tasks (id, title, description, priority, status, scope, role, parent, goalId, hold, createdAt, updatedAt, acceptance)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+diff --git a/team-hub/routes/agents.mjs b/team-hub/routes/agents.mjs
+index 7a5472d9..01fd3b56 100644
+--- a/team-hub/routes/agents.mjs
++++ b/team-hub/routes/agents.mjs
+@@ -13,6 +13,26 @@ export function createAgentsRoutes({ service, json, authorized, readBody, requir
+   return { id:'agents',routes,async dispatch(req,res,{ path,url }) {
+     const r=routes.find(r => r.path===path && r.method===req.method)
+     if (!r) return false
++    // ★★★ 2026-10-05（T-178）：`GET /api/agents` 是**两套契约共用的一条路径**，
++    //   靠 `scope` 的有无分流：
++    //     · `/api/agents?scope=<s>` —— 本族的空间内岗位清单（`service.list(scope)`）；
++    //     · `/api/agents`（不带 scope）—— read-models 族的**全局智能体目录**
++    //       （按 role 去重、把来源空间收进 `scopes`），workbench「配置编队」用它，
++    //       契约见 `workbench/README.md:91-92` 与 `workbench/src/api.ts:340`。
++    //
++    //   两个族都声明了 `GET /api/agents`（见 `team-hub/routes/read-models.mjs:218`），
++    //   而派发按**注册顺序**命中即返回 —— 本族排在 read-models 之前（`server.mjs:6786`
++    //   vs `:6957`），于是那条目录请求**永远**被本族接走；`service.list` 对缺 scope
++    //   抛 `required(scope,'scope')`，落到 catch 里变成 400：
++    //
++    //     > 一个「同一路径两族各实现一半、由注册顺序决定谁赢」的接线，
++    //     > 与一个「前端那条不带 scope 的目录请求永远 400」的接线，
++    //     > 在路由清单上长得一模一样 —— 清单按 (method,path) 去重，只留一行。
++    //
++    //   所以本族把**不带 scope** 的那一条**让出去**（返回 false，交给后面的族），
++    //   带着 scope 的那一条仍归本族。全局鉴权在 `server.mjs:7091` 那一道，
++    //   让出不会绕过认证。
++    if (req.method === 'GET' && path === '/api/agents' && (url.searchParams.get('scope') ?? '').trim() === '') return false
+     if (!authorized(req)) { json(res,401,{ ok:false,error:'未授权' }); return true }
+     try {
+       let input=url
+diff --git a/team-hub/routes/delivery.mjs b/team-hub/routes/delivery.mjs
+index fb286d31..df47954a 100644
+--- a/team-hub/routes/delivery.mjs
++++ b/team-hub/routes/delivery.mjs
+@@ -97,8 +97,26 @@ export function createDeliveryRoutes({ json, readBody, authorized, deliveryStore
+     json(res, 200, { ok: true, delivery: created.delivery })
+   })
+ 
+-  // GET /api/deliveries/:id 或 /api/deliveries?taskId=
+-  on('GET', /^\/api\/deliveries(?:\/([^/]+))?$/, async (req, res, m) => {
++  // GET /api/deliveries?taskId= —— 按任务查
++  // GET /api/deliveries/:id     —— 按 id 查
++  //
++  // ★ 2026-10-05（T-178）：这两条**拆成两个 on()**（而不是一条带可选段的正则）。
++  //   分派行为逐字不变 —— `(?:\/([^/]+))?` 本来就是把两种形态交给同一个处理函数。
++  //   拆开是因为平台契约的**唯一权威** `platformHttpRoutes()`
++  //   （`scripts/prt/baseline-snapshot.mjs`）的 `regexPath()` 处理不了
++  //   「可选段里再嵌捕获组」（`(?:\/([^/]+))?`）：那条正则声明的端点在
++  //   `httpRoutes` 里**一条都不出现**。于是 workbench 那条真实的
++  //   `GET /api/deliveries?taskId=…` 会被交叉校验报成
++  //   「前端写了个不存在的端点，用户只会看到一个 404」—— 而它存在。
++  //
++  //   > 一个「抽取器看不见」的端点，与一个「不存在」的端点，
++  //   > 在交叉校验的输出上是同一行。
++  //
++  //   拆成两条之后两种形态都能被逐条抽出（`GET /api/deliveries` 与
++  //   `GET /api/deliveries/:param`）。真正该修的其实是 `regexPath()` 里那个
++  //   可选段正则（嵌套的 `)` 让它匹配失败），但它在 `scripts/prt/` 下
++  //   （T-177 的范围），本任务不动它。
++  const getDelivery = async (req, res, m) => {
+     if (!authorized(req)) { json(res, 401, { ok: false, code: 'UNAUTHORIZED' }); return }
+     if (m[1]) {
+       const d = deliveryStore.getDelivery(m[1])
+@@ -111,7 +129,12 @@ export function createDeliveryRoutes({ json, readBody, authorized, deliveryStore
+     const d = deliveryStore.getDeliveryByTask(taskId)
+     if (!d) { json(res, 404, { ok: false, code: 'NOT_FOUND' }); return }
+     json(res, 200, { ok: true, delivery: d, events: deliveryStore.listIntegrationEvents({ deliveryId: d.id }) })
+-  })
++  }
++  //   注意：第三个参数写成**内联 async 函数**（而不是直接引用 `getDelivery`）——
++  //   平台契约的路由抽取器认的是 `on('<M>', /re/, async (` 这个形态（见
++  //   `extractDeclaredRoutes` 的 `ON_RE`）；传函数引用会让它看不见这两条。
++  on('GET', /^\/api\/deliveries$/, async (req, res, m) => getDelivery(req, res, m))
++  on('GET', /^\/api\/deliveries\/([^/]+)$/, async (req, res, m) => getDelivery(req, res, m))
+ 
+   // POST /api/integration/claim —— 同仓库同 target ref 至多一个活跃 job
+   on('POST', /^\/api\/integration\/claim$/, async (req, res) => {
+diff --git a/team-hub/run-events.test.mjs b/team-hub/run-events.test.mjs
+index d74eb33b..1e52c0fd 100644
+--- a/team-hub/run-events.test.mjs
++++ b/team-hub/run-events.test.mjs
+@@ -299,12 +299,31 @@ async function get(path) {
+   return { status: r.status, body: await r.json().catch(() => null) }
+ }
+ 
+-/** 造一条任务并认领它，返回 lease。 */
++/**
++ * 造一条任务并认领它，返回 lease。
++ *
++ * ★ 2026-10-05（T-178）：夹具任务必须**申报自己的写入范围**（`fileDomain`）。
++ *
++ * 本文件所有用例共用**一个 hub 库**，而认领会在同一事务里授予写入预约。
++ * 未申报范围的会被按**整仓独占**处理（设计如此：`write-intent-store.mjs` 的
++ * `resolvePlannedPaths` 返回 `unplanned-exclusive`，`reserve({exclusive:true})`；
++ * `contention-paths.test.mjs` ④ 明确钉住了这个方向）。而预约**跨 `in_review`
++ * 持有**也是刻意的（`rebindForRetry` 的注释："A reviewed attempt has stopped;
++ * keep the same path lock while binding it to its retry"）。
++ *
++ * 两条合起来：⑬ 跑完停在与 `in_review` 对应的 `Validating`，它那条**整仓独占**
++ * 预约仍然活跃 ⇒ ⑭ 起的每一次 `claimOne()` 都以 `FILE_CONTENTION` 返回
++ * `claimed:null`，红的位置却指向"没能认领到任务"，与真实原因（上一条用例的
++ * 整仓预约还压着）毫无关系。
++ *
++ * 修法是让夹具与实际派工一致：每个用例的任务只申报自己那一片路径，
++ * 于是它们**互不相交**，谁也不整仓独占。断言一条没动。
++ */
+ async function claimOne(tag) {
+   const id = `T-EV-${tag}`
+   mod.db.prepare(
+-    'INSERT OR REPLACE INTO tasks (id, title, priority, status, scope, hold, createdAt, updatedAt) VALUES (?,?,?,?,?,0,?,?)',
+-  ).run(id, id, 'medium', 'todo', 'software', new Date().toISOString(), new Date().toISOString())
++    'INSERT OR REPLACE INTO tasks (id, title, priority, status, scope, hold, createdAt, updatedAt, fileDomain) VALUES (?,?,?,?,?,0,?,?,?)',
++  ).run(id, id, 'medium', 'todo', 'software', new Date().toISOString(), new Date().toISOString(), JSON.stringify([`ev/${tag}`]))
+   const r = await post('/api/runtime/claim', { workerId: `w-${tag}`, scope: 'software' })
+   assert.equal(r.status, 200, JSON.stringify(r.body))
+   // 响应形状是 `{ok:true, claimed:{attemptId,…}}`——`claimed` 是**对象**不是布尔。
+diff --git a/workbench/scripts/model-api.test.mjs b/workbench/scripts/model-api.test.mjs
+index 0f19e29e..2f124c33 100644
+--- a/workbench/scripts/model-api.test.mjs
++++ b/workbench/scripts/model-api.test.mjs
+@@ -348,15 +348,39 @@ describe('③ 每条路径都必须在平台契约里真实存在（交叉校验
+     // **一条会给出错误结论的校验，比不校验更坏**，所以这里把范围收窄到能可靠判定的集合。
+     const src = readFileSync(resolve(ROOT, 'workbench/src/api.ts'), 'utf8')
+     const found = []
++    // ★ 2026-10-05（T-178）：抽取器从前在模板段（美元花括号）处**截断**，
++    //   于是中间带模板段的路径只剩前缀：tasks 那条抽成 /api/tasks/、
++    //   repositories 那条抽成 /api/repositories/。那些**截断出来的前缀**
++    //   再去与路由表做前缀匹配必然全落空 —— 报出来的是「前端写了个不存在的端点」，
++    //   而真实情况是**抽取器自己截断了**。
++    //
++    //   > 一个「在模板段处截断」的抽取器，与一个「前端调了 6 个不存在的端点」的抽取器，
++    //   > 报的是同一句话；而这句话读起来完全正确，所以没人会去怀疑抽取器。
++    //
++    //   现在改抽**整个字面量**，再把模板段归一成路由表里位置参数的写法（:param）、
++    //   并去掉查询串（查询串不属于路径）。判据没有放宽：被检查的路径**变多**了
++    //   （后缀不再被丢掉），而且位置参数段必须与路由表逐字对上。
++    // 归一规则（两条，各自对应一种真实形态）：
++    //   · 模板段后面还有路径字面量（/api/tasks/${id}/write-intent）⇒ 它是位置参数，换 :param；
++    //   · 模板段直接接在路径末尾（plan${qs}、skills${qs.size …}）⇒ 它是查询串/拼接，丢掉。
++    //     这一条也顺带兜住**嵌套模板**（`/api/skills${qs.size ? `?${qs}` : ''}` 会被
++    //     内层反引号切断，残留 `${…`）——判据只对"清理干净的路径"做。
++    const normalize = (raw) => raw
++      .split('?')[0]
++      .replace(/(\/)?\$\{[^}]*\}/g, (m, slash) => (slash === '/' ? '/:param' : ''))
++      .replace(/\$\{.*$/, '')
++    // 反引号在正则字符类里写成 \x60（免得与这里的模板串定界符打架）。
+     const patterns = [
+-      [/hubGet\(\s*[`'"](\/api\/[^`'"$]*)/g, 'GET'],
+-      [/hubPost\(\s*[`'"](\/api\/[^`'"$]*)/g, 'POST'],
+-      [/hubRequest\(\s*'([A-Z]+)'\s*,\s*[`'"](\/api\/[^`'"$]*)/g, null],
++      [/hubGet\(\s*[\x60'"](\/api\/[^\x60'"]*)/g, 'GET'],
++      [/hubPost\(\s*[\x60'"](\/api\/[^\x60'"]*)/g, 'POST'],
++      [/hubRequest\(\s*'([A-Z]+)'\s*,\s*[\x60'"](\/api\/[^\x60'"]*)/g, null],
+     ]
+     for (const [re, method] of patterns) {
+       let m
+       while ((m = re.exec(src)) !== null) {
+-        found.push(method === null ? { method: m[1], path: m[2] } : { method, path: m[1] })
++        found.push(method === null
++          ? { method: m[1], path: normalize(m[2]) }
++          : { method, path: normalize(m[1]) })
+       }
+     }
+ 
+@@ -370,11 +394,12 @@ describe('③ 每条路径都必须在平台契约里真实存在（交叉校验
+       assert.ok(found.some((f) => f.path === p || f.path.startsWith(p + '/')), `抽取结果里缺少 ${p}`)
+     }
+ 
+-    // 已知的两处**本抽取器覆盖不到**的地方，写在这里以免日后被当成"已经校验过"：
+-    //   · 轮换的路径以 `${encodeURIComponent(ref)}/rotate` 结尾，抽取器在 `$` 处截断，
+-    //     只能拿到 `/api/secrets/`。**后缀本身**由 ① 的行为用例断言
+-    //     （`rotateSecret` 的真实 URL 必须以 `/rotate` 结尾），不靠这里。
+-    //   · DELETE 的路径同理在 `$` 处截断。行为断言同样在 ①。
++    // 抽取器的覆盖边界（写在这里，以免日后被当成"已经校验过"）：
++    //   · 从前那两处盲区（轮换路径与 DELETE 路径在模板段处被截断）**已经不存在**：
++    //     归一规则把 `${…}/rotate` 落成 `/:param/rotate`、把末尾的模板段丢弃，
++    //     于是 `/api/secrets/:param/rotate` 与 `/api/secrets/:param` 都被逐条校验了。
++    //   · 本抽取器**不**负责查询串里的语义：`?taskId=` 这类参数名不属于路径，
++    //     这里只校验路径本身（查询串在切分时就丢掉了）。
+ 
+     const bad = found.filter((f) => !exists(f.method, f.path))
+     assert.deepEqual(

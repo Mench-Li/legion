@@ -28,15 +28,19 @@ describe('hub event cursor', () => {
     assert.equal(readHubCursor(storage, hubCursorKey('https://hub.test/', 'scope-b')), null)
   })
 
-  it('损坏游标按无游标处理，URL 正确编码 scope/cursor/token', () => {
+  it('损坏游标按无游标处理，URL 正确编码 scope/cursor/ticket', () => {
     const storage = { getItem: () => 'bad', setItem: () => {} }
     assert.equal(readHubCursor(storage, 'k'), null)
     const url = buildHubEventSourceUrl('https://hub.test/api/events?existing=1', {
       scope: 'a b',
       sinceSeq: 8,
-      token: 'x/y',
+      ticket: 'x/y',
     })
-    assert.equal(url, 'https://hub.test/api/events?existing=1&scope=a+b&sinceSeq=8&token=x%2Fy')
+    // ★ 参数名是 `ticket`。它是一次性短时票据，**不是**访问令牌——
+    //   两者共用一个参数名会让人在 URL 上分不出"这一串是哪一种"，
+    //   而那正是"把主钥匙抄在门口"最容易发生的方式。
+    assert.equal(url, 'https://hub.test/api/events?existing=1&scope=a+b&sinceSeq=8&ticket=x%2Fy')
+    assert.doesNotMatch(url, /[?&]token=/)
   })
 })
 
@@ -60,34 +64,38 @@ describe('hub envelope validation', () => {
     assert.equal(isHubAuditEvent({ ...good, payload: undefined }), false)
   })
 
-  it('订阅器只消费单调、匹配 scope 的合法事件并持久游标', () => {
+  it('订阅器只消费单调、匹配 scope 的合法事件并持久游标', async () => {
     const values = new Map([['hub-events:https://hub.test/api/events/:a', '2']])
     const storage = {
       getItem: (key) => values.get(key) ?? null,
       setItem: (key, value) => values.set(key, value),
     }
     class FakeEventSource {
-      static instance
-      constructor(url) { this.url = url; FakeEventSource.instance = this; this.onmessage = null }
+      static instances = []
+      constructor(url) { this.url = url; FakeEventSource.instances.push(this); this.onmessage = null }
       close() { this.closed = true }
     }
     const received = []
+    // `subscribeHubEventStream` 现在是**异步**建的（要先签票据），
+    // 所以断言之前要让它跑完一轮微任务。
     const off = subscribeHubEventStream('https://hub.test/api/events', (event) => received.push(event), {
       scope: 'a',
       storage,
-      token: 'token',
+      ticketProvider: async () => 'token',
       EventSourceCtor: FakeEventSource,
     })
-    assert.equal(FakeEventSource.instance.url, 'https://hub.test/api/events?scope=a&sinceSeq=2&token=token')
+    await Promise.resolve(); await Promise.resolve(); await Promise.resolve()
+    const FakeES = FakeEventSource.instances[0]
+    assert.equal(FakeES.url, 'https://hub.test/api/events?scope=a&sinceSeq=2&ticket=token')
     const valid = { id: 3, event: 'task:create', scope: 'a', seq: 3, ts: '2026-01-01', payload: {}, action: 'task:create', member: 'general', taskId: null, goalId: null, detail: {} }
-    FakeEventSource.instance.onmessage({ data: JSON.stringify(valid) })
-    FakeEventSource.instance.onmessage({ data: JSON.stringify(valid) })
-    FakeEventSource.instance.onmessage({ data: JSON.stringify({ ...valid, id: 4, seq: 4, scope: 'b' }) })
-    FakeEventSource.instance.onmessage({ data: '{broken' })
+    FakeES.onmessage({ data: JSON.stringify(valid) })
+    FakeES.onmessage({ data: JSON.stringify(valid) })
+    FakeES.onmessage({ data: JSON.stringify({ ...valid, id: 4, seq: 4, scope: 'b' }) })
+    FakeES.onmessage({ data: '{broken' })
     assert.deepEqual(received.map((event) => event.seq), [3])
     assert.equal(values.get('hub-events:https://hub.test/api/events/:a'), '3')
     off()
-    assert.equal(FakeEventSource.instance.closed, true)
+    assert.equal(FakeES.closed, true)
   })
 })
 

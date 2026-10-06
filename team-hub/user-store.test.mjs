@@ -789,3 +789,101 @@ test('列表不含 code_hash（那是凭据的哈希，界面不需要它）', a
   assert.equal(blob.includes(code), false, '列表里不许出现明文码')
   assert.equal(blob.includes(store._internals.hashSecret(code)), false, '也不许出现它的哈希')
 })
+
+// ── 事件订阅票据（SSE） ─────────────────────────────────────────────────────
+//
+// 它取代的是"把访问令牌放在查询串里"。查询串会进访问日志、浏览器历史、Referer，
+// 而访问令牌是 15 分钟、覆盖全部 API 的主钥匙。
+
+test('签发的票据能用一次，换出来的是**用户会话**', async () => {
+  const { store, owner } = await bootstrapped()
+  const session = await store.login({ name: 'owner', password: 'owner-password' })
+  const t = store.createEventTicket({ userId: owner.userId, sessionId: session.sessionId })
+  assert.equal(typeof t.ticket, 'string')
+  assert.ok(t.ticket.length > 20)
+
+  const r = store.redeemEventTicket(t.ticket)
+  assert.equal(r.ok, true)
+  // 形状与 `verifyAccessToken` 一致：门禁对两者一视同仁，不写第二条分支。
+  assert.deepEqual(Object.keys(r).sort(), ['name', 'ok', 'sessionId', 'userId'])
+  assert.equal(r.userId, owner.userId)
+  assert.equal(r.sessionId, session.sessionId)
+})
+
+test('★ 一次性：同一张票第二次作废', async () => {
+  const { store, owner } = await bootstrapped()
+  const session = await store.login({ name: 'owner', password: 'owner-password' })
+  const { ticket } = store.createEventTicket({ userId: owner.userId, sessionId: session.sessionId })
+  assert.equal(store.redeemEventTicket(ticket).ok, true)
+  assert.equal(store.redeemEventTicket(ticket).ok, false)
+})
+
+test('票据会过期', async () => {
+  const clock = { now: 1_700_000_000_000 }
+  const { store, owner } = await bootstrapped({ clock })
+  const session = await store.login({ name: 'owner', password: 'owner-password' })
+  const { ticket } = store.createEventTicket({ userId: owner.userId, sessionId: session.sessionId })
+  clock.now += 60 * 1000 + 1
+  assert.equal(store.redeemEventTicket(ticket).ok, false)
+})
+
+test('★ 四种失败**只有一种说法**（分开报会让"这张票存在过"可探测）', async () => {
+  const { store, owner } = await bootstrapped()
+  const session = await store.login({ name: 'owner', password: 'owner-password' })
+  const { ticket } = store.createEventTicket({ userId: owner.userId, sessionId: session.sessionId })
+  const shapes = new Set()
+
+  shapes.add(JSON.stringify(store.redeemEventTicket('根本不存在的票')))
+  store.redeemEventTicket(ticket)                      // 用掉
+  shapes.add(JSON.stringify(store.redeemEventTicket(ticket)))
+  // 会话被撤销之后
+  const s2 = await store.login({ name: 'owner', password: 'owner-password' })
+  const t2 = store.createEventTicket({ userId: owner.userId, sessionId: s2.sessionId })
+  await store.revokeSession({ sessionId: s2.sessionId, by: owner.userId })
+  shapes.add(JSON.stringify(store.redeemEventTicket(t2.ticket)))
+
+  assert.equal(shapes.size, 1, `对外说法必须只有一种，实际有 ${shapes.size} 种：${[...shapes].join(' | ')}`)
+
+  // 空票据**不在**这条纪律里：空串不可能是"某一张票"，所以它泄露不了
+  // "这张票存在过"，而"缺少票据"对写错客户端的诊断价值更大。
+  assert.equal(store.redeemEventTicket('').code, IDENTITY_CODES.INVALID_INPUT)
+})
+
+test('★ 会话被撤销后，它签出去的票据一并作废', async () => {
+  // 否则"撤销会话"会留下一条只活 60 秒、但确实还能用的尾巴。
+  const { store, owner } = await bootstrapped()
+  const session = await store.login({ name: 'owner', password: 'owner-password' })
+  const { ticket } = store.createEventTicket({ userId: owner.userId, sessionId: session.sessionId })
+  await store.revokeSession({ sessionId: session.sessionId, by: owner.userId })
+  assert.equal(store.redeemEventTicket(ticket).ok, false)
+})
+
+test('已停用的账号签不出票据，也换不出来', async () => {
+  const { store, owner } = await bootstrapped()
+  const session = await store.login({ name: 'owner', password: 'owner-password' })
+  const { ticket } = store.createEventTicket({ userId: owner.userId, sessionId: session.sessionId })
+  await store.setUserDisabled({ by: owner.userId, userId: owner.userId, disabled: true })
+  assert.equal(await codeOf(() => store.createEventTicket({ userId: owner.userId, sessionId: session.sessionId })), IDENTITY_CODES.FORBIDDEN)
+  assert.equal(store.redeemEventTicket(ticket).ok, false)
+})
+
+test('库里只存哈希：明文票据读不出来', async () => {
+  const { store, db, owner } = await bootstrapped()
+  const session = await store.login({ name: 'owner', password: 'owner-password' })
+  const { ticket } = store.createEventTicket({ userId: owner.userId, sessionId: session.sessionId })
+  const blob = JSON.stringify(db.prepare('SELECT * FROM hub_event_tickets').all())
+  assert.equal(blob.includes(ticket), false, '库里不许出现明文票据')
+})
+
+test('过期票据与重置码会被清掉（后台扫，不抛）', async () => {
+  const clock = { now: 1_700_000_000_000 }
+  const { store, owner } = await bootstrapped({ clock })
+  const session = await store.login({ name: 'owner', password: 'owner-password' })
+  store.createEventTicket({ userId: owner.userId, sessionId: session.sessionId })
+  // 要跨过「票据过期」+「清理的宽限期」两段。宽限期是**刻意的**：
+  // 刚过期的东西留一会儿，排障时还看得到它存在过。
+  clock.now += 24 * 60 * 60 * 1000 + 60 * 1000 + 1000
+  const r = store.sweepExpiredCredentials()
+  assert.equal(r.tickets, 1)
+  assert.ok(r.resets >= 0)
+})

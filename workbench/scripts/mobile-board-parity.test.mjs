@@ -129,7 +129,10 @@ describe('手机端：空间与会话的绑定', () => {
       ['会话', /state\.convId = null/],
       ['时间线', /state\.timeline = \[\]/],
       ['事件游标', /state\.cursor = null/],
-      ['事件流', /state\.sse = null/],
+      // 事件流改走 `stopStream()`：它关连接、置空、**并取消重连计时器**——
+      // 最后那一项是这次换票据之后新加的（票据一次性，重连必须自己接管），
+      // 少了它，切空间之后旧的流会自己重连回来，把上一个空间的事件泼进新空间。
+      ['事件流', /stopStream\(\)/],
       ['任务列表', /state\.tasks = \[\]/],
     ]) assert.match(fn, re, `切空间没有重置「${what}」——不重置不会报错，只会显示错的内容`)
   })
@@ -183,5 +186,36 @@ describe('手机端：竞态与请求合并', () => {
     assert.doesNotMatch(stream, /void refreshTasks\(\)/, 'SSE 里不该直接调 refreshTasks')
     // 合并器只该有一个：两个就是两套计时器与两份"在飞"记账，合并失效。
     assert.equal((app.match(/createRefresher\(/g) ?? []).length, 1)
+  })
+})
+
+describe('手机端：SSE 票据', () => {
+  const app = readFileSync(resolve(ROOT, 'workbench/mobile/app.mjs'), 'utf8')
+
+  test('★ 订阅用的是票据，不是令牌', () => {
+    // 查询串会进访问日志/浏览器历史/Referer，而访问令牌是 15 分钟、
+    // 覆盖全部 API——把它放进去等于把主钥匙抄在门口。
+    const fn = /async function connectStream\(\)[\s\S]*?\n}/.exec(app)?.[0] ?? ''
+    assert.ok(fn.length > 0, '找不到 connectStream')
+    assert.match(fn, /params\.set\('ticket'/)
+    assert.doesNotMatch(fn, /params\.set\('token'/)
+    assert.match(app, /api\/events\/ticket/)
+  })
+
+  test('★ 自带重连被掐掉，改由自己退避重连并新签一张', () => {
+    // 票据是**一次性**的，而 EventSource 自带的重连会原样重发那个 URL ——
+    // 自带重连在这里必然失败，而且失败得很安静（界面停在"正在重连"，
+    // 服务端一串 401）。
+    const fn = /async function connectStream\(\)[\s\S]*?\n}/.exec(app)?.[0] ?? ''
+    assert.match(fn, /es\.close\(\)/, 'onerror 里要先掐掉自带重连')
+    assert.match(fn, /scheduleReconnect\(\)/)
+    assert.match(app, /async function mintTicket\(\)/)
+  })
+
+  test('登出与切空间都要停流，且**取消重连计时器**', () => {
+    const stop = /function stopStream\(\)[\s\S]*?\n}/.exec(app)?.[0] ?? ''
+    assert.ok(stop.length > 0, '找不到 stopStream')
+    assert.match(stop, /streamClosed = true/)
+    assert.match(stop, /clearTimeout\(streamTimer\)/)
   })
 })

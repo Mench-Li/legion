@@ -45,7 +45,7 @@ describe('指挥台账号会话', () => {
     // 判据要写成"两个键不相等"而不是"文件里不出现那个字符串"：后者会被
     // **注释**里那句解释（"`legion.workbench.token` 是机器令牌"）误伤——
     // 一条把说明文字也算作违规的断言，会逼着后来的人删掉说明。
-    assert.match(api, /import \{ getAccessToken, recoverSession \} from '\.\/identity/)
+    assert.match(api, /import \{ getAccessToken, hasSession, recoverSession \} from '\.\/identity/)
     assert.match(identity, /const SS_ACCESS = 'legion\.identity\.access'/)
     assert.match(identity, /const LS_REFRESH = 'legion\.identity\.refresh'/)
     const legacyKey = /const LEGACY_KEY = '([^']+)'/.exec(api)?.[1] ?? 'legion.workbench.token'

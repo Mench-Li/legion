@@ -213,6 +213,16 @@ export function createIdentityRoutes({
     },
 
     // ── 用户与邀请（管理） ──────────────────────────────────────────────────
+    // ── 事件订阅票据（SSE）──────────────────────────────────────────────────
+    {
+      method: 'POST',
+      path: '/api/events/ticket',
+      async run(req, res, { url }) {
+        // 要**用户会话**：票据只是一个短命的替代品，签发它的前提仍然是"你是登录用户"。
+        await withUser(req, res, url, (me) => userStore.createEventTicket({ userId: me.userId, sessionId: me.sessionId }))
+      },
+    },
+
     // ── 口令重置（忘记口令 / 账号恢复）──────────────────────────────────────
     {
       method: 'POST',

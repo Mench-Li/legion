@@ -67,8 +67,15 @@ export const PUBLIC_PATHS = Object.freeze(new Set([
   '/',
 ]))
 
-/** 允许把令牌放在查询串里的路径。EventSource 无法自定义请求头。 */
-export const QUERY_TOKEN_PATHS = Object.freeze(new Set([
+/**
+ * 允许用**查询串凭据**的路径。`EventSource` 无法自定义请求头。
+ *
+ * ★ 这里放的**不是**访问令牌，而是一次性订阅票据（`?ticket=`）。
+ *   访问令牌走查询串会进反代日志/浏览器历史/Referer，而它 15 分钟、覆盖全部
+ *   API——等于把主钥匙抄在门口。票据只能用一次、只活 60 秒、只对订阅有效。
+ *   见 `user-store.mjs` 的 `redeemEventTicket`。
+ */
+export const QUERY_TICKET_PATHS = Object.freeze(new Set([
   '/api/events',           // SSE
   '/api/event-delivery',
 ]))
@@ -94,17 +101,24 @@ const constantTimeEqual = (a, b) => {
 }
 
 /**
- * 从请求里取令牌。只在允许的路径上接受查询串形式的令牌。
+ * 从请求里取凭据。头里是**访问令牌**，允许的路径上还可以带**查询串票据**。
  *
- * 为什么不是到处都接受 `?token=`：查询串会进访问日志、浏览器历史、Referer。
- * 把它限死在"确实没有别的办法"的 SSE 上，是一个可以解释的边界。
+ * ★ 查询串里**只**收 `?ticket=`，不收 `?token=`。
+ *
+ *   原来收 `?token=`（因为 `EventSource` 自定义不了请求头）。而查询串会进
+ *   访问日志、浏览器历史、Referer——把一枚 15 分钟、覆盖全部 API 的访问令牌
+ *   放在那儿，与没有鉴权在"日志被读走那天"是同一个结果。
+ *
+ *   票据是一次性的、只活 60 秒、只对订阅有效的另一种东西。两者**不共用**一个
+ *   参数名，是为了让"这里现在放的是哪一种"在 URL 上就看得出来——
+ *   共用一个名字会让人以为它还是那个能改数据的东西。
  */
 export function extractBearer({ path, headers = {}, searchParams = null, legacyToken = '' } = {}) {
   const headerToken = /^Bearer\s+(.+)$/i.exec(String(headers.authorization ?? ''))?.[1]?.trim() ?? ''
   if (headerToken) return { token: headerToken, source: 'header' }
-  if (QUERY_TOKEN_PATHS.has(path)) {
-    const q = searchParams?.get?.('token') ?? ''
-    if (q) return { token: q.trim(), source: 'query' }
+  if (QUERY_TICKET_PATHS.has(path)) {
+    const q = searchParams?.get?.('ticket') ?? ''
+    if (q) return { token: '', ticket: q.trim(), source: 'query-ticket' }
   }
   // 既有的 `x-dsh-token` 头（与 v1 对齐）继续被当作 **Hub token**，不是用户令牌。
   const legacyHeader = String(headers['x-dsh-token'] ?? '').trim()
@@ -135,8 +149,10 @@ export function decideRemoteAuth({
   method = 'GET',
   remoteAuth = false,
   token = '',
+  ticket = '',
   legacyAuthorized = false,
   verifyAccessToken = () => ({ ok: false, code: REMOTE_AUTH_CODES.MISSING }),
+  redeemTicket = () => ({ ok: false, code: REMOTE_AUTH_CODES.INVALID }),
 } = {}) {
   if (remoteAuth !== true) {
     // 门禁未启用：保持既有行为**逐条不变**。这条分支让"上线远程面"这件事
@@ -155,6 +171,16 @@ export function decideRemoteAuth({
     // 因为客户端对这三者的正确反应不同——过期要刷新，撤销要重新登录。
     // 这不泄露信息：能区分它们的前提是**已经持有**一个签名合法的令牌。
     return deny(401, verified.code ?? REMOTE_AUTH_CODES.INVALID, verified.message ?? '访问令牌无效')
+  }
+  // 查询串票据：只可能出现在 `QUERY_TICKET_PATHS` 上（`extractBearer` 已经限死）。
+  // 它换出来的**就是**一个用户会话——门禁之后的所有判断对两者一视同仁，
+  // 不写第二条分支。
+  if (typeof ticket === 'string' && ticket.length > 0) {
+    const redeemed = redeemTicket(ticket) ?? { ok: false, code: REMOTE_AUTH_CODES.INVALID }
+    if (redeemed.ok === true) {
+      return allow({ kind: 'user', userId: redeemed.userId, sessionId: redeemed.sessionId, name: redeemed.name })
+    }
+    return deny(401, redeemed.code ?? REMOTE_AUTH_CODES.INVALID, redeemed.message ?? '订阅票据无效或已过期')
   }
   return deny(401, REMOTE_AUTH_CODES.MISSING, '缺少访问令牌')
 }

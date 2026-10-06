@@ -98,6 +98,14 @@ export const IDENTITY_CODES = Object.freeze({
   RESET_EXPIRED: 'IDENTITY_RESET_EXPIRED',
 })
 
+/**
+ * 事件订阅票据的有效期。
+ *
+ * 短是**故意的**，而且比它看起来能接受的长度还要短：客户端在**每次**（重）连
+ * 之前都会新签一张，所以它不需要"活得久"。见 `redeemEventTicket`。
+ */
+export const EVENT_TICKET_TTL_MS = 60 * 1000
+
 /** 口令重置码的有效期。短是**故意的**：它是一条带外传递的凭据。 */
 export const RESET_TTL_MS = 30 * 60 * 1000
 
@@ -258,6 +266,13 @@ export function createUserStore({ db, withTx, clock = Date.now, key = '', audit 
     CREATE TABLE IF NOT EXISTS hub_registrations (
       id TEXT PRIMARY KEY, user_id TEXT, space TEXT NOT NULL, at_ms INTEGER NOT NULL);
     CREATE INDEX IF NOT EXISTS idx_hub_registrations_at ON hub_registrations(at_ms);
+    -- 一次性事件订阅票据（SSE 用）。见 redeemEventTicket 里"为什么不用 ?token="那段。
+    CREATE TABLE IF NOT EXISTS hub_event_tickets (
+      id TEXT PRIMARY KEY, code_hash TEXT NOT NULL UNIQUE, user_id TEXT NOT NULL,
+      session_id TEXT NOT NULL, created_at_ms INTEGER NOT NULL, expires_at_ms INTEGER NOT NULL,
+      consumed_at_ms INTEGER);
+    CREATE INDEX IF NOT EXISTS idx_hub_event_tickets_session ON hub_event_tickets(session_id);
+
     -- 一次性口令重置码。**只存哈希**，明文只在签发那一次返回（与邀请码同一口径）。
     CREATE TABLE IF NOT EXISTS hub_password_resets (
       id TEXT PRIMARY KEY, user_id TEXT NOT NULL, code_hash TEXT NOT NULL UNIQUE,
@@ -375,6 +390,79 @@ export function createUserStore({ db, withTx, clock = Date.now, key = '', audit 
       db.prepare('INSERT INTO hub_space_roles VALUES(?,?,?,?,?)').run(userId, fresh.space, fresh.role, fresh.created_by, at)
       record('identity:invite-accept', fresh.space, { userId, role: fresh.role }, userId)
       return { userId, name: clean, space: fresh.space, role: fresh.role }
+    })
+  }
+
+  // ── 事件订阅票据（SSE）──────────────────────────────────────────────────
+  //
+  // ## 它取代的是什么
+  //
+  // `EventSource` 不能自定义请求头，所以 SSE 那一条路只好把令牌放在**查询串**里。
+  // 而查询串会进反代的访问日志、浏览器历史、Referer——那里放一枚 15 分钟、
+  // 覆盖全部 API 的**访问令牌**，等于把主钥匙抄在门口。
+  //
+  //   > 一个"把主令牌写在 URL 里"的订阅方式，
+  //   > 与一个"没有鉴权"的订阅方式，在日志被读走那天是同一个东西——
+  //   > 只不过前者在代码里看起来是"已经鉴权了"。
+  //
+  // 换成票据之后，URL 里那一串：只能用一次、只活 60 秒、只对订阅有效。
+  // 它被记进日志也不再是一条能拿去改数据的凭据。
+
+  /**
+   * 签一张事件订阅票据。**明文只在这里返回一次**，库里只存哈希。
+   *
+   * 绑定 `sessionId`：会话被撤销之后，它签出去的票据一并作废——否则
+   * "撤销会话"会留下一条只活 60 秒、但确实还能用的尾巴。
+   */
+  function createEventTicket({ userId, sessionId, ttlMs = EVENT_TICKET_TTL_MS, random = randomBytes }) {
+    requireUser(userId)
+    const session = db.prepare('SELECT * FROM hub_user_sessions WHERE id=? AND user_id=?').get(sessionId, userId)
+    if (!session || session.revoked_at_ms !== null) fail(IDENTITY_CODES.SESSION_REVOKED, '会话不可用', 401)
+    const code = Buffer.from(random(24)).toString('base64url')
+    const at = now()
+    return withTx(() => {
+      db.prepare('INSERT INTO hub_event_tickets VALUES(?,?,?,?,?,?,NULL)')
+        .run(id('ticket'), hashSecret(code), userId, sessionId, at, at + ttlMs)
+      return { ticket: code, expiresAtMs: at + ttlMs }
+    })
+  }
+
+  /**
+   * 兑换票据。**一次性**：兑换即作废。
+   *
+   * 「一次性」与 EventSource 自带的重连是**冲突**的——浏览器重连会原样重发
+   * 那个 URL。所以客户端必须关掉自带重连、每次重连前新签一张。这是这笔交易里
+   * 明确付出的一侧代价，换的是"URL 里那一串用完即废"。
+   *
+   * 返回形状与 `verifyAccessToken` 一致：门禁对两者一视同仁，不写第二条分支。
+   */
+  function redeemEventTicket(code) {
+    if (typeof code !== 'string' || code.length === 0) return { ok: false, code: IDENTITY_CODES.INVALID_INPUT, message: '缺少票据' }
+    const row = db.prepare('SELECT * FROM hub_event_tickets WHERE code_hash=?').get(hashSecret(code))
+    // 不存在 / 已用 / 过期 / 会话已撤 —— 对外**只有一种**说法。
+    // 分开报会让"这张票据存在过"变成一个可探测的事实。
+    const generic = { ok: false, code: IDENTITY_CODES.TOKEN_EXPIRED, message: '订阅票据无效或已过期' }
+    if (!row) return generic
+    if (row.consumed_at_ms !== null) return generic
+    if (row.expires_at_ms <= now()) return generic
+    const session = db.prepare('SELECT * FROM hub_user_sessions WHERE id=?').get(row.session_id)
+    if (!session || session.revoked_at_ms !== null || session.refresh_expires_at_ms <= now()) return generic
+    const user = userRow(row.user_id)
+    if (user === null || user.disabled_at_ms !== null) return generic
+    const at = now()
+    const used = db.prepare('UPDATE hub_event_tickets SET consumed_at_ms=? WHERE id=? AND consumed_at_ms IS NULL').run(at, row.id)
+    // changes=0 ⇒ 另一个并发请求先兑走了它。这正是"一次性"要拦的那件事。
+    if (Number(used.changes) !== 1) return generic
+    return { ok: true, userId: row.user_id, sessionId: row.session_id, name: user.name }
+  }
+
+  /** 清掉过期的票据与重置码（后台扫；不抛）。 */
+  function sweepExpiredCredentials({ keepMs = 24 * 60 * 60 * 1000 } = {}) {
+    const cutoff = now() - keepMs
+    return withTx(() => {
+      const t = db.prepare('DELETE FROM hub_event_tickets WHERE expires_at_ms < ?').run(cutoff)
+      const r = db.prepare('DELETE FROM hub_password_resets WHERE expires_at_ms < ?').run(cutoff)
+      return { tickets: Number(t.changes), resets: Number(r.changes) }
     })
   }
 
@@ -1000,6 +1088,7 @@ export function createUserStore({ db, withTx, clock = Date.now, key = '', audit 
     createInvite, acceptInvite,
     register, changePassword,
     createPasswordReset, redeemPasswordReset, listPasswordResets,
+    createEventTicket, redeemEventTicket, sweepExpiredCredentials,
     // 诊断与用例用：闸门当前读数（不写、不需要就能读）。
     registrationGate: () => registrationAllowed(),
     login, refresh, upgradePassword,

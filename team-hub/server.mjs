@@ -11,7 +11,7 @@
  *   TEAM_HUB_PORT  监听端口（默认 8787）
  *   TEAM_HUB_DB    SQLite 文件（默认 team-hub/team.db）
  *   TEAM_HUB_TOKEN 团队 token。token 三种携带方式（与 v1 serve.mjs 对齐）：
- *     Authorization: Bearer <t> / x-dsh-token: <t> / ?token=<t>（?token= 供 EventSource 等无法自定 header 的读订阅）。
+ *     Authorization: Bearer <t> / x-dsh-token: <t>；SSE 走 `?ticket=`（一次性短时票据，不是令牌）。
  *     非空时写操作需 token；且非回环监听（TEAM_HUB_HOST ≠ 127.0.0.1/localhost/::1）时
  *     全部读端点与 SSE 同样需 token（P2-2 读面门禁，/api/config 能力探测除外）。
  *     本地回环开发模式读面保持开放（不回退）。
@@ -6371,7 +6371,7 @@ function readBody(req) {
 
 /**
  * token 三种携带方式（与 v1 scrum/serve.mjs 对齐）：
- *   Authorization: Bearer <t> / x-dsh-token: <t> / ?token=<t>。
+ *   Authorization: Bearer <t> / x-dsh-token: <t>；SSE 走 `?ticket=`。
  * ?token= 供浏览器 EventSource 等无法自定 header 的读面订阅使用（token 未配置时恒放行）。
  */
 function authorized(req) {
@@ -6389,9 +6389,17 @@ function authorized(req) {
   if (TOKEN === '') return true
   const header = (req.headers.authorization ?? '').replace(/^Bearer\s+/i, '')
   const custom = req.headers['x-dsh-token'] ?? ''
-  let query = ''
-  try { query = new URL(req.url ?? '/', 'http://x').searchParams.get('token') ?? '' } catch { /* 保持空 */ }
-  return header === TOKEN || custom === TOKEN || query === TOKEN
+  // ★ 查询串里**不再**收令牌。
+  //
+  // 原来这里有一条 `?token=`（注释写的理由是"供 EventSource 等无法自定 header
+  // 的读订阅"）。而那个理由现在由**一次性票据**承担了（见 `remote-auth.mjs` 的
+  // `QUERY_TICKET_PATHS`）——票据只用一次、只活 60 秒、只对订阅有效，
+  // 而被记进访问日志/浏览器历史的令牌是 15 分钟、覆盖全部 API 的主钥匙。
+  //
+  //   > 一个"把主令牌写在 URL 里"的订阅方式，
+  //   > 与一个"没有鉴权"的订阅方式，在日志被读走那天是同一个东西——
+  //   > 只不过前者在代码里看起来是"已经鉴权了"。
+  return header === TOKEN || custom === TOKEN
 }
 
 function requireMember(body) {
@@ -7729,11 +7737,14 @@ if (REMOTE_AGENT_ENABLED) {
       id: 'remote-auth-gate',
       routes: [],
       async dispatch(req, res, ctx) {
-        const { token } = extractBearer({
+        const { token, ticket } = extractBearer({
           path: ctx.path, headers: req.headers, searchParams: ctx.url.searchParams, legacyToken: TOKEN,
         })
         const decision = decideRemoteAuth({
           path: ctx.path,
+          ticket,
+          // 票据换出来的**就是**一个用户会话：门禁之后的所有判断对两者一视同仁。
+          redeemTicket: (t) => userStore.redeemEventTicket(t),
           method: req.method,
           remoteAuth: true,
           token,

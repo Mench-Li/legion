@@ -663,7 +663,7 @@ async function openConversation() {
   const c = await api('/api/agent-conversations', { method: 'POST', body: { agentId: state.agentId, scope: state.scope, by: 'mobile' } })
   state.convId = c.convId
   await refreshTimeline()
-  connectStream()
+  void connectStream()
 }
 
 async function refreshTimeline() {
@@ -788,7 +788,7 @@ async function switchScope(scope) {
   state.cursor = null
   state.tasks = []
   state.targetTaskId = null
-  if (state.sse !== null) { try { state.sse.close() } catch { /* 已关 */ } state.sse = null }
+  stopStream()
   $('board-views').replaceChildren()
   $('task-groups').replaceChildren()
   await refreshSpaces()
@@ -864,15 +864,57 @@ const refreshLoop = createRefresher({
   },
 })
 
-function connectStream() {
-  if (state.sse !== null) { try { state.sse.close() } catch { /* 已关 */ } }
+/**
+ * 订阅进展流。
+ *
+ * ## 为什么不再把令牌放在查询串里
+ *
+ * `EventSource` 不能自定义请求头，所以这条路原来把**访问令牌**塞在 URL 里。
+ * 而查询串会进反代的访问日志、浏览器历史、Referer——那里放一枚 15 分钟、
+ * 覆盖全部 API 的令牌，等于把主钥匙抄在门口。
+ *
+ *   > 一个"把主令牌写在 URL 里"的订阅，与一个"没有鉴权"的订阅，
+ *   > 在日志被读走那天是同一个东西——只不过前者在代码里看起来是"已经鉴权了"。
+ *
+ * 换成**一次性票据**（`?ticket=`）：只用一次、只活 60 秒、只对订阅有效。
+ *
+ * ## 因此重连要自己接管
+ *
+ * 票据是一次性的，而 `EventSource` 自带的重连会原样重发那个 URL——自带重连
+ * 在这里**必然失败**，而且失败得很安静（界面停在"正在重连"，服务端一串 401）。
+ * 所以 `onerror` 里先 `close()` 掐掉自带重连，自己退避后重连并**新签一张**。
+ */
+let streamClosed = false
+let streamRetry = 0
+let streamTimer = null
+
+async function mintTicket() {
+  const r = await api('/api/events/ticket', { method: 'POST', body: {} })
+  return typeof r?.ticket === 'string' ? r.ticket : null
+}
+
+function scheduleReconnect() {
+  if (streamClosed || streamTimer !== null) return
+  // 指数退避、封顶 30 秒：一个连不上的订阅不该变成每秒一次的锤击。
+  const delay = Math.min(30000, 1000 * 2 ** Math.min(streamRetry, 5))
+  streamRetry += 1
+  streamTimer = setTimeout(() => { streamTimer = null; void connectStream() }, delay)
+}
+
+async function connectStream() {
+  if (state.sse !== null) { try { state.sse.close() } catch { /* 已关 */ } state.sse = null }
+  streamClosed = false
+  let ticket = null
+  try { ticket = await mintTicket() } catch { /* 签不出来：按"连不上"处理，退避后重试 */ }
+  if (streamClosed) return
   const params = new URLSearchParams({ scope: state.scope, kind: 'mobile' })
   if (state.cursor !== null) params.set('sinceSeq', String(state.cursor))
-  // EventSource 无法自定义请求头，所以令牌走查询串（服务端的 `QUERY_TOKEN_PATHS`
-  // 只对 SSE 与投递读数放开这一条）。
-  params.set('token', state.access)
+  // 参数名是 `ticket`，**不是** `token`：两者是不同的东西，
+  // 共用一个名字会让人在 URL 上分不出"这一串是哪一种"。
+  if (ticket !== null) params.set('ticket', ticket)
   const es = new EventSource(`${hubBase()}/api/events?${params}`)
   state.sse = es
+  es.onopen = () => { streamRetry = 0 }
   es.onmessage = () => {
     // ★ 事件帧只当通知：内容一律回 Hub 读。这样"事件丢了"最多是晚一会儿看到，
     //   而不是界面上一段缺失。
@@ -883,9 +925,19 @@ function connectStream() {
     refreshLoop.request()
   }
   es.onerror = () => {
-    // EventSource 自带重连；这里只更新状态显示，不去手工重连（两套重连会互相打断）。
+    // 先掐掉自带重连（它会拿同一张已作废的票据重试），再自己排一次。
+    try { es.close() } catch { /* 已关 */ }
+    if (state.sse === es) state.sse = null
     setConnection({ hubReachable: false })
+    scheduleReconnect()
   }
+}
+
+/** 停止订阅（登出、切空间时用）。不排重连。 */
+function stopStream() {
+  streamClosed = true
+  if (streamTimer !== null) { clearTimeout(streamTimer); streamTimer = null }
+  if (state.sse !== null) { try { state.sse.close() } catch { /* 已关 */ } state.sse = null }
 }
 
 // ── 登录 / 注册 ─────────────────────────────────────────────────────────────
@@ -967,7 +1019,7 @@ async function enterApp(me) {
 function doLogout() {
   void api('/api/identity/logout', { method: 'POST', body: {} }).catch(() => { })
   clearSession()
-  if (state.sse !== null) { try { state.sse.close() } catch { /* 已关 */ } state.sse = null }
+  stopStream()
   location.reload()
 }
 

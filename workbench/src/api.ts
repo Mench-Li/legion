@@ -1,7 +1,7 @@
 import type { ActivityEvent, AgentCatalogItem, AgentModelCfg, ApiConfig, BoardData, CardStatus, ChatAttachmentRef, ChatConversation, ChatHealthInfo, ChatMessage, DirListing, FileListResponse, FilePreview, GoalInfo, GoalStatus, HubActivity, HubAuditEvent, HubDocContent, HubTask, MissionsResponse, ModelOption, OverlapGroup, RepoInspect, RosterResponse, ScenePreset, SkillInfo, SpaceInfo, WebFetchResult, WebHistoryResponse, WebMetaResponse, WebShotResult } from './types'
 import { subscribeHubEventStream } from './hubEventStream.ts'
 import { hubErrorFromBody } from './hub-errors.ts'
-import { getAccessToken, recoverSession } from './identity.ts'
+import { getAccessToken, hasSession, recoverSession } from './identity.ts'
 
 /**
  * 数据源地址解析：?api= 查询参数优先，其次 localStorage，最后默认 4820。
@@ -956,7 +956,16 @@ export function subscribeHubAudit(
   return subscribeHubEventStream(`${hubBase()}/api/events`, onEvent, {
     scope: options.scope,
     storage: options.storage,
-    token: getToken() || undefined,
+    // ★ 不是令牌，是**票据**：一次性、只活 60 秒、只对订阅有效。
+    //   访问令牌走查询串会进日志与浏览器历史，而它 15 分钟、覆盖全部 API。
+    //
+    //   没登录时返回 undefined（本机单机部署走的就是这一条：门禁没开，
+    //   订阅本来就不需要凭据）。
+    ticketProvider: async () => {
+      if (!hasSession()) return undefined
+      const r = await hubPost('/api/events/ticket', {})
+      return typeof (r as { ticket?: unknown })?.ticket === 'string' ? (r as { ticket: string }).ticket : undefined
+    },
     onStatus: options.onStatus,
   })
 }

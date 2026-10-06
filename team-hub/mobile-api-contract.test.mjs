@@ -247,7 +247,11 @@ describe('手机端接口契约（照 app.mjs 的顺序）', () => {
     const timer = setTimeout(() => controller.abort(), 5000)
     let firstChunk = ''
     try {
-      const res = await fetch(`${base}/api/events?scope=${ctx.scope}&kind=mobile&token=${ctx.access}`, { signal: controller.signal })
+      // ★ SSE 走**一次性票据**，不是令牌：查询串会进访问日志/浏览器历史，
+      //   而令牌是 15 分钟、覆盖全部 API。
+      const ticket = await call('POST', '/api/events/ticket', { body: {}, token: ctx.access })
+      assert.equal(ticket.status, 200, ticket.text.slice(0, 160))
+      const res = await fetch(`${base}/api/events?scope=${ctx.scope}&kind=mobile&ticket=${encodeURIComponent(ticket.json.ticket)}`, { signal: controller.signal })
       assert.equal(res.status, 200)
       const reader = res.body.getReader()
       const { value } = await reader.read()
@@ -290,7 +294,8 @@ describe('手机端接口契约（照 app.mjs 的顺序）', () => {
     const controller = new AbortController()
     const timer = setTimeout(() => controller.abort(), 5000)
     try {
-      const res = await fetch(`${base}/api/events?scope=someone-elses-space&token=${encodeURIComponent(ctx.access)}`, { signal: controller.signal })
+      const alienTicket = await call('POST', '/api/events/ticket', { body: {}, token: ctx.access })
+      const res = await fetch(`${base}/api/events?scope=someone-elses-space&ticket=${encodeURIComponent(alienTicket.json.ticket)}`, { signal: controller.signal })
       assert.equal(res.status, 403, 'SSE 也要按空间拒')
       const body = await res.text()
       assert.match(body, /SPACE_FORBIDDEN/)

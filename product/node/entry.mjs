@@ -5,6 +5,7 @@
 //
 // 用法：
 //   node product/node/entry.mjs pair  --hub https://HOST --code <配对码> --out node-config.json
+//           [--workspace <空间>=<目录>]… [--agent <程序>] [--agent-arg <参数>]…
 //   node product/node/entry.mjs check --config node-config.json
 //   node product/node/entry.mjs run   --config node-config.json
 //
@@ -21,7 +22,7 @@
 // 配对码一次性 + 短时 + 限速，所以它被记进 shell 历史的风险远小于长期令牌。
 // ============================================================================
 import { readFileSync, writeFileSync, existsSync, chmodSync } from 'node:fs'
-import { dirname, resolve } from 'node:path'
+import { dirname, relative, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 import { createNodeAgent } from './agent.mjs'
@@ -30,16 +31,37 @@ import { createRunLedger } from './ledger.mjs'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 
+/**
+ * 本入口脚本的路径，**尽量相对当前目录**。
+ *
+ * 提示里要给出"照着再跑一次"的命令，而绝对路径在分享/换机器时是错的、
+ * 也长得让人不想看。`relative` 算不出来（跨盘符）时回落到绝对路径——
+ * 那种情况下给一个错的相对路径比给一个长的绝对路径更坏。
+ */
+function relEntry() {
+  const abs = fileURLToPath(import.meta.url)
+  const rel = relative(process.cwd(), abs)
+  return rel.length > 0 && !rel.startsWith('..') ? rel.replace(/\\/g, '/') : abs.replace(/\\/g, '/')
+}
+
 function parseArgv(argv) {
   const [command, ...rest] = argv
   const opts = {}
+  // 这两个可以给多次（多个工作区、多个执行器参数），所以收成数组。
+  // 其余保持"后写覆盖前写"——命令行上重复给同一个单值参数，最后一次生效
+  // 是所有人的预期。
+  const REPEATABLE = new Set(['workspace', 'agent-arg'])
   for (let i = 0; i < rest.length; i += 1) {
     const a = rest[i]
     if (!a.startsWith('--')) throw new Error(`未知参数：${a}`)
     const key = a.slice(2)
     const value = rest[i + 1]
     if (value === undefined || value.startsWith('--')) opts[key] = true
-    else { opts[key] = value; i += 1 }
+    else {
+      if (REPEATABLE.has(key)) (opts[key] ??= []).push(value)
+      else opts[key] = value
+      i += 1
+    }
   }
   return { command, opts }
 }
@@ -47,6 +69,8 @@ function parseArgv(argv) {
 const USAGE = `Legion Node
 
   node product/node/entry.mjs pair  --hub <https://hub> --code <配对码> [--out <路径>]
+        [--workspace <空间>=<目录>]…  允许这台机器访问的目录（可多次）
+        [--agent <程序>] [--agent-arg <参数>]…  真正执行任务的命令
   node product/node/entry.mjs check --config <路径>
   node product/node/entry.mjs run   --config <路径>
 
@@ -87,8 +111,33 @@ export function validateConfig(raw) {
   }
   if (config.agent === null || typeof config.agent?.command !== 'string' || config.agent.command.length === 0) {
     problems.push('缺少 agent.command：Node 不知道要用什么执行任务')
+  } else if (isBareInterpreter(config.agent)) {
+    // ★ `pair` 生成的默认值就是"裸 node、没有参数"——而它**跑不了任何任务**。
+    //
+    //   原来的判据只看"command 是不是非空字符串"，于是这个默认值**一路过关**：
+    //   `check` 打印「配置看起来可用」，还把它当执行器显示出来。而 `run` 起来之后
+    //   裸 node 会去把 stdin 当脚本读——表现为"连上了但任务永远不动"。
+    //
+    //   > 一个"校验通过、却跑不了"的配置，与一个"校验不通过"的配置，
+    //   > 在用户那边是两种不同的坏法：后者他当场就知道要改，
+    //   > 前者要等到他看见任务卡住、再去猜是哪儿的问题。
+    //
+    //   只拦这一种确切形状（解释器本身 + 零参数），不拦"node + 脚本路径"——
+    //   那是完全合法的用法。
+    problems.push('agent.command 是**裸解释器**（没有任何参数）：它不会执行任务，只会把 stdin 当脚本读'
+      + '。请给出真正干活的命令，例如 `--agent <程序路径> --agent-arg <参数>`')
   }
   return { ok: problems.length === 0, config, problems }
+}
+
+/** `agent.command` 是不是"就是那个解释器自己、且没有参数"——那种配置执行不了任务。 */
+function isBareInterpreter(agent) {
+  const args = Array.isArray(agent?.args) ? agent.args : []
+  if (args.length > 0) return false
+  const cmd = String(agent?.command ?? '')
+  // 比 basename：`D:\software\nodejs\node.exe` 与 `node` 都要认出来。
+  const base = cmd.split(/[\\/]/).pop()?.toLowerCase() ?? ''
+  return base === 'node' || base === 'node.exe' || cmd === process.execPath
 }
 
 /** 不带主机口径的 hub origin → `wss://host/node`。 */
@@ -98,15 +147,34 @@ export function nodeUrlFromHub(hub) {
   return `${secure ? 'wss' : 'ws'}://${url.host}/node`
 }
 
-export function configFromPairing({ hub, pairing }) {
+export function configFromPairing({ hub, pairing, workspaces = null, agent = null }) {
   return {
     hubUrl: nodeUrlFromHub(hub),
     deviceToken: pairing.deviceToken,
     nodeId: pairing.nodeId,
-    workspaces: {},
-    agent: { command: process.execPath, args: [], timeoutMs: 30 * 60 * 1000 },
+    // ★ 空 workspaces + 指向"一个不带脚本的 node"的 agent.command，
+    //   是**注定被 `check` 拒掉**的默认值（"未配置任何工作区" / 缺 agent.command）。
+    //   保留它们是因为"没有默认值"会让配置文件缺字段，而缺字段与"配了个空"在
+    //   校验里长得一样。真正的解法是让 `pair` 能**一次配好**——见 doPair。
+    workspaces: workspaces ?? {},
+    agent: agent ?? { command: process.execPath, args: [], timeoutMs: 30 * 60 * 1000 },
     ledgerFile: resolve(dirname(HERE), 'node-ledger.json'),
   }
+}
+
+/** `--workspace <scope>=<path>` → `{ scope: { path } }`。给错格式就具名拒绝。 */
+function parseWorkspaces(list) {
+  if (list === undefined) return null
+  const out = {}
+  for (const item of list) {
+    const eq = String(item).indexOf('=')
+    if (eq <= 0) throw new Error(`--workspace 要写成 <空间>=<路径>，收到：${item}`)
+    const scope = String(item).slice(0, eq).trim()
+    const path = String(item).slice(eq + 1).trim()
+    if (scope.length === 0 || path.length === 0) throw new Error(`--workspace 的空间名与路径都不能为空：${item}`)
+    out[scope] = { path }
+  }
+  return out
 }
 
 async function doPair(opts) {
@@ -127,17 +195,41 @@ async function doPair(opts) {
     return
   }
   const out = typeof opts.out === 'string' ? resolve(opts.out) : resolve(process.cwd(), 'node-config.json')
-  const config = configFromPairing({ hub: opts.hub, pairing: payload })
+  let workspaces = null
+  let agent = null
+  try {
+    workspaces = parseWorkspaces(opts.workspace)
+    if (typeof opts.agent === 'string') {
+      agent = { command: opts.agent, args: opts['agent-arg'] ?? [], timeoutMs: 30 * 60 * 1000 }
+    }
+  } catch (e) { fail(e.message); return }
+  const config = configFromPairing({ hub: opts.hub, pairing: payload, workspaces, agent })
   writeFileSync(out, JSON.stringify(config, null, 2), { encoding: 'utf8', mode: 0o600 })
   try { chmodSync(out, 0o600) } catch { /* Windows 上 chmod 语义有限 */ }
-  process.stdout.write([
+
+  const lines = [
     `已配对。设备 ${payload.nodeId}（${payload.name}），能力：${payload.capabilities.join(', ')}`,
     `配置写到 ${out}（权限 0600）`,
-    '',
-    '还需要手工补两件事，然后 `check`：',
-    '  1. workspaces：把允许这台机器访问的空间 → 工作区路径填进去；',
-    '  2. agent.command/args：这台机器上真正执行任务的命令。',
-  ].join('\n') + '\n')
+  ]
+  // ★ 配对成功 ≠ 配置可用。默认值注定被 `check` 拒，所以这里**如实分开说**：
+  //   还需要什么、缺了会怎样、以及补它的**确切命令**。
+  //   一条"配置写到 X"的成功消息，与一条"但其实它跑不起来"的成功消息，
+  //   在只看最后一行的人眼里是同一个东西。
+  if (workspaces === null || agent === null) {
+    lines.push('', '⚠ 这份配置**还不能跑**——check 会拒它。还缺：')
+    if (workspaces === null) {
+      lines.push('  · workspaces：允许这台机器访问哪个目录')
+      lines.push(`      node ${relEntry()} pair … --workspace default=${process.cwd().replace(/\\/g, '/')}`)
+    }
+    if (agent === null) {
+      lines.push('  · agent.command：这台机器上真正执行任务的程序')
+      lines.push(`      node ${relEntry()} pair … --agent <程序路径> --agent-arg <参数> --agent-arg <参数>`)
+    }
+    lines.push('', '补完再跑：node ' + relEntry() + ' check --config ' + out)
+  } else {
+    lines.push('', '直接跑：node ' + relEntry() + ' check --config ' + out)
+  }
+  process.stdout.write(lines.join('\n') + '\n')
 }
 
 function loadConfig(path) {
@@ -152,7 +244,35 @@ function doCheck(opts) {
   try { raw = loadConfig(opts.config) } catch (e) { fail(e.message); return }
   const { ok, config, problems } = validateConfig(raw)
   if (!ok) {
-    process.stdout.write(`配置有问题：\n  - ${problems.join('\n  - ')}\n`)
+    const lines = [`配置有问题：`, ...problems.map((p) => `  - ${p}`)]
+    // ★ 缺什么就**给出可直接粘的片段**，而不是只报"缺"。
+    //
+    //   `pair` 的默认配置注定被这里拒（空 workspaces + 没脚本的 node），
+    //   所以这条路径是**必走**的。只报问题的话，用户手上是一份要照着自己编
+    //   JSON 的活——而字段名与嵌套形状都不是能猜出来的。
+    //
+    //   > 一个只说"缺 workspaces"的检查，与一个给出确切 JSON 的检查，
+    //   > 在"用户能不能自己修好"这件事上差别很大——而前者看起来也完成了工作。
+    const missing = problems.join('\n')
+    const patch = {}
+    if (/未配置任何工作区|缺少 path|工作区不存在/.test(missing)) {
+      patch.workspaces = { default: { path: '<改成这台机器上允许被访问的目录，绝对路径>' } }
+    }
+    if (/缺少 agent\.command|裸解释器/.test(missing)) {
+      patch.agent = { command: '<真正执行任务的程序，如 DSH / Claude Code>', args: [], timeoutMs: 1800000 }
+    }
+    if (Object.keys(patch).length > 0) {
+      lines.push('', '把这部分并进配置文件（合并，不是整份替换）：', JSON.stringify(patch, null, 2))
+      lines.push('', '或者重新配一次、这次带上参数：')
+      if (patch.workspaces !== undefined) {
+        lines.push(`  node ${relEntry()} pair --hub <hub> --code <新码> --workspace default=${process.cwd().replace(/\\/g, '/')} …`)
+      }
+      if (patch.agent !== undefined) {
+        lines.push(`  node ${relEntry()} pair --hub <hub> --code <新码> --agent <程序路径> --agent-arg <参数> …`)
+      }
+      lines.push('', '★ 配对码是一次性的：走第二条路要先在设备页**重新生成一个**。')
+    }
+    process.stdout.write(lines.join('\n') + '\n')
     process.exitCode = 1
     return
   }

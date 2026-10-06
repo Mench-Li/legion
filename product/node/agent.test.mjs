@@ -330,3 +330,43 @@ test('同一 attempt 的序号跨多次进展单调递增（不会被 Hub 当成
     assert.equal(new Set(seqs).size, seqs.length, '序号不得重复')
   } finally { agent.stop(); await hub.stop() }
 })
+
+// ── pair 的参数化与 check 的可执行性判据 ────────────────────────────────────
+//
+// 这一组补的是"跟着文档走两步就撞墙"：`pair` 的默认配置（空 workspaces +
+// 裸 node）注定跑不了，而原来的 `check` **会放它过关**。
+
+test('★ validateConfig 拒「裸解释器」——它跑不了任务，却曾一路过关', async () => {
+  const { validateConfig } = await import('./entry.mjs')
+  const base = { hubUrl: 'wss://h/node', deviceToken: 't', nodeId: 'n', workspaces: {}, ledgerFile: 'x' }
+
+  // 裸 node：`check` 原来只判"command 是非空字符串"，于是它打印「配置看起来可用」。
+  // 而 run 起来之后裸 node 会把 stdin 当脚本读——表现为"连上了但任务不动"。
+  const bare = validateConfig({ ...base, agent: { command: 'node', args: [] } })
+  assert.equal(bare.ok, false)
+  assert.ok(bare.problems.some((p) => /裸解释器/.test(p)))
+
+  // 反证：`node + 脚本路径` 是完全合法的，不许误伤。
+  const withScript = validateConfig({ ...base, agent: { command: 'node', args: ['worker.mjs'] } })
+  assert.equal(withScript.ok, false)          // 仍因"未配置工作区"失败
+  assert.ok(!withScript.problems.some((p) => /裸解释器/.test(p)), 'node + 参数不该被判成裸解释器')
+
+  // 绝对路径的 node.exe 也要认出来（Windows 上就是这个形状）。
+  // 路径用 join 拼而**不写反斜杠字面量**：`'D:\software\nodejs\node.exe'` 里的
+  // `\n` 是换行，源码里写成那样得到的是一个带换行的字符串——而它会**静默地**
+  // 让这条断言测不到 Windows 形状（我第一版就是这么写的）。
+  const winNode = ['D:', 'software', 'nodejs', 'node.exe'].join(String.fromCharCode(92))
+  const absNode = validateConfig({ ...base, agent: { command: winNode, args: [] } })
+  assert.ok(absNode.problems.some((p) => /裸解释器/.test(p)))
+})
+
+test('★ validateConfig 指得出缺的东西，且不误伤完整配置', async () => {
+  const { validateConfig } = await import('./entry.mjs')
+  const full = {
+    hubUrl: 'wss://h/node', deviceToken: 't', nodeId: 'n', ledgerFile: 'x',
+    workspaces: { default: { path: process.cwd() } },
+    agent: { command: process.execPath, args: ['worker.mjs'], timeoutMs: 1000 },
+  }
+  const r = validateConfig(full)
+  assert.equal(r.ok, true, `完整配置不该被拒：${r.problems.join('；')}`)
+})

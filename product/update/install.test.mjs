@@ -1439,3 +1439,84 @@ test('事务 ID 每次不同', () => {
   assert.equal(ids.size, 50)
   assert.deepEqual([...INSTALL_VERDICTS], ['not-started', 'maintenance-required', 'handed-off'])
 })
+
+// ---------------------------------------------------------------------------
+// ★★★★ 解压实现缺失必须是**具名失败**，不是"静默跳过"
+// ---------------------------------------------------------------------------
+
+test('★★★★ `effects.unpack` 缺失时必须是 `UNPACK_FAILED`，不许静默跳过', async (t) => {
+  // ★★★ 这条守的是一次**真实的生产故障**：
+  //
+  //     `desktop/helper-entry.mjs` 的 `buildEffects()` 曾经返回
+  //         { createMigrationStore: null, unpack: null }
+  //     而 `helper.mjs` 的合并是 `{ ...DEFAULT_EFFECTS, ...effects }`
+  //     ⇒ 那个 `null` **覆盖**了 `DEFAULT_EFFECTS.unpack`（**真的**解压实现）。
+  //
+  //     旧代码在缺失时默认 `{ ok: true, skipped: true }`，于是：
+  //       ① 解压被静默跳过，日志里 unpack 那一行是**绿的**；
+  //       ② 版本目录不会出现；
+  //       ③ 真实症状是"目标版本目录在解压之后仍然不完整"（`UNPACK_INCOMPLETE`），
+  //          排查的人会去查包、查磁盘 —— 而**问题在于没有人负责解压**。
+  //
+  //     也就是说：**每一次真实升级都必然回滚，而测试全绿**
+  //     ——因为 `helperEffects()` 给每个用例都注入了假的 unpack，
+  //     于是"生产传 null"这条路径从来没有被跑过。
+  //
+  //   > 一个把产品代码里已经做对的默认实现覆盖成 `null` 的打包入口，
+  //   > 与一个"这个功能还没实现"的入口，在测试里长得一模一样
+  //   > ——因为测试自己把那个实现补上了。
+  //
+  //   处置与下面"迁移存储缺失"那句同一个道理：不能把"没有人负责"当成"做完了"。
+  const { ctx, transaction, secretHex, helperDir } = helperSetup(t)
+  const fx = helperEffects({ unpack: null })
+  const report = await runHelper({
+    paths: { installDir: ctx.installDir, dataDir: ctx.dataDir, helperDir },
+    transaction, credentialSecretHex: secretHex, effects: fx,
+  })
+
+  // ── ① 具名失败，而且**是解压那一条** ──
+  assert.equal(report.verdict, 'rolled-back', report.reason)
+  assert.equal(report.code, 'helper-unpack-failed',
+    `期望 helper-unpack-failed（"没有人负责解压"），实际 ${report.code}：${report.reason}`)
+
+  // ── ② ★ 不许退化成那条**误导**的码 ──
+  //
+  //   `UNPACK_INCOMPLETE` 说的是"解压之后目录还是不完整"。那是一条**关于结果**
+  //   的判据；而这里的真相是"没有任何人负责解压"。两条码的排查方向完全不同：
+  //   一条去看包与磁盘判据，一条去看打包入口有没有把实现接上。
+  assert.notEqual(report.code, 'helper-unpack-incomplete',
+    '缺失解压实现被报成了"解压之后目录不完整"—— 那会把排查引到包与磁盘上')
+
+  // ── ③ 理由里必须说清是**实现不可用** ──
+  assert.match(report.reason, /解压实现不可用/,
+    `理由没有点出"实现不可用"：${report.reason}`)
+
+  // ── ④ ★ 报告里 unpack 那一步**不许**是绿的 ──
+  //
+  //   这是最关键的一条：旧实现把这一步写成 `ok: true`，于是一份**审计记录**
+  //   会显示"解压成功"，而磁盘上从来没有那个目录。
+  const steps = report.steps ?? []
+  const unpackStep = steps.find((s) => s.name === 'unpack')
+  assert.ok(unpackStep !== undefined, '报告里没有 unpack 这一步 —— 那更要紧了')
+  assert.equal(unpackStep.ok, false,
+    '解压被跳过，而报告把它写成了成功 —— 一份"解压成功但没有目录"的审计记录')
+
+  // ── ⑤ 而且它**没有**走到切换指针 ──
+  const activateCalls = fx.calls.filter((c) => Array.isArray(c) && c[0] === 'activate')
+  assert.deepEqual(activateCalls, [],
+    '解压不可用却仍然去切换了活动指针 —— 那会把指针指到一个不存在的版本目录')
+
+  // ── ⑥ 没有留下事务描述符（现场是干净的旧版本）──
+  assert.equal(readActive(ctx.dataDir).ok, false, '失败之后事务描述符没有清掉')
+
+  // ── ⑦ ★ 反面对照：`unpack` 正常时同一条路必须走到提交 ──
+  //
+  //   没有这一条，"缺失时报 UNPACK_FAILED"可能只是因为"这条路本来就走不通"。
+  const okSetup = helperSetup(t)
+  const okReport = await runHelper({
+    paths: { installDir: okSetup.ctx.installDir, dataDir: okSetup.ctx.dataDir, helperDir: okSetup.helperDir },
+    transaction: okSetup.transaction, credentialSecretHex: okSetup.secretHex, effects: helperEffects(),
+  })
+  assert.equal(okReport.verdict, 'committed',
+    `注入了可用的 unpack 却仍然没提交：${okReport.code} ${okReport.reason}`)
+})

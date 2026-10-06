@@ -66,8 +66,21 @@ export const HELPER_CODES = Object.freeze({
   RECOVERY_REQUIRED: 'helper-recovery-required',
 })
 
-/** helper 需要的全部注入点。默认实现是"真的去做"，测试里换成替身。 */
-const DEFAULT_EFFECTS = Object.freeze({
+/**
+ * helper 需要的全部注入点。默认实现是"真的去做"，测试里换成替身。
+ *
+ * ★★★ **导出**是为了让"打包入口有没有把真实现覆盖成 null"这件事可以被判据检查。
+ *
+ *   合并是 `const fx = { ...DEFAULT_EFFECTS, ...effects }`：一个键一旦出现在
+ *   调用方传的 `effects` 里，**无论值是什么都会覆盖默认**。所以
+ *   "某个默认是**函数**、而调用方把它写成 `null`"是一次真实的实现丢失
+ *   （`desktop/helper-entry.mjs` 曾经对 `unpack` 这么做，导致每一次真实升级
+ *   都在解压那一步静默跳过、最后以"版本目录不完整"回滚）。
+ *
+ *   判据要问的正是这件事：**哪些键的默认是真的、调用方不该把它 null 掉**。
+ *   不导出的话，那条判据只能靠读源码文本，而文本判据看不见"默认后来被改成了 null"。
+ */
+export const DEFAULT_EFFECTS = Object.freeze({
   /**
    * 解压目标版本目录（设计 §6 line 142 + §8 第 7 步）。
    *
@@ -265,7 +278,7 @@ export async function runHelper({
 
   // ── 第 7 步：解压、验证目标版本目录、原子切换 ──
   journal.intent('unpack', { releaseId: transaction.releaseId, targetVersion: transaction.toVersion })
-  let unpacked = { ok: true, skipped: true }
+  let unpacked
   if (typeof fx.unpack === 'function') {
     try {
       unpacked = await fx.unpack({
@@ -286,6 +299,32 @@ export async function runHelper({
       })
     } catch (error) {
       unpacked = { ok: false, reason: String(error?.message ?? error) }
+    }
+  } else {
+    // ★★★ 没有解压实现**不是**"跳过这一步"，而是"没有人负责让目标版本目录出现"。
+    //
+    //   这里原先写的是
+    //
+    //       let unpacked = { ok: true, skipped: true }
+    //       if (typeof fx.unpack === 'function') { … }
+    //
+    //   ——缺失时**默认成功**。而 `fx = { ...DEFAULT_EFFECTS, ...effects }`，
+    //   所以只要调用方传了 `unpack: null`，`DEFAULT_EFFECTS` 里那份**真的**
+    //   解压实现就被覆盖掉，这一步被静默跳过、日志写成 `ok`，
+    //   然后流程继续往下：版本目录根本不存在 ⇒ 活动指针指向一个空目录。
+    //
+    //   ★ 而真正的失败会被**记到别处**：先是"目标版本目录不完整"
+    //     （`UNPACK_INCOMPLETE`），或者更靠后的指针切换失败。于是排查的人
+    //     会去查包、查磁盘、查路径判据——**而报告里 unpack 那一行是绿的**。
+    //
+    //   > 一次"因为没人负责而被跳过"的解压，与一次"解压成功"，
+    //   > 在报告里必须长得不一样。
+    //
+    //   处置与下面迁移那一段**同一个道理**（那里写着：不能把"不知道跑没跑"
+    //   当成"没有迁移"）。这里写成具名失败，而不是静默跳过。
+    unpacked = {
+      ok: false,
+      reason: '解压实现不可用（effects.unpack 不是函数）：不能把"没有人负责解压"当成"解压完成"',
     }
   }
   if (unpacked?.ok !== true) {

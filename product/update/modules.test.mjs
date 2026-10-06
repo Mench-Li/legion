@@ -1141,3 +1141,108 @@ test('★★★★ `desktop/main.mjs` 的可交互标记必须走工厂，且运
     '运行时装载完成之后没有补投"可交互"标记 —— 于是"窗口先到"那个顺序下'
     + '首次自动检查永远不会被安排（而那恰好是打包版的行为）')
 })
+
+// ---------------------------------------------------------------------------
+// ★★★★ 生产入口**不许**把 helper 的真实现覆盖成 `null`
+// ---------------------------------------------------------------------------
+
+/**
+ * 从一个 `buildEffects()` 风格的函数体里取出它**显式写了**的键与值。
+ *
+ * 只认 `key: value` 这种字面写法——那正是打包入口的写法
+ * （`{ createMigrationStore: null, unpack: null }`）。取不出来时返回空表，
+ * 而判据那边会因此报"没读到任何键"，不会静默通过。
+ */
+function explicitEffectKeys(source) {
+  const start = source.indexOf('function buildEffects()')
+  if (start < 0) return null
+  const end = source.indexOf('\n}', start)
+  const body = end < 0 ? source.slice(start) : source.slice(start, end)
+  const out = new Map()
+  for (const m of body.matchAll(/^\s*([A-Za-z_$][\w$]*)\s*:\s*([^,\n]+),?\s*$/gm)) {
+    out.set(m[1], m[2].trim())
+  }
+  return out
+}
+
+test('★★★★ `desktop/helper-entry.mjs` 不许把 helper 的真实现覆盖成 `null`', async () => {
+  // ★★★ 这条守的是一次**真实的生产故障**（本轮修掉的那一个）：
+  //
+  //     // desktop/helper-entry.mjs（旧）
+  //     function buildEffects() {
+  //       return { createMigrationStore: null, unpack: null }   // ← 覆盖了真实现
+  //     }
+  //
+  //   而 `product/update/helper.mjs` 里 `DEFAULT_EFFECTS.unpack` 就是**真的**
+  //   解压实现，合并又是 `{ ...DEFAULT_EFFECTS, ...effects }`
+  //   ⇒ 那个 `null` 把它盖掉 ⇒ 解压被静默跳过 ⇒ **每一次真实升级都回滚**。
+  //
+  //   而所有用例照样全绿：`install.test.mjs` 的 `helperEffects()` 给每个用例
+  //   注入了一个**假的** unpack，于是"生产传 null"这条路径从来没有被跑过。
+  //
+  //   > "测试全绿"与"生产能跑"之间，隔着的是**测试有没有用生产的那份 effects**。
+  //
+  //   判据的形状是结构性的，而不是文本性的：拿**真实的** `DEFAULT_EFFECTS`
+  //   逐个比——"某个键的默认是函数，而入口把它写成了 `null`"就是实现丢失。
+  const { readFileSync } = await import('node:fs')
+  // ★ `DEFAULT_EFFECTS` 由本模块**导出**（见 `helper.mjs` 里那段注释）：
+  //   这条判据要拿**真实的**默认表逐个比，而不是读源码文本——
+  //   文本判据看不见"某个默认后来被改成了 null"。
+  const { DEFAULT_EFFECTS } = await import('./helper.mjs')
+  const root = fileURLToPath(new URL('../../', import.meta.url))
+  const source = readFileSync(`${root}desktop/helper-entry.mjs`, 'utf8')
+  const written = explicitEffectKeys(source)
+
+  // ── ① 必须读得到那个函数（否则下面全是空过）──
+  assert.notEqual(written, null, 'helper-entry.mjs 里找不到 buildEffects()')
+  assert.ok(written.size >= 1,
+    'buildEffects() 里一个显式键都没读到 —— 判据的解析可能写错了（这就是一次空过）')
+
+  // ── ② ★ `DEFAULT_EFFECTS` 里是**函数**的键，不许被写成 `null` ──
+  const functionKeys = Object.entries(DEFAULT_EFFECTS)
+    .filter(([, value]) => typeof value === 'function')
+    .map(([key]) => key)
+  assert.ok(functionKeys.includes('unpack'),
+    `DEFAULT_EFFECTS.unpack 不再是函数了（现在是 ${typeof DEFAULT_EFFECTS.unpack}）——`
+    + '那么"默认实现是真的"这句话要重新审：这条判据的前提变了')
+
+  const nulled = []
+  for (const key of functionKeys) {
+    if (written.get(key) === 'null') nulled.push(key)
+  }
+  assert.deepEqual(nulled, [],
+    'helper-entry.mjs 把有真实默认实现的注入点写成了 null：\n'
+    + nulled.map((k) => `  ${k}（DEFAULT_EFFECTS.${k} 是一个函数）`).join('\n')
+    + '\n★ 合并是 `{ ...DEFAULT_EFFECTS, ...effects }`，写 null 会**覆盖**真实现。'
+    + '\n  要"不注入"，正确做法是**这个键根本不出现**。')
+
+  // ── ③ 正对照：一段"把真实现写成 null"的源码必须被这条判据抓到 ──
+  //
+  //   ★ 没有这一组，一个"解析写错所以永远读到空表"的实现会让上面两条**都通过**。
+  {
+    const badSource = 'function buildEffects() {\n'
+      + '  return {\n'
+      + '    createMigrationStore: null,\n'
+      + '    unpack: null,\n'
+      + '  }\n'
+      + '}\n'
+    const parsed = explicitEffectKeys(badSource)
+    assert.notEqual(parsed, null, '正对照：连假源码都解析不出来')
+    assert.equal(parsed.get('unpack'), 'null', `正对照：解析出的 unpack 值是 ${parsed.get('unpack')}`)
+    const caught = functionKeys.filter((k) => parsed.get(k) === 'null')
+    assert.ok(caught.includes('unpack'),
+      '正对照失败：把 unpack 写成 null 的源码没有被这条判据抓到')
+  }
+
+  // ── ④ 反对照：**不写**那个键（正确做法）不许被报 ──
+  {
+    const goodSource = 'function buildEffects() {\n'
+      + '  return {\n'
+      + '    createMigrationStore: null,\n'
+      + '  }\n'
+      + '}\n'
+    const parsed = explicitEffectKeys(goodSource)
+    const caught = functionKeys.filter((k) => parsed.get(k) === 'null')
+    assert.deepEqual(caught, [], `反对照失败：不写 unpack 被误报 → ${JSON.stringify(caught)}`)
+  }
+})

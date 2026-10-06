@@ -853,10 +853,63 @@ export function createUpdateClient({
     snooze,
     shouldNotify,
     scheduler,
+    /**
+     * ★★★ 用户点的"检查更新"**必须走这里**，不要直接调 `check()`。
+     *
+     *   设计 §6 line 134 那一句有两个分句，`check()` 只满足前一个：
+     *
+     *   > 手动检查立即执行，并与已有检查共享一次网络请求。失败按 15 分钟、
+     *   > 30 分钟、1 小时逐步退避，最终上限 6 小时，加入抖动；
+     *   > **成功恢复正常周期**。
+     *
+     *   `check()` 是**低层**入口：它只做"去取一次清单"，不碰调度器的
+     *   账本（`consecutiveFailures`、`dueAtMs`、`lastOutcome`）。
+     *   调度器的账本只在 `run()` 里更新——也就是说，
+     *   **只有走调度器的检查才会"成功恢复正常周期"**。
+     *
+     *   ★ 此前 `desktop/update-service.mjs` 的 `update.check` 直接调
+     *     `client.check({ trigger: 'manual' })`，于是：
+     *
+     *       · 手动检查成功了，退避计数**不复位** ⇒ 那条规定不成立；
+     *       · 调度器的两个手动入口**全仓没有任何生产调用者**，
+     *         而 `CHECK_TRIGGERS` 仍然声明着 `'manual'`/`'retry'` 两个触发源
+     *         ——**声明的词表在真实链路上没有生产方**。
+     *
+     *   > 一个"手动检查"的按钮，与一个"手动检查且账本也跟着走"的按钮，
+     *   > 在用户点下去的那一秒看起来完全一样。
+     */
+    manualCheck: () => scheduler.manual(),
     /** 桌面可交互之后调用，首次检查从这一刻起算。 */
     markInteractive: () => scheduler.markInteractive(),
-    /** 周期检查（由调度器驱动）。 */
-    runScheduledCheck: () => scheduler.run('periodic'),
+    /**
+     * ★★ 这里原本还有一个 `runScheduledCheck: () => scheduler.run('periodic')`，
+     *    已删除。理由是它**两头都不成立**：
+     *
+     *      ① 调度器**没有** `run` 这个公开方法（它只有 `snapshot` /
+     *         `markInteractive` / `manual` / `notifyResume` / `retry` /
+     *         `stop` / `suspend` / `reschedule`）。`run` 是模块内的局部函数，
+     *         只由计时器回调与 `manual()`/`retry()`/`notifyResume()` 调用。
+     *         所以那个函数一被调用就抛 `TypeError`——它不是"没接线"，
+     *         而是**一调就炸**。
+     *      ② 全仓**没有任何生产调用者**（定时检查由调度器自己的计时器驱动：
+     *         `reschedule()` → `setTimer(() => run('periodic'))`）。
+     *
+     *    > 一个"一调就炸、而没人调"的公开方法，比没有这个方法更坏：
+     *    > 它把下一个想"立刻检查一次"的人引到一条死路上，
+     *    > 而他会把那个 TypeError 当成别的地方坏了。
+     *
+     *    处置与 `state.mjs` 的 `STATE_LABELS` 相同（也是声明了却没有消费者的
+     *    东西）：**删掉**，而不是补一个半吊子的实现。
+     *    真需要"立刻做一次检查"时，走 `manualCheck()`。
+     *
+     *    ★ 这条缺陷是这样被发现的：先把 `manualCheck` 接上，再写一条用例
+     *      想"驱动三次周期检查"——而它调不动，因为那个入口是坏的。
+     *      **一条新用例把一个从来没被执行过的死路照了出来。**
+     *
+     *    ★ 现在有一条机械判据守着同类问题：`modules.test.mjs` 里
+     *      "引用的调度器方法必须真的存在"（用**真实的**调度器实例读公开面，
+     *      而不是读源码）。
+     */
     notifyResume: () => scheduler.notifyResume(),
     stop: () => scheduler.stop(),
     /** 启动清理：删掉所有半截下载（设计 §6：不承诺续传）。 */

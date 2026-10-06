@@ -39,7 +39,11 @@ function createFakeClient({ state = 'available', usable = true, installResult = 
     snapshot: () => current,
     setState(patch) { current = { ...current, ...patch }; for (const l of listeners) l(current) },
     state: () => current.state,
+    // ★ 手动检查的**唯一**入口：走调度器（`manualCheck`），不是低层的 `check`。
+    //   两个都留在替身上，是为了让"服务调了哪一个"在 `calls` 里**看得见**——
+    //   而这正是本轮修掉的那条缺陷（服务曾经直接调 `check`）。
     async check(options) { calls.push(['check', options]); return { outcome: 'available', candidate: { releaseId: RELEASE, manifestSha256: DIGEST } } },
+    async manualCheck() { calls.push(['manualCheck']); return { outcome: 'available', trigger: 'manual', candidate: { releaseId: RELEASE, manifestSha256: DIGEST } } },
     async download(releaseId, manifestDigest, options) {
       calls.push(['download', { releaseId, manifestDigest, options }])
       return { ok: true, code: null, reason: null, reused: false, path: 'C:\\cache\\pkg.zip' }

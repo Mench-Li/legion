@@ -743,3 +743,201 @@ test('★★★★ 仓库里没有任何**能解析成真私钥**的 PEM（设�
   assert.match(gitignore, /^\*\.key\.pem\s*$/m,
     '`.gitignore` 里没有 `*.key.pem` —— 而 `keygen.mjs new` 的默认输出目录就是仓库根')
 })
+
+// ---------------------------------------------------------------------------
+// ★★★★ 调用方引用的调度器方法必须**真的存在**
+// ---------------------------------------------------------------------------
+
+/**
+ * ★★★ 把注释与字符串**挖空**，只留下可执行代码（长度与换行保持不变）。
+ *
+ *   这条辅助函数是被自己的判据逼出来的：两条新判据最初都**抓到了自己**——
+ *   它们扫描的文件里，注释正引用着被删掉的那句代码：
+ *
+ *     · \`client.mjs\` 的解释性注释里写着 \`scheduler.run('periodic')\`；
+ *     · \`update-service.mjs\` 的解释性注释里写着 \`client.check({ trigger: 'manual' })\`。
+ *
+ *   > 一条"不许出现某个调用"的文本判据，只要**它要扫的文件里的注释**
+ *   > 提到过那个调用，它就永远报红——而那个红会让人把判据关掉，
+ *   > 或者（更坏）把解释删掉：**把知识删掉去换一个绿**。
+ *
+ *   这与 ㊵/㊹/㊿ 是同一个坑的第三种形态：那三次是"判据自己的源码里有被扫的
+ *   字面量"，这次是"**被扫文件的注释**里有"。共同点：**文本判据必须区分
+ *   '代码里出现'与'注释里提到'**。
+ *
+ *   ★ 挖空而不是丢弃：偏移量与换行都保留，这样报错时的行号还有意义。
+ *   ★ 字符串字面量也一起挖空：正则/模板里出现 \`scheduler.run(\` 同样不算引用。
+ */
+function codeOnly(text) {
+  const out = text.split('')
+  const blank = (from, to) => { for (let i = from; i < to; i += 1) if (out[i] !== '\n') out[i] = ' ' }
+  let i = 0
+  while (i < text.length) {
+    const ch = text[i]
+    const next = text[i + 1]
+    if (ch === '/' && next === '/') {
+      let j = i
+      while (j < text.length && text[j] !== '\n') j += 1
+      blank(i, j); i = j; continue
+    }
+    if (ch === '/' && next === '*') {
+      let j = i + 2
+      while (j < text.length && !(text[j] === '*' && text[j + 1] === '/')) j += 1
+      blank(i, Math.min(j + 2, text.length)); i = j + 2; continue
+    }
+    if (ch === '"' || ch === "'" || ch === '`') {
+      let j = i + 1
+      while (j < text.length) {
+        if (text[j] === '\\') { j += 2; continue }
+        if (text[j] === ch) { j += 1; break }
+        j += 1
+      }
+      // 引号本身保留（对"是不是某类字面量"的判据没影响），内容挖空。
+      blank(i + 1, j - 1 <= i ? i + 1 : j - 1)
+      i = j; continue
+    }
+    i += 1
+  }
+  return out.join('')
+}
+
+/**
+ * 找出"引用了调度器上不存在的方法"的地方。
+ *
+ * ★★★ 这条判据的来历是一个**一调就炸**的公开方法：
+ *
+ *     // product/update/client.mjs（已删除）
+ *     runScheduledCheck: () => scheduler.run('periodic'),
+ *
+ *   而调度器的公开面是
+ *   `snapshot / markInteractive / manual / notifyResume / retry / stop /
+ *    suspend / reschedule` —— **没有 `run`**（`run` 是模块内的局部函数，
+ *   只由计时器回调与 `manual()`/`retry()`/`notifyResume()` 调用）。
+ *
+ *   于是 `client.runScheduledCheck()` 抛 `TypeError`。它之所以一直没被发现，
+ *   是因为**全仓没有任何生产调用者**——定时检查由调度器自己的计时器驱动。
+ *   两个缺陷叠在一起互相掩护：
+ *
+ *     · 没有调用者 ⇒ 那个 TypeError 从来没出现过；
+ *     · 那个方法"看起来能用" ⇒ 下一个人想"立刻检查一次"时会去用它。
+ *
+ *   > 一个"一调就炸、而没人调"的公开方法，比没有这个方法更坏：
+ *   > 它把下一个人引到一条死路上，而他会把 TypeError 当成别处坏了。
+ *
+ *   这条判据把"引用"与"实际表面"接起来：**按文本找出 `scheduler.<name>(`
+ *   的每一处，逐个在真实的调度器实例上查有没有这个键**。
+ *   用真实实例而不是读源码，是因为"公开面"是**运行时**的事实。
+ */
+function findMissingSchedulerMethods({ text, surface }) {
+  const findings = []
+  // ★ 先挖空注释与字符串：否则**解释性注释里那句被删掉的代码**会把这条判据钉死。
+  const code = codeOnly(text)
+  for (const match of code.matchAll(/\bscheduler\.([A-Za-z_$][\w$]*)\s*\(/g)) {
+    const name = match[1]
+    if (!surface.has(name)) findings.push(name)
+  }
+  return [...new Set(findings)].sort()
+}
+
+test('★★★★ 引用的调度器方法必须真的存在（`scheduler.run` 那次是怎么来的）', async () => {
+  const { readFileSync } = await import('node:fs')
+  const { createCheckScheduler } = await import('./schedule.mjs')
+  const root = fileURLToPath(new URL('../../', import.meta.url))
+
+  // 造一个**真实的**调度器，读它的公开面。
+  const probe = createCheckScheduler({
+    runCheck: async () => ({ outcome: 'up-to-date' }),
+    now: () => 0, random: () => 0.5,
+    setTimer: () => ({ unref() {} }), clearTimer: () => {},
+  })
+  const surface = new Set(Object.keys(probe))
+  probe.stop()
+  // ── ① 基本事实：`run` 不在表面上（这条缺陷的根）──
+  assert.equal(surface.has('run'), false,
+    '调度器竟然公开了 run —— 那么当初 runScheduledCheck 并不是"一调就炸"，这条注释要改')
+  assert.ok(surface.has('manual') && surface.has('retry'),
+    `调度器缺少手动/重试入口：${[...surface].join(', ')}`)
+
+  // ── ①′ ★ `codeOnly` 本身的对照：注释与字符串要被挖空，代码不许被挖空 ──
+  //
+  //   这是**判据的判据**：一个把所有东西都挖空的 `codeOnly`，会让上面
+  //   两条判据永远绿——而那与"没有缺陷"读数一样。
+  {
+    const sample = [
+      "// scheduler.run('x')  ← 注释里的，不算",
+      "/* scheduler.stop() ← 块注释里的，不算 */",
+      "const s = 'scheduler.retry()'  // 字符串里的，不算",
+      "scheduler.manual()   // ← 这一处是**代码**，必须留下",
+    ].join('\n')
+    const masked = codeOnly(sample)
+    // 注释/字符串里的三处都被挖空：
+    assert.equal(/scheduler\.run\s*\(/.test(masked), false, '注释里的引用没有被挖空')
+    assert.equal(/scheduler\.stop\s*\(/.test(masked), false, '块注释里的引用没有被挖空')
+    assert.equal(/scheduler\.retry\s*\(/.test(masked), false, '字符串里的引用没有被挖空')
+    // 而真正的代码必须留下：
+    assert.equal(/scheduler\.manual\s*\(/.test(masked), true,
+      'codeOnly 把真代码也挖空了 —— 那两条判据会永远绿')
+    // 换行数不变（报错行号才有意义）：
+    assert.equal(masked.split('\n').length, sample.split('\n').length, 'codeOnly 改变了行数')
+  }
+
+  // ── ② ★ 正对照：一段引用了不存在方法的文本必须被抓到 ──
+  //
+  //   一条"扫描没发现任何东西"的判据，与一条"正则写错了所以永远匹配不上"
+  //   的判据，读数完全一样。
+  {
+    const fake = "const x = () => scheduler.run('periodic')\n"
+      + "const y = () => scheduler.snapshot()\n"
+    const found = findMissingSchedulerMethods({ text: fake, surface })
+    assert.deepEqual(found, ['run'], `正对照失败：${JSON.stringify(found)}`)
+  }
+
+  // ── ③ 真仓：调用 `scheduler.*` 的每一处都要对得上 ──
+  const scanned = []
+  for (const rel of ['product/update/client.mjs', 'desktop/update-wiring.mjs',
+    'desktop/update-service.mjs', 'desktop/main.mjs']) {
+    let text
+    try { text = readFileSync(`${root}${rel}`, 'utf8') } catch { continue }
+    scanned.push(rel)
+    assert.deepEqual(findMissingSchedulerMethods({ text, surface }), [],
+      `${rel} 引用了调度器上不存在的方法（一调就炸）：`
+      + findMissingSchedulerMethods({ text, surface }).join('、'))
+  }
+  // ★ 读数：至少扫到一个文件——否则"没有发现问题"只是"没扫"。
+  assert.ok(scanned.length >= 1, '一个文件都没扫到')
+})
+
+test('★★★★ 桌面端的"检查更新"必须走 `manualCheck`，不能直接调低层 `check`', async () => {
+  // ★ 设计 §6 line 134 那一句的两个分句必须落在**同一个**入口上：
+  //
+  //   > 手动检查立即执行，并与已有检查共享一次网络请求。……
+  //   > **成功恢复正常周期**。
+  //
+  //   `client.check()` 只满足前一个（它不碰调度器的账本）。所以服务层
+  //   一旦直接调它，"成功恢复正常周期"就静默失效——而界面上看不出来
+  //   （按钮照样能点、照样显示"当前已是最新版本"）。
+  //
+  //   这条判据是**文本**判据，而不是行为判据，因为它要守的正是
+  //   "调用点用了哪个入口"这件事；行为那一半由 `client.test.mjs` 的两条
+  //   用例守着（一条证明 `manualCheck` 复位、一条证明低层 `check` 不复位）。
+  const { readFileSync } = await import('node:fs')
+  const root = fileURLToPath(new URL('../../', import.meta.url))
+  const text = readFileSync(`${root}desktop/update-service.mjs`, 'utf8')
+
+  // ── 正对照：这段"直接调 check"的文本必须被抓到 ──
+  {
+    const fake = "return { result: await client.check({ trigger: 'manual' }) }\n"
+    assert.match(fake, /\bclient\.check\s*\(/, '正对照的正则匹配不上，这条判据是空跑的')
+  }
+
+  // ★ 同样先挖空注释：这条判据的解释里正引用着那句被修掉的调用。
+  const code = codeOnly(text)
+  const direct = [...code.matchAll(/\bclient\.check\s*\(/g)]
+  assert.deepEqual(direct, [],
+    '桌面端直接调了低层 client.check()：手动检查必须走 client.manualCheck()，'
+    + '否则退避不会复位（设计 §6 line 134「成功恢复正常周期」）')
+
+  // ── 而 `manualCheck` 必须真的被调到（否则"没调低层"只是因为"没调任何东西"）──
+  assert.match(code, /\bclient\.manualCheck\s*\(/,
+    '桌面端没有调用 client.manualCheck() —— 那么上面那条"没调低层 check"是空过的')
+})

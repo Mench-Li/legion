@@ -1200,3 +1200,141 @@ test('★★★★ `client.check()` 能返回的每个 outcome 都在 `CHECK_OUT
   const { createCheckScheduler } = await import('./schedule.mjs')
   assert.equal(typeof createCheckScheduler, 'function')
 })
+
+// ---------------------------------------------------------------------------
+// ★★★★ 手动检查必须走调度器（设计 §6 line 134 的**第二个分句**）
+// ---------------------------------------------------------------------------
+
+/**
+ * 造一个"先坏后好"的真实托管，并返回一个**可推进定时器**的客户端。
+ *
+ * ★ 为什么必须走定时器：周期检查在生产里**由调度器自己的计时器驱动**
+ *   （`reschedule()` → `setTimer(() => run('periodic'))`）。此前这里用的是
+ *   `client.runScheduledCheck()`——而那个方法调的是**不存在**的
+ *   `scheduler.run`，一调就抛 `TypeError`（它已连同这个理由一起删掉了）。
+ *   所以驱动定时器不是绕路，它就是生产路径。
+ */
+function makeTimedClient({ ctx, failures }) {
+  let left = failures
+  const real = ctx.fetchImpl
+  const fetchImpl = async (url, options) => {
+    if (left > 0) { left -= 1; throw new Error('探针：模拟网络故障') }
+    return real(url, options)
+  }
+  fetchImpl.host = real.host
+  fetchImpl.trustStore = real.trustStore
+  const timers = []
+  const client = makeClient({
+    ...ctx,
+    fetchImpl,
+    setTimer: (fn, ms) => { const t = { fn, ms, unref() {} }; timers.push(t); return t },
+    clearTimer: () => {},
+  })
+  /** 推进一次已经排好的周期检查（等待它跑完）。 */
+  const tick = async () => {
+    const next = timers.find((t) => t.pending !== false)
+    assert.ok(next !== undefined, '没有排好的定时器可以推进')
+    next.pending = false
+    next.fn()
+    // 定时器的回调是 `void run('periodic')`：等它把 in-flight 跑完。
+    for (let i = 0; i < 50; i += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 1))
+      if (client.scheduler.snapshot().inFlight === false) break
+    }
+  }
+  return { client, timers, tick }
+}
+
+test('★★★★ 手动检查成功后，调度器的退避必须复位（「成功恢复正常周期」）', async (t) => {
+  // ★ 设计 §6 line 134 那一句有**两个**分句：
+  //
+  //   > 手动检查立即执行，并与已有检查共享一次网络请求。失败按 15 分钟、
+  //   > 30 分钟、1 小时逐步退避，最终上限 6 小时，加入抖动；
+  //   > **成功恢复正常周期**。
+  //
+  //   `client.check()` 只满足前一个：它是低层入口，不碰调度器的账本。
+  //   账本（`consecutiveFailures` / `dueAtMs` / `lastOutcome`）只在
+  //   调度器的 `run()` 里更新——所以只有走 `client.manualCheck()` 的
+  //   手动检查才会"成功恢复正常周期"。
+  //
+  //   ★ 这条用例存在的原因：`desktop/update-service.mjs` 曾经直接调
+  //     `client.check({ trigger: 'manual' })`。于是手动检查成功了、
+  //     退避计数却**不复位**，而那在界面上完全看不出来
+  //     （按钮照样能点，照样显示"当前已是最新版本"）。
+  const ctx = setup()
+  t.after(() => rmSync(ctx.cacheDir, { recursive: true, force: true }))
+  const { client, tick } = makeTimedClient({ ctx, failures: 3 })
+
+  // ── 三次**周期**检查全部失败 ⇒ 调度器进入退避 ──
+  client.markInteractive()
+  for (let i = 0; i < 3; i += 1) await tick()
+  const inBackoff = client.scheduler.snapshot()
+  assert.equal(inBackoff.consecutiveFailures, 3,
+    `三次周期检查失败之后退避计数应当是 3，实际 ${inBackoff.consecutiveFailures}`)
+  const backoffDueAt = inBackoff.dueAtMs
+  assert.ok(backoffDueAt !== null, '进退避之后应当仍然安排了下一次检查')
+
+  // ── 一次**手动**检查，这次会成功 ──
+  const manual = await client.manualCheck()
+  assert.equal(manual.outcome, 'available', `手动检查没有成功：${manual.reason}`)
+  assert.equal(manual.trigger, 'manual', '手动检查的结果里应当带上 trigger')
+
+  // ── ① 退避必须复位 ──
+  const after = client.scheduler.snapshot()
+  assert.equal(after.consecutiveFailures, 0,
+    '手动检查成功了，退避计数却没有复位 —— 设计 §6 line 134「成功恢复正常周期」不成立')
+  // ★ 顺便把**读数**也钉住：复位之后退避那一栏必须回到"正常周期"，
+  //   而不是还写着"退避第 3 档 60 分钟"。界面读的正是这个 label。
+  assert.equal(after.backoff.step, 0, `复位之后退避档位应当是 0，实际 ${after.backoff.step}`)
+  assert.equal(after.backoff.baseMs, 6 * 60 * 60 * 1000,
+    `复位之后基准间隔应当是 6 小时，实际 ${after.backoff.baseMs}`)
+  assert.equal(after.backoff.label, '正常周期', `复位之后的退避标签是 ${after.backoff.label}`)
+  // ── ② 而且下一次检查必须**重新排**到正常周期 ──
+  //
+  //   ★ 只断言 `consecutiveFailures === 0` 是不够的：一个"清了计数但没重排"
+  //     的实现会让 `dueAtMs` 停在退避那一刻，而那与复位在**界面**上一样。
+  assert.notEqual(after.dueAtMs, backoffDueAt,
+    '退避复位之后没有重新安排下一次检查 —— dueAt 还停在退避的那一刻')
+  assert.equal(after.dueKind, 'periodic', `复位之后的下一次检查应当是正常周期，实际 ${after.dueKind}`)
+})
+
+test('★★★★ 走低层 `check()` 则**不**复位退避（两个入口的差别必须钉住）', async (t) => {
+  // ★ 这一条是上一条的**反面对照**。没有它，上一条可能只是因为
+  //   "任何检查都会复位"而通过——那样"服务必须调 manualCheck"这个结论
+  //   就无从检验了。
+  //
+  //   > 一个"必须走某个入口"的判据，如果没有"走错入口会怎样"的对照，
+  //   > 就分不清"入口选对了"与"两个入口其实一样"。
+  const ctx = setup()
+  t.after(() => rmSync(ctx.cacheDir, { recursive: true, force: true }))
+  const { client, tick } = makeTimedClient({ ctx, failures: 3 })
+
+  client.markInteractive()
+  for (let i = 0; i < 3; i += 1) await tick()
+  assert.equal(client.scheduler.snapshot().consecutiveFailures, 3)
+
+  const lowLevel = await client.check({ trigger: 'manual' })
+  assert.equal(lowLevel.outcome, 'available', lowLevel.reason)
+  assert.equal(client.scheduler.snapshot().consecutiveFailures, 3,
+    '低层 check() 竟然也复位了退避 —— 那么"必须走调度器"这条结论不成立，'
+    + '上一条用例也就测不出服务调错入口这件事了')
+})
+
+test('★★ 并发的 `manualCheck` 共享同一次网络请求（两个入口同一把锁）', async (t) => {
+  // ★ 两条路径各自有一把 in-flight 锁（调度器的 `inFlight`、客户端的
+  //   `inFlightCheck`）。手动检查走调度器时，那次检查与**周期**检查
+  //   落在同一把锁上；走低层 `check()` 则只有客户端那一把。
+  const ctx = setup()
+  t.after(() => rmSync(ctx.cacheDir, { recursive: true, force: true }))
+  const client = makeClient(ctx)
+
+  const [a, b] = await Promise.all([client.manualCheck(), client.manualCheck()])
+  assert.equal(a.outcome, 'available', a.reason)
+  assert.equal(b.outcome, 'available', b.reason)
+  // 合并的那个必须**自报**它是共享的，而不是伪装成一次独立检查。
+  assert.equal([a.shared, b.shared].filter(Boolean).length, 1,
+    `两次并发的手动检查应当恰好有一个自报 shared，实际 a=${a.shared} b=${b.shared}`)
+  const feedRequests = ctx.fetchImpl.requests.filter((r) => r.url.endsWith('feeds/stable/win-x64.json'))
+  assert.equal(feedRequests.length, 1,
+    `并发的手动检查把通道清单请求了 ${feedRequests.length} 次 —— 设计要求"共享一次网络请求"`)
+})

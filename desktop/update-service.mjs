@@ -286,10 +286,31 @@ export function createUpdateService({
     switch (command) {
       case 'update.status':
         return Object.freeze({ ok: true, code: null, reason: null, state: projectState(client.snapshot()) })
-      case 'update.check':
-        // 「手动检查立即执行，并与已有检查共享一次网络请求」——共享那件事
-        // 由 client/调度器负责，这里只是转达。
-        return Object.freeze({ ok: true, code: null, reason: null, result: await client.check({ trigger: 'manual' }) })
+      case 'update.check': {
+        // ★★ 「手动检查立即执行，并与已有检查共享一次网络请求」**以及**
+        //    「成功恢复正常周期」——这一句有两个分句，必须走**同一个**入口。
+        //
+        //    `client.check()` 是低层入口：它只取一次清单，不碰调度器的账本
+        //    （`consecutiveFailures` / `dueAtMs` / `lastOutcome`）。那些只在
+        //    调度器的 `run()` 里更新。所以这里必须调 `manualCheck()`。
+        //
+        //    ★ 此前这里直接调低层 `check()`，后果是：
+        //      · 手动检查成功了，退避计数**不复位** ⇒「成功恢复正常周期」不成立；
+        //      · 调度器的两个手动入口成为全仓没有生产调用者的死代码，
+        //        而 `CHECK_TRIGGERS` 仍然声明着 `'manual'`/`'retry'`。
+        //
+        //    ★ 缺 `manualCheck` 时**具名拒绝**，不退回到 `check()`：
+        //      退回恰好就是这条缺陷本身，而且它在界面上看不出来
+        //      （按钮照样能点、照样显示"当前已是最新版本"）。
+        if (typeof client.manualCheck !== 'function') {
+          return Object.freeze({
+            ok: false, code: UPDATE_INPUT_CODES.UNAVAILABLE,
+            reason: '更新客户端没有接上"手动检查"入口：手动检查必须走调度器，'
+              + '否则成功之后退避不会复位（设计 §6 line 134「成功恢复正常周期」）',
+          })
+        }
+        return Object.freeze({ ok: true, code: null, reason: null, result: await client.manualCheck() })
+      }
       case 'update.download': {
         const input = validateTargetInput(payload)
         if (!input.ok) return input

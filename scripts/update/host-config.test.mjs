@@ -499,3 +499,64 @@ test('★★★ CLI `--files` 真的会打印目录清单（布尔开关不能�
   // 而且配置本体必须完全一致——`--files` 只是**附注**，不该改变生成物。
   assert.equal(withFlag.text.split('\n# 需要存在的目录：')[0], without.text)
 })
+
+test('★★★★ 反向代理（隧道）形态下：明文请求必须在 443 块里被挡住', () => {
+  // ★★★ 这条守的是一个**部署形态相关的**缺口，本轮在真机上实测出来的：
+  //
+  //   生成器原本只在「监听 80 的那个块」里放 `return 301`。那只在**客户端直连
+  //   源站**时有用。入口是 Cloudflare 隧道这类反向代理时（隧道固定连 443），
+  //   80 上的请求根本不会落到那个块上——代理连的是 443，然后把**原始协议**
+  //   放在 `X-Forwarded-Proto` 里。
+  //
+  //   于是「80 上不服务任何内容」这句话在实际部署形态下是**假的**。实测：
+  //
+  //     http://updates.legion-si.online/healthz  → 200 与真正的内容
+  //     443 块里看到的 xfp=http（TLS 请求则是 xfp=https）
+  //
+  //   ★ 危害不是洁癖：设计 §4 写着 stable 上的 HTTP 意味着中间人可以把客户端
+  //     「引到一个只提供**旧版**清单的托管」——签名挡得住伪造，挡不住这种降级。
+  const tree = treeOf('production').tree
+  const r = renderServerBlock({
+    tree, serverName: 'updates.example.com',
+    tls: { cert: '/etc/ssl/legion/fullchain.pem', key: '/etc/ssl/legion/privkey.pem' },
+  })
+  assert.equal(r.ok, true, r.reason)
+
+  // ① 443 内容块里必须有 X-Forwarded-Proto 守卫。
+  assert.match(r.config, /if \(\$http_x_forwarded_proto = "http"\) \{/,
+    '443 内容块里没有明文守卫 —— 反向代理形态下 http:// 会拿到 200 与真正的内容')
+
+  // ② 守卫必须在**内容 location 之前**：放到后面等于没放。
+  const guardAt = r.config.indexOf('$http_x_forwarded_proto')
+  const contentAt = r.config.indexOf('location ~ ^/legion/feeds/')
+  assert.ok(guardAt > 0, '找不到守卫')
+  assert.ok(contentAt > 0, '找不到清单 location')
+  assert.ok(guardAt < contentAt, `守卫排在内容之后（guard@${guardAt} vs content@${contentAt}）`)
+
+  // ③ 守卫必须属于 443 那个块（不能掉进 80 块里）。
+  assert.ok(guardAt < r.config.lastIndexOf('server {'), '守卫跑到 80 那个块里去了')
+
+  // ④ 直连形态的那条跳转**仍然**要在：两种部署形态各只会走到其中一处。
+  const httpBlock = r.config.slice(r.config.lastIndexOf('server {'))
+  assert.ok(httpBlock.includes('return 301 https://$host$request_uri;'), '80 那个块的跳转没了')
+
+  // ⑤ 正对照：旧形态（只有 80 块跳转）必须被认出来是「缺守卫」。
+  {
+    const legacy = [
+      'server {',
+      '    listen 443 ssl http2;',
+      '    server_name updates.example.com;',
+      '    location ~ ^/legion/feeds/ { try_files $uri =404; }',
+      '    location / { return 404; }',
+      '}',
+      'server {',
+      '    listen 80;',
+      '    server_name updates.example.com;',
+      '    return 301 https://$host$request_uri;',
+      '}',
+    ].join('\n')
+    assert.match(legacy, /return 301/, '正对照：旧形态连 80 跳转都没有')
+    assert.equal(/if \(\$http_x_forwarded_proto = "http"\)/.test(legacy), false,
+      '正对照失败：一段没有守卫的旧配置被判成有守卫')
+  }
+})

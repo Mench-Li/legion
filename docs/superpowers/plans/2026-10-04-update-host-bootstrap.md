@@ -114,6 +114,10 @@ cloudflared: 127.0.0.1:43344 → 127.0.0.1:8787
 ★ 下面这段是本轮选定路径的**逐条命令**，等 Cloudflare token 到位后执行。
 它的每一步都对应上面的一条实测事实，所以不是通用模板。
 
+★★ **实际执行时这条路径的"直连"部分被证伪了**（见下面的执行结果）：DNS-01 与
+证书那两步**照此执行并成功**，但灰云 A 记录那条走不通——最终改成了隧道。
+保留这段是因为它记录了**当时的推理**，以及"证书这一半是独立可用的"。
+
 ```bash
 # ── ① 用 token 建 A 记录（灰云 = 不代理，让客户端直连 443）──
 #   ★ 为什么必须灰云：这条路径要的就是"客户端直接到 117.72.146.36:443"。
@@ -327,6 +331,131 @@ server {
 - 若希望**彻底摆脱 Cloudflare 依赖**（灰云直连），唯一的路是给该域名做
   **ICP 备案**；备案通过后，本轮已经建好的 A 记录 + Let's Encrypt 证书 + nginx
   443 站点**就是**正确形态，不需要重做。
+
+---
+
+## 执行结果（2026-10-07）：改走**隧道**，入口已上线
+
+拿到带 `Account → Cloudflare Tunnel → Edit` 的 token 之后，按最终结论做完了。
+
+### 做完的事
+
+| # | 动作 | 结果 |
+|---|---|---|
+| 1 | 读隧道配置（**先只读**，确认不破坏 hub） | 版本 2：`legion-si.online → http://127.0.0.1:8787` + catch-all 404 |
+| 2 | 备份隧道配置到 `$TEMP\tunnel-config-backup-v2.json` | ✓ |
+| 3 | 在 catch-all **之前**插入一条 ingress | ✓ 版本 3 |
+| 4 | DNS：删掉灰云 A，改成**代理 CNAME** → 隧道 | ✓ 与 hub 同一条隧道 |
+| 5 | 从主机验证端到端 | ✓ `https://updates.legion-si.online/healthz` → **200 `tls=0`** |
+| 6 | 从公网验证（强制 CF 边缘 IP） | ✓ 200 `tls=0`，IPv6 也 200 |
+
+**新增的那条 ingress**（配置的其余部分逐字保留）：
+
+```
+2) updates.legion-si.online
+     service          = https://localhost:443
+     originRequest    = { originServerName: "updates.legion-si.online" }
+```
+
+★ `originServerName` 是**必需**的，不是可选美化：443 上还有 `legion-hub-ip`
+那个自签站点，不给 SNI 的话 cloudflared 会连到它、证书校验失败。
+给了 SNI 才会命中我们那个 `server_name updates.legion-si.online` 的块，
+从而用上刚签的 Let's Encrypt 证书。
+
+★ 边缘证书**不需要另签**：zone 的 Universal SSL 证书（`CN=legion-si.online`，
+覆盖 `*.legion-si.online`）已经涵盖新主机名。
+
+**公网回读**（真实 DNS、真实证书、经 CF 边缘 → 隧道 → nginx）：
+
+| 判据 | 结果 |
+|---|---|
+| `/healthz` | **200** `tls_verify=0`，HTTP/2 |
+| `/legion/feeds/…`（生产前缀） | **200**，`Cache-Control: no-store`，`cf-cache=DYNAMIC` |
+| `/legion/releases/…` | **200**，`Cache-Control: public, max-age=31536000, immutable` |
+| GET / HEAD / POST / PUT / DELETE | 200 / 200 / **403** / **403** / **403** |
+| 目录索引 / 其它路径 | **404** |
+| 明文 `http://` | **301 → https** ✓ |
+
+★ 内容确实来自我们的树（探针文件 `{"probe":"feed"}` 原样取回，探针已清理）。
+
+### ★★★ 顺带修掉一个部署形态相关的真缺陷（生成器）
+
+**症状**：`http://updates.legion-si.online/healthz` 返回 **200 与真正的内容**，
+而不是跳转。
+
+**原因**：生成器只在「监听 80 的那个块」里放 `return 301`。而入口是隧道时，
+cloudflared **固定连 443**，80 上的请求根本不会落到那个块上——它把**原始协议**
+放在 `X-Forwarded-Proto` 里。实测：
+
+```
+明文请求 → xfp=http     ← 修之前这里返回 200 与清单内容
+TLS 请求 → xfp=https
+```
+
+> 于是「80 上不服务任何内容」这句话，在**实际部署的那个形态**下是假的。
+
+**为什么不是洁癖**：设计 §4 写着 stable 上的 HTTP 意味着中间人可以把客户端
+「引到一个只提供**旧版**清单的托管」——签名挡得住伪造，挡不住这种降级。
+
+**修法**（在生成器里，所以可复现）：443 内容块里加一条**同义**判据
+
+```nginx
+if ($http_x_forwarded_proto = "http") {
+    return 301 https://$host$request_uri;
+}
+```
+
+两种部署形态各只会走到其中一处，所以**两条都要在**。
+`if` 里只放 `return`（nginx 明确保证这一种用法在 server 上下文里安全）。
+
+**判据**（`host-config.test.mjs`，+1）：443 块里必须有守卫、守卫必须排在
+内容 location **之前**、必须属于 443 块、80 块的跳转仍在，外加正对照
+（一段只有 80 块跳转的旧形态必须被判为"缺守卫"）。
+
+**修后实测**：
+
+```
+http://…/healthz              → 301
+http://…/legion/feeds/x.json  → 301
+https://…/healthz             → 200  （没把好的挡掉）
+跟随跳转                       → 200
+裸 IP 测试树                   → 200  （未受影响）
+hub 域名                       → 401  （未受影响）
+```
+
+### ★ 一个差点造成误判的观察点问题
+
+在本地机器上，`updates.legion-si.online` 一直 `ECONNRESET`，而
+`legion-si.online` 正常。看起来像"新域名没配好"。实际原因是**本机 DNS 缓存**
+还留着**已删除的灰云 A 记录**：
+
+```
+getaddrinfo → 117.72.146.36, 2606:4700:3030::ac43:b4e4, …
+               ↑ 依旧 IP，命中 ICP reset，且不会回落到后面的 Cloudflare 地址
+```
+
+`ipconfig /flushdns` 也没清掉它（缓存可能在上游解析器）。
+
+> 一个"解析器还留着旧地址"的本地状态，看起来完全像"服务端坏了"。
+> 从**第二个观察点**（更新主机本身）一看就分开了。
+
+### 仍未做
+
+- 把 `update-config.example.json` 的 stable/canary `origin` 填成
+  `https://updates.legion-si.online`（`prefix` 保持 `/legion`）——
+  ★ 这一步**还没做**，目前示例里仍是 `https://updates.example.com`。
+- 建议在 Cloudflare 打开 **Always Use HTTPS**（SSL/TLS → Edge Certificates）：
+  那是边缘层的同一条判据，比源站层更早生效。本轮只做了源站层（因为
+  token 没有 `Zone Settings:Edit`）。
+- ★★ `cloudflared.service` 的 `/etc/cloudflared/token` **仍然不存在**——
+  这次改动让 `legion-si.online`（hub）与 `updates.legion-si.online` **都**依赖
+  这条隧道，所以那个风险比之前更大了。请尽快从控制台重新导出 token。
+- ★ Cloudflare API token 现在存在主机 `/root/.legion-cf-token`（`0600`，
+  acme.sh 续期要用，它把 `CF_Token` 也写进了 `/root/.acme.sh/account.conf`）。
+  **拿到那台机器就等于拿到这个 token**，建议在信任边界变化时轮换它。
+- 灰云直连（彻底不依赖 Cloudflare）仍只差 **ICP 备案**；
+  备案之后删掉代理 CNAME、恢复那条灰云 A 记录即可（记录字段已存档）。
+
 
 
 

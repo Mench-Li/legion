@@ -224,6 +224,31 @@ export function renderServerBlock({
     // HTTPS 服务内容 + HTTP 只做跳转。两条都不能少：只加 443 的话，
     // 一次 http:// 的请求会落到默认 server 上（拿到别的站点的页面或 404），
     // 而不是被明确地导向 https。
+    //
+    // ★★★ 但"监听 80 的那个块"只在**客户端直连源站**时有用。入口是
+    //      Cloudflare 隧道这类反向代理时（隧道固定连 443），80 上的请求
+    //      根本不会落到它上面——代理连的是 443，然后把**原始协议**放在
+    //      `X-Forwarded-Proto` 里。于是"80 上不服务任何内容"这句话在
+    //      实际部署形态下是**假的**：`http://` 会拿到 200 和真正的内容。
+    //
+    //      实测（cloudflared 隧道 + nginx）：
+    //        明文请求 → `xfp=http`   ← 修之前这里返回 200 与清单内容
+    //        TLS 请求 → `xfp=https`
+    //
+    //    ★ 为什么这不只是洁癖：设计 §4 写着 stable 上的 HTTP 意味着中间人
+    //      可以"把客户端引到一个只提供**旧版**清单的托管"——签名挡得住伪造，
+    //      挡不住这种降级。
+    //
+    //    `if ($http_x_forwarded_proto = "http")` 里只放 `return`（nginx 明确
+    //    保证这一种用法在 server 上下文里是安全的），与下面那个 80 块的跳转
+    //    是**同一个判据的两处实现**——因为两种部署形态各只会走到其中一处。
+    const plaintextGuard = [
+      '    # ★ 明文请求必须在**这里**再挡一次：下面那个监听 80 的块在反向代理',
+      '    #   （隧道）形态下是死代码（代理固定连 443，原始协议在 X-Forwarded-Proto 里）。',
+      '    if ($http_x_forwarded_proto = "http") {',
+      '        return 301 https://$host$request_uri;',
+      '    }',
+    ]
     const https = [
       'server {',
       `    listen ${tlsListen} ssl http2;`,
@@ -237,6 +262,8 @@ export function renderServerBlock({
       '    ssl_session_cache shared:legion_updates:1m;',
       '    ssl_session_timeout 10m;',
       '',
+      ...plaintextGuard,
+      '',
       ...content,
       '}',
     ]
@@ -248,6 +275,7 @@ export function renderServerBlock({
       '    # 80 上**不服务任何内容**：只把请求明确导向 https。',
       '    # 留一个 404 兜底是错的——那会让"用 http 发布出去的地址"看起来是坏的，',
       '    # 而实际原因是协议不对。',
+      '    # ★ 直连部署靠这一块；反向代理部署靠上面 443 块里那条同义判据。',
       '    return 301 https://$host$request_uri;',
       '}',
     ]

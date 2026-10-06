@@ -488,6 +488,127 @@ CI 的 `node --test` 默认按**文件**隔离进程（`run-ci` 也是逐套件�
 按验收口径「纯重构可豁免」，**不**改 `docs/FEATURES.md` 对应小节 / 功能索引 / README 引导段。
 （`check-docs.mjs` 的结构/链接/索引一致性可由 `run-ci --only doc` 复跑。）
 
+## 11. T-194 发布说明：BUG-007 worker 超时结算「先取证、再决定」（含读数诚实化）
+
+> 角色：devops（部署运维员）｜任务：T-194｜分支：`w/T-194`
+> 开工基线（实测）：`git log --oneline -1` = `f9687218  promote T-193`；`w/T-194` 与 `main` 同点（`git diff main...w/T-194` 为空；本 worktree 无前序 coder/reviewer/tester 的 diff）。
+> BUG-007 的实现来自上游 `efc11c9c`（初修）+ `d8c29923`（T-184 续修）两次提交，均为 HEAD 祖先；现场记录 `docs/bugs/BUG-007-timeout-reservation-not-released.md` §八/§九。
+> 环境：本机 dev / acceptance（127.0.0.1 三件套）。**未发布生产**（未获将军批准；边界「未获批准不发布生产」）。
+
+### 11.1 结论速览
+
+| 项 | 结论 |
+| --- | --- |
+| 构建（插件，本任务变更面） | `tsc -p plugins/tsconfig.json --noEmit` **exit 0**；`tsc -p plugins/tsconfig.json`（emit）**exit 0**，产出 `plugins/lib/timeoutSettlement.js` + `plugins/lib/index.js` |
+| 回归（BUG-007 两条必跑） | `timeout-settlement` **8 pass / 0 fail / 0 skip, exit 0**；`claim-reservation.e2e` **1 pass / 0 fail, exit 0**（22.8s，含三半对照 ⑰） |
+| 仓库构建门禁（等价复跑） | whiteboard `node scripts/build.mjs` **exit 0**；workbench `tsc --noEmit` **exit 0**；workbench `vite build` 被沙箱 `spawn EPERM`（esbuild）挡住（§11.4） |
+| `run-ci` 全量 | `--only env,deps,build`：`deps` PASS；`env`/`build` **exception: spawn EPERM**（`run-ci.mjs:73`），exit 1 —— 沙箱限制，非门禁失败（§11.4） |
+| 文档门禁 | `node scripts/ci/check-docs.mjs` **FAIL（2 处）**：`docs/T191-evidence`、`docs/T192-evidence` 无 md banner —— 基线既有红、不由本任务改动引入（§11.5-②） |
+| 本次 diff | 仅文档：`docs/DEPLOY.md`（§11）+ `docs/FEATURES.md`（§3.7 一条）+ `README.md`（§5.5 一句）；**未改任何业务功能代码** |
+| 用户可见行为 | 有（守护超时结算的文案与任务去向）⇒ 已同步 FEATURES.md + README 引导段（§11.6）；功能索引 F-07 无需新增行（无新入口/新功能 id） |
+| 生产放行 | **未放行**：T-192 tester 判定「不通过」的 F1/F2（超时文案里的人工恢复命令缺 `scope` ⇒ 400）在 HEAD 仍未修，属 coder 面；已登记 §11.5-① 作放行门禁 |
+
+### 11.2 变更内容与影响面
+
+**改了什么（上游实现，本阶段只复核 + 写发布说明）**
+
+- `plugins/src/timeoutSettlement.ts`（新增决策/文案纯函数模块）：`planTimeoutSettlement`（能取证⇒`release-and-retry` / 取不到⇒`hold-for-manual`）、`workerStoppedWithin`（20s 宽限期内等 `run.result` 到终态）、`planTimeoutTransitionFailure`（释放失败的诚实文案）、`TIMEOUT_SETTLE_GRACE_MS`。
+- `plugins/src/index.ts`（超时结算调用点）：`dispose() → 取证 → 决定 → transitionTo(by=执行者本人, confirmedStopped) → safeComment(最终文案)`；transition 失败时改写为 `failure.comment`。
+- 未改 `team-hub/server.mjs`：走的是既有诚实出口（`in_progress→todo` + `confirmedStopped:true` ⇒ `finishTaskReservationInTx(cancelled:false)`）。
+
+**行为影响（部署视角）**
+
+| 场景 | 修复前 | 修复后 |
+| --- | --- | --- |
+| worker 跑满 25 分钟超时 | 写「保留在 in_progress，下一轮自动重试」，实际不动状态、不动预约；15 分钟后被 stale 回收器冻结成 `reconciling`，认领一律 409，只能人工 `confirm-stopped` | **能证实已停止** ⇒ 任务回 `todo` + 预约 `released` ⇒ 下一轮扫描真能认领并复用 `w/<id>` WIP |
+| 取不到终止证据（abort 后 20s 未结算） | 同上（既没释放、文案也不成立） | **安全方向保持**：任务留 `in_progress`、预约继续被持有；文案直说「仍被持有、不会自动重试」并给人工路径 |
+| 释放尝试失败 | （此前）仍打印释放成功文案 | 改印失败文案 + 两步人工恢复命令，不再谎称已释放 |
+
+- 不触：无新增依赖、无库表迁移、无新接口、无前端产物、无端口/配置变更。
+- 数据面：既有 `reconciling` 预约**不会**被本次升级自动清理，仍需按 §11.3 步骤 4 人工处置（运维注意项）。
+
+### 11.3 环境 × 步骤 × 验证项 × 回滚
+
+环境：dev / acceptance（本机 127.0.0.1：team-hub :8787 + workbench :5173 + 可选 scrum v1 :4820）。**production 未授权，未发布。**
+
+**发布/验证步骤（普通终端；沙箱内 §11.4 给出等价命令）**
+
+```powershell
+# 0) 预检（gate）：不通过则终止，禁止跳过
+node scripts/ci/run-ci.mjs --only env,deps,build
+
+# 1) 本任务变更面：插件类型检查 + 构建（产出 plugins/lib，回归测试依赖它）
+cd plugins; npm run typecheck; npm run build; cd ..
+
+# 2) BUG-007 两条回归（必须都 exit 0）
+node plugins/tests/timeout-settlement.test.mjs        # 期望 8 pass / 0 fail
+node team-hub/claim-reservation.e2e.test.mjs          # 期望 1 pass / 0 fail（含 can-confirm / cannot-confirm / 越权三半对照）
+
+# 3) 仓库门禁（全量，放行前必跑）
+node scripts/ci/run-ci.mjs                            # 期望 exit 0（env,deps,build,test,smoke,stage,doc）
+
+# 4) 现场残留预约（升级前已有的 reconciling）——人工逐条处置
+node -e "const{DatabaseSync}=require('node:sqlite');const db=new DatabaseSync('team-hub/team.db',{readOnly:true});console.log(db.prepare(\"SELECT id,task_id,state FROM write_reservations WHERE state IN ('reserved','reconciling')\").all())"
+#   对 state=reconciling 且任务已是 todo/blocked/canceled 的：确认执行进程已停止后
+#   POST /api/tasks/<id>/reservation/confirm-stopped  {by:'general',scope:'<space>',confirm:'stopped:<id>'}
+#   ★ body 必须带 scope（team-hub/routes/write-intent.mjs:45），否则 400 MISSING_SCOPE
+```
+
+**验证项（本次实测，w/T-194 @ `f9687218`）**
+
+| # | 项 | 命令 | 结果 |
+| --- | --- | --- | --- |
+| 1 | 插件类型检查 | `tsc -p plugins/tsconfig.json --noEmit` | exit 0 |
+| 2 | 插件构建 | `tsc -p plugins/tsconfig.json`（emit） | exit 0；`lib/timeoutSettlement.js`、`lib/index.js` 生成 |
+| 3 | 超时结算回归 | `node plugins/tests/timeout-settlement.test.mjs` | 8 pass / 0 fail / 0 skip，exit 0 |
+| 4 | 认领+预约 e2e（三半对照） | `node team-hub/claim-reservation.e2e.test.mjs` | 1 pass / 0 fail，exit 0（22.8s） |
+| 5 | whiteboard 构建 | `node whiteboard/scripts/build.mjs` | exit 0（copied 12 shared modules） |
+| 6 | workbench 类型检查 | `tsc -p workbench/tsconfig.json --noEmit` | exit 0 |
+| 7 | workbench 生产构建 | `cd workbench && node node_modules/vite/bin/vite.js build` | **FAIL：esbuild `spawn EPERM`（沙箱）**，见 §11.4 |
+| 8 | CI 运行器 | `node scripts/ci/run-ci.mjs --only env,deps,build` | deps PASS；env/build `spawn EPERM`，exit 1（沙箱） |
+| 9 | 文档门禁 | `node scripts/ci/check-docs.mjs` | FAIL 2 处（T191/T192 evidence banner，基线既有）；结构/表行/链接其余全过 |
+
+**回滚方案**（本次变更**不触库、不新增迁移**，回滚 = 回退代码 + 重建插件）
+
+| 场景 | 操作 |
+| --- | --- |
+| 代码回滚 | `git revert d8c29923 efc11c9c`（或 `git checkout f9687218 -- plugins/src/timeoutSettlement.ts plugins/src/index.ts`），随后重建：`cd plugins && npm run build`，并**重启加载插件的守护进程**（DSH）使其重新加载 `plugins/lib` |
+| 行为回滚语义 | 回到「超时只写评论、不动状态与预约」；stale 回收器的既有冻结行为不变 ⇒ 卡死场景会回归（仅作应急，不建议长期停留） |
+| 数据回滚 | **不需要**：无 schema/迁移；预约状态由运行时写入，回滚代码不会重建已释放的预约 |
+| 触发条件 | 超时结算后出现两个写者（同一 worktree 并发写）、或 `timeout-settlement` / `claim-reservation.e2e` 转红、或 30 秒扫描出现异常延迟 |
+
+### 11.4 沙箱限制（如实标注，不冒充通过）
+
+本会话沙箱拦截 Node 的**子进程 pipe 捕获**（`spawn`/`execFileSync` ⇒ `EPERM`），以及跨出工作区的 junction 删除（`rmSync EPERM`）。实测：
+
+- `node scripts/ci/run-ci.mjs --only env,deps,build` ⇒ `env`/`build` 阶段 `exception: spawn EPERM`（栈在 `scripts/ci/run-ci.mjs:73` 的 `spawn`），`deps` PASS，exit 1。**环境限制，不是门禁失败。**
+- `scripts/ci/build-external-package.mjs plugins` 在重建 `plugins/node_modules/*` junction 时 `rmSync EPERM` ⇒ 改用**直接 tsc emit**（同一 `plugins/tsconfig.json`，等价产出 `lib/`）取得验证项 1/2 读数。
+- `workbench vite build` 的 esbuild 需要 spawn 子进程 ⇒ `spawn EPERM`；其类型检查（`tsc --noEmit`）已单独 exit 0。
+- `scripts/config/scan.mjs --check` 因 `git ls-files` 被 `execFileSync EPERM` 挡下，退化为 **walk 模式**（源码自述：结果含未跟踪文件、仅调试参考）⇒ 报 47 项「未在 schema 中处理」，是**量具退化**不是配置面真红。
+- `encoding-check.mjs` 同样报「无法列出文件（git 不可用？）：spawnSync git EPERM」。
+
+⇒ 本阶段结论以**逐条直接命令**为准（§11.3 步骤 1~3、验证项 1~6），并如实登记 7~9 的环境受限。普通终端复跑 `node scripts/ci/run-ci.mjs` 时应全量 exit 0。
+
+### 11.5 已知缺陷 / 未清门禁（放行前必须处置）
+
+① **F1/F2（必须修改，coder 面，本阶段未代改）**——超时文案给出的人工恢复命令**当场不可执行**：
+
+- `plugins/src/timeoutSettlement.ts:91-92`（hold 分支）：`POST /api/tasks/<id>/reservation/confirm-stopped` 的 body 只给 `{by, confirm}`，**缺 `scope`**；
+  `team-hub/routes/write-intent.mjs:45` 对 `scope===''` 一律返回 **400 `MISSING_SCOPE`**（补 scope 后，hold 时任务仍是 `in_progress` ⇒ 该端点要求 `todo/blocked/canceled` ⇒ **403**，故正确路径是先 transition 再 confirm）。
+- `plugins/src/timeoutSettlement.ts:139`（`planTimeoutTransitionFailure` 步骤②）：同样缺 `scope` ⇒ 400。
+- 现状定性：机制（安全方向）正确，**文案里的人工恢复命令不成立**——与本缺陷「读数与事实不一致」同源。T-192 tester 已判「不通过」并要求 coder 修文案；本角色边界「不改业务功能代码」，**未代改**，仅登记为**生产放行门禁**。
+
+② **`check-docs.mjs` 基线既有红（非本任务引入）**：`docs/T191-evidence`、`docs/T192-evidence` 为无 md 的证据快照目录（缺 banner 载体）。本 worktree 与 `main` 同点，故该红在 `main` 上即存在；修复属对应任务/将军，本角色未碰。
+
+### 11.6 文档同步判定
+
+本次有**用户可见行为变更**（守护 worker 超时结算后任务的去向与评论文案）⇒ 按验收口径**不豁免**，已同步：
+
+- `docs/FEATURES.md` §3.7「自动交接与守护流水线」新增一条「worker 超时强制结算（先取证、再决定）」；
+- `README.md` §5.5「自动交接、闸门与人工干预」引导段补一句同义摘要；
+- 功能索引 §4：沿用既有 **F-07**（无新入口/新功能 id，不新增 F-xx 行）；
+- 现场记录 `docs/bugs/BUG-007-timeout-reservation-not-released.md` §八/§九 已由 coder/tester 登记改法与读数，本阶段引用不重复另造。
+
 ---
 
 ## 附录 A：发布检查单（每次发布逐项打勾）

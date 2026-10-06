@@ -628,6 +628,22 @@ async function stageTest() {
         //   `evaluateResponse()` —— 生成器与验证器用同一个函数连起来，
         //   两处就不可能各自漂移。
         'scripts/update/host-config.test.mjs',
+        // ★★★ 回读核对里**产物那一段**的判据（`artifact-package` /
+        //   `artifact-installer` / `artifact-notes`）。
+        //
+        //   这三条检查此前**在任何地方都没有被断言过**——而且更关键的是，
+        //   它们**只有一半的分支是活的**：`publish.test.mjs` 的替身把每个响应
+        //   都截到 4 KiB 并声明截断后的长度，于是传输层永远走 `head.ok`；
+        //   而真实发布的三个产物都远大于 4 KiB ⇒ 走的是 `net-too-large`
+        //   那条分支。一个"只有真实使用才会走到"的分支，此前零覆盖。
+        //
+        //   ★ 顺带记下这一轮在**替身保真度**上学到的三件事（都写进了那个文件）：
+        //     ① 裁到"实现恰好能接受的长度"的响应，会让真实使用走的分支永不执行；
+        //     ② 只给 `entries()` 不给 `get()` 的 headers 替身，会让
+        //        "服务器声明了 50 MB" 与"什么都没声明"在被测代码眼里一样；
+        //     ③ `publish.immutable` 的大产物是 `{ bytes: null, localPath }`
+        //        ——假定每个条目都带字节的替身，会恰好在那三个产物上取到 null。
+        'scripts/update/verify-host.test.mjs',
       ],
       cwd: ROOT,
     },

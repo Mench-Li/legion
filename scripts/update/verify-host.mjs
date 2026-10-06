@@ -28,7 +28,7 @@
 import { readFileSync } from 'node:fs'
 
 import { createHostConfig, evaluateResponse, feedUrl, releaseManifestUrl } from '../../product/update/host.mjs'
-import { createTransport } from '../../product/update/transport.mjs'
+import { TRANSPORT_CODES, createTransport } from '../../product/update/transport.mjs'
 import { ENVELOPE_FORMATS, createTrustStore, verifyEnvelope } from '../../product/update/envelope.mjs'
 import { validateFeedPayload, judgeSequence, emptySequenceState, selectCandidate } from '../../product/update/feed.mjs'
 import { validateRelease } from '../../product/update/release.mjs'
@@ -143,10 +143,25 @@ export async function verifyHost({
   check('release-schema', releaseValidation.ok, releaseValidation.ok ? null : releaseValidation.reason)
   const release = releaseValidation.release
 
-  // —— ③ 产物：只回读**前 4 KiB** 核可达性与大小，不整包下载 ——
+  // —— ③ 产物：核可达性与大小，**不整包下载** ——
   //
-  // 完整下载属于"真实旧客户端检查/下载/安装"那一步（设计 §9 第 5 步），
-  // 而它需要一个真实的旧版本环境。这里回答的是"发布之后这些地址能不能取到"。
+  //   ★★ 这一段的实际行为与"只回读前 4 KiB"这句话**不一样**，这里如实写清：
+  //
+  //     真实发行里三个产物都**远大于** 4 KiB，而 `transport.fetchBytes` 的
+  //     声明长度判据在**读 body 之前**就会拒（`declared > maxBytes` ⇒ TOO_LARGE）。
+  //     所以对一个真实发布，这里**一个字节的产物内容都不读**——它证明的是
+  //     "地址可达、状态码对、缓存头对、服务器自己声明的大小能被读出来"。
+  //
+  //     ★ 第一版的注释写的是"只回读前 4 KiB"，那会让读者以为这一段核过产物
+  //       的前 4 KiB（例如"它真的是个 ZIP"）。它没有。
+  //
+  //     > 产物内容与摘要的核对属于**客户端下载**那一步（设计 §9 第 5 步要求
+  //     > 「用真实旧客户端检查、下载、安装」）——那需要真实的旧版本环境。
+  //     > 本条命令回答的只是"发布之后这些地址能不能取到"。
+  //
+  //   ★ `TOO_LARGE` 用 `TRANSPORT_CODES` 常量比较，不写字面量 'net-too-large'：
+  //     一个手抄的错误码在**真实发布**上永远不匹配（而那个分支恰恰只有真实
+  //     发布才会走到），于是这个门禁会对每一次真发布都报 FAIL。
   if (release !== null) {
     for (const kind of ['package', 'installer', 'notes']) {
       const artifact = release[kind]
@@ -156,10 +171,13 @@ export async function verifyHost({
         relativePath: artifact.path, maxBytes: 4096, overallMs: transport.manifestTimeoutMs,
       })
       if (head.ok) {
-        check(`artifact-${kind}`, true, `${artifact.path} 可达（${artifact.sizeBytes} 字节声明）`)
-      } else if (head.code === 'net-too-large') {
-        // 限长中止 = 文件比 4 KiB 大 = 可达且大小合理。
-        check(`artifact-${kind}`, true, `${artifact.path} 可达（大于 4 KiB 探测窗口）`)
+        // ≤ 4 KiB：真的把内容读回来了（小产物，例如一份短发布说明）。
+        check(`artifact-${kind}`, true,
+          `${artifact.path} 可达（${head.bytes} 字节已回读，清单声明 ${artifact.sizeBytes}）`)
+      } else if (head.code === TRANSPORT_CODES.TOO_LARGE) {
+        // 声明长度超过探测窗口 ⇒ 可达、且服务器自报的大小被读到了。
+        check(`artifact-${kind}`, true,
+          `${artifact.path} 可达（服务器声明 ${head.bytes ?? '?'} 字节，超过 4 KiB 探测窗口）`)
       } else {
         check(`artifact-${kind}`, false, `${artifact.path}：${head.reason}`)
       }

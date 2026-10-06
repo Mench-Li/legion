@@ -109,3 +109,100 @@ cloudflared: 127.0.0.1:43344 → 127.0.0.1:8787
   隧道进程现在跑着，但**一旦重启（或机器重启）就会失败**——届时
   `legion-si.online` 会整体下线。建议从 Cloudflare 控制台重新导出那份 token。
 
+### 待执行的完整命令（DNS-01，选定方案）
+
+★ 下面这段是本轮选定路径的**逐条命令**，等 Cloudflare token 到位后执行。
+它的每一步都对应上面的一条实测事实，所以不是通用模板。
+
+```bash
+# ── ① 用 token 建 A 记录（灰云 = 不代理，让客户端直连 443）──
+#   ★ 为什么必须灰云：这条路径要的就是"客户端直接到 117.72.146.36:443"。
+#     设成橙云会让流量回到 Cloudflare，而那需要隧道 ingress（另一条路），
+#     并且在 nginx 上加的任何 location 都**不会生效**（见事实③）。
+CF_TOKEN_FILE=/root/.legion-cf-token          # 只在主机上，不进仓库
+ZONE_ID=$(curl -sS -H "Authorization: Bearer $CF_TOKEN_FILE" \
+  'https://api.cloudflare.com/client/v4/zones?name=legion-si.online' | jq -r '.result[0].id')
+curl -sS -X POST -H "Authorization: Bearer $(cat $CF_TOKEN_FILE)" \
+  -H 'content-type: application/json' \
+  "https://api.cloudflare.com/client/v4/zones/$ZONE_ID/dns_records" \
+  --data '{"type":"A","name":"updates.legion-si.online","content":"117.72.146.36",
+           "ttl":300,"proxied":false}'
+
+# ── ② 用 acme.sh 的 DNS-01 签发（**不需要任何端口可达**）──
+#   ★ 这一条是选定 DNS-01 的全部理由：它同时绕开了
+#     事实①（80 被拦，HTTP-01 不可用）与事实②带来的停机问题。
+export CF_Token="$(cat $CF_TOKEN_FILE)"
+apt-get install -y -qq socat jq >/dev/null 2>&1 || true
+ACME=/root/.acme.sh/acme.sh
+$ACME --set-default-ca --server letsencrypt
+$ACME --issue --dns dns_cf -d updates.legion-si.online --keylength ec-256
+install -d -m 0755 /etc/legion-updates/certs
+$ACME --install-cert -d updates.legion-si.online --ecc \
+  --key-file       /etc/legion-updates/certs/privkey.pem \
+  --fullchain-file /etc/legion-updates/certs/fullchain.pem \
+  --reloadcmd      'systemctl reload nginx || true'
+$ACME --install-cronjob >/dev/null 2>&1 || true
+
+# ── ③ nginx：443 上加一个 server 块，**不改**现有 legion-updates(80) ──
+#   三段 location 直接照抄 legion-updates：清单 no-store、发布文件 immutable、
+#   /healthz、其余 404。80 端口那条保留并改成 301（自签/裸 IP 过渡仍在用）。
+#   → 见下面「nginx 443 站点」一节
+
+# ── ④ 回读验证（设计 §9 line 198）：**不关闭**证书校验 ──
+node scripts/update/verify-host.mjs \
+  --origin https://updates.legion-si.online --prefix /legion --channel stable
+```
+
+**nginx 443 站点**（加在 `/etc/nginx/sites-available/legion-updates` 里，
+与现有 80 的 `server` 块并列；★ 不新建文件，避免两个站点抢同一个
+`server_name` —— `legion-hub-ip` 的注释记录过那次实测事故）：
+
+```nginx
+server {
+    listen 443 ssl http2;
+    listen [::]:443 ssl http2;
+    server_name updates.legion-si.online;
+
+    ssl_certificate     /etc/legion-updates/certs/fullchain.pem;
+    ssl_certificate_key /etc/legion-updates/certs/privkey.pem;
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_prefer_server_ciphers off;
+    # ★ 这一次**可以**发 HSTS：证书是可信的，不存在"用户手动信任一次"的
+    #   问题（`legion-hub-ip` 那边不发 HSTS 正是因为它在自签阶段）。
+    add_header Strict-Transport-Security "max-age=31536000" always;
+
+    root /srv/legion-updates;
+    autoindex off;
+    server_tokens off;
+    add_header X-Content-Type-Options nosniff always;
+
+    location = /healthz {
+        default_type text/plain;
+        add_header Cache-Control "no-store" always;
+        return 200 "legion-update-host: ready\n";
+    }
+    location ~ ^/(test|production)/legion/feeds/ {
+        limit_except GET { deny all; }
+        add_header Cache-Control "no-store" always;
+        add_header X-Content-Type-Options nosniff always;
+        try_files $uri =404;
+    }
+    location ~ ^/(test|production)/legion/releases/ {
+        limit_except GET { deny all; }
+        add_header Cache-Control "public, max-age=31536000, immutable";
+        add_header X-Content-Type-Options nosniff always;
+        try_files $uri =404;
+    }
+    location / { return 404; }
+}
+
+# 80 端口那条改成跳转（保留 listeners，让 sslip/IP 的旧引用不至于 404 得莫名其妙）
+server {
+    listen 80;
+    server_name updates.legion-si.online 117.72.146.36;
+    location = /healthz { return 200 "legion-update-host: ready\n"; }
+    location / { return 301 https://updates.legion-si.online$request_uri; }
+}
+```
+
+

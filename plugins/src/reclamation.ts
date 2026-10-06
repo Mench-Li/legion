@@ -7,11 +7,31 @@
 // 第 1 个切片（`./mediation.ts`）取了「交接边界」的合入调解。本文件是**第 2 个切片**，
 // 取「仓储边界」里最靠前的一段：`spaceWorker()` 每轮扫单开头对**在办租约**做的两件事——
 //
-//   · `// 0. 认领租约回收`：释放超过 `staleMinutes` 无进展（距最近 progress 起算）
-//     或过 TTL 的 `in_progress` 任务；
-//   · `// 0.5 守护重启孤儿回收`（仅进程启动后第一轮）：重启前进程的 worker 已随进程消失，
-//     其任务停在 `in_progress` 且通常无「未完成」评论——若只靠 stale 释放要等
-//     `staleMinutes`（如 100 分钟），故第一轮就释放回 `todo`。
+//   · `// 0. 守护重启孤儿回收`（仅进程启动后第一轮）：重启前进程的 worker 已随进程消失，
+//     其任务停在 `in_progress` 且通常无「未完成」评论 ⇒ 释放回 `todo` 并**真释放**写入资格；
+//   · `// 0.5 认领租约回收`：释放超过 `staleMinutes` 无进展（距最近 progress 起算）
+//     或过 TTL 的 `in_progress` 任务 ⇒ 回 `todo`，但写入资格**冻结**成 `reconciling`。
+//
+// ## ★ 次序是语义的一部分，不是排版（BUG-012）
+//
+// 上面两条是**证据强度不同的两种判定**，配的也是两种处理：
+// `0.` 手里是**证明**（宿主刚重启 ⇒ 旧 worker 必然已不在），所以它敢真释放；
+// `0.5` 手里只是**猜测**（很久没进展 ⇒ 慢 worker 可能还在写），所以它必须冻结。
+//
+// 于是 **`0.` 必须在 `0.5` 之前**。反过来的后果不是"多等一轮"，而是**整条恢复路径失效**：
+// 两者读的是同一批对象（`index.ts` 里 `byId` 的值就是 `tasks` 里的那些对象），
+// 所以 `0.5` 把任务改成 `todo` 之后，`0.` 那句 `status === 'in_progress'` 就再也看不到它了。
+// **越老的孤儿越一定被冻结**——老，正是 `0.5` 的命中条件。
+//
+// 实测（2026-10-06）：T-189 因此被冻结 7 小时、850 次认领失败（每 30 秒一次），
+// 它的整仓独占预约把 T-190 一起堵死，整个 software 空间零进展，只能人工 `confirm-stopped` 解开。
+// 详见 `docs/bugs/BUG-012-boot-orphan-reclaim-order.md`。
+//
+// ★ 本文件头原先写的理由是「若只靠 stale 释放要等 `staleMinutes`（如 100 分钟），
+//   故第一轮就释放回 `todo`」—— 这句话把缺陷藏了整整一个版本期：它假设开机时 stale 释放
+//   **不会**命中，而 stale 释放**恰恰会**命中（凡是认领超过 `staleMinutes` 的孤儿），
+//   命中之后冻结，于是"第一轮就释放"这件事根本没发生。
+//   一个"为什么要做这一步"的理由，如果只论证了必要性、没论证**为什么它轮得到**，就会掩盖次序问题。
 //
 // 两者都是**任务池的写路径**：hub 模式走 `/api/release-stale`（守护不直连本地库，
 // 多存储部署下避免误碰其他任务池），本地模式走 `taskctl release-stale`。
@@ -118,16 +138,24 @@ export interface ReclamationDeps {
   boot: BootReconcileState
 }
 
-/** `createReclamation` 交回给 `index.ts` 的东西（调用顺序即 `index.ts` 里的 `// 0.` → `// 0.5`）。 */
+/** `createReclamation` 交回给 `index.ts` 的东西。
+ *
+ *  ★ **调用顺序是契约的一部分**（BUG-012）：`reclaimBootOrphans` 必须先于 `reclaimStaleLeases`。
+ *  这里把「先」写成接口字段的**声明顺序**（只是提示，接口顺序没有运行时含义），
+ *  真正钉住它的是 `plugins/tests/boot-orphan-reclaim-order.test.mjs` ——
+ *  因为一个"两件事都对、顺序反了"的组合，在两条独立的行为用例里都是绿的（理由见文件头）。 */
 export interface Reclamation {
-  reclaimStaleLeases: (byId: Map<string, Task>) => Promise<void>
   reclaimBootOrphans: (tasks: Task[], byId: Map<string, Task>) => Promise<void>
+  reclaimStaleLeases: (byId: Map<string, Task>) => Promise<void>
 }
 
 export function createReclamation(deps: ReclamationDeps): Reclamation {
   const { config, log, scope, useHub, isPipeline, hubPost, runTaskctl, activity, mediating, boot } = deps
 
-  // 0. 认领租约回收：普通任务超时后释放；工作流阶段结果未知时由 Hub 隔离，不自动重派。
+  // 0.5 认领租约回收：普通任务超时后释放；工作流阶段结果未知时由 Hub 隔离，不自动重派。
+  //    ★ 它是 `0.5`（跑在 `0.` 之后）而不是 `0.`：它手里只有**猜测**（很久没进展），
+  //      所以 Hub 会把写入资格冻结成 reconciling；而 `0.` 手里是**证明**（宿主刚重启）。
+  //      次序反了会让 `0.` 看不到孤儿 —— 理由与实测见文件头「次序是语义的一部分」。
   //    hub 模式走 hub 的 /api/release-stale（守护不直连本地库，多存储部署下避免误碰其他任务池）；本地模式带 --scope 限定本守护 scope。
   async function reclaimStaleLeases(byId: Map<string, Task>): Promise<void> {
     try {
@@ -160,8 +188,13 @@ export function createReclamation(deps: ReclamationDeps): Reclamation {
     }
   }
 
-  // 0.5 守护重启孤儿回收（仅进程启动后第一轮）：重启前进程的 worker 已随进程消失。
+  // 0. 守护重启孤儿回收（仅进程启动后第一轮）：重启前进程的 worker 已随进程消失。
   //     普通任务立即释放回 todo；带 workflow 快照的任务交给 Hub 隔离，避免重复执行外部副作用。
+  //
+  //     ★ 它是 `0.`（跑在 `0.5` 之前）：它手里是**证明**（本进程刚起来 ⇒ 旧 worker 已不在），
+  //       所以 Hub 会**真释放**写入资格（`cancelled: false`），任务下一轮即可重认领。
+  //       它必须抢在"按超龄猜"的那条之前跑，否则它过滤的 `status === 'in_progress'`
+  //       已经被对方改成了 `todo` —— 理由与实测见文件头「次序是语义的一部分」。
   //
   //     闸门语义（见文件头）：`boot.done` 在**动手之前**置位，故即使下面的释放调用抛错，
   //     本轮也算「做过了」——与原来闭包里 `bootReconciled = true` 的位置逐字一致。
@@ -206,5 +239,5 @@ export function createReclamation(deps: ReclamationDeps): Reclamation {
     }
   }
 
-  return { reclaimStaleLeases, reclaimBootOrphans }
+  return { reclaimBootOrphans, reclaimStaleLeases }
 }

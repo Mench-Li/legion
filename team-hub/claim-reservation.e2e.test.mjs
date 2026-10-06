@@ -165,6 +165,52 @@ test('真实任务认领与文件预约同事务：撞车等待，释放后才�
     assert.equal((await post('/api/tasks/T-stale-frozen/reservation/confirm-stopped', { by: 'general', scope: 'default', confirm: 'stopped:T-stale-frozen' })).status, 200)
     assert.equal((await post('/api/claim', { id: 'T-stale-frozen', by: 'worker', scope: 'default' })).status, 200)
 
+    // ── ⑯③ ★ BUG-012：「老」与「孤儿」是**同一个任务**时，按**生产的次序**跑两条回收 ─────────
+    //
+    // ⑯① 与 ⑯② 各自都对，但它们的现场被切得各只让一条路径看得见：
+    //   ① 的孤儿是**刚认领**的 ⇒ 超龄判据不命中 ⇒ 只有「带 ids」那条能看到它；
+    //   ② 的任务**不是孤儿**   ⇒ 「带 ids」那条看不到它 ⇒ 只有超龄那条能看到它。
+    // 生产上这两个"看不见"都不成立：孤儿的 `claimedAt` 通常**早已**超过 `staleMinutes`
+    // （worker 超时预算 45 分钟、staleMinutes 60，而长任务很常见），于是**两条都能看见它**，
+    // 谁先跑就决定了它被真释放还是被冻结。
+    //
+    // 现场（2026-10-06，docs/bugs/BUG-012-boot-orphan-reclaim-order.md）：守护把超龄那条排在前面，
+    // 于是 T-189 被冻结 7 小时、850 次认领失败，它的整仓独占预约把 T-190 一起堵死，
+    // 整个 software 空间零进展，只能人工 confirm-stopped 解开。
+    //
+    // 这一条钉**组合**：老孤儿 + 守护的真实次序（先 ids，后超龄）⇒ 必须真释放。
+    ins.run('T-old-orphan', 'old orphan', 'todo', 'default', 0)
+    await post('/api/tasks/T-old-orphan/write-intent', { by: 'planner', scope: 'default', paths: ['src/old-orphan.mjs'] })
+    assert.equal((await post('/api/claim', { id: 'T-old-orphan', by: 'worker', scope: 'default' })).status, 200)
+    // 推老到超过 olderThan ⇒ 此刻它**同时**满足两条回收的判据（老 + 孤儿）
+    hub.db.prepare("UPDATE tasks SET claimedAt=? WHERE id='T-old-orphan'").run(new Date(Date.now() - 3600_000).toISOString())
+    const orphanFirst = await post('/api/release-stale', { by: 'general', scope: 'default', olderThan: 1, ids: ['T-old-orphan'] })
+    assert.equal(orphanFirst.status, 200)
+    assert.ok((orphanFirst.body.task?.released ?? orphanFirst.body.released ?? []).includes('T-old-orphan'))
+    const staleSecond = await post('/api/release-stale', { by: 'general', scope: 'default', olderThan: 1 })
+    assert.equal(staleSecond.status, 200)
+    assert.equal((staleSecond.body.task?.released ?? staleSecond.body.released ?? []).includes('T-old-orphan'), false,
+      '第二趟必须已经看不见它（任务已是 todo，不在 in_progress 扫描里）—— 这就是"先跑的那条决定结局"')
+    assert.equal(hub.db.prepare("SELECT state FROM write_reservations WHERE task_id='T-old-orphan' ORDER BY id DESC LIMIT 1").get().state, 'released',
+      '老孤儿必须被**真释放**：守护手里是"宿主刚重启"这条证明，不是"很久没进展"这条猜测')
+    assert.equal((await post('/api/claim', { id: 'T-old-orphan', by: 'worker', scope: 'default' })).status, 200,
+      '老孤儿释放后必须能立即重认领 —— 否则它就和 T-189 一样，要人工解锁才能再动')
+
+    // ⑯④ 反序（超龄先跑）⇒ 冻结，且**「带 ids」那条再也看不到它**。这一半解释"次序为什么不能反"。
+    ins.run('T-old-orphan-rev', 'old orphan reversed', 'todo', 'default', 0)
+    await post('/api/tasks/T-old-orphan-rev/write-intent', { by: 'planner', scope: 'default', paths: ['src/old-orphan-rev.mjs'] })
+    assert.equal((await post('/api/claim', { id: 'T-old-orphan-rev', by: 'worker', scope: 'default' })).status, 200)
+    hub.db.prepare("UPDATE tasks SET claimedAt=? WHERE id='T-old-orphan-rev'").run(new Date(Date.now() - 3600_000).toISOString())
+    const staleFirst = await post('/api/release-stale', { by: 'general', scope: 'default', olderThan: 1 })
+    assert.equal(staleFirst.status, 200)
+    assert.ok((staleFirst.body.task?.released ?? staleFirst.body.released ?? []).includes('T-old-orphan-rev'))
+    const orphanSecond = await post('/api/release-stale', { by: 'general', scope: 'default', olderThan: 1, ids: ['T-old-orphan-rev'] })
+    assert.equal((orphanSecond.body.task?.released ?? orphanSecond.body.released ?? []).includes('T-old-orphan-rev'), false,
+      '反序下「带 ids」那条必然扑空：任务已被超龄那条改回 todo，不再是 in_progress —— 这正是 T-189 的现场')
+    assert.equal(hub.db.prepare("SELECT state FROM write_reservations WHERE task_id='T-old-orphan-rev' ORDER BY id DESC LIMIT 1").get().state, 'reconciling',
+      '反序的结局是冻结（必须人工 confirm-stopped）—— ③ 与 ④ 合起来，才是"守护必须把孤儿回收排在超龄回收之前"的判据')
+    assert.equal((await post('/api/claim', { id: 'T-old-orphan-rev', by: 'worker', scope: 'default' })).status, 409)
+
     // ── ⑰ BUG-007：超时结算的诚实出口（in_progress → todo，by = 执行者本人）──────────────
     //
     // 现场记录 docs/bugs/BUG-007-timeout-reservation-not-released.md。守护 worker 超时（25 分钟）

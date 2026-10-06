@@ -3650,8 +3650,23 @@ function spaceWorker(ctx: AppContext, config: Config): void {
 
       // 0/0.5 认领租约回收 + 守护重启孤儿回收已拆到 ./reclamation.ts（仓储边界）；
       // 原始注释（hub 模式为何不动本地库、孤儿回收为何必须在第一轮、为何要同步本轮快照）随代码搬入该模块。
-      await reclamation.reclaimStaleLeases(byId)
+      //
+      // ★ BUG-012：这两行的**先后不能换回来**。它们是两种强度不同的证据，配的也是两种处理：
+      //   · `reclaimBootOrphans`（带 ids）= **证明**：本进程刚重启 ⇒ 上一轮 worker 已随进程消失
+      //     ⇒ Hub 真释放预约（`cancelled: false`，见 server.mjs 的 `/api/release-stale`），
+      //     任务下一轮就能重认领；
+      //   · `reclaimStaleLeases`（按超龄/TTL）= **猜测**：只知"很久没进展"，**慢 worker 可能还在写**
+      //     ⇒ Hub 把写入资格**冻结**成 `reconciling`，必须人工 `confirm-stopped` 才能再认领
+      //     （这是 T-170 的核心不变量：宁要人工解锁，不要两个写者）。
+      //
+      //   而**猜测**一旦先跑，就会把**证明**的入口关掉 —— 因为两者读的是同一批对象：
+      //   下面 `const byId = new Map(tasks.map(t => [t.id, t]))` 的值就是 `tasks` 里的那些对象，
+      //   所以超龄那条把任务改成 `todo` 之后，孤儿回收那句 `status === 'in_progress'` 就再也看不到它。
+      //   于是**越老的孤儿越一定被冻结**：老，正是超龄那条的命中条件。
+      //   实测（2026-10-06）：T-189 因此被冻结 7 小时、850 次认领失败，它的整仓独占预约把 T-190
+      //   一起堵死，整个 software 空间零进展。详见 docs/bugs/BUG-012-boot-orphan-reclaim-order.md。
       await reclamation.reclaimBootOrphans(tasks, byId)
+      await reclamation.reclaimStaleLeases(byId)
 
       // 1/2/3 任务迁移决策（todo 认领派工 / blocked 解阻续做 / in_progress 退回纠错·调解重派·中止退避）
       // 已拆到 ./stateMachine.ts（状态机边界）；原始注释（含 T-117 现场与退回/退避口径）随代码搬入该模块。

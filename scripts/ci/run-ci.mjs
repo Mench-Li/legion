@@ -1519,6 +1519,10 @@ async function stageTest() {
     // 接回下一环**；闸门评论原先漏了这一步，于是人合入之后下游被静默跳过（T-178 的代码审查环）。
     // 这组用例按源码钉住"恢复指引"与"停摆读数"不被删掉（手法同 model-config 的 routeAssemblySource）。
     { label: 'pipeline-resume-guidance（BUG-010：异常停摆后的恢复指引与可见读数）', files: ['plugins/tests/pipeline-resume-guidance.test.mjs'], cwd: ROOT },
+    // BUG-012：两条租约回收**各自都对、次序反了**，于是按超龄猜的那条先把任务改成 todo 并冻结写入资格，
+    // 按重启确定的那条（真释放）随后按 `status === 'in_progress'` 再也看不到它 ⇒ 老孤儿被冻结、整空间停摆。
+    // 行为侧的组合判据在 `claim-reservation.e2e.test.mjs` 的 ⑯③④；这两行是**调用点**，只有源码判据钉得住。
+    { label: 'boot-orphan-reclaim-order（BUG-012：孤儿回收必须排在超龄回收之前）', files: ['plugins/tests/boot-orphan-reclaim-order.test.mjs'], cwd: ROOT },
     { label: 'legacy-convergence（S6 唯一集成入口/模式收敛/回滚）', files: ['plugins/tests/legacy-convergence.test.mjs'], cwd: ROOT, nodeArgs: ['--experimental-strip-types'] },
     { label: 'delivery-ui（S7 交付/调度徽标前端纯函数）', files: ['workbench/scripts/delivery-ui.test.mjs'], cwd: ROOT, nodeArgs: ['--experimental-strip-types'] },
     // `dual-write-smoke` 守「两个进程同时启动、迁移同一新库」的**行为**，

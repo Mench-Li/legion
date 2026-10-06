@@ -86,6 +86,11 @@ export const SCHEMA = defineSchema({
     //     回的码（与 product/local-auth.mjs 的 DESKTOP_* 同族；那条 desktop 线正在撤，
     //     但**产出这个码的代码还在**，因此登记也必须还在）。
     'COMMIT', 'ROLLBACK', 'DESKTOP_AUTH_REQUIRED',
+    // ── 远程 Agent 通道：指挥台侧的连接状态码 ──
+    //   · HUB_UNREACHABLE —— workbench/src/identity.ts 的 `IdentityRequestError.code`：
+    //     "连不上 Hub"与"服务器拒绝了这次请求"是**两件事**（前者要等/重试，后者要改东西），
+    //     所以 fetch 抛错时给一个具名的码而不是一句自由文本。形如 env 键，但不是配置。
+    'HUB_UNREACHABLE',
   ],
   // 前缀撞名的外部变量：DSH 宿主自己用 DSH_WEB_URL 表示「Web GUI 地址」，
   // 与 workbench 的 DSH_WEB_*（P2-8 浏览器助手配置）同名空间重叠。它不属于 workbench 的配置面，

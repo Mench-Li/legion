@@ -169,6 +169,45 @@ export const SCHEMA = defineSchema({
         + '★ 必须以 `sensitive: true` 声明：否则 `config check --json` 会把值原样打进'
         + '产品进程的 `values` 里',
     },
+
+    // ── 服务器运维脚本（`product/server/`）自用的开关 ──
+    //
+    // 这一族与上面那些**不是一回事**：上面是 Legion 进程从 Launcher 拿到的配置，
+    // 而这几个是**人手工在服务器上跑脚本时**给的参数。它们既没有 `--flag` 形式，
+    // 也不是产品配置面，但既然是 `process.env.X` 的读取点，就得声明——
+    // 不声明时 `scan --check` 会红，而红的原因是"有人漏登记"，那是**假的**。
+    //
+    // 逐个说明它替的是哪个参数：
+    {
+      key: 'serverHub', env: 'HUB', type: 'string', default: '', owner: '运维脚本（人工执行）',
+      doc: '运维脚本要打的 Hub 基址（`_phone-act.mjs`）。默认 `http://127.0.0.1:8787`。'
+        + '★ 名字太短（`HUB`）是**既有形状**，本次只登记不改名：改名会让已经在用的脚本失效',
+    },
+    {
+      key: 'serverPasswordFile', env: 'PW_FILE', type: 'path', default: '', owner: '运维脚本（人工执行）',
+      doc: '管理员口令文件路径（`_phone-act.mjs`）。默认 `/etc/legion-hub/first-admin-password.txt`',
+    },
+    {
+      key: 'serverAdminPasswordFile', env: 'LEGION_PW_FILE', type: 'path', default: '', owner: '运维脚本（人工执行）',
+      doc: '同上（`verify-phone.mjs` 的写法）。两个名字并存是因为两个脚本各写了一次——'
+        + '登记它们不等于认可这个重复，是先把事实记下来再谈收敛',
+    },
+    {
+      key: 'serverAdminName', env: 'LEGION_ADMIN_NAME', type: 'string', default: '', owner: '运维脚本（人工执行）',
+      doc: '验收/装包脚本用哪个管理员账号登录（默认 `legion`）',
+    },
+    {
+      key: 'serverSpace', env: 'LEGION_SPACE', type: 'string', default: '', owner: '运维脚本（人工执行）',
+      doc: '验收脚本打哪个空间（默认 `default`）',
+    },
+    {
+      key: 'serverScope', env: 'SCOPE', type: 'string', default: '', owner: '运维脚本（人工执行）',
+      doc: '同上（`_phone-act.mjs` 的写法）。与 `LEGION_SPACE` 是同一个东西的两个名字',
+    },
+    {
+      key: 'serverAgentRole', env: 'AGENT_ROLE', type: 'string', default: '', owner: '运维脚本（人工执行）',
+      doc: '`_phone-act.mjs` 拿哪个岗位的 Agent 做验证（默认 `coder`）',
+    },
   ],
   // ── 动态下标读取（本批起 `scan --check` 强制登记）────────────────────
   //
@@ -1188,6 +1227,31 @@ export const SCHEMA = defineSchema({
     'PLAN_CLI_MODE_UNKNOWN',
     'PLAN_CLI_NOT_TEXT',
     'PLAN_CLI_RENDER_FAILED',
+
+    // ── 服务器运维脚本（`product/server/`）──
+    //
+    // 这一族与其他族不同：它们是**部署到服务器上、由人手工跑的一次性脚本**
+    // （备份 / 异地同步 / 恢复演练 / 验收），不是 Legion 进程的一部分。
+    // 所以它们的"配置"来自命令行参数与自己的小 env，而不是 Launcher 注入。
+    //
+    //   · OFFSITE_* —— offsite.mjs 的具名拒因。每一条对应一个**不会自己暴露**的
+    //     错误：明文备份（`PLAINTEXT_IS_NEWEST`）、口令被一起传上去
+    //     （`PASSPHRASE_IN_SOURCE`，传了它异地加密就等于没加密而文件看着仍是 .gpg）、
+    //     目标其实是本机路径（`TARGET_NOT_REMOTE`）、读回来对不上
+    //     （`READBACK_MISMATCH`）…… 逐条都要能被人读出来才知道该修哪。
+    //   · CREDENTIALS_* —— read-credentials.mjs 的取值断言。它拦的是"取到的值不是
+    //     我以为的那个"（首尾空白、不可打印字符），而那类错误只会表现为十分钟后
+    //     一句"口令不正确"。
+    //   · AES256 —— `gpg --cipher-algo AES256` 算**算法名**，不是配置项。
+    //   · SPACE_FORBIDDEN —— verify-phone.mjs 断言空间级授权时引用的**同名字符串**
+    //     （与 team-hub 侧那个是同一个约定，验收脚本按它判断"拒得对不对"）。
+    'OFFSITE_BACKUP_STALE', 'OFFSITE_BAD_ARG', 'OFFSITE_NO_ENCRYPTED_BACKUP',
+    'OFFSITE_PASSPHRASE_IN_SOURCE', 'OFFSITE_PASSPHRASE_MISSING', 'OFFSITE_PLAINTEXT_IS_NEWEST',
+    'OFFSITE_PRUNE_FAILED', 'OFFSITE_RCLONE_MISSING', 'OFFSITE_READBACK_MISMATCH',
+    'OFFSITE_READBACK_UNUSABLE', 'OFFSITE_TARGET_NOT_REMOTE', 'OFFSITE_UPLOAD_FAILED',
+    'CREDENTIALS_BAD_JSON', 'CREDENTIALS_MISSING_PASSWORD', 'CREDENTIALS_NOT_FOUND',
+    'CREDENTIALS_SURROUNDING_WHITESPACE', 'CREDENTIALS_UNPRINTABLE',
+    'AES256', 'SPACE_FORBIDDEN',
   ],
   injects: [
     { target: 'team-hub', env: 'TEAM_HUB_PORT', via: 'env', from: 'ports.team-hub', note: '端口由 Launcher 决定，不由各进程的代码默认值决定' },

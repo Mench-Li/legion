@@ -735,6 +735,28 @@ export const SCHEMA = defineSchema({
     //   NO_DOMAIN             — 没声明域，不参与判定
     //   UNKNOWN               — 探不到 git（没绑定 / 非 git 仓库 / 命令出错）⇒ **不知道**，放行
     'DOMAIN_ALL_IGNORED', 'DOMAIN_PARTLY_IGNORED', 'DOMAIN_OK', 'NO_DOMAIN', 'UNKNOWN',
+
+    // ── 远程 Agent 通道（S-B/S-D/S-E）的具名码 ──
+    //
+    // 全是形状像 env 键（全大写 + 下划线）的**结论名**，没有一条是 `process.env.X`：
+    //   · IDENTITY_* —— user-store.mjs 的身份族拒绝理由。其中 REGISTRATION_* 与
+    //     RESET_* 是"注册/口令重置"那两条路新加的（见 specs 的实施计划）；
+    //     SPACE_NOT_FOUND / SPACE_REQUIRED 是**目标空间解析**的两种拒因
+    //     （写错一个字母 vs 有多个空间没说清），它们分开报是为了给出不同的补救话术。
+    //   · SPACE_FORBIDDEN —— 门禁的空间级授权拒绝（设计文档 §13「一个项目的 Agent
+    //     无权读取未授权项目」），由 remote-auth 与路由层共用同一个字符串。
+    //   · NODE_* —— Node 网关/上下文/回收三处的诊断结论。NODE_CONTEXT_* 是
+    //     "Hub 侧装配上下文快照"那一段的失败分类（缺席的来源**不静默消失**）；
+    //     NODE_PUMP_FAILED / NODE_RECOVERY_SWEEP_FAILED 是后台作业的崩溃码。
+    //   · BAD_RECOVERY_STATES —— run-store.recoverExpired 的状态收窄入参非法
+    //     （空数组在 SQLite 里 `IN ()` 恒为假，那会伪装成"成功地什么都没做"）。
+    'IDENTITY_INVITE_REQUIRED', 'IDENTITY_REGISTRATION_CLOSED', 'IDENTITY_REGISTRATION_RATE_LIMITED',
+    'IDENTITY_RESET_CONSUMED', 'IDENTITY_RESET_EXPIRED', 'IDENTITY_RESET_NOT_FOUND',
+    'IDENTITY_SPACE_NOT_FOUND', 'IDENTITY_SPACE_REQUIRED', 'IDENTITY_WRONG_PASSWORD',
+    'SPACE_FORBIDDEN', 'BAD_RECOVERY_STATES',
+    'NODE_CONTEXT_ASSEMBLY_FAILED', 'NODE_CONTEXT_BAD_WIRING', 'NODE_CONTEXT_NOT_FROZEN',
+    'NODE_CONTEXT_PERSIST_FAILED', 'NODE_CONTEXT_SOURCES_UNAVAILABLE', 'NODE_CONTEXT_TASK_UNAVAILABLE',
+    'NODE_PROGRESS_PROJECTION_FAILED', 'NODE_PUMP_FAILED', 'NODE_RECOVERY_SWEEP_FAILED',
   ],
   // team-hub 的 CHAT_ 前缀覆盖了插件的提示词预算变量（CHAT_CTX_*）：它们是**插件**读的配置，
   // team-hub 不读，登记为外来变量，避免误报成「拼写错误」（P3-4）。

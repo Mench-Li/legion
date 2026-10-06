@@ -197,7 +197,7 @@ export const Config = z.object({
   logFile: z.string().default(''),
   hubUrl: z.string().default(''),
   hubToken: z.string().default(''),
-  scope: z.string().default('default'),
+  scope: z.string().default(''),
   agentNodeId: z.string().default(''),
   sliceCoderSlots: z.number().min(0).max(8).default(2),
   sliceTesterSlots: z.number().min(0).max(8).default(2),
@@ -677,14 +677,40 @@ function spaceWorker(ctx: AppContext, config: Config): void {
     }
   }
 
+  /**
+   * hub 读请求的鉴权头。**读与写一样需要它。**
+   *
+   * ## 为什么这一行必须存在（实测）
+   *
+   * 此前全插件的**读**路径（`/api/board`、`/api/skills`、`/api/goal`、
+   * `/api/pipeline`、`/api/rules`）都**不带任何鉴权头**，只有写路径
+   * （`hubPost`）带了。
+   *
+   * 这个不对称在**回环 + 门禁关着**的本机部署上侥幸能用——`readAuthRequired()`
+   * 只对非回环生效。但一旦 hub 那边开了 `LEGION_REMOTE_AUTH`（远程门禁），
+   * 门禁对**所有**非公开路径要求令牌，回环也一样。于是 worker 每 30 秒
+   * 打一行 `list 失败：hub board 失败（401）`，**而它看起来只是"hub 拒绝了"**。
+   *
+   *   > 一个"读路径不带令牌、写路径带"的客户端，
+   *   > 与一个"鉴权完全不工作"的客户端，在只测过写的环境里是同一个东西——
+   *   > 只不过前者只在**换了一个 hub 之后**才现形。
+   *
+   * 远程 Agent 通道把 hub 从"本机回环"搬到了"公网 + 门禁"，这条不对称
+   * 因此从"侥幸"变成了"必然失败"：手机派的单永远到不了电脑。
+   *
+   * 空 token 时不发这个头（无鉴权部署仍照常工作）。
+   */
+  function hubHeaders(extra: Record<string, string> = {}): Record<string, string> {
+    return config.hubToken !== ''
+      ? { ...extra, authorization: `Bearer ${config.hubToken}` }
+      : extra
+  }
+
   /** hub 写调用（POST，带 token；body 里带 by + scope）。 */
   async function hubPost(path: string, body: Record<string, unknown>): Promise<unknown> {
     const res = await fetch(`${hubUrl}${path}`, {
       method: 'POST',
-      headers: {
-        'content-type': 'application/json',
-        ...(config.hubToken !== '' ? { authorization: `Bearer ${config.hubToken}` } : {}),
-      },
+      headers: hubHeaders({ 'content-type': 'application/json' }),
       body: JSON.stringify(body),
     })
     const data = await res.json().catch(() => ({})) as Record<string, unknown>
@@ -694,7 +720,7 @@ function spaceWorker(ctx: AppContext, config: Config): void {
 
   /** hub 读任务列表（按 scope 过滤；公共调解员模式按传入 scope 跨空间拉取）。 */
   async function hubList(scopeFor: string = scope): Promise<Task[]> {
-    const res = await fetch(`${hubUrl}/api/board?scope=${encodeURIComponent(scopeFor)}`)
+    const res = await fetch(`${hubUrl}/api/board?scope=${encodeURIComponent(scopeFor)}`, { headers: hubHeaders() })
     if (!res.ok) throw new Error(`hub board 失败（${res.status}）`)
     return res.json() as Promise<Task[]>
   }
@@ -705,7 +731,7 @@ function spaceWorker(ctx: AppContext, config: Config): void {
   async function fetchSkills(): Promise<void> {
     if (!useHub) return
     try {
-      const res = await fetch(`${hubUrl}/api/skills?scope=${encodeURIComponent(scope)}&member=${encodeURIComponent(config.role)}`)
+      const res = await fetch(`${hubUrl}/api/skills?scope=${encodeURIComponent(scope)}&member=${encodeURIComponent(config.role)}`, { headers: hubHeaders() })
       if (!res.ok) return // 拉取失败：保留旧缓存（TC-S3-05）
       const skills = await res.json() as SkillRef[]
       if (skillsChanged(sharedSkills, skills)) {
@@ -731,7 +757,7 @@ function spaceWorker(ctx: AppContext, config: Config): void {
   const getWorkflowCancellationState = async (id: string): Promise<Task & { goalStatus?: string | null }> => {
     const task = await getTask(id, scope)
     if (!useHub || !task.goalId) return task
-    const response = await fetch(`${hubUrl}/api/goal?scope=${encodeURIComponent(scope)}`, { signal: AbortSignal.timeout(5000) })
+    const response = await fetch(`${hubUrl}/api/goal?scope=${encodeURIComponent(scope)}`, { headers: hubHeaders(), signal: AbortSignal.timeout(5000) })
     if (!response.ok) throw new Error(`hub goal status failed (${response.status})`)
     const data = await response.json() as { goals?: Array<{ id?: string; status?: string }> }
     const goal = data.goals?.find(item => item.id === task.goalId)
@@ -795,7 +821,7 @@ function spaceWorker(ctx: AppContext, config: Config): void {
   async function refreshPipelineFromHub(): Promise<void> {
     if (!useHub || config.mode === 'mediator') return
     try {
-      const res = await fetch(`${hubUrl}/api/pipeline?scope=${encodeURIComponent(scope)}&include=active`)
+      const res = await fetch(`${hubUrl}/api/pipeline?scope=${encodeURIComponent(scope)}&include=active`, { headers: hubHeaders() })
       if (!res.ok) return // hub 不可达/4xx：沿用当前来源（含部署面兜底），不降级为单角色
       const data = await res.json() as { version?: unknown; stages?: unknown; workflow?: unknown }
       const stages = stagesFromHubPayload(data.stages)
@@ -823,7 +849,21 @@ function spaceWorker(ctx: AppContext, config: Config): void {
 
   // 项目 scope：显式配置优先，否则用部署面 roles.json 的 name（软件流水线 = software），再否则 default。
   // 注意：scope 在数据面流水线加载之前就需要确定（它是拉取 key），因此这里刻意只看部署面文件。
-  const scope = config.scope !== 'default' ? config.scope : (filePipeline?.name ?? 'default')
+  //
+  // ★ 哨兵值从 `'default'` 改成 `''`（2026-10-06 实测）。
+  //
+  //   原来写的是 `config.scope !== 'default' ? …`，也就是说**字符串 `'default'`
+  //   同时表示"一个叫 default 的空间"和"没配"**。这两个意思撞在一起时，
+  //   后者赢——而用户看到的是"我明明把 scope 配成了 default，它却跑在别的空间上"。
+  //
+  //   > 一个把"没配"编码成一个**合法取值**的哨兵，
+  //   > 与一个"这个配置项根本不生效"的哨兵，在用户那边是同一个东西——
+  //   > 只不过前者只在有人想用那个取值时才现形。
+  //
+  //   实测场景：远端 Hub 上的空间就叫 `default`（`first-space.pack.json` 建的），
+  //   而本机 `roles.json` 的 name 是 `software` ⇒ worker 永远在 `software` 上扫单，
+  //   手机在 `default` 里派的单**永远到不了电脑**，而两端日志都"正常"。
+  const scope = config.scope !== '' ? config.scope : (filePipeline?.name ?? 'default')
 
   const activeWriteGuards = new Map<string, GrantedWrite>()
   const childTaskIds = new Map<string, string>()
@@ -831,7 +871,7 @@ function spaceWorker(ctx: AppContext, config: Config): void {
     if (!useHub) return null
     try {
       const res = await fetch(`${hubUrl}/api/tasks/${encodeURIComponent(taskId)}/reservation`, {
-        headers: config.hubToken ? { authorization: `Bearer ${config.hubToken}` } : {},
+        headers: hubHeaders(),
         signal: AbortSignal.timeout(5000),
       })
       if (!res.ok) return null
@@ -1320,7 +1360,7 @@ function spaceWorker(ctx: AppContext, config: Config): void {
   async function refreshNorms(): Promise<void> {
     if (!useHub) return
     try {
-      const res = await fetch(`${hubUrl}/api/rules?scope=global`)
+      const res = await fetch(`${hubUrl}/api/rules?scope=global`, { headers: hubHeaders() })
       if (!res.ok) return // 保留旧缓存
       const data = await res.json() as { rules?: { content?: string } }
       normsGlobalText = typeof data.rules?.content === 'string' ? data.rules.content : ''
@@ -1442,7 +1482,7 @@ function spaceWorker(ctx: AppContext, config: Config): void {
   async function fetchGoals(): Promise<void> {
     if (!useHub) return
     try {
-      const res = await fetch(`${hubUrl}/api/goal?scope=${encodeURIComponent(scope)}`)
+      const res = await fetch(`${hubUrl}/api/goal?scope=${encodeURIComponent(scope)}`, { headers: hubHeaders() })
       if (!res.ok) return
       const data = await res.json().catch(() => null) as { goals?: GoalCtx[] } | null
       if (!data || !Array.isArray(data.goals)) return
@@ -1461,7 +1501,7 @@ function spaceWorker(ctx: AppContext, config: Config): void {
   async function fetchGoalById(goalId: string): Promise<GoalCtx | undefined> {
     if (!useHub) return undefined
     try {
-      const res = await fetch(`${hubUrl}/api/goal?scope=${encodeURIComponent(scope)}`)
+      const res = await fetch(`${hubUrl}/api/goal?scope=${encodeURIComponent(scope)}`, { headers: hubHeaders() })
       if (!res.ok) return undefined
       const data = await res.json().catch(() => null) as { goals?: GoalCtx[] } | null
       const hit = data?.goals?.find(x => x.id === goalId)

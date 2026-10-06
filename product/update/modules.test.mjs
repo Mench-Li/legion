@@ -941,3 +941,138 @@ test('★★★★ 桌面端的"检查更新"必须走 `manualCheck`，不能直
   assert.match(code, /\bclient\.manualCheck\s*\(/,
     '桌面端没有调用 client.manualCheck() —— 那么上面那条"没调低层 check"是空过的')
 })
+
+// ---------------------------------------------------------------------------
+// ★★★★ 引用的**输入文档**必须在树里（否则那句"依据原话"无法复核）
+// ---------------------------------------------------------------------------
+
+/**
+ * 找出"引用了本仓不存在的**日期命名文档**"的地方。
+ *
+ * ★★★ 这条判据的来历：本目标有两份输入文档，其中
+ *   `2026-10-04-update-host-bootstrap.md` **连主仓都没有跟踪**（它是未跟踪的
+ *   工作区文件），而本分支有 **5 个已跟踪文件**引用它——包括
+ *   `modules.test.mjs` 里那条 TLS 判据的理由：
+ *
+ *   > 依据是本目标第二份文档（`2026-10-04-update-host-bootstrap.md`）最后一段的原话：
+ *   > 「没有域名时不把自签证书或关闭证书验证作为正式方案。」
+ *
+ *   于是"这句原话"在分支里**找不到出处**。这与 ㊼/㊽ 是同一个族的第三个层次：
+ *
+ *     | # | 悬空的是什么 |
+ *     |---|---|
+ *     | ㊼ | 证据的地址（`transport.test.mjs`） |
+ *     | ㊽ | 承诺的判据（`closure.test.mjs`） |
+ *     | 这里 | 依据的**文档本身** |
+ *
+ *   > 一个"依据某文档原话"的判据，如果那份文档不在树里，
+ *   > 复核它的人只能选择相信作者——而那正是判据本来要避免的事。
+ *
+ * ## 为什么只查**日期命名**的 .md
+ *
+ * 实测：全仓还有十几个"缺失的 .md 引用"，但它们是**测试夹具**刻意用的名字
+ * （`b.md`、`nope.md`、`poison.md`、`secret.md`、`FAKE-generated.md`…）——
+ * 它们**必须**不存在。一条"所有 .md 都要在"的判据会被这些假阳性淹没，
+ * 然后被人关掉。
+ *
+ * 而 `2026-10-04-….md` 这种**日期前缀**是真实文档的构造方式：本仓的计划与
+ * 设计文档全部这样命名，没有一个是夹具。所以这条判据只查日期命名的那一类——
+ * **窄，但真**。
+ */
+function findMissingDatedDocs({ files, existsInRepo }) {
+  const findings = []
+  const dated = /\b(\d{4}-\d{2}-\d{2}-[A-Za-z0-9._-]+\.md)\b/g
+  for (const [rel, text] of Object.entries(files)) {
+    for (const match of text.matchAll(dated)) {
+      const ref = match[1]
+      if (!existsInRepo(ref)) findings.push(Object.freeze({ file: rel, ref }))
+    }
+  }
+  return findings
+}
+
+test('★★★★ 引用的日期命名文档必须真的在树里（`update-host-bootstrap.md` 那次）', async () => {
+  const { execFileSync } = await import('node:child_process')
+  const { readFileSync } = await import('node:fs')
+  const root = fileURLToPath(new URL('../../', import.meta.url))
+
+  // ── ① ★ 正对照：引用一个不存在的日期文档必须被抓到 ──
+  //
+  //   ★★ 这个文件名**必须拼出来**，不能写成整字面量。
+  //
+  //     第一版我写的是字面量，于是这条判据**抓到了它自己**：
+  //     `modules.test.mjs` 是它要扫的文件之一，而那个字面量就在里面。
+  //     症状是"真仓里发现一个不存在的日期文档"，而报出来的文件名正是
+  //     我刚编的那个——同一轮里第**四**次踩这个形状。
+  //
+  //     ★ 为什么这里**不能**用 `codeOnly()`（第 53 条那个助手）：
+  //       那条助手是把**注释**挖空，而这条判据要扫的引用**恰恰住在注释里**
+  //       （"依据某文档原话"就是一句注释）。挖空注释 = 把这条判据变成空跑。
+  //
+  //       > 同一个坑，两条判据要用**相反**的解法：
+  //       > 一条要挖空注释（引用在代码里），一条要**拼出字面量**（引用在注释里）。
+  //       > 照抄上一条的修法，会把这一条修成永远绿。
+  {
+    const noSuchDoc = ['2026', '01', '01-no-such-plan.md'].join('-')
+    const fake = { 'x.mjs': `// 依据 ${noSuchDoc} 的原话\n` }
+    const found = findMissingDatedDocs({
+      files: fake,
+      existsInRepo: () => false,
+    })
+    assert.equal(found.length, 1, `正对照失败：${JSON.stringify(found)}`)
+    assert.equal(found[0].ref, noSuchDoc)
+  }
+
+  // ── ② 反对照：**夹具式的名字**不许被报（它们必须不存在）──
+  {
+    const fake = {
+      'x.mjs': 'const names = ["b.md", "nope.md", "poison.md", "FAKE-generated.md"]\n'
+        + `// 依据 ${['2026-10-02-legion-desktop-auto-update-design.md'].join('')}\n`,
+    }
+    const found = findMissingDatedDocs({
+      files: fake,
+      existsInRepo: (ref) => ref === '2026-10-02-legion-desktop-auto-update-design.md',
+    })
+    assert.deepEqual([...found], [],
+      `反对照失败：夹具名被误报 → ${JSON.stringify(found)}`)
+  }
+
+  // ── ③ 真仓：扫本功能的代码与实施记录 ──
+  const tracked = execFileSync('git', ['ls-files'], { cwd: root, encoding: 'utf8' })
+    .split('\n').map((s) => s.trim()).filter(Boolean)
+  const trackedSet = new Set(tracked)
+  const basenames = new Set(tracked.map((p) => p.slice(p.lastIndexOf('/') + 1)))
+
+  const scan = [
+    'product/update/client.mjs', 'product/update/modules.test.mjs',
+    'product/update/envelope.mjs', 'product/update/transport.mjs',
+    'scripts/update/host-config.mjs', 'scripts/update/publish.mjs',
+    'docs/superpowers/plans/2026-10-04-auto-update-implementation.md',
+  ]
+  const files = {}
+  for (const rel of scan) {
+    try { files[rel] = readFileSync(`${root}${rel}`, 'utf8') } catch { /* 不在就跳过 */ }
+  }
+  // ★ 读数：至少读到一条，否则"没问题"只是"没读"。
+  assert.ok(Object.keys(files).length >= 5,
+    `只读到 ${Object.keys(files).length} 个文件，这条判据几乎没扫东西`)
+
+  const findings = findMissingDatedDocs({
+    files,
+    // 日期文档按**文件名**判定（引用里通常只写文件名，路径随文档移动而变）。
+    existsInRepo: (ref) => trackedSet.has(ref) || basenames.has(ref),
+  })
+  assert.deepEqual([...findings], [],
+    '引用了树里不存在的日期命名文档（那句"依据原话"无法复核）：\n'
+    + findings.map((f) => `  ${f.file} → ${f.ref}`).join('\n'))
+
+  // ── ④ ★ 而那句被引用的原话必须**真的能读到**（不只是文件在）──
+  //
+  //   ★ 这一半是必要的：文件在、但里面没有那句话，与文件不在，对复核者
+  //     是同一件事。所以直接去读那一句。
+  const doc = readFileSync(`${root}docs/superpowers/plans/2026-10-04-update-host-bootstrap.md`, 'utf8')
+  assert.match(doc, /没有域名时不把自签证书或关闭证书验证作为正式方案/,
+    'bootstrap 文档在树里，但 `modules.test.mjs` 引用的那句原话不在里面')
+  assert.match(doc, /正式环境必须使用可信 HTTPS/,
+    'bootstrap 文档缺少"正式环境必须使用可信 HTTPS"那一句')
+})

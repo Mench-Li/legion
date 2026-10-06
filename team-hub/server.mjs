@@ -7766,14 +7766,40 @@ function projectProgressToConversation({ taskId, scope, frame }) {
   )
 }
 
-/** 网关需要一个任务摘要端口（它不认识 `tasks` 表的列）。 */
+/**
+ * 网关需要一个任务摘要端口（它不认识 `tasks` 表的列）。
+ *
+ * ★ `brief` 是**给电脑上真正干活那个程序**的东西，不是给人看的卡片摘要。
+ *
+ * 在这之前，远端只拿到 `{id,title,status,version,role}`——而手机建任务时
+ * `title` 是**用户消息截断到 200 字**，也就是说"做这件事"的全部信息就是那 200 字。
+ * `describeTaskForNode` 原来的注释写着"正文由 claim/上下文包那条路径送"，
+ * 那是**本机**那条路（worker 与 Hub 同进程、同一个库）；远端节点在另一台机器上，
+ * 读不到这个库，所以正文根本没有任何路能到。
+ *
+ *   > 一个"把任务派到电脑上"的协议，与一个"把任务的名字派到电脑上"的协议，
+ *   > 在只跑一次冒烟测试时看起来一模一样——只不过前者能让电脑干活，
+ *   > 后者只能让电脑说"我收到了"。
+ *
+ * 出境范围由**这里**决定（不是由协议层）：只取这条任务自己的字段。
+ * **不取** `comments`（人写的、可能含与任务无关的东西）、不取任何别的空间的数据。
+ * 上下文快照（`run_context_snapshots`）暂不随派发下发——它是 Hub 侧冻结的证据，
+ * 有它自己的读取接口；把整份塞进帧里会让这一帧的大小取决于装配策略，
+ * 而那不是一个协议字段该有的性质。
+ */
 function describeTaskForNode(taskId, scope) {
   try {
-    const t = db.prepare('SELECT id,title,status,version,role,soldier FROM tasks WHERE id=? AND scope=?').get(taskId, scope)
+    const t = db.prepare('SELECT id,title,description,acceptance,boundary,status,version,priority,role,soldier,scope FROM tasks WHERE id=? AND scope=?').get(taskId, scope)
     if (!t) return null
-    // 只给身份与状态。**不给**描述/验收标准/评论——那些可能含用户原文，
-    // 而任务的正文由 `claim`/上下文包那条路径送，不从这里绕。
-    return { id: t.id, title: t.title, status: t.status, version: t.version, role: t.role ?? t.soldier ?? null }
+    const brief = {
+      goal: t.title,
+      description: typeof t.description === 'string' ? t.description : '',
+      acceptance: parseJson(t.acceptance, []).filter((x) => typeof x === 'string').slice(0, 50),
+      priority: t.priority ?? null,
+    }
+    const boundary = parseJson(t.boundary, null)
+    if (Array.isArray(boundary)) brief.boundary = boundary.filter((x) => typeof x === 'string').slice(0, 50)
+    return { id: t.id, title: t.title, status: t.status, version: t.version, role: t.role ?? t.soldier ?? null, brief }
   } catch { return null }
 }
 

@@ -152,10 +152,26 @@ export function createCommandExecutor({
       for (const line of String(chunk).split('\n')) if (line.trim().length > 0) pushLog(line)
     })
 
-    // 任务以 JSON 从 stdin 进去。结束 stdin 是**必要的**：不关的话，
+// 任务以 JSON 从 stdin 进去。结束 stdin 是**必要的**：不关的话，
     // 一个读 stdin 到 EOF 的执行器会一直等，而超时是 30 分钟。
+    //
+    // ★ `brief` 与 `task` **并列**给出，而不是塞进 `task` 里。
+    //
+    //   理由与"为什么 dispatch 帧里 brief 是独立字段"同一条：把新东西塞进一个
+    //   既有结构，会让那个结构在两种版本里形状不同——而读的人无从知道手上这份
+    //   有没有它。并列的字段可以**缺席**（老执行器读不到就用自己的默认），
+    //   而塞进去的字段做不到同样的事。
+    //
+    //   `brief` 就是"做这件事需要知道的全部"：目标、描述、验收标准、边界。
+    //   在它之前，执行器能拿到的只有 `task.title`——而手机建的任务里，
+    //   那是**用户消息截断到 200 字**。
     try {
-      child.stdin.write(JSON.stringify({ task, attempt, workspace: workspace === undefined || workspace === null ? null : { scope: workspace.scope } }))
+      child.stdin.write(JSON.stringify({
+        task,
+        brief: task?.brief ?? null,
+        attempt,
+        workspace: workspace === undefined || workspace === null ? null : { scope: workspace.scope },
+      }))
       child.stdin.end()
     } catch { /* 子进程可能已经退出 */ }
 

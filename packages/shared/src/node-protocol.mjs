@@ -55,6 +55,11 @@ export const LIMITS = Object.freeze({
   reason: 500,
   artifacts: 50,
   ledgerEntries: 500,
+  // 任务简介的每一段上限。**分段限长而不是整包限长**：整包限长时，一段超长
+  // 会把别的段一起挤掉，而"挤掉的是哪一段"取决于哪一段先写——那是不可复现的。
+  briefText: 8000,
+  briefItems: 50,
+  briefItem: 500,
   capabilities: 64,
 })
 
@@ -225,6 +230,63 @@ function checkRequestId(frame) {
   return checkString(frame, 'requestId', { max: LIMITS.requestId })
 }
 
+/**
+ * 任务简介（dispatch 的 `brief`）。**可选**——不带也能派发。
+ *
+ * ## 它为什么必须存在
+ *
+ * 在它之前，派发帧里的 `task` 只有 `{id, title, status, version, role}`。
+ * 而 `title` 在手机建任务那条路上是**用户消息截断到 200 字**——也就是说，
+ * 电脑上真正干活的那个程序能拿到的全部信息，就是这 200 字。
+ *
+ * `describeTaskForNode` 的注释说"任务的正文由 claim/上下文包那条路径送"——
+ * 那是**本机**那条路（worker 与 Hub 同进程、同一个库）。远端节点在**另一台机器**
+ * 上，读不到 Hub 的库，所以正文根本没有任何路能到。
+ *
+ *   > 一个"把任务派到电脑上"的协议，与一个"把任务的名字派到电脑上"的协议，
+ *   > 在只跑一次冒烟测试时看起来一模一样——只不过前者能让电脑干活，
+ *   > 后者只能让电脑说"我收到了"。
+ *
+ * ## 为什么**不**沿用 `describeTaskForNode` 的那条纪律
+ *
+ * 那段注释写着"不给描述/验收标准/评论——那些可能含用户原文"。那条纪律针对的是
+ * **Hub 的 node 网关**（它当时只做身份与路由）。而现在要让电脑干活，正文就是
+ * 必需品。所以这里的纪律换成**出境由发送端决定**：`node-gateway` 组装 brief 时
+ * 只取任务自己的字段，不取评论、不取别的空间的东西；并且**有界**（见 LIMITS）。
+ *
+ * ## 每一段都是有界的，而不是整包有界
+ *
+ * 整包限长时，一段超长会把别的段一起挤掉，而"挤掉的是哪一段"取决于写入顺序——
+ * 那是不可复现的。分段限长让"哪一段被截断"是确定的，也让失败可归因。
+ */
+function checkBrief(brief) {
+  if (brief === undefined || brief === null) return null
+  if (typeof brief !== 'object' || Array.isArray(brief)) {
+    return fail(PROTOCOL_CODES.INVALID_FIELD, 'brief 必须是对象（或省略）')
+  }
+  const text = checkString(brief, 'description', { required: false, max: LIMITS.briefText })
+  if (text) return text
+  const goal = checkString(brief, 'goal', { required: false, max: LIMITS.briefText })
+  if (goal) return goal
+  for (const field of ['acceptance', 'boundary', 'artifacts']) {
+    const v = brief[field]
+    if (v === undefined || v === null) continue
+    if (!Array.isArray(v)) return fail(PROTOCOL_CODES.INVALID_FIELD, `brief.${field} 必须是数组（或省略）`)
+    if (v.length > LIMITS.briefItems) {
+      return fail(PROTOCOL_CODES.TOO_MANY_ITEMS, `brief.${field} 有 ${v.length} 条，超过上限 ${LIMITS.briefItems}`)
+    }
+    for (const item of v) {
+      if (typeof item !== 'string' || item.length === 0) {
+        return fail(PROTOCOL_CODES.INVALID_FIELD, `brief.${field} 的元素必须是非空字符串`)
+      }
+      if (item.length > LIMITS.briefItem) {
+        return fail(PROTOCOL_CODES.FIELD_TOO_LONG, `brief.${field} 的某条长度 ${item.length} 超过上限 ${LIMITS.briefItem}`)
+      }
+    }
+  }
+  return null
+}
+
 // ── 各类型的字段要求 ────────────────────────────────────────────────────────
 
 /**
@@ -262,7 +324,9 @@ const FIELD_RULES = Object.freeze({
   [FRAME_TYPES.DISPATCH]: (f) => {
     const e = checkString(f, 'taskId', { max: LIMITS.taskId }) ?? checkString(f, 'attemptId', { max: LIMITS.attemptId })
     if (e) return e
-    return checkLeaseEpoch(f)
+    const lease = checkLeaseEpoch(f)
+    if (lease) return lease
+    return checkBrief(f.brief)
   },
   [FRAME_TYPES.ACK]: (f) => {
     const e = checkString(f, 'taskId', { max: LIMITS.taskId }) ?? checkString(f, 'attemptId', { max: LIMITS.attemptId })

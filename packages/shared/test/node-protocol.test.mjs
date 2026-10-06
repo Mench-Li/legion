@@ -9,6 +9,7 @@ import assert from 'node:assert/strict'
 import {
   DEFAULT_SEEN_WINDOW,
   FRAME_TYPES,
+  LIMITS,
   MAX_FRAME_BYTES,
   NODE_PHASES,
   NODE_PATH,
@@ -262,4 +263,60 @@ test('buildFrame 拒绝未知类型与缺 requestId', () => {
 test('requestIdFor 可注入随机源', () => {
   assert.equal(requestIdFor('req', () => new Uint8Array(12).fill(0)), 'req-000000000000000000000000')
   assert.match(requestIdFor(), /^req-[0-9a-f]{24}$/)
+})
+
+// ── 任务简介（dispatch 的 brief） ────────────────────────────────────────────
+//
+// 在它之前，远端只拿到 `{id,title,status,version,role}`——而手机建任务时
+// `title` 是**用户消息截断到 200 字**。也就是说电脑上真正干活那个程序能拿到的
+// 全部信息就是那 200 字。
+
+test('brief 可省略（老 Hub 不发它，不该因此判成非法帧）', () => {
+  const base = { v: PROTOCOL_VERSION, type: FRAME_TYPES.DISPATCH, requestId: 'r', nodeId: 'n', taskId: 'T-1', attemptId: 'a-1', leaseEpoch: 1 }
+  assert.equal(validateFrame(JSON.stringify(base), { role: 'node', version: PROTOCOL_VERSION }).ok, true)
+})
+
+test('brief 带上正文、验收标准、边界与优先级', () => {
+  const frame = {
+    v: PROTOCOL_VERSION, type: FRAME_TYPES.DISPATCH, requestId: 'r', nodeId: 'n',
+    taskId: 'T-1', attemptId: 'a-1', leaseEpoch: 1,
+    brief: { goal: '把登录页改一下', description: '正文', acceptance: ['能登录'], boundary: ['不改数据库'], priority: 'high' },
+  }
+  const r = validateFrame(JSON.stringify(frame), { role: 'node', version: PROTOCOL_VERSION })
+  assert.equal(r.ok, true, r.message)
+})
+
+test('★ brief 分段有界：超长的那一段**具名**报出来，而不是整包被拒', () => {
+  // 整包限长时，一段超长会把别的段一起挤掉，而"挤掉的是哪一段"取决于写入顺序
+  // ——那是不可复现的。分段限长让"哪一段超了"是确定的。
+  const mk = (brief) => JSON.stringify({
+    v: PROTOCOL_VERSION, type: FRAME_TYPES.DISPATCH, requestId: 'r', nodeId: 'n',
+    taskId: 'T-1', attemptId: 'a-1', leaseEpoch: 1, brief,
+  })
+  const tooLong = validateFrame(mk({ description: 'x'.repeat(LIMITS.briefText + 1) }), { role: 'node', version: PROTOCOL_VERSION })
+  assert.equal(tooLong.ok, false)
+  assert.equal(tooLong.code, PROTOCOL_CODES.FIELD_TOO_LONG)
+  assert.match(tooLong.message, /description/)
+
+  const tooMany = validateFrame(mk({ acceptance: Array.from({ length: LIMITS.briefItems + 1 }, (_, i) => `a${i}`) }), { role: 'node', version: PROTOCOL_VERSION })
+  assert.equal(tooMany.ok, false)
+  assert.equal(tooMany.code, PROTOCOL_CODES.TOO_MANY_ITEMS)
+  assert.match(tooMany.message, /acceptance/)
+
+  const bigItem = validateFrame(mk({ boundary: ['x'.repeat(LIMITS.briefItem + 1)] }), { role: 'node', version: PROTOCOL_VERSION })
+  assert.equal(bigItem.ok, false)
+  assert.match(bigItem.message, /boundary/)
+})
+
+test('brief 形状不对时报错，不静默丢弃', () => {
+  const mk = (brief) => JSON.stringify({
+    v: PROTOCOL_VERSION, type: FRAME_TYPES.DISPATCH, requestId: 'r', nodeId: 'n',
+    taskId: 'T-1', attemptId: 'a-1', leaseEpoch: 1, brief,
+  })
+  const arr = validateFrame(mk([]), { role: 'node', version: PROTOCOL_VERSION })
+  assert.equal(arr.ok, false)
+  assert.match(arr.message, /brief 必须是对象/)
+  const notArray = validateFrame(mk({ acceptance: '能登录' }), { role: 'node', version: PROTOCOL_VERSION })
+  assert.equal(notArray.ok, false)
+  assert.match(notArray.message, /acceptance 必须是数组/)
 })

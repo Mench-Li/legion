@@ -2186,7 +2186,7 @@ node scripts/update/verify-host.mjs --origin <生产 origin> --prefix /legion \
 # ★ 下面这份清单与 CI 的 `product-update` 套件**不是**同一份，两者都要跑：
 #   这里多跑了 `launcher.test.mjs` / `desktop-bridge.test.mjs` 等接线层，
 #   而 CI 那份多跑了 `errors` / `integration` / `envelope` 等（见 §7.1）。
-#   两个数字应当各自对得上——`product-update` 是 **532**。
+#   两个数字应当各自对得上——`product-update` 是 **533**。
 #
 # ★ 清单里必须包含 `product/launcher/cli-recovery.test.mjs`：它是恢复入口
 #   （设计 §8 line 190）的 9 条用例。**先前这一行漏了它**，于是按本文档
@@ -2200,7 +2200,7 @@ node --test product/update/*.test.mjs product/upgrade/*.test.mjs \
   product/launcher/cli-recovery.test.mjs \
   desktop/scripts/shell-files.test.mjs desktop/scripts/update-payload.test.mjs
 
-# CI 的 `product-update` 套件那一份（**532 条**）。两份都与上面同一棵树上跑过。
+# CI 的 `product-update` 套件那一份（**533 条**）。两份都与上面同一棵树上跑过。
 #
 # ★ 与 §7.1 里那次全量 CI 的读数（406）不同，差的是三次之后才加的东西：
 #   `modules.test.mjs` 的"selfCheckAll() 必须覆盖每一个有自检的模块"、
@@ -2243,7 +2243,7 @@ node --test desktop/scripts/shell-files.test.mjs
 node scripts/ci/run-ci.mjs
 ```
 
-### 7.1 全量 CI 的实际读数（`d8de729b`，53.1 分钟）
+### 7.1 全量 CI 的实际读数（`e09fab78`，57.1 分钟）
 
 ★ 这一节的读数是**最新一次完整跑**。下面还留着前两次（`b41a7a10` / `4e2728cd`）的读数，
 因为两次之间的差集本身是一条判据。
@@ -2257,18 +2257,18 @@ test   FAIL   smoke PASS  stage PASS      doc PASS
 
 ```
 PASS product-update（自动更新：协议验签、下载缓存、状态机、事务与恢复）
-     exit=0 tests=532 pass=532 fail=0 skipped=0
+     exit=0 tests=533 pass=533 fail=0 skipped=0
 PASS desktop-payload-packaging（升级载荷的身份：签名清单描述的东西 =
      x64 安装器交付的东西；载荷里的 dsh 家族必须钉死版本）
      exit=0 tests=3 pass=3 fail=0 skipped=0
 ```
 
-★ 那 532 条与我在本地按**同一份文件清单**跑出来的数字**逐字相同**。这一点值得
+★ 那 533 条与我在本地按**同一份文件清单**跑出来的数字**逐字相同**。这一点值得
 单独记：门禁跑的是它自己在 `run-ci.mjs` 里列的清单，而"我本地跑过了"通常指的
 是另一个集合。两个数字对上，才说明"我验证过的"与"门禁验证的"是同一件事。
 
-★★ **与上一次完整跑（`5f5af8c4`）做差集：红灯清单 37 ↔ 37，`Compare-Object`
-判定**逐条完全一致**（㊿ 只加了一条用例与一条 `.gitignore` 规则）。
+★★ **与上一次完整跑（`d8de729b`）做差集：红灯清单 37 ↔ 37，`Compare-Object`
+判定**逐条完全一致**（51/52 都只加用例，没有增删套件登记）。
 
 ---
 

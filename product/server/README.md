@@ -1,6 +1,8 @@
 # Legion Hub 服务器部署手册
 
-远程 Agent 通道的服务器侧部署。设计依据：
+远程 Agent 通道的服务器侧部署。**配置变量的单一入口是 [CONFIG.md](CONFIG.md)**
+（装了之后要配什么、每个变量的后果、密钥轮换的代价）；备份与异地见 [BACKUP.md](BACKUP.md)。
+设计依据：
 [个人服务器、个人电脑与手机协同架构设计](../../docs/superpowers/specs/2026-10-02-legion-server-pc-mobile-agent-architecture.md)，
 实施计划：[2026-10-04-legion-server-pc-mobile-agent-implementation.md](../../docs/superpowers/plans/2026-10-04-legion-server-pc-mobile-agent-implementation.md)。
 

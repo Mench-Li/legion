@@ -668,7 +668,7 @@ export function createUpdateClient({
    *   **这个参数还在**——于是"接回去"只需要在调用点加一个参数。删掉它，
    *   那个决定就不再是"没人这么做"，而是"做不到"。
    */
-  async function install(releaseId, manifestDigest, { onProgress = null, signal = null } = {}) {
+  async function install(releaseId, manifestDigest, { onProgress = null } = {}) {
     const wanted = Object.freeze({
       releaseId, productVersion: candidate?.productVersion ?? null, channel: config?.channel ?? null,
       platform: config?.host?.platform ?? platform, arch: config?.host?.arch ?? arch,
@@ -705,7 +705,10 @@ export function createUpdateClient({
     //     在这里必须给出同一个结论，因为能证明"它没被撤回"的只有通道本身。
     //     这与设计对整条链的要求一致：判据的输入缺失时，缺的不是"便利性"，
     //     而是"这次安装安不安全"。
-    const reconfirm = await readChannelFeed(signal)
+    // ★ 这一步没有"取消"语义：它是一次必须做完的核对（不做完就不能安装）。
+    //   此前这里传的是 `install(..., { signal })` 里的那个 signal，而
+    //   **没有任何调用方提供过它**，下游 `runInstallTransaction` 也从不读它。
+    const reconfirm = await readChannelFeed(null)
     if (!reconfirm.ok) {
       return fail('install', UPDATE_CODES_CLIENT.RECALL_UNVERIFIED,
         `安装前无法确认该版本仍在通道上（${reconfirm.reason}），因此不安装。`
@@ -735,7 +738,6 @@ export function createUpdateClient({
       identity: readyIdentity,
       release,
       packagePath,
-      signal,
       onProgress: (update) => {
         progress = update === null ? null : Object.freeze({ ...update })
         if (typeof onProgress === 'function') onProgress(progress)

@@ -1246,3 +1246,156 @@ test('★★★★ `desktop/helper-entry.mjs` 不许把 helper 的真实现覆�
     assert.deepEqual(caught, [], `反对照失败：不写 unpack 被误报 → ${JSON.stringify(caught)}`)
   }
 })
+
+// ---------------------------------------------------------------------------
+// ★★★★ 生产调用点传的键，必须**真的被那个函数的签名接受**
+// ---------------------------------------------------------------------------
+
+/**
+ * 从 `export (async )?function NAME({` 的参数表里取出**顶层参数名**。
+ *
+ * 只认"恰好 baseIndent 空格缩进"的行，于是嵌套的解构（更深的缩进）不会被算进来。
+ * `param = default` 与简写 `param,` 都算。
+ */
+function signatureParams(source, functionName, baseIndent) {
+  const anchor = source.indexOf('function ' + functionName + '({')
+  if (anchor < 0) return null
+  const end = source.indexOf('} = {}', anchor)
+  if (end < 0) return null
+  const out = new Set()
+  const re = new RegExp('^ {' + baseIndent + '}([A-Za-z_$][\\w$]*)\\s*(?::|,|=|$)')
+  for (const line of source.slice(anchor, end).split('\n')) {
+    const m = re.exec(line)
+    if (m !== null) out.add(m[1])
+  }
+  return out
+}
+
+/**
+ * 从一个对象字面量的源码里取出**顶层键**（含简写键）。
+ *
+ * 用花括号配对切块，而不是"找下一个 `})`"——后者在含嵌套对象时会**提前截断**，
+ * 于是更深层的键会被误当成顶层键（我第一版就是这么错的：把 `paths` 里的
+ * `installDir` 也算了进来，于是差集里多出一串假阳性）。
+ */
+function topLevelKeys(source, startIndex, baseIndent) {
+  const braceStart = source.indexOf('{', startIndex)
+  if (braceStart < 0) return null
+  let depth = 0
+  let end = -1
+  for (let i = braceStart; i < source.length; i += 1) {
+    if (source[i] === '{') depth += 1
+    else if (source[i] === '}') { depth -= 1; if (depth === 0) { end = i; break } }
+  }
+  if (end < 0) return null
+  const block = source.slice(braceStart, end + 1)
+  const out = new Map()
+  const re = new RegExp('^ {' + baseIndent + '}([A-Za-z_$][\\w$]*)\\s*(?::|,|$)')
+  for (const line of block.split('\n')) {
+    const m = re.exec(line)
+    if (m !== null) out.set(m[1], line.trim())
+  }
+  return out
+}
+
+test('★★★★ 生产安装调用点不许传"签名不接受的键"（静默忽略 = 看起来配置了）', async () => {
+  // ★★ 这条判据抓到的是一类**很安静的**缺陷：调用点传了一个键，而那个函数
+  //    从来不读它。传的人以为配置生效了，读的人以为那个行为被设置了。
+  //
+  //    实测抓到两个（都在同一次调用里）：
+  //
+  //      · `requireSignature: false` —— 读起来就是"生产安装不要求验签"。
+  //        它**没有任何效果**：`runInstallTransaction` 不接这个参数，
+  //        而真正决定要不要验签的是它内部的
+  //        `requireSignature: publicKeyPem !== null`。
+  //        ★ 幸运的是方向安全（验签并没有被关掉）——但"看起来关掉了"
+  //        本身就会让下一个人**不去检查验签到底有没有生效**。
+  //
+  //      · `signal` —— 从 `client.install(..., { signal })` 一路透传到
+  //        `installer.install({ signal })` 再到这个调用点，而
+  //        `runInstallTransaction` **一个字节都没读它**。
+  //        它读起来是"这一次安装可以被取消"。
+  //
+  //    > 一个传了但没人读的选项，与一个声明了但不发出的错误码，
+  //    > 是同一种病：它让读者以为那件事被处理了。
+  const { readFileSync: read } = await import('node:fs')
+  const root = fileURLToPath(new URL('../../', import.meta.url))
+  const install = read(`${root}product/update/install.mjs`, 'utf8').replace(/\r/g, '')
+  const wiring = read(`${root}desktop/update-wiring.mjs`, 'utf8').replace(/\r/g, '')
+
+  // ── ① 解析器本身要有分辨力 ──
+  const accepted = signatureParams(install, 'runInstallTransaction', 2)
+  assert.notEqual(accepted, null, '解析不出 runInstallTransaction 的签名')
+  assert.ok(accepted.size >= 20, `只解析出 ${accepted.size} 个参数，明显偏少——解析器写错了`)
+  assert.ok(accepted.has('paths') && accepted.has('release') && accepted.has('spawnHelper'),
+    `签名解析结果不对：${[...accepted].sort().join(', ')}`)
+
+  // ── ② ★ 正对照：一段"传了签名不要的键"的源码必须被抓到 ──
+  {
+    const fakeAccepted = new Set(['paths', 'release'])
+    const fakeSource = 'return runInstallTransaction({\n'
+      + '        paths: {},\n'
+      + '        release,\n'
+      + '        requireSignature: false,\n'
+      + '      })\n'
+    const keys = topLevelKeys(fakeSource, fakeSource.indexOf('runInstallTransaction('), 8)
+    assert.notEqual(keys, null, '正对照：连假源码都解析不出来')
+    const bad = [...keys.keys()].filter((k) => !fakeAccepted.has(k))
+    assert.deepEqual(bad, ['requireSignature'], `正对照失败：${JSON.stringify([...keys.keys()])}`)
+  }
+
+  // ── ③ 反对照：嵌套对象里的键**不许**被当成顶层键 ──
+  {
+    const fakeAccepted = new Set(['paths'])
+    const nested = 'return runInstallTransaction({\n'
+      + '        paths: {\n'
+      + '          installDir: x,\n'
+      + '          dataDir: y,\n'
+      + '        },\n'
+      + '      })\n'
+    const keys = topLevelKeys(nested, nested.indexOf('runInstallTransaction('), 8)
+    assert.deepEqual([...keys.keys()], ['paths'],
+      `反对照失败：嵌套键被误报 → ${JSON.stringify([...keys.keys()])}`)
+  }
+
+  // ── ④ 真仓 ──
+  const at = wiring.indexOf('return runInstallTransaction(')
+  assert.ok(at > 0, '在 update-wiring.mjs 里找不到安装事务的调用点')
+  const passed = topLevelKeys(wiring, at, 8)
+  assert.notEqual(passed, null, '解析不出调用点传的对象')
+  assert.ok(passed.size >= 10, `调用点只解析出 ${passed.size} 个顶层键，明显偏少`)
+
+  const unknown = [...passed.keys()].filter((k) => !accepted.has(k)).sort()
+  assert.deepEqual(unknown, [],
+    '生产安装调用点传了 runInstallTransaction **不接受**的键（会被静默忽略）：\n'
+    + unknown.map((k) => `  ${k}   →   ${passed.get(k)}`).join('\n')
+    + '\n★ 一个传了但没人读的选项，会让读者以为那个行为被配置了。'
+    + '\n  要么接上它，要么删掉它——不要让它留在那里。')
+})
+
+test('★★ 安装事务**不可取消**：不要再往这条调用链上传 signal', async () => {
+  // ★ 上一条判据删掉了两个死参数。这一条把"为什么 `signal` 不该回来"
+  //   写成判据，免得下一个人又顺手加上。
+  //
+  //   设计 §7 line 150 对"等任务超时"的答案是「回到可选择界面，**不默认强杀**」。
+  //   而一个已经写下 journal intent 的安装事务**不能在中间被放弃**：
+  //   中止它留下的是一份"做了一半且没人继续"的现场。
+  //   那一步的可选性来自**开始之前的用户确认**与 `drainInFlight` 的超时，
+  //   不是来自一个 AbortSignal。
+  const { readFileSync: read } = await import('node:fs')
+  const root = fileURLToPath(new URL('../../', import.meta.url))
+  const wiring = read(`${root}desktop/update-wiring.mjs`, 'utf8').replace(/\r/g, '')
+
+  // 正对照：旧写法必须被认出来。
+  {
+    const legacy = '      }).then((result) => {\n        void signal\n'
+    assert.match(legacy, /void signal/, '正对照的正则匹配不上，这条判据是空跑的')
+  }
+
+  const at = wiring.indexOf('return runInstallTransaction(')
+  const keys = topLevelKeys(wiring, at, 8)
+  assert.equal(keys.has('signal'), false,
+    '安装调用点又传了 signal —— runInstallTransaction 不读它，它只让读者以为安装可取消')
+  assert.equal(keys.has('requireSignature'), false,
+    '安装调用点又传了 requireSignature —— 真正决定验签的是函数内部的 publicKeyPem')
+})

@@ -558,7 +558,7 @@ export function buildDesktopInstaller({
   if (typeof dataDir !== 'string' || dataDir === '') throw new Error('buildDesktopInstaller 需要 dataDir')
 
   return Object.freeze({
-    async install({ identity, release, packagePath, pendingTasks = null, onStage = () => {}, signal = null } = {}) {
+    async install({ identity, release, packagePath, pendingTasks = null, onStage = () => {} } = {}) {
       const runner = createInstallTransactionRunner({
         bridge, dataDir, installDir: installRoot, nodePath, helperEntry, now, drainTimeoutMs,
         // 进程边界可注入（见 `buildDesktopInstaller` 的参数注释）。
@@ -873,9 +873,26 @@ export function buildDesktopInstaller({
           return started
         },
         verifyExit: () => runner.verifyExit(),
-        signal,
         now,
-        requireSignature: false,
+        // ★★ 这里原本还有两个键，已删除——它们**都是死参数**，
+        //    `runInstallTransaction` 一个都不接（有机械判据守着这一条）：
+        //
+        //      · `requireSignature: false` —— 读起来是"生产安装不要求验签"。
+        //        它**没有任何效果**；真正决定要不要验签的是 `install.mjs` 内部的
+        //        `requireSignature: publicKeyPem !== null`。
+        //        ★ 方向是安全的（验签并没有被关掉），但"看起来关掉了"会让下一个
+        //        人**不去检查验签到底有没有生效**。
+        //      · `signal` —— 从 `client.install(..., { signal })` 一路透传到这里，
+        //        而 `runInstallTransaction` 完全不读它。它读起来是"安装可以取消"。
+        //
+        //    ★ 为什么 `signal` 的正确处置是**删掉而不是接上**：设计 §7 line 150
+        //      对"等任务超时"的答案是「回到可选择界面，**不默认强杀**」。一个已经
+        //      写下 journal intent 的安装事务不能在中间被放弃——中止它留下的是
+        //      一份"做了一半且没人继续"的现场。那一步的可选性来自**开始之前的
+        //      用户确认**与 `drainInFlight` 的超时，不是来自一个 AbortSignal。
+        //
+        //    > 一个传了但没人读的选项，与一个声明了但不发出的错误码，
+        //    > 是同一种病：它让读者以为那件事被处理了。
       }).then((result) => {
         if (result.verdict === 'handed-off') stage('installing')
         else if (result.code === 'install-drain-timeout') stage('tasks-timeout')

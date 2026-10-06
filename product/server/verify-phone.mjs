@@ -138,14 +138,24 @@ if (access === null) { console.log('\n无法继续：登录失败'); process.exi
   check('⑩ 设备在线状态', r.status === 200 && Array.isArray(r.json?.presence), `${r.status} presence=${r.json?.presence?.length ?? '-'}`)
 }
 
-// ⑪ SSE（进展流）
+// ⑪ SSE（进展流）——**走一次性票据**，与手机端同一条路
 {
+  // ★ 这里原来带的是 `?token=<访问令牌>`。而订阅那条路已经改成 `?ticket=`：
+  //   查询串会进反代日志/浏览器历史/Referer，那里放一枚 15 分钟、覆盖全部 API
+  //   的令牌，等于把主钥匙抄在门口。票据只用一次、只活 60 秒、只对订阅有效。
+  //
+  //   所以这一步顺带也验了**新那条路在真实部署上通不通**——比原来更有价值。
+  const minted = await call('POST', '/api/events/ticket', { body: {}, token: access })
+  check('⑪₀ 订阅票据', minted.status === 200 && typeof minted.json?.ticket === 'string',
+    `${minted.status} ${typeof minted.json?.ticket === 'string' ? '拿到票据' : String(minted.text).slice(0, 120)}`)
+
   const controller = new AbortController()
   const timer = setTimeout(() => controller.abort(), 8000)
   let first = ''
   let status = 0
   try {
-    const res = await fetch(`${BASE}/api/events?scope=${SPACE}&kind=phone-verify&token=${encodeURIComponent(access)}`, { signal: controller.signal })
+    const ticket = encodeURIComponent(minted.json?.ticket ?? '')
+    const res = await fetch(`${BASE}/api/events?scope=${SPACE}&kind=phone-verify&ticket=${ticket}`, { signal: controller.signal })
     status = res.status
     const reader = res.body.getReader()
     const { value } = await reader.read()

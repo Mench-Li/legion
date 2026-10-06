@@ -25,7 +25,20 @@
 // 那条"发新版后手机能拿到新代码"）。缓存优先的 SW 会把那条**抵消掉**——
 // 两处规矩各写一半，合起来正好是谁都没生效。
 const CACHE = 'legion-mobile-v2'
-const SHELL = ['./', './index.html', './app.mjs', './board.mjs', './timeline.mjs', './manifest.webmanifest']
+// ★ 这份清单必须覆盖 `index.html` 引到的**每一个模块**。
+//
+//   实测踩过：`refresh-loop.mjs` 是后加的一个模块，而这份清单没跟着更新。
+//   静态资源走网络优先，所以第一次成功加载之后它自己会进缓存——**平时看不出来**。
+//   只有"装好 Service Worker 之后立刻离线"那一种情形会露馅，而那恰好是
+//   PWA 最想守住的那一种情形。
+//
+//   下面那条用例（`workbench/scripts/sw-shell.test.mjs`）直接对着
+//   `index.html` 的 `<script>` 与各模块的 import 语句核对，不靠人记得同步。
+const SHELL = [
+  './', './index.html', './manifest.webmanifest',
+  // 入口 + 它的直接依赖（app.mjs 三个 import 都在这里）
+  './app.mjs', './board.mjs', './timeline.mjs', './refresh-loop.mjs',
+]
 const CODE_EXT = /\.(?:mjs|js|html|webmanifest)$/
 
 self.addEventListener('install', (event) => {

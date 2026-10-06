@@ -18,6 +18,7 @@ import {
   describeCommandResult, describeLastCheck, describePendingTasks, describeVersionLine, formatBytes,
   projectView, render,
 } from './update-panel.mjs'
+import { UPDATE_COMMANDS } from './update-service.mjs'
 
 const DIGEST = 'a'.repeat(64)
 
@@ -489,4 +490,112 @@ test('★★★ `source-unsupported` 的**状态文案**必须与 `up-to-date` �
   //   `describeLastCheck` 的注释：`lastCheck.outcome` 只可能是 `'ok'`。
   const line = describeLastCheck({ lastCheck: { atMs: Date.UTC(2026, 9, 6, 12), outcome: 'ok' } })
   assert.equal(/不支持/.test(line), false, '上次检查那一行出现了"不支持"——那是从哪来的？')
+})
+
+// ---------------------------------------------------------------------------
+// ★★★★ 两张表必须**逐条**对上：preload 能发的命令 ↔ 主进程认的命令
+// ---------------------------------------------------------------------------
+
+/**
+ * 在一个新 context 里跑 `update-preload.cjs`，把每个公开方法都调一次，
+ * 收集**实际发出去的**命令字符串。
+ *
+ * 收集"实际发出的"而不是"代码里写的"很重要：这张表是**行为**，不是文本。
+ * 一个把命令拼出来的实现（`send('update.' + name)`）在文本扫描下什么都看不见。
+ */
+function preloadCommands(digest) {
+  let exposed = null
+  const commands = []
+  const filename = fileURLToPath(new URL('./update-preload.cjs', import.meta.url))
+  runInNewContext(readFileSync(filename, 'utf8'), {
+    require: () => ({
+      contextBridge: { exposeInMainWorld(_name, api) { exposed = api } },
+      ipcRenderer: {
+        invoke: (_channel, command, payload) => {
+          commands.push({ command, payload })
+          return Promise.resolve({ ok: true })
+        },
+        on() {}, removeListener() {},
+      },
+    }),
+  })
+  return { exposed, commands }
+}
+
+test('★★★★ preload 能发的命令集合与主进程的允许表**逐条相等**（两个方向）', async () => {
+  // ★ 这条守的是一个**跨文件的缝**：命令字符串在**两个**地方各自声明——
+  //
+  //     · `update-preload.cjs`：每个方法自己 `send('update.xxx', …)`
+  //     · `update-service.mjs`：`UPDATE_COMMANDS` 白名单
+  //
+  //   而此前两边**各自**被一份**手写副本**钉住：
+  //   `update-panel.test.mjs` 手写 8 个**方法名**（`install`/`tasks`/…），
+  //   `update-service.test.mjs` 手写 7 个**命令名**（`update.install`/…）。
+  //   两份手写副本都"对得上自己那一半"，于是**没有任何东西**比较过这两半。
+  //
+  //   漂移的两个方向、两种症状：
+  //
+  //     | 漂移 | 症状 |
+  //     |---|---|
+  //     | preload 多一个 | 面板那个按钮**永远**拿到 `UNKNOWN_COMMAND`（静默失效，只在点的时候才看得见） |
+  //     | 白名单多一个 | 一条**没人能调**的命令（死处理器），而"设计 §7 的命令都暴露了"的自检仍然绿 |
+  //
+  //   > 两份各自被手写副本钉住的清单，与一份被交叉核对的清单，
+  //   > 在"它们还一不一致"上不是同一个东西。
+  const { exposed, commands } = preloadCommands('a'.repeat(64))
+  assert.notEqual(exposed, null, 'update-preload.cjs 没有暴露任何东西')
+
+  // 把每个方法都调用一次，喂合法入参（不合法会在本地被拒、根本不发 IPC）。
+  const digest = 'a'.repeat(64)
+  const calls = [
+    ['status', () => exposed.status()],
+    ['check', () => exposed.check()],
+    ['tasks', () => exposed.tasks()],
+    ['snooze', () => exposed.snooze()],
+    ['download', () => exposed.download('rel-1.0.0', digest)],
+    ['cancelDownload', () => exposed.cancelDownload(1)],
+    ['install', () => exposed.install('rel-1.0.0', digest)],
+  ]
+  for (const [name, call] of calls) {
+    const before = commands.length
+    await call()
+    assert.equal(commands.length, before + 1,
+      `${name}() 没有发出 IPC —— 那么"它能用"与"它是死的"在读数上一样`)
+  }
+
+  // ── 方向 ①：preload 发的每一条，主进程都必须认 ──
+  const sent = commands.map((c) => c.command)
+  const allowed = new Set(UPDATE_COMMANDS)
+  for (const command of sent) {
+    assert.ok(allowed.has(command),
+      `preload 会发 ${command}，而 ${'UPDATE_COMMANDS'} 里没有它 —— 面板那个按钮永远只会拿到 UNKNOWN_COMMAND`)
+  }
+
+  // ── 方向 ②：主进程认的每一条，都必须有一条 preload 路径能发出来 ──
+  //
+  //   ★ 反方向同样重要，而且更容易被漏掉：白名单里多一条**没人能调**的命令
+  //     时，`update-service.mjs` 的自检（"设计 §7 的命令没有暴露"）照样是绿的，
+  //     因为那条自检问的是"设计要求的都在不在"，不是"多出来的有没有人用"。
+  for (const command of UPDATE_COMMANDS) {
+    assert.ok(sent.includes(command),
+      `${command} 在白名单里，但 update-preload.cjs 没有任何方法会发出它 —— 那是一条死处理器`)
+  }
+
+  // ── 集合相等（上面两个循环各自只查一个方向，这里把"条数"也钉住）──
+  assert.deepEqual([...new Set(sent)].sort(), [...UPDATE_COMMANDS].sort(),
+    'preload 的命令集合与 UPDATE_COMMANDS 不是同一集合')
+
+  // ── `subscribe` 是**单向**的：它不发任何命令 ──
+  //
+  //   设计 §7 line 162：「网页**不能**直接触发迁移或程序切换」。
+  //   这条在结构上成立，因为 `subscribe` 只注册监听、没有返回通道；
+  //   而它一旦开始"发点什么"，那句话就不再是结构性的了。
+  const beforeSubscribe = commands.length
+  const off = exposed.subscribe(() => {})
+  assert.equal(commands.length, beforeSubscribe,
+    'subscribe 发出了 IPC —— 它必须只是**注册监听**，否则它就成了页面回传的入口')
+  assert.equal(typeof off, 'function', 'subscribe 必须返回取消订阅的函数（否则页面会泄漏监听）')
+  assert.equal(typeof exposed.subscribe('not a function'), 'function',
+    'subscribe 传非函数时也要返回一个可调用的取消函数（否则调用方会崩）')
+  assert.equal(commands.length, beforeSubscribe, 'subscribe 的失败路径也不该发 IPC')
 })

@@ -1053,7 +1053,23 @@ function bind() {
   $('btn-logout-2').addEventListener('click', doLogout)
   $('agent-select').addEventListener('change', (e) => { void selectAgent(e.target.value) })
   $('task-select').addEventListener('change', (e) => { state.targetTaskId = e.target.value })
-  window.addEventListener('online', () => { setConnection({ hubReachable: true, nodeOnline: null }) })
+  // ★ 网络恢复时**去问**，而不是把读数重置成"未知"。
+  //
+  // 原来这里写的是 `setConnection({ hubReachable: true, nodeOnline: null })`,
+  // 而 `nodeOnline: null` 渲染出来正是「电脑状态未知」。于是手机切一次
+  // WiFi↔4G、或锁屏唤醒（都会触发 `online`），状态就变成"未知"，并且
+  // **一直停在那里**——直到下一次 refreshTasks（SSE 来帧 / 手动刷新 / 切标签）
+  // 才恢复。用户看到的是一个凭空出现、又迟迟不走的"未知"。
+  //
+  //   > 一个"网络回来了就把读数抹成未知"的处理，
+  //   > 与一个"网络回来了就当电脑也掉了"的处理，在用户那边都是错的信息——
+  //   > 只不过前者看起来更谨慎。
+  //
+  // 网络恢复意味着**现在能问了**，所以就去问：`refreshLoop.now()` 会重跑
+  // refreshTasks，由它按真实 presence 定读数（在线/离线/未知）。
+  // 拿不到时会落到 `.catch`，那时才该说不可达。
+  window.addEventListener('online', () => { refreshLoop.now() })
+  // 离线这条是**事实**：连不上 Hub 时读到的任何东西都不是最新的，如实说。
   window.addEventListener('offline', () => { setConnection({ hubReachable: false }) })
 }
 

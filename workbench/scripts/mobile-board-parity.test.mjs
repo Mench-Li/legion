@@ -219,3 +219,22 @@ describe('手机端：SSE 票据', () => {
     assert.match(stop, /clearTimeout\(streamTimer\)/)
   })
 })
+
+describe('手机端：网络恢复时的读数', () => {
+  const app = readFileSync(resolve(ROOT, 'workbench/mobile/app.mjs'), 'utf8')
+
+  test('★ 网络恢复要**去问**，不能重置成"未知"', () => {
+    // 原来写的是 setConnection({ hubReachable: true, nodeOnline: null })，
+    // 而 nodeOnline: null 渲染出来正是「电脑状态未知」。手机切一次 WiFi↔4G
+    // 就会触发，然后一直停在"未知"——一个凭空出现、又迟迟不走的读数。
+    const line = /window\.addEventListener\('online'[^\n]*/.exec(app)?.[0] ?? ''
+    assert.ok(line.length > 0, '找不到 online 监听器')
+    assert.doesNotMatch(line, /nodeOnline: null/, '网络恢复不该把读数重置成未知')
+    assert.match(line, /refreshLoop\.now\(\)/, '网络恢复应当重新去问')
+  })
+
+  test('离线仍然如实说"不可达"（那是事实，不是猜）', () => {
+    const line = /window\.addEventListener\('offline'[^\n]*/.exec(app)?.[0] ?? ''
+    assert.match(line, /hubReachable: false/)
+  })
+})

@@ -39,6 +39,25 @@ workbench/scripts/serve.mjs.bak
 Thumbs.db
 /.legion-services.log
 
+# ★★★ 更新发行私钥 —— **绝不入库**（设计 §9 line 202：
+#   「上传凭据、签名私钥和 Windows 签名凭据保存在发布机或 CI 密钥存储」）
+#
+#   为什么这条不能靠"记得别提交"：`scripts/update/keygen.mjs` 的 `--out`
+#   **默认是 `.`**（就是仓库根），所以文档里那条命令
+#
+#       node scripts/update/keygen.mjs new --key-id release-2026-a --write-private
+#
+#   会直接把 `<keyId>.key.pem` 写在仓库根下。本仓的提交习惯里有一条
+#   `git add -A`，于是"生成一次密钥再提交"就会把一个**签名私钥**推进历史
+#   ——而私钥进历史之后，唯一真正的补救是**吊销它**（`envelope.mjs` 的吊销
+#   路径就是为这个情形写的），不是删文件。
+#
+#   `keygen.mjs` 本身已经只在 `--write-private` 时才落盘私钥（默认不写），
+#   这一条 `.gitignore` 是**第二道**：它拦的是"显式要求落盘、然后顺手提交"。
+#
+#   公钥**不在**此列：`*.pub.pem` 是要随包分发的，必须能被跟踪。
+*.key.pem
+
 # T-093 目标级 CI / 发布运行时产物（可再生成，不入库）
 .ci/
 releases/

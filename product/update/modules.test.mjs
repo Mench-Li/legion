@@ -555,3 +555,191 @@ test('★★★★ 生产代码里提到的 `*.test.mjs` 必须真的存在（�
     '生产代码里提到了不存在的用例文件（那句"由某条判据守着"是假的）：\n'
     + findings.map((f) => `  ${f.file} → ${f.ref}（试过：${f.tried.join(' / ')}）`).join('\n'))
 })
+
+
+// ---------------------------------------------------------------------------
+// ★★★★ 仓库里**不许有**签名私钥（设计 §9 line 202）
+// ---------------------------------------------------------------------------
+
+/**
+ * PEM 私钥头的形状。每一种都要列出来——只查一种会漏掉别的编码。
+ *
+ * ★★ 这些字符串**必须拼出来**，不能整段写成字面量。
+ *
+ *   第一版我写了字面量数组，于是这条判据**扫到了它自己**：
+ *   `modules.test.mjs` 是已跟踪文件，而它里面正好有那些字面量。
+ *
+ *   > 一条按文本扫描全仓的判据，只要**它自己**含有被扫描的字符串，
+ *   > 它就永远报一个假阳性——而那个假阳性会让人把整条判据关掉。
+ *
+ *   （这与 ㊵/㊹ 同一个手法：那两次是"**注释**里写了被扫描的字面量"，
+ *     这次是"**清单**里写了被扫描的字面量"。）
+ */
+const PEM_BEGIN = ['-----', 'BEGIN '].join('')
+const PEM_END = '-----'
+/**
+ * ★★ 结束标记的前缀是 `-----END `，**不是** `-----BEGIN `。
+ *
+ *   第一版我把结束标记写成 `PEM_BEGIN + 'END ' + kind + PEM_END`，
+ *   于是它是 `-----BEGIN END PRIVATE KEY-----`——一个**永远匹配不上**的字符串。
+ *   后果是扫描**静默地什么都不返回**，而"什么都没找到"与"没有泄漏"
+ *   在读数上完全一样。
+ *
+ *   > 抓到它的是那条**正对照**（喂一把真私钥、要求必须被抓到）。
+ *   > 没有正对照，这条判据会以"全绿"的形式**从未运行过**。
+ */
+const PEM_END_BEGIN = ['-----', 'END '].join('')
+const PRIVATE_KEY_KINDS = Object.freeze([
+  'PRIVATE KEY',
+  'RSA PRIVATE KEY',
+  'EC PRIVATE KEY',
+  'DSA PRIVATE KEY',
+  'OPENSSH PRIVATE KEY',
+  'ENCRYPTED PRIVATE KEY',
+  'PGP PRIVATE KEY BLOCK',
+])
+
+/** 把一段文本里的每个 PEM 私钥块取出来（按 kind 逐个找，含 END 配对）。 */
+function pemBlocksOf(text, kind) {
+  const begin = PEM_BEGIN + kind + PEM_END
+  const end = PEM_END_BEGIN + kind + PEM_END
+  const blocks = []
+  let cursor = 0
+  for (;;) {
+    const from = text.indexOf(begin, cursor)
+    if (from < 0) break
+    const to = text.indexOf(end, from)
+    if (to < 0) break
+    blocks.push(text.slice(from, to + end.length))
+    cursor = to + end.length
+  }
+  return blocks
+}
+
+/**
+ * 在**已跟踪**的文件里找**真的**签名私钥。
+ *
+ * ★★★ 判据是"**能不能被解析成一把真私钥**"，不是"有没有那个头"。
+ *
+ *   我第一版的判据是后者，而它在真仓里立刻红了——命中的是 **redaction 的
+ *   用例夹具**：`product/diagnostics/redact-package.test.mjs` 与
+ *   `runtime/context/redaction.test.mjs` **故意**含有 PEM 私钥头，用来验证
+ *   日志与诊断会把它们打码；那些头是**哑的**（`createPrivateKey` 解析不了）。
+ *
+ *   > "含有私钥头"与"含有一把私钥"不是同一个读数——
+ *   > 前者在一份专门测"打码"的夹具里**必须**为真。
+ *
+ *   如果当时按第一版把判据"修绿"（比如删掉那些夹具），代价是**打码的判据
+ *   失去输入**——用一个安全判据去换另一个安全判据，两边都变弱。
+ *
+ * ★ 用 `git grep` 先筛（一次子进程，只扫跟踪的文件——未跟踪的东西不进历史，
+ *   而这条判据问的正是"历史里有没有"），再对命中的少数文件做解析。
+ */
+function findLeakedPrivateKeys(root, exec, readFile, createPrivateKey) {
+  const candidates = new Set()
+  for (const kind of PRIVATE_KEY_KINDS) {
+    let out = ''
+    try {
+      out = exec('git', ['grep', '-l', '-F', '-e', PEM_BEGIN + kind + PEM_END],
+        { cwd: root, encoding: 'utf8' })
+    } catch (error) {
+      // `git grep` 无命中时退出码是 1（不是错误）。其余退出码要抛出去。
+      if (error?.status === 1) continue
+      throw error
+    }
+    for (const file of out.split('\n').map((s) => s.trim()).filter(Boolean)) candidates.add(file)
+  }
+  const findings = []
+  for (const file of [...candidates].sort()) {
+    let text = ''
+    try { text = readFile(root + file) } catch { continue }
+    for (const kind of PRIVATE_KEY_KINDS) {
+      for (const pem of pemBlocksOf(text, kind)) {
+        try {
+          createPrivateKey(pem)
+          findings.push(Object.freeze({ file, kind }))
+        } catch {
+          // 解析不了 ⇒ 哑夹具。**不是**违规。
+        }
+      }
+    }
+  }
+  return Object.freeze({ findings: Object.freeze(findings), scanned: candidates.size })
+}
+
+test('★★★★ 仓库里没有任何**能解析成真私钥**的 PEM（设计 §9 line 202）', async () => {
+  const { execFileSync } = await import('node:child_process')
+  const { readFileSync: read, mkdtempSync, writeFileSync, rmSync } = await import('node:fs')
+  const { createPrivateKey } = await import('node:crypto')
+  const { tmpdir } = await import('node:os')
+  const { join } = await import('node:path')
+  const root = fileURLToPath(new URL('../../', import.meta.url))
+  const readText = (p) => read(p, 'utf8')
+
+  // ── ① 规则本身：七种头都在，而公钥不在其中 ──
+  assert.ok(PRIVATE_KEY_KINDS.length >= 7, '私钥头的清单太短，覆盖面可疑')
+  assert.equal(PRIVATE_KEY_KINDS.some((k) => k.includes('PUBLIC KEY')), false,
+    '公钥混进了私钥清单——那会把随包分发的公钥判成违规')
+
+  // ── ② ★★★ 正对照：一把**真的**私钥必须被抓到 ──
+  //
+  //   用 `envelope.mjs` 生成一对真的（与发布端同一套函数），所以这条正对照
+  //   证明的是"我们能抓到**本仓会产出的那种**私钥"，而不是某个我编的字符串。
+  {
+    const { generateReleaseKeyPair } = await import('./envelope.mjs')
+    const dir = mkdtempSync(join(tmpdir(), 'legion-key-leak-'))
+    try {
+      execFileSync('git', ['init', '-q'], { cwd: dir })
+      const pair = generateReleaseKeyPair({ keyId: 'leak-check' })
+      writeFileSync(join(dir, 'release.key.pem'), pair.privateKeyPem, 'utf8')
+      writeFileSync(join(dir, 'release.pub.pem'), pair.publicKeyPem, 'utf8')
+      execFileSync('git', ['add', '-A'], { cwd: dir })
+      const result = findLeakedPrivateKeys(dir + '/', execFileSync, readText, createPrivateKey)
+      assert.equal(result.findings.length, 1,
+        '正对照失败：一把真私钥没有被抓到 → ' + JSON.stringify(result))
+      assert.equal(result.findings[0].file, 'release.key.pem')
+      // ★ 而公钥**不许**被报（它要随包分发）。
+      assert.equal(result.findings.some((f) => f.file === 'release.pub.pem'), false,
+        '公钥被误报成私钥')
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  }
+
+  // ── ③ ★★ 反对照：**哑的** PEM（redaction 夹具那种）不许被报 ──
+  //
+  //   这一条是这条判据能存在的前提：本仓**真的**有这种文件，而且它们必须在。
+  //   没有这一条，下一个人看到真仓红了就会去删那些夹具。
+  {
+    const dir = mkdtempSync(join(tmpdir(), 'legion-key-dummy-'))
+    try {
+      execFileSync('git', ['init', '-q'], { cwd: dir })
+      const dummy = PEM_BEGIN + 'PRIVATE KEY' + PEM_END + '\nMIIEvQIBADANBgkq\n'
+        + PEM_BEGIN + 'END PRIVATE KEY' + PEM_END + '\n'
+      writeFileSync(join(dir, 'fixture.test.mjs'), 'const sample = ' + JSON.stringify(dummy) + '\n', 'utf8')
+      execFileSync('git', ['add', '-A'], { cwd: dir })
+      const result = findLeakedPrivateKeys(dir + '/', execFileSync, readText, createPrivateKey)
+      assert.deepEqual([...result.findings], [],
+        '哑夹具被误报成真私钥 → ' + JSON.stringify(result.findings))
+      // 而它确实**被扫到了**（否则这条反对照只是"扫描没跑"）。
+      assert.equal(result.scanned, 1, '反对照里连候选文件都没扫到——那这条反对照没有分辨力')
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  }
+
+  // ── ④ 真仓：一把真的都不许有 ──
+  const result = findLeakedPrivateKeys(root, execFileSync, readText, createPrivateKey)
+  assert.deepEqual([...result.findings], [],
+    '仓库的已跟踪文件里有**能解析成真私钥**的 PEM（设计 §9 line 202 要求它留在发布机或 CI 密钥存储）：\n'
+    + result.findings.map((f) => '  ' + f.file + '（' + f.kind + '）').join('\n')
+    + '\n★ 私钥进历史之后，删文件不够——唯一的补救是**吊销那把钥匙**。')
+
+  // ── ⑤ `.gitignore` 必须挡在**生成**那一侧（第一道防线） ──
+  //
+  //   `keygen.mjs new` 的 `--out` **默认是 `.`**（仓库根），所以这条规则拦的
+  //   正是"在仓库里生成私钥、然后 `git add -A`"这个组合。
+  const gitignore = read(root + '.gitignore', 'utf8')
+  assert.match(gitignore, /^\*\.key\.pem\s*$/m,
+    '`.gitignore` 里没有 `*.key.pem` —— 而 `keygen.mjs new` 的默认输出目录就是仓库根')
+})

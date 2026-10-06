@@ -3,7 +3,7 @@ import { spawn } from 'node:child_process'
 import { randomBytes } from 'node:crypto'
 import { join } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
-import { canNavigate, closeAction, createBridgeClient, desktopRequestHeaders, externalUrl, workbenchTarget } from './runtime.mjs'
+import { canNavigate, closeAction, createBridgeClient, createInteractiveMarker, desktopRequestHeaders, externalUrl, workbenchTarget } from './runtime.mjs'
 import { resolveUpdateRuntime, trayLabelFor } from './update-wiring.mjs'
 
 const desktopDir = fileURLToPath(new URL('.', import.meta.url))
@@ -28,7 +28,13 @@ let selectedWorkspace = null
 let choosingWorkspace = false
 let updateRuntime = null
 let updateState = null
-let updateMarksInteractive = false
+/**
+ * ★★ 「桌面可交互」的一次性标记 —— 用 `createInteractiveMarker` 而不是一个
+ *    裸布尔量。理由见 `runtime.mjs` 那段长注释：裸布尔量会在
+ *    `updateRuntime` 还是 `null` 时被**空操作消费掉**，于是自动检查永远不开始。
+ *    而"窗口画出来"与"运行时装载完成"哪个先到是**竞态**。
+ */
+const markUpdateInteractiveOnce = createInteractiveMarker({ readRuntime: () => updateRuntime })
 
 function showWindow() {
   if (!window) return
@@ -159,11 +165,17 @@ async function openUpdatePanel() {
   try { await updateRuntime.service.showPanel({ parent: window }) } catch { /* 面板打开失败不该中断应用 */ }
 }
 
-/** 幂等：`markInteractive` 只应该真的调用一次。 */
+/**
+ * 标记"桌面已可交互"，首次自动检查从这一刻起计时（设计 §6 line 132）。
+ *
+ * ★ 返回值带 `delivered`：**只有投递成功才消费那个一次性标记**。
+ *   调用方（尤其是 `startUpdateRuntime` 里装载完成之后那一次补投）要看它。
+ */
 function markUpdateInteractive() {
-  if (updateMarksInteractive) return
-  updateMarksInteractive = true
-  try { updateRuntime?.markInteractive?.() } catch { /* 计时失败不该影响启动 */ }
+  try { return markUpdateInteractiveOnce() } catch {
+    // 标记失败不该影响启动（更新不可用不是应用不可用）。
+    return { delivered: false, alreadyDelivered: false, reason: '标记可交互时抛错' }
+  }
 }
 
 /**
@@ -207,6 +219,26 @@ function startUpdateRuntime() {
       try {
         updateRuntime.client.subscribe((snapshot) => { updateState = snapshot; refreshTray() })
       } catch { /* 订阅失败只影响托盘文案 */ }
+      /**
+       * ★★★ 装载完成之后**补投一次**「可交互」标记 —— 这是那个竞态的另一半。
+       *
+       *   启动顺序是 `createWindow()` → `createTray()` → `startUpdateRuntime()`，
+       *   而 `ready-to-show`（窗口真的画出来）与 `resolveUpdateRuntime()`（这里）
+       *   都要等异步，**谁先到不确定**：
+       *
+       *     · 窗口先到 ⇒ 那一次标记投递时 `updateRuntime` 还是 `null`（空操作），
+       *       标记**不被消费**（`createInteractiveMarker` 保证），于是这里补投；
+       *     · 运行时先到 ⇒ 窗口那次会正常投递，这里补投是**幂等的空操作**。
+       *
+       *   ★ 两种顺序都必须得到同一个结果：**首次检查被安排**。没有这一次补投，
+       *     第一种顺序下自动检查永远不会开始——而它在开发模式下（Vite dev
+       *     server 加载慢）恰好是第二种顺序，于是**只有打包版会中招**。
+       */
+      const marked = markUpdateInteractive()
+      if (marked.delivered !== true && marked.reason !== null) {
+        // 不是错误：窗口还没画出来时这是正常的，窗口那次会投递。
+        if (!app.isPackaged) process.stdout.write(`[update] 可交互标记暂未投递：${marked.reason}\n`)
+      }
     } catch (error) {
       updateRuntime = { ok: false, reason: `更新运行时启动失败：${error?.message ?? error}` }
     }

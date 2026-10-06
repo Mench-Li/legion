@@ -29,6 +29,93 @@ export function closeAction({ quitting, closeToTray }) {
   return !quitting && closeToTray ? 'hide' : 'close'
 }
 
+/**
+ * 「桌面可交互」的一次性标记（设计 §6 line 132）。
+ *
+ * > 启动达到桌面可交互状态后延迟 30～90 秒首次检查；之后以 6 小时为基准、
+ * > ±20% 抖动检查。
+ *
+ * ## ★★★ 为什么需要这个工厂，而不是一个布尔量
+ *
+ * 原来的写法是：
+ *
+ * ```js
+ * let marked = false
+ * function markUpdateInteractive() {
+ *   if (marked) return
+ *   marked = true                      // ← 先置位
+ *   try { updateRuntime?.markInteractive?.() } catch {}   // ← 再投递
+ * }
+ * ```
+ *
+ * ★ 而 `updateRuntime` 在启动那一刻**是 `null`**：`app.whenReady()` 里的顺序是
+ *
+ * ```js
+ * createWindow()        // 注册 ready-to-show
+ * createTray()
+ * startUpdateRuntime()  // async，**没有 await**
+ * ```
+ *
+ * `ready-to-show` 与 `resolveUpdateRuntime()` 都要等异步，**谁先到不确定**。
+ * 于是"窗口先画出来"那一次调用会走进上面那段代码：`marked` 被置为 `true`，
+ * 而 `updateRuntime?.markInteractive?.()` 是一个**空操作**（可选链把 null 吃掉）。
+ * 之后运行时装载完成，**再也没有人来标记**——
+ *
+ * > 一次**被空操作消费掉**的一次性标记，与一次从来没发生过的标记，
+ * > 在用户那一端是同一件事：**自动检查永远不会开始**。
+ *
+ * 而且它是竞态：开发模式下窗口加载慢（Vite dev server）就正常，打包之后
+ * 本地文件加载快就可能失效——**同一份代码，两种行为**。
+ *
+ * ## 判据
+ *
+ * **标记只在投递成功时才被消费。** 投递失败（运行时还没好、`ok !== true`、
+ * 或者 `markInteractive` 抛错）⇒ 返回 `delivered: false`，下一次调用**还会再试**。
+ *
+ * @param {object} args
+ * @param {Function} args.readRuntime 读当前运行时（可能返回 null）
+ */
+export function createInteractiveMarker({ readRuntime }) {
+  if (typeof readRuntime !== 'function') throw new Error('createInteractiveMarker 需要 readRuntime')
+  let delivered = false
+  /**
+   * @returns {{delivered: boolean, alreadyDelivered: boolean, reason: string|null}}
+   */
+  return function markInteractive() {
+    if (delivered) {
+      return Object.freeze({ delivered: true, alreadyDelivered: true, reason: null })
+    }
+    const runtime = readRuntime()
+    if (runtime === null || runtime === undefined) {
+      return Object.freeze({ delivered: false, alreadyDelivered: false, reason: '更新运行时还未装载' })
+    }
+    if (runtime.ok !== true) {
+      return Object.freeze({
+        delivered: false, alreadyDelivered: false,
+        reason: `更新运行时不可用：${runtime.reason ?? '（没有给出原因）'}`,
+      })
+    }
+    if (typeof runtime.markInteractive !== 'function') {
+      return Object.freeze({
+        delivered: false, alreadyDelivered: false,
+        reason: '更新运行时没有 markInteractive —— 首次检查不会被安排',
+      })
+    }
+    try {
+      runtime.markInteractive()
+    } catch (error) {
+      // ★ 投递抛错同样**不消费**标记：下一次（面板打开、或运行时装载完成后的
+      //   那一次补投）还会再试。一次抛错不该让自动检查永久失效。
+      return Object.freeze({
+        delivered: false, alreadyDelivered: false,
+        reason: `标记可交互时抛错：${error?.message ?? error}`,
+      })
+    }
+    delivered = true
+    return Object.freeze({ delivered: true, alreadyDelivered: false, reason: null })
+  }
+}
+
 export function desktopRequestHeaders(details, { origin, token, webContentsId }) {
   const headers = { ...details.requestHeaders }
   if (!origin || !token || details.webContentsId !== webContentsId || details.frame?.parent !== null

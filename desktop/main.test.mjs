@@ -6,7 +6,7 @@ import { readFileSync } from 'node:fs'
 import { runInNewContext } from 'node:vm'
 import { fileURLToPath } from 'node:url'
 import { dirname, join } from 'node:path'
-import { BRIDGE_DEADLINES, canNavigate, closeAction, createBridgeClient, desktopRequestHeaders, externalUrl, workbenchTarget } from './runtime.mjs'
+import { createInteractiveMarker, BRIDGE_DEADLINES, canNavigate, closeAction, createBridgeClient, desktopRequestHeaders, externalUrl, workbenchTarget } from './runtime.mjs'
 import { failureMessage, portConflictMessage } from './messages.mjs'
 
 function fakeBridge() {
@@ -296,4 +296,119 @@ test('desktop credential belongs only to the owned main frame and verified origi
   ]) assert.equal(desktopRequestHeaders(details, owner).Authorization, undefined)
   assert.equal(desktopRequestHeaders(request, { ...owner, origin: null }).Authorization, undefined)
   assert.equal(desktopRequestHeaders({ ...request, resourceType: 'mainFrame', frame: { parent: null, url: 'file:///startup.html' } }, owner).Authorization, 'Bearer private-test-token')
+})
+
+// ---------------------------------------------------------------------------
+// ★★★★ 「桌面可交互」一次性标记：**投递失败不许消费标记**
+// ---------------------------------------------------------------------------
+
+test('★★★★ 运行时还没装载时标记不许被消费（否则首次自动检查永远不开始）', () => {
+  // ★★ 设计 §6 line 132：「启动达到桌面可交互状态后延迟 30～90 秒首次检查」。
+  //
+  //   启动顺序是
+  //
+  //     app.whenReady() → createWindow() → createTray() → startUpdateRuntime()
+  //
+  //   而 `ready-to-show`（窗口真的画出来）与 `resolveUpdateRuntime()` 都要等
+  //   异步，**谁先到不确定**。原来的写法是
+  //
+  //     let marked = false
+  //     function markUpdateInteractive() {
+  //       if (marked) return
+  //       marked = true                                   // ← 先置位
+  //       try { updateRuntime?.markInteractive?.() } catch {}   // ← 再投递
+  //     }
+  //
+  //   于是"窗口先到"那一次：`marked` 被置为 `true`，而投递是一个**空操作**
+  //   （可选链把 `null` 吃掉）。运行时随后装载完成，**再也没有人来标记**。
+  //
+  //   > 一次**被空操作消费掉**的一次性标记，与一次从来没发生过的标记，
+  //   > 在用户那一端是同一件事：**自动检查永远不会开始**。
+  //
+  //   而它是竞态：开发模式下窗口加载慢（Vite dev server）走的是"运行时先到"
+  //   那条路，打包之后本地文件加载快就可能中招——**同一份代码，两种行为**。
+  let runtime = null
+  const mark = createInteractiveMarker({ readRuntime: () => runtime })
+
+  // ── ① 窗口先到：运行时还没有 ⇒ 标记**不许**被消费 ──
+  const first = mark()
+  assert.equal(first.delivered, false, '运行时还没装载，却报告"已投递"')
+  assert.equal(first.alreadyDelivered, false)
+  assert.match(first.reason, /还未装载/)
+
+  // ── ② 运行时装载完成 → 补投必须成功（这就是修法的那一半）──
+  let marked = 0
+  runtime = { ok: true, markInteractive: () => { marked += 1 } }
+  const second = mark()
+  assert.equal(second.delivered, true, `补投没有成功：${second.reason}`)
+  assert.equal(second.alreadyDelivered, false)
+  assert.equal(marked, 1, `底层 markInteractive 被调了 ${marked} 次，应当是 1 次`)
+
+  // ── ③ 之后必须**幂等**：窗口那次再来一遍不许重复投递 ──
+  const third = mark()
+  assert.equal(third.delivered, true)
+  assert.equal(third.alreadyDelivered, true, '第二次投递应当自报 alreadyDelivered')
+  assert.equal(marked, 1, `幂等被破坏：底层被调了 ${marked} 次`)
+})
+
+test('★★★★ 运行时先到：窗口那次正常投递，装载后的补投是幂等空操作', () => {
+  // ★ 竞态的**另一个方向**。两个方向都必须得到同一个结果（首次检查被安排），
+  //   所以这条与上一条是一对——只测一个方向的话，"补投"这件事可能被写成
+  //   "重复标记"，而重复标记会让计时被重置（首次延迟从第二次调用重新算）。
+  let marked = 0
+  const runtime = { ok: true, markInteractive: () => { marked += 1 } }
+  const mark = createInteractiveMarker({ readRuntime: () => runtime })
+
+  const windowFirst = mark()
+  assert.equal(windowFirst.delivered, true)
+  assert.equal(marked, 1)
+
+  const afterLoad = mark()
+  assert.equal(afterLoad.delivered, true)
+  assert.equal(afterLoad.alreadyDelivered, true)
+  assert.equal(marked, 1, '装载后的补投重复标记了 —— 首次延迟会被重新计时')
+})
+
+test('★★ 运行时不可用 / 没有 markInteractive / 投递抛错：都不消费标记', () => {
+  // ★ 三种"投递不成"的形状都要**留着标记**，因为调用方还有下一次机会
+  //   （面板打开时会再投一次）。一次抛错不该让自动检查永久失效。
+  const cases = [
+    [{ ok: false, reason: '没有配置更新地址' }, /不可用/, '运行时 ok !== true'],
+    [{ ok: true }, /没有 markInteractive/, '运行时缺 markInteractive'],
+    [{ ok: true, markInteractive: () => { throw new Error('boom') } }, /抛错/, '投递抛错'],
+  ]
+  for (const [runtime, pattern, label] of cases) {
+    const mark = createInteractiveMarker({ readRuntime: () => runtime })
+    const first = mark()
+    assert.equal(first.delivered, false, `${label}：被报告成"已投递"`)
+    assert.match(first.reason, pattern, `${label}：理由不对（${first.reason}）`)
+    // ★ 再投一次必须**还是** delivered:false（标记没被消费掉）。
+    //   "标记还在"这件事更强的那一半（换一个好的运行时就投得进去）由下一条覆盖。
+    const again = mark()
+    assert.equal(again.delivered, false, `${label}：第二次投递竟然成功了（标记状态不对）`)
+  }
+})
+
+test('★★ 投递抛错之后，换一个好的运行时**仍然能**投递（标记没被吃掉）', () => {
+  // ★ 上一条只证明了"第一次报告 delivered:false"。这一条证明**标记还在**：
+  //   把 readRuntime 换成一个好的运行时，同一个 marker 必须能投递成功。
+  //   没有这一条，"不消费标记"这个结论只停留在返回值上。
+  let current = { ok: true, markInteractive: () => { throw new Error('第一次抛错') } }
+  let marked = 0
+  const mark = createInteractiveMarker({ readRuntime: () => current })
+
+  const failed = mark()
+  assert.equal(failed.delivered, false)
+  assert.match(failed.reason, /抛错/)
+
+  current = { ok: true, markInteractive: () => { marked += 1 } }
+  const retry = mark()
+  assert.equal(retry.delivered, true, `抛错之后再也投不进去了：${retry.reason}`)
+  assert.equal(retry.alreadyDelivered, false, '这一次应当是**真的**投递，不是幂等空操作')
+  assert.equal(marked, 1)
+})
+
+test('★ `createInteractiveMarker` 缺 readRuntime 时明确报错（不是静默的空操作）', () => {
+  assert.throws(() => createInteractiveMarker({}), /readRuntime/)
+  assert.throws(() => createInteractiveMarker(), /readRuntime/)
 })

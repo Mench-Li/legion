@@ -1076,3 +1076,68 @@ test('★★★★ 引用的日期命名文档必须真的在树里（`update-ho
   assert.match(doc, /正式环境必须使用可信 HTTPS/,
     'bootstrap 文档缺少"正式环境必须使用可信 HTTPS"那一句')
 })
+
+// ---------------------------------------------------------------------------
+// ★★★★ 「可交互」标记必须是工厂造出来的，而且装载完成之后要**补投**
+// ---------------------------------------------------------------------------
+
+test('★★★★ `desktop/main.mjs` 的可交互标记必须走工厂，且运行时装载后要补投', async () => {
+  // ★★ 这条守的是那个**竞态**修法的两半，缺一不可：
+  //
+  //   · **走工厂**（`createInteractiveMarker`）：保证"投递失败不消费标记"。
+  //     一个裸布尔量会在 `updateRuntime` 还是 `null` 时被空操作消费掉。
+  //   · **装载后补投**：兜住"窗口先到"那个顺序——那一次标记没投成，
+  //     运行时好了之后必须有**第二次**投递机会。
+  //
+  //   > 只改一半都能通过"看起来对"的检查：只走工厂而不补投，
+  //   > 窗口先到那条路径下标记仍然永远不会被投递；
+  //   > 只补投而不走工厂，补投那一次会被"已消费"的标记直接 return 掉。
+  const { readFileSync } = await import('node:fs')
+  const root = fileURLToPath(new URL('../../', import.meta.url))
+  const text = readFileSync(`${root}desktop/main.mjs`, 'utf8')
+  // ★ 先挖空注释：`main.mjs` 里那段解释**故意**引用了旧写法，
+  //   不挖空的话这条判据会被自己的文档钉死（本会话第五次遇到这个形状）。
+  const code = codeOnly(text)
+
+  // ── ① ★ 正对照：旧写法必须被这条判据抓到 ──
+  //
+  //   把旧实现喂进来。注意这里用的是**字符串拼接**而不是整字面量：
+  //   若写成整字面量，`modules.test.mjs` 自己（它也在扫描范围内吗？不在，
+  //   但保持与前面几次一致的习惯）会成为假阳性来源。
+  {
+    const legacy = [
+      'let ' + 'updateMarks' + 'Interactive = false',
+      'function markUpdateInteractive() {',
+      '  if (' + 'updateMarks' + 'Interactive) return',
+      '  ' + 'updateMarks' + 'Interactive = true',
+      '}',
+    ].join('\n')
+    const legacyCode = codeOnly(legacy)
+    assert.equal(/updateMarksInteractive/.test(legacyCode), true,
+      '正对照失败：旧写法的标记名没有被认出来（这条判据的判据写错了）')
+    // 而它**没有**走工厂：
+    assert.equal(/createInteractiveMarker\s*\(/.test(legacyCode), false)
+  }
+
+  // ── ② 走工厂：一个裸布尔量都不许剩 ──
+  assert.match(code, /createInteractiveMarker\s*\(/,
+    'desktop/main.mjs 没有用 createInteractiveMarker —— 一次性标记会在运行时'
+    + '还是 null 时被空操作消费掉，于是自动检查永远不开始')
+
+  // ── ③ 装载完成之后必须**补投**一次 ──
+  //
+  //   判据落在 `startUpdateRuntime` 的函数体里：在 `ok !== true` 的早退**之后**，
+  //   必须出现一次标记调用。
+  const startAt = code.indexOf('function startUpdateRuntime()')
+  assert.ok(startAt >= 0, '找不到 startUpdateRuntime')
+  // 取到下一个顶层 function 之前（够用：这个函数体不长）。
+  const afterStart = code.slice(startAt)
+  const nextFn = afterStart.indexOf('\nfunction ', 1)
+  const body = nextFn > 0 ? afterStart.slice(0, nextFn) : afterStart
+  const okGuard = body.indexOf('updateRuntime.ok !== true')
+  assert.ok(okGuard >= 0, 'startUpdateRuntime 里找不到 `updateRuntime.ok !== true` 早退')
+  const remark = body.indexOf('markUpdateInteractive()', okGuard)
+  assert.ok(remark > okGuard,
+    '运行时装载完成之后没有补投"可交互"标记 —— 于是"窗口先到"那个顺序下'
+    + '首次自动检查永远不会被安排（而那恰好是打包版的行为）')
+})

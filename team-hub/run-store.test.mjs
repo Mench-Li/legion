@@ -49,7 +49,7 @@ import { TOKEN_ESTIMATOR_KINDS } from '../runtime/contracts/context.mjs'
  * 凡是走到那一步的用例都得注入它。默认 `null` —— 现有的用例都不进 `AwaitingApproval`，
  * 保持它们在"没有接线"这个事实下的原样。
  */
-function makeEnv({ startMs = 1_700_000_000_000, createApproval = null, resolveAgentSelection = null } = {}) {
+function makeEnv({ startMs = 1_700_000_000_000, createApproval = null, resolveAgentSelection = null, extraStoreOptions = {} } = {}) {
   const root = mkdtempSync(join(tmpdir(), 'legion-runstore-'))
   const dbFile = join(root, 'team.db')
   const db = new DatabaseSync(dbFile)
@@ -73,6 +73,7 @@ function makeEnv({ startMs = 1_700_000_000_000, createApproval = null, resolveAg
     db, clock,
     createApproval: typeof createApproval === 'function' ? createApproval(db) : null,
     resolveAgentSelection,
+    ...extraStoreOptions,
   })
   const addTask = (id, { status = 'todo', scope = 'default', priority = 'medium', hold = 0 } = {}) => {
     db.prepare('INSERT INTO tasks (id, title, priority, status, scope, hold, createdAt, updatedAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
@@ -607,6 +608,55 @@ test('⑥ 缺少「外部副作用是否可能已发生」时拒绝回收（这�
   } finally { env.cleanup() }
 })
 
+test('⑥ `states` 收窄：只扫点名的状态，其余一概不动', () => {
+  // ★ 这条是为了让**后台回收器**能把"正在执行"与"执行完在等人"分开。
+  //   `Validating` 也在 `IN_FLIGHT_ATTEMPT_STATES` 里（它确实持有租约），
+  //   但它的语义是"执行已结束、等验收"——租约过期不意味着结果不明，
+  //   `runResult` 早就落库了。而 `recoveryDecision` 在租约过期时一律给
+  //   `mark-unknown-outcome`，于是"已完成待验收"会被改写成"结果待确认"。
+  const env = makeEnv()
+  try {
+    env.addTask('t1')
+    const c = env.store.claim({ workerId: 'w1' }).claimed
+    // 走到 Validating（测试环境里 `Running → Validating` 声明要有 runResult，
+    // 所以先把它备上——这条边的证据闸门是另一件事，不该拦住这条用例）。
+    env.store.transition({ attemptId: c.attemptId, leaseEpoch: c.leaseEpoch, workerId: 'w1', to: 'PreparingWorkspace' })
+    env.store.transition({ attemptId: c.attemptId, leaseEpoch: c.leaseEpoch, workerId: 'w1', to: 'BuildingContext' })
+    // `BuildingContext → Running` 要一份真的上下文快照（那是另一条闸门，见 ⑪）。
+    env.freezeContext(c.attemptId)
+    env.store.transition({
+      attemptId: c.attemptId, leaseEpoch: c.leaseEpoch, workerId: 'w1', to: 'Running',
+      context: { runResult: { runId: 'r1', outcome: 'succeeded' } },
+    })
+    env.store.transition({
+      attemptId: c.attemptId, leaseEpoch: c.leaseEpoch, workerId: 'w1', to: 'Validating',
+      context: { runResult: { runId: 'r1', outcome: 'succeeded' } },
+    })
+    env.advance(DEFAULT_LEASE_TTL_MS + 1)
+
+    // 默认（不收窄）：完整在途集合 → 会把它判成 UnknownOutcome。
+    const wide = env.store.recoverExpired({ externalEffectPossible: true })
+    assert.equal(wide.recovered.some((x) => x.attemptId === c.attemptId), true, '不收窄时它确实在扫描范围内')
+
+    // 收窄到"真正在执行"的状态 → 不碰它。
+    const env2 = makeEnv()
+    try {
+      env2.addTask('t2')
+      const c2 = env2.store.claim({ workerId: 'w1' }).claimed
+      env2.store.transition({ attemptId: c2.attemptId, leaseEpoch: c2.leaseEpoch, workerId: 'w1', to: 'PreparingWorkspace' })
+      env2.advance(DEFAULT_LEASE_TTL_MS + 1)
+      const narrow = env2.store.recoverExpired({ externalEffectPossible: true, states: ['Leased', 'Running'] })
+      // PreparingWorkspace 不在点名的两个状态里 → 一条都不动。
+      assert.equal(narrow.recovered.length, 0)
+      assert.equal(env2.store.getAttempt(c2.attemptId).state, 'PreparingWorkspace')
+    } finally { env2.cleanup() }
+
+    // 空数组必须**报错**，不能静默地"成功的什么都没做"。
+    const e = assertRunError(() => env.store.recoverExpired({ externalEffectPossible: true, states: [] }), 'BAD_RECOVERY_STATES')
+    assert.match(e.message, /IN \(\)/)
+  } finally { env.cleanup() }
+})
+
 test('⑥ 未过期的租约不被回收（正常执行中的任务不得被抢走）', () => {
   const env = makeEnv()
   try {
@@ -1046,5 +1096,117 @@ test('⑫ 目标不是 AwaitingApproval 时**不调用**审批端口，也不建
     assert.equal(r.attempt.state, 'Validating')
     assert.equal(calls, 0, '端口在一条与审批无关的迁移上被调用了')
     assert.equal(env.db.prepare('SELECT COUNT(*) AS n FROM permission_requests').get().n, 0)
+  } finally { env.cleanup() }
+})
+
+// ---------------------------------------------------------------- ② 心跳续租
+//
+// 这一组守的是一个**曾经真实存在**的缺陷，它值得写清楚，因为它的表现方式
+// 与"没修"长得一模一样：
+//
+//   心跳里那句 UPDATE 写死了 `AND state = 'Leased'`。而 `Leased` 只覆盖
+//   "已认领、还没开始干活"那一小段——尝试一走到 `PreparingWorkspace` /
+//   `BuildingContext` / `Running`（**每一次真实执行**都要经过的三个状态），
+//   续租就静默地影响 0 行，**而返回值照样报一个 `atMs + ttl` 的到期时间**。
+//
+//   于是"心跳续租"这件事在全部真实执行里都是假的，只是没人看得出来：
+//   跑得比租期短的验证任务在到期前就结束了，而它一旦被掩住，
+//   下一次出现就是"一个正在电脑上跑的任务被判成结果待确认"。
+
+test('② Running 期间心跳真的续租：返回值就是库里那一个（不是编的）', () => {
+  const env = makeEnv()
+  try {
+    env.addTask('t1')
+    const c = env.store.claim({ workerId: 'w1' }).claimed
+    advanceToRunning(env, c)
+    env.advance(30_000)
+    const hb = env.store.heartbeat({ attemptId: c.attemptId, leaseEpoch: c.leaseEpoch, workerId: 'w1' })
+    assert.equal(hb.renewed, true)
+    const stored = env.db.prepare('SELECT lease_expires_at_ms FROM run_attempts WHERE id = ?').get(c.attemptId).lease_expires_at_ms
+    assert.equal(hb.leaseExpiresAtMs, stored, '心跳报的到期时间必须与库里一致')
+    assert.equal(stored, env.clock() + DEFAULT_LEASE_TTL_MS)
+  } finally { env.cleanup() }
+})
+
+test('② 跑得比租期长的 Running 尝试不再被判成"结果待确认"', () => {
+  const env = makeEnv()
+  try {
+    env.addTask('t1')
+    const c = env.store.claim({ workerId: 'w1' }).claimed
+    advanceToRunning(env, c)
+    // 每 30 秒心跳一次，累计跑满 4 个租期（远超 DEFAULT_LEASE_TTL_MS）。
+    // 续租若是假的，第一轮之后租约就已经过期了。
+    for (let i = 0; i < 8; i += 1) {
+      env.advance(30_000)
+      assert.equal(env.store.heartbeat({ attemptId: c.attemptId, leaseEpoch: c.leaseEpoch, workerId: 'w1' }).renewed, true)
+    }
+    const r = env.store.recoverExpired({
+      externalEffectPossible: () => true,
+      states: ['Leased', 'PreparingWorkspace', 'BuildingContext', 'Running'],
+    })
+    assert.deepEqual(r.recovered, [], '一直在心跳的活任务没有任何被回收的理由')
+    assert.equal(env.store.getAttempt(c.attemptId).state, 'Running')
+    assert.equal(env.taskStatus('t1'), 'in_progress', '任务也不该掉进"结果待确认"')
+  } finally { env.cleanup() }
+})
+
+test('② 终态之后飞来的心跳不续期，也不谎报续到了几点', () => {
+  const env = makeEnv()
+  try {
+    env.addTask('t1')
+    const c = env.store.claim({ workerId: 'w1' }).claimed
+    advanceToRunning(env, c)
+    env.store.transition({ attemptId: c.attemptId, leaseEpoch: c.leaseEpoch, workerId: 'w1', outcome: 'cancelled' })
+    assert.equal(env.store.getAttempt(c.attemptId).state, 'Cancelled')
+    const before = env.db.prepare('SELECT lease_expires_at_ms FROM run_attempts WHERE id = ?').get(c.attemptId).lease_expires_at_ms
+    // 不报错：worker 报完终态之后又飞一个心跳是**正常竞态**，不是故障。
+    const hb = env.store.heartbeat({ attemptId: c.attemptId, leaseEpoch: c.leaseEpoch, workerId: 'w1' })
+    assert.equal(hb.ok, true)
+    assert.equal(hb.renewed, false)
+    assert.equal(hb.leaseExpiresAtMs, before, '不续期就不能报一个没写进去的时间')
+    assert.equal(env.db.prepare('SELECT lease_expires_at_ms FROM run_attempts WHERE id = ?').get(c.attemptId).lease_expires_at_ms, before)
+  } finally { env.cleanup() }
+})
+
+test('② 心跳在同一事务里续期写入预约，且预约层的拒因不改写心跳结论', () => {
+  const calls = []
+  let answer = { ok: true, renewed: true }
+  const env = makeEnv({
+    extraStoreOptions: {
+      renewWrite: (args) => { calls.push(args); return answer },
+    },
+  })
+  try {
+    env.addTask('t1')
+    const c = env.store.claim({ workerId: 'w1' }).claimed
+    advanceToRunning(env, c)
+    env.advance(30_000)
+    const ok = env.store.heartbeat({ attemptId: c.attemptId, leaseEpoch: c.leaseEpoch, workerId: 'w1' })
+    assert.equal(ok.ok, true)
+    assert.equal(ok.renewed, true)
+    assert.equal(ok.writeReservation.renewed, true)
+    assert.equal(calls.length, 1)
+    assert.equal(calls[0].taskId, 't1')
+    assert.equal(calls[0].attemptId, c.attemptId)
+    assert.equal(calls[0].epoch, c.leaseEpoch, '与 reserveWrite 同一个参数名（epoch），不另起一个 leaseEpoch')
+    assert.equal(calls[0].leaseMs, DEFAULT_LEASE_TTL_MS, '预约与租约用同一个 TTL——两条寿命不许漂移')
+
+    // 预约正在对账冻结时：心跳**仍然成功**（租约是好的），但把这件事说出来。
+    // 让心跳失败会让 worker 置 `leaseMayBeLost` 并停手，那是**另一个**读数。
+    answer = { ok: false, code: 'RECONCILING', reason: '预约处于对账冻结中' }
+    const frozen = env.store.heartbeat({ attemptId: c.attemptId, leaseEpoch: c.leaseEpoch, workerId: 'w1' })
+    assert.equal(frozen.ok, true)
+    assert.equal(frozen.renewed, true)
+    assert.equal(frozen.writeReservation.code, 'RECONCILING')
+  } finally { env.cleanup() }
+})
+
+test('② 没有接 renewWrite 端口时字段为 null，不是"续期成功了"', () => {
+  const env = makeEnv()
+  try {
+    env.addTask('t1')
+    const c = env.store.claim({ workerId: 'w1' }).claimed
+    const hb = env.store.heartbeat({ attemptId: c.attemptId, leaseEpoch: c.leaseEpoch, workerId: 'w1' })
+    assert.equal(hb.writeReservation, null, '没接线就得看得出来没接线')
   } finally { env.cleanup() }
 })

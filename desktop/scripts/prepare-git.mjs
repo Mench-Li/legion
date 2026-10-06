@@ -25,10 +25,19 @@ if (!bytes || createHash('sha256').update(bytes).digest('hex') !== spec.sha256) 
 }
 if (createHash('sha256').update(bytes).digest('hex') !== spec.sha256) throw new Error('Git checksum mismatch')
 await writeFile(archive, bytes)
-const script = join(build, 'expand-git.ps1')
-await writeFile(script, 'param([string]$Archive, [string]$Destination)\nExpand-Archive -LiteralPath $Archive -DestinationPath $Destination -Force\n')
+// 解压：与 `prepare-node.mjs` 同一处修法，理由见那里的注释——
+// 写 .ps1 再用 `-File` 执行会撞上机器的 PowerShell 执行策略（它管**脚本文件**），
+// 于是 Restricted/AllSigned 的机器上构建失败，而报错完全不提构建。
+// 内联 `-Command` 不经过脚本文件；命令串是常量，路径走环境变量。
 await new Promise((resolve, reject) => {
-  const child = spawn('powershell.exe', ['-NoLogo', '-NoProfile', '-NonInteractive', '-File', script, archive, dest], { stdio: 'inherit', windowsHide: true })
+  const child = spawn('powershell.exe', [
+    '-NoLogo', '-NoProfile', '-NonInteractive', '-Command',
+    'Expand-Archive -LiteralPath $env:LEGION_EXPAND_ARCHIVE -DestinationPath $env:LEGION_EXPAND_DEST -Force',
+  ], {
+    stdio: 'inherit',
+    windowsHide: true,
+    env: { ...process.env, LEGION_EXPAND_ARCHIVE: archive, LEGION_EXPAND_DEST: dest },
+  })
   child.once('error', reject)
   child.once('exit', code => code === 0 ? resolve() : reject(new Error(`Git extraction failed (${code})`)))
 })

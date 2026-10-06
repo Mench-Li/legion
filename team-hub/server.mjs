@@ -11,7 +11,7 @@
  *   TEAM_HUB_PORT  监听端口（默认 8787）
  *   TEAM_HUB_DB    SQLite 文件（默认 team-hub/team.db）
  *   TEAM_HUB_TOKEN 团队 token。token 三种携带方式（与 v1 serve.mjs 对齐）：
- *     Authorization: Bearer <t> / x-dsh-token: <t> / ?token=<t>（?token= 供 EventSource 等无法自定 header 的读订阅）。
+ *     Authorization: Bearer <t> / x-dsh-token: <t>；SSE 走 `?ticket=`（一次性短时票据，不是令牌）。
  *     非空时写操作需 token；且非回环监听（TEAM_HUB_HOST ≠ 127.0.0.1/localhost/::1）时
  *     全部读端点与 SSE 同样需 token（P2-2 读面门禁，/api/config 能力探测除外）。
  *     本地回环开发模式读面保持开放（不回退）。
@@ -583,6 +583,24 @@ const runStore = createRunStore({
     if (conflict?.code === 'FILE_CONTENTION' || conflict?.code === 'SINGLE_WRITER_REQUIRED') {
       db.prepare("UPDATE tasks SET scheduling_state='waiting-file' WHERE id=?").run(taskId)
     }
+  },
+  /**
+   * 心跳里的预约续期（端口形状与 `reserveWrite` 对称）。
+   *
+   * 预约的仓库绑定**从任务当下的绑定重新解析**，而不是回读预约行自己记的
+   * `repo_id`：绑定是可以被改的（`REPO_BINDING_CHANGED` 就是为这件事存在的），
+   * 而拿旧行里的仓库去续期，会续到一条**已经不属于这条任务**的锁上——
+   * 续期成功、真实锁没人管。
+   *
+   * 解不出来时返回具名拒绝而不是抛错：续期失败是心跳应答里的事实，
+   * 不该让整次心跳失败（那会让 worker 以为租约丢了而停手，是另一个读数）。
+   */
+  renewWrite: ({ taskId, scope, attemptId, epoch, leaseMs }) => {
+    const binding = resolveDeliveryBinding(scope)
+    if (binding.error) return { ok: false, code: 'REPO_UNBOUND', reason: binding.error }
+    return writeIntentStore.renew({
+      repoId: binding.repoId, taskId, attemptId, epoch, leaseMs,
+    })
   },
   integrationMode: process.env.LEGION_INTEGRATION_MODE === 'integration',
   deliveryStateForTask: (taskId) => taskDeliveryStore.getDeliveryByTask(taskId)?.state ?? null,
@@ -6462,16 +6480,35 @@ function readBody(req) {
 
 /**
  * token 三种携带方式（与 v1 scrum/serve.mjs 对齐）：
- *   Authorization: Bearer <t> / x-dsh-token: <t> / ?token=<t>。
+ *   Authorization: Bearer <t> / x-dsh-token: <t>；SSE 走 `?ticket=`。
  * ?token= 供浏览器 EventSource 等无法自定 header 的读面订阅使用（token 未配置时恒放行）。
  */
 function authorized(req) {
+  // ★ 远程门禁已用**用户会话**认过这个请求（见 `remote-auth.mjs` 与下面的网关）。
+  //
+  // 这一句是必需的，不是便利：下面那一串只认**机器令牌**，而远程部署下的调用方
+  // 是**登录用户**。少了它，手机上每一个 `/api/agent-*` 都会 401——
+  // 门禁放行了、路由又把它挡回去，而两处都"各自看起来是对的"。
+  // 实测就是这么发现的：手机端契约用例一跑，`/api/agents` 直接 401。
+  //
+  // 它**不放宽**任何东西：标记只由网关在"用户令牌已验证 + 该用户在那个空间里有角色"
+  // 之后才打上（见 `remote-auth.mjs` 的 `SPACE_FORBIDDEN`）。没有远程通道时
+  // `__legionUser` 永远是 `undefined`，既有行为一字不变。
+  if (req.__legionUser !== undefined) return true
   if (TOKEN === '') return true
   const header = (req.headers.authorization ?? '').replace(/^Bearer\s+/i, '')
   const custom = req.headers['x-dsh-token'] ?? ''
-  let query = ''
-  try { query = new URL(req.url ?? '/', 'http://x').searchParams.get('token') ?? '' } catch { /* 保持空 */ }
-  return header === TOKEN || custom === TOKEN || query === TOKEN
+  // ★ 查询串里**不再**收令牌。
+  //
+  // 原来这里有一条 `?token=`（注释写的理由是"供 EventSource 等无法自定 header
+  // 的读订阅"）。而那个理由现在由**一次性票据**承担了（见 `remote-auth.mjs` 的
+  // `QUERY_TICKET_PATHS`）——票据只用一次、只活 60 秒、只对订阅有效，
+  // 而被记进访问日志/浏览器历史的令牌是 15 分钟、覆盖全部 API 的主钥匙。
+  //
+  //   > 一个"把主令牌写在 URL 里"的订阅方式，
+  //   > 与一个"没有鉴权"的订阅方式，在日志被读走那天是同一个东西——
+  //   > 只不过前者在代码里看起来是"已经鉴权了"。
+  return header === TOKEN || custom === TOKEN
 }
 
 function requireMember(body) {
@@ -6830,7 +6867,16 @@ const router = createRouter([
   createWorkflowPackRoutes({
     db, json, handleWrite: (req, res, run) => handleWrite(req, res, run, { maxBytes: 2 * 1024 * 1024 }), audit, withTx,
   }),
-  createAgentsRoutes({ service:agentConversations,json,authorized,readBody,requireMember,readScope }),
+  createAgentsRoutes({
+    service:agentConversations,json,authorized,readBody,requireMember,readScope,
+    // 写路径的空间授权：门禁只看得到 URL，而 POST 的 scope 在请求体里（见该族的注释）。
+    //
+    // ★ 这里**必须**包一层箭头函数，不能写成 `userStore === null ? null : …`：
+    //   本行在 `const userStore` 声明**之前**执行（路由表先建、`userStore` 在文件末尾），
+    //   直接读它会撞 TDZ 并在启动时抛 ReferenceError。
+    //   `requireSpaceAccess` 自己在**调用时**才看 `userStore`，于是这里是延迟求值。
+    requireSpace: (req, scope) => requireSpaceAccess(req, scope),
+  }),
   // 冲突治理族放在最前：/api/tasks/:id/write-intent 等具体路径必须先于宽前缀匹配。
   createWriteIntentRoutes({
     json, readBody, authorized, writeIntentStore, db,
@@ -7616,3 +7662,302 @@ function routeHarnessForTask(input) {
   if (out.ok) return out.provider
   throw new Error('harness 路由被拒：' + out.reason + '（' + JSON.stringify(out.detail ?? {}) + '）')
 }
+
+// ════════════════════════════════════════════════════════════════════════════
+// 远程 Agent 通道接线（S-B / S-D）：身份、设备与 Node 网关
+//
+// 与上面那段 `harnessStoreForDispatch` 同一个理由，整段放在**文件末尾**：
+// 本仓有多处手钉行号的引用，加在中间会让它们全部后移。
+// ESM 的 `import` 声明在模块体里任何顶层位置都合法（且会被提升），
+// 所以末尾声明不改变任何导入语义。
+//
+// ## 默认关闭，且**必须**显式打开
+//
+// `LEGION_IDENTITY_KEY` 没配时，身份与设备路由**不注册**、Node 网关**不挂**。
+// 这样做的理由是：本文件是既有的本机服务（桌面 / 守护 / 看板都指过来），
+// 把一条公网通道顺手打开会让"我升级了一次代码"变成"我多了一个公网入口"。
+// 打开它需要一个显式动作（见 `docs/DEPLOY.md` 或实施计划 §阶段 G）。
+//
+// ## 它不替换 `TEAM_HUB_TOKEN`
+//
+// 两把门并存：机器令牌保护本机/服务间那一面，用户与设备身份保护远程那一面。
+// 见 `team-hub/remote-auth.mjs` 文件头。
+// ════════════════════════════════════════════════════════════════════════════
+import { createIdentityRoutes } from './routes/identity.mjs'
+import { createMobileRoutes } from './routes/mobile.mjs'
+import { createPortalRoutes } from './routes/portal.mjs'
+import { createReleaseRoutes, latestInstaller } from './routes/releases.mjs'
+import { createUserStore } from './user-store.mjs'
+import { createDeviceStore } from './device-store.mjs'
+import { createNodeGateway } from './node-gateway.mjs'
+import { createNodeContextPreparer } from './node-context.mjs'
+import { createNodeRecovery } from './node-recovery.mjs'
+import { PUBLIC_PATHS, decideRemoteAuth, extractBearer } from './remote-auth.mjs'
+
+/** 远程通道是否启用：配了身份签名密钥即启用。 */
+export const REMOTE_AGENT_ENABLED = String(CFG.values.identityKey ?? '').length >= 16
+
+/**
+ * 身份签名密钥。**没有它就没有令牌签名**，而"没有签名的令牌"与
+ * "任何人都能伪造的令牌"是同一个东西——所以缺它时整个远程通道不注册。
+ */
+const IDENTITY_KEY = String(CFG.values.identityKey ?? '')
+const REMOTE_AUTH_ENABLED = REMOTE_AGENT_ENABLED && String(CFG.values.remoteAuth ?? '') === '1'
+
+export const userStore = REMOTE_AGENT_ENABLED
+  ? createUserStore({ db, withTx, key: IDENTITY_KEY, audit, registrationMax: CFG.values.registrationMax })
+  : null
+export const deviceStore = REMOTE_AGENT_ENABLED
+  ? createDeviceStore({ db, withTx, audit })
+  : null
+
+/**
+ * 空间级授权的**唯一判定处**（读取与写入共用）。
+ *
+ * `req.__legionUser` 由远程门禁在"用户令牌已验证"之后打上；没有它就说明
+ * 这个请求不是用户令牌来的（机器令牌 / 本机无鉴权），此时**不做判定**——
+ * 与 `authorized` 在无 token 时的既有语义一致，不改变本机部署的行为。
+ *
+ * 抛的是带 `status` 的普通错误（与 `AgentConversationError` 同形），
+ * 路由族把它翻成响应。返回 `undefined` 表示放行。
+ */
+function requireSpaceAccess(req, scope) {
+  // 在**调用时**才读 `userStore`：本函数的定义在文件末尾，而路由表在它之前建好，
+  // 于是这里必须延迟求值（见调用点那段注释）。
+  if (REMOTE_AGENT_ENABLED !== true || userStore === null) return
+  const actor = req?.__legionUser
+  if (actor === undefined || actor === null) return
+  if (typeof scope !== 'string' || scope.length === 0) return
+  if (userStore.hasRoleAtLeast(actor.userId, scope, 'viewer') === true) return
+  throw Object.assign(new Error(`无权访问空间「${scope}」`), { code: 'SPACE_FORBIDDEN', status: 403 })
+}
+
+/**
+ * 把节点上报的进展投影进**会话**（持久化的那一条路）。
+ *
+ * 为什么需要它：网关那边的两条出口都只到得了"活着的订阅者"——
+ * 运行明细手机不会读，审计走 SSE 断线就错过了。设计文档 §6.1 第 6 步
+ * 要的是「Hub 持久化后推给手机」，而 §1 要的是它在**同一 Agent 详情**里可追溯：
+ * 手机重开时那条进展必须还在。
+ *
+ * `agentConversations.report()` 正是"把运行事实投影进对话"的既有路径
+ * （Attempt/任务状态变迁一直这么做），所以进展也走它，不另造一条。
+ */
+function projectProgressToConversation({ taskId, scope, frame }) {
+  if (agentConversations === undefined || agentConversations === null) return
+  const task = db.prepare('SELECT scope, role, soldier FROM tasks WHERE id=?').get(taskId)
+  if (!task) return
+  const taskScope = task.scope ?? scope
+  // 任务属于哪个 Agent：角色 → 注册表。投影不到就不投影（例如该角色已归档），
+  // 那是"这条任务没有对应的 Agent 会话"，不是错误。
+  const agent = db.prepare('SELECT * FROM agent_registry WHERE scope=? AND role=? AND archived=0')
+    .get(taskScope, task.role ?? task.soldier)
+  if (!agent) return
+  const kindLabel = { started: '开始', step: '进展', tool: '工具', note: '说明', blocked: '受阻', question: '提问', artifact: '产物' }[frame.kind] ?? '进展'
+  agentConversations.report(
+    agent, taskId,
+    // sourceKey 决定幂等：同一个 eventId 重复投影只落一条消息。
+    // 用 JSON.stringify 拼键，与 `agent-conversations.mjs` 内部的 `keyOf` 同形
+    // （那是模块私有的，不为了这一个调用点把它导出来）。
+    JSON.stringify(['node-progress', frame.eventId ?? `${frame.attemptId}:${frame.seq}`]),
+    `${taskId} ${kindLabel}：${frame.summary}`,
+    [{ taskId, attemptId: frame.attemptId, eventSeq: frame.seq }],
+    { semanticType: 'progress', attemptId: frame.attemptId, nodeEventId: frame.eventId ?? null },
+  )
+}
+
+/** 网关需要一个任务摘要端口（它不认识 `tasks` 表的列）。 */
+function describeTaskForNode(taskId, scope) {
+  try {
+    const t = db.prepare('SELECT id,title,status,version,role,soldier FROM tasks WHERE id=? AND scope=?').get(taskId, scope)
+    if (!t) return null
+    // 只给身份与状态。**不给**描述/验收标准/评论——那些可能含用户原文，
+    // 而任务的正文由 `claim`/上下文包那条路径送，不从这里绕。
+    return { id: t.id, title: t.title, status: t.status, version: t.version, role: t.role ?? t.soldier ?? null }
+  } catch { return null }
+}
+
+/**
+ * 派发前冻结上下文。**必需**——没有它远端到不了 `Running`。
+ *
+ * 用的是 Hub 自己的库与它已有的装配器/仓储，所以装配与持久化都在真相源这一侧
+ * 完成（见 `node-context.mjs` 文件头：为什么不让电脑自己装配）。
+ *
+ * 这里包一层薄适配而不是直接传 `contextStore`：本文件里的 `contextStore`
+ * 是个**延迟构造的 getter 函数**（与 `modelStore` / `bindingStore` 同一形状），
+ * 传进去会得到"没有 record 方法"的构造期报错——而那句报错读起来像"少传了参数"，
+ * 真实原因是"传的是 getter 而不是实例"。同样的坑在本文件的 `audit` 适配那处
+ * 已经踩过一次（见 `contextStore()` 里的注释）。
+ */
+const nodeContextPreparer = REMOTE_AGENT_ENABLED
+  ? createNodeContextPreparer({
+    db,
+    contextStore: {
+      record: (snapshot, opts) => contextStore().record(snapshot, opts),
+    },
+  })
+  : null
+
+/**
+ * 远程节点的租约回收与预约结清（`node-recovery.mjs`）。
+ *
+ * `externalEffectPossible` **默认对一切在途状态返回 true** —— 逾期的远端尝试
+ * 可能已经在电脑上产生了副作用（推到远端、删了文件、付了款），
+ * 两条出口里「可重试」会重复执行而「未知」只是要人对账，代价不对称。
+ */
+const nodeRecovery = REMOTE_AGENT_ENABLED
+  ? createNodeRecovery({ db, runStore, writeIntentStore, audit })
+  : null
+
+export const nodeGateway = REMOTE_AGENT_ENABLED
+  ? createNodeGateway({
+    deviceStore, runStore, audit,
+    describeTask: describeTaskForNode,
+    // 派发前冻结上下文。没有它远端到不了 `Running`：状态机要求
+    // `BuildingContext → Running` 先有 `run_context_snapshots` 的一行。
+    prepareContext: nodeContextPreparer,
+    // 把节点上报的进展投影进会话（否则手机重开后时间线里看不到它做过什么）。
+    projectProgressToConversation,
+    claimScope: CFG.values.claimScope || null,
+    onWarn: (code, detail) => console.warn(`[node-gateway] ${code}: ${JSON.stringify(detail)}`),
+  })
+  : null
+
+if (REMOTE_AGENT_ENABLED) {
+  // 身份/设备族挂在**最前**，路由层与既有 `if` 链都不需要改一行。
+  router.families.unshift(createIdentityRoutes({
+    json, readBody, authorized, requireString,
+    userStore, deviceStore, remoteAuthEnabled: REMOTE_AUTH_ENABLED,
+    gateway: nodeGateway,
+    // 注册策略从**配置**来，不从请求体来。见 `/api/identity/register` 的注释。
+    registration: CFG.values.registration ?? 'closed',
+  }))
+  router.list.push(
+    { family: 'identity', method: 'GET', path: '/api/identity/status' },
+    { family: 'identity', method: 'POST', path: '/api/identity/login' },
+    { family: 'identity', method: 'POST', path: '/api/identity/register' },
+    { family: 'identity', method: 'POST', path: '/api/devices/pair' },
+  )
+
+  if (REMOTE_AUTH_ENABLED) {
+    // 远程门禁也要挂在最前：它必须先于所有业务族做判定，且**放行时返回 false**
+    // 让请求继续落到真正的路由上。见 remote-auth.mjs 文件头那段"为什么需要它"。
+    router.families.unshift({
+      id: 'remote-auth-gate',
+      routes: [],
+      async dispatch(req, res, ctx) {
+        const { token, ticket } = extractBearer({
+          path: ctx.path, headers: req.headers, searchParams: ctx.url.searchParams, legacyToken: TOKEN,
+        })
+        const decision = decideRemoteAuth({
+          path: ctx.path,
+          ticket,
+          // 票据换出来的**就是**一个用户会话：门禁之后的所有判断对两者一视同仁。
+          redeemTicket: (t) => userStore.redeemEventTicket(t),
+          method: req.method,
+          remoteAuth: true,
+          token,
+          legacyAuthorized: authorized(req),
+          verifyAccessToken: (t) => userStore.verifyAccessToken(t),
+        })
+        if (decision.allow === true) {
+          // ── 用户会话通过之后的两件事 ────────────────────────────────────
+          //
+          // ① 打标记让路由层的 `authorized(req)` 认得他。
+          //    路由层那一串只认机器令牌，而远程调用方是登录用户；
+          //    不打这个标记时手机端每个 `/api/agent-*` 都会 401。
+          //
+          // ② **空间级授权**：URL 上能看见 `scope` 的请求，先验这个用户在不在那个空间里。
+          //    没有它，任何登录用户只要把 `?scope=` 换成别人的空间就能读到——
+          //    而设计文档 §13 明确要求「一个项目的 Agent 无权读取未授权项目」。
+          //
+          //    ★ 已知边界：`scope` 在 **POST 请求体**里时不在这里检查
+          //      （门禁读不到 body，读了就把流消耗掉、路由再也拿不到）。
+          //      写路径的空间授权需要在路由层或权限引擎里补，属于**未完成的接线**，
+          //      不是"已经安全了"。这条注释就是它的台账。
+          if (decision.actor?.kind === 'user') {
+            const scope = ctx.url.searchParams.get('scope')
+            if (scope !== null && scope.length > 0
+              && userStore.hasRoleAtLeast(decision.actor.userId, scope, 'viewer') !== true) {
+              json(res, 403, {
+                error: `无权访问空间「${scope}」`,
+                code: 'SPACE_FORBIDDEN',
+              })
+              return true
+            }
+            req.__legionUser = Object.freeze({
+              userId: decision.actor.userId,
+              sessionId: decision.actor.sessionId ?? null,
+              name: decision.actor.name ?? null,
+            })
+          }
+          return false
+        }
+        if (decision.headers) for (const [k, v] of Object.entries(decision.headers)) res.setHeader(k, v)
+        json(res, decision.status, { error: decision.message, code: decision.code })
+        return true
+      },
+    })
+  }
+
+  // 手机端静态资源**排在门禁之前**：它是页面本身（HTML/JS/图标），
+  // 而鉴权发生在页面发出的 API 调用上。把登录页也挡在门禁后面，
+  // 用户就永远拿不到那个能让他登录的页面。
+  // 位置最后 unshift ⇒ 数组最前 ⇒ 最先派发。
+  router.families.unshift(createMobileRoutes({ root: join(ROOT, 'workbench', 'mobile') }))
+
+  // 发布目录托管（`GET /legion/*`）。
+  //
+  // 只在**显式配了** `LEGION_RELEASES_DIR` 时注册：没配就让 `/legion/*` 落到
+  // 通用 404，而不是挂一个空目录上去——"200 但是空的"与"还没有发布"在界面上
+  // 长得一样，而前者会让排障的人去查缓存。
+  const releasesDir = String(CFG.values.releasesDir ?? '').trim()
+  if (releasesDir.length > 0) {
+    router.families.unshift(createReleaseRoutes({ root: releasesDir }))
+  }
+
+  // 门口（`GET /`）也排在最前：它是**第一个**打开这个 Hub 的人看到的页面。
+  // 排在后面的话会被通用 404 接走，而"发个链接给人"是这个产品被使用的第一步。
+  //
+  // 下载地址的取法：**显式配置优先**；没配就**从发布目录里现找**最新的一份安装包。
+  // 后者不是便利，是那条纪律的落地——门口页只链接**确实存在**的文件。
+  // 让运营者手填一个 URL，就等于把这个保证换成了"希望他填对了"。
+  const explicitDownload = String(CFG.values.downloadUrl ?? '').trim()
+  const foundInstaller = explicitDownload.length === 0 && releasesDir.length > 0
+    ? latestInstaller(releasesDir)
+    : null
+  router.families.unshift(createPortalRoutes({
+    downloadUrl: explicitDownload.length > 0
+      ? explicitDownload
+      : foundInstaller === null ? '' : `/legion/releases/${encodeURIComponent(foundInstaller.releaseId)}/Legion-Setup-win-x64.exe`,
+    version: CFG.values.desktopVersion ?? '',
+    registration: CFG.values.registration ?? 'closed',
+  }))
+
+  nodeGateway.attach(server)
+
+  // 远程节点的租约回收。**必需**，理由见 `node-recovery.mjs` 文件头：
+  // 本机 worker 会自己回收自己的租约，而远程节点断线/关机后没有任何人收拾它留下的
+  // 租约——那条租约占着单写者位，于是**所有**新任务都领不到
+  // （`claim` 返回 `file-contention`，界面上只是"任务不动"）。
+  //
+  // 30s：与投递回收、自动化 tick 同一个量级。`unref()`：一个会阻止进程退出的
+  // 定时器与一个关不掉的后台任务是同一个东西（测试进程会因此永远不结束）。
+  setInterval(() => {
+    try {
+      const r = nodeRecovery.sweepOnce()
+      if (r.errors.length > 0) {
+        console.warn(`[node-recovery] 回收有失败项：${r.errors.map((e) => `${e.phase}:${e.message}`).join('；')}`)
+      }
+      // 只在**真的动了东西**时打一行：每 30 秒重印"什么都没做"是噪音。
+      if (r.leasesRecovered > 0 || r.reservationsReleased > 0) {
+        console.log(`[node-recovery] 到期租约 ${r.leasesRecovered} 条；结清预约 ${r.reservationsReleased} 条`)
+      }
+    } catch (e) {
+      console.warn(`[node-recovery] 回收崩了（下一轮再试）：${e instanceof Error ? e.message : String(e)}`)
+    }
+  }, 30000).unref()
+}
+
+export { PUBLIC_PATHS }
+

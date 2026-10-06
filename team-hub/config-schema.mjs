@@ -17,6 +17,71 @@ export const SCHEMA = defineSchema({
     { key: 'host', env: 'TEAM_HUB_HOST', cli: 'host', type: 'string', default: '127.0.0.1', doc: '监听地址；非回环必须配 token' },
     { key: 'token', env: 'TEAM_HUB_TOKEN', cli: 'token', type: 'string', default: '', sensitive: true, doc: '访问 token（读写鉴权）' },
     { key: 'dbFile', env: 'TEAM_HUB_DB', type: 'path', default: 'team-hub/team.db', doc: 'SQLite 数据库文件（WAL）' },
+    // ── 远程 Agent 通道（身份 / 设备 / Node 网关）──
+    //
+    // 三者的**共同默认值是"关闭"**，而且关闭方式是"密钥为空"而不是一个 `enabled` 开关：
+    // 一个布尔开关会在有人把它打开而忘了配密钥时，起一个**没有签名**的令牌体系
+    // （也就是任何人都能伪造令牌）。密钥为空 ⇒ 路由不注册、网关不挂载，
+    // 不存在"打开了但没配好"这个中间态。
+    {
+      key: 'identityKey', env: 'LEGION_IDENTITY_KEY', type: 'string', default: '', sensitive: true,
+      doc: '用户/设备令牌的 HMAC 签名密钥（>=16 字符）；留空 = 关闭远程 Agent 通道',
+    },
+    {
+      key: 'remoteAuth', env: 'LEGION_REMOTE_AUTH', type: 'string', default: '',
+      doc: "设为 '1' 时启用远程门禁：除白名单外的 /api/* 都要求用户访问令牌（Hub 绑回环+反代时必须开）",
+    },
+    {
+      key: 'claimScope', env: 'LEGION_NODE_CLAIM_SCOPE', type: 'string', default: '',
+      doc: 'Node 网关认领任务时限定到某个空间；留空 = 不限（单机部署的安全做法是限定）',
+    },
+    // 注册策略。**默认 `closed`**，要开放必须显式写出来。
+    //
+    // 默认值不是随手定的：一个默认开放的注册端点，与一个"忘了设策略"的部署，
+    // 在出事那天是同一个东西——只是没人会去查一个一直好好的开关。
+    //   closed —— 只能由管理员造邀请；
+    //   invite —— 自助注册，但必须有邀请码；
+    //   open   —— 任何人可注册（自建/内网演示；公网请三思）。
+    // 枚举值由 `user-store.mjs` 的 `REGISTRATION_MODES` 定义，两处由用例断言一致。
+    {
+      key: 'registration', env: 'LEGION_REGISTRATION', type: 'string', default: 'closed',
+      doc: "注册策略：closed（默认，仅邀请）/ invite（需邀请码自助注册）/ open（开放注册）",
+    },
+    // Hub 门口（`GET /`）上的桌面版下载地址。
+    //
+    // **默认留空 = 尚未发布**，页面会照实这么写。给一个点开 404 的假链接
+    // 比没有按钮更坏：用户会以为是自己网络或浏览器的问题，然后反复试。
+    // 有稳定下载页或对象存储入口时把它指过去即可，不需要改代码。
+    // 自助注册的速率闸门：一小时内最多新开几个账号。见 user-store 的 registrationAllowed。
+    //
+    // **是全局的，不是按 IP**：部署形态是"Hub 绑回环 + 反代"，于是
+    // `req.socket.remoteAddress` 恒为反代自己；要拿真实来源得信 X-Forwarded-For，
+    // 而那要求"谁是可信代理"是配置出来的——没配就信它，等于让调用方自带一个 IP。
+    // 自托管 Hub 上，"一小时内新开了几个账号"本身就有意义，而合法注册远到不了上限。
+    // 设 0 = 关掉闸门（明确写出来才算）。
+    {
+      key: 'registrationMax', env: 'LEGION_REGISTRATION_MAX', type: 'int',
+      default: 20, min: 0, max: 10000,
+      doc: '自助注册速率上限（每小时新开账号数）；0 = 关掉闸门。仅对 open 策略生效',
+    },
+    {
+      key: 'downloadUrl', env: 'LEGION_DOWNLOAD_URL', type: 'string', default: '',
+      doc: '桌面版安装包的下载地址（显示在 Hub 首页）；留空 = 首页如实显示"尚未发布"',
+    },
+    {
+      key: 'desktopVersion', env: 'LEGION_DESKTOP_VERSION', type: 'string', default: '',
+      doc: '桌面版版本号（只用于首页展示，可空）',
+    },
+    // 发布目录：其下应有 `feeds/` 与 `releases/`（结构见桌面自动更新设计 §4）。
+    //
+    // **默认留空 = 不托管**（这一族根本不注册，`/legion/*` 落到通用 404）。
+    // 不默认指向仓库里的 `releases/`：那个目录被 gitignore，默认指过去只会让
+    // 一台刚部署的 Hub 挂上一个空目录，而"空目录"与"还没发布"在门口页上
+    // 长得一样。要让 Hub 托管，显式写出来。
+    {
+      key: 'releasesDir', env: 'LEGION_RELEASES_DIR', type: 'path', default: '',
+      doc: '发布目录（含 feeds/ 与 releases/）；留空 = Hub 不托管安装包下载',
+    },
     // ── 附件（P3-2 统一项：附件目录相关限值）──
     { key: 'attachMaxBytes', env: 'CHAT_ATTACH_MAX_BYTES', type: 'int', default: 10 * 1024 * 1024, min: 1, doc: '单附件大小上限（字节）' },
     { key: 'attachMaxPerMsg', env: 'CHAT_ATTACH_MAX_PER_MSG', type: 'int', default: 3, min: 1, doc: '每条消息附件数量上限' },
@@ -99,6 +164,31 @@ export const SCHEMA = defineSchema({
   ],
   nonEnvLiterals: [
     'COMMIT', 'ROLLBACK', 'DELETE', 'OPTIONS', 'SIGINT', 'SIGTERM', 'ENOENT',
+    // ── 远程 Agent 通道（S-B / S-D）的具名错误码 ──
+    //
+    // 三个来源，都**不是**环境变量读取点，只是长得像（全大写）：
+    //   · `user-store.mjs` 的 IDENTITY_*（登录/会话/邀请/空间授权）；
+    //   · `device-store.mjs` 的 DEVICE_*（配对/令牌/能力）；
+    //   · `node-gateway.mjs` / `remote-auth.mjs` / `routes/identity.mjs` 的
+    //     NODE_* / REMOTE_AUTH_* / HUB_TOKEN_REQUIRED。
+    // `UNIQUE` 是 SQLite 唯一约束报错里的字样，用于把"重名"翻成具名结果。
+    'DEVICE_CAPABILITY_NOT_ALLOWED', 'DEVICE_INVALID_INPUT', 'DEVICE_NOT_FOUND',
+    'DEVICE_PAIRING_CONSUMED', 'DEVICE_PAIRING_EXPIRED', 'DEVICE_PAIRING_NOT_FOUND',
+    'DEVICE_PAIRING_RATE_LIMITED', 'DEVICE_REVOKED', 'DEVICE_TOKEN_INVALID', 'DEVICE_USER_NOT_FOUND',
+    'HUB_TOKEN_REQUIRED', 'UNIQUE',
+    'IDENTITY_ACCOUNT_LOCKED', 'IDENTITY_ALREADY_BOOTSTRAPPED', 'IDENTITY_BOOTSTRAP_DENIED',
+    'IDENTITY_FORBIDDEN', 'IDENTITY_INVALID_CREDENTIALS', 'IDENTITY_INVALID_INPUT',
+    'IDENTITY_INVITE_CONSUMED', 'IDENTITY_INVITE_EXPIRED', 'IDENTITY_INVITE_NOT_FOUND',
+    'IDENTITY_KEY_REQUIRED', 'IDENTITY_NAME_TAKEN', 'IDENTITY_NOT_BOOTSTRAPPED',
+    'IDENTITY_REFRESH_REUSE_DETECTED', 'IDENTITY_REQUEST_FAILED', 'IDENTITY_SESSION_EXPIRED',
+    'IDENTITY_SESSION_NOT_FOUND', 'IDENTITY_SESSION_REVOKED', 'IDENTITY_TOKEN_BAD_SIGNATURE',
+    'IDENTITY_TOKEN_EXPIRED', 'IDENTITY_TOKEN_MALFORMED', 'IDENTITY_TOKEN_MISSING', 'IDENTITY_USER_NOT_FOUND',
+    'NODE_CAPABILITY_MISSING', 'NODE_FRAME_BUILD_FAILED', 'NODE_HELLO_REQUIRED', 'NODE_HELLO_TIMEOUT',
+    'NODE_ID_MISMATCH', 'NODE_LEASE_NOT_OWNED', 'NODE_STORE_REJECTED', 'NODE_VERSION_REJECTED',
+    'NODE_DISPATCH_ACK_TIMEOUT', 'NODE_CLAIM_BLOCKED', 'NODE_CLAIM_UNBLOCKED',
+    'REMOTE_AUTH_EXPIRED', 'REMOTE_AUTH_INVALID', 'REMOTE_AUTH_MISSING',
+    // 手机端静态路由（`routes/mobile.mjs`）的拒绝原因；不是环境变量。
+    'BAD_PATH', 'OUT_OF_ROOT', 'TYPE_NOT_SERVED',
     // 运行面（PRT-302/303/313）的具名错误码，来自 team-hub/run-store.mjs 的 RUN_ERRORS。
     // 逐个登记而不是加前缀通配：这份清单的价值在于「每一条都被看过一次」。
     'WORKER_REQUIRED', 'EPOCH_REQUIRED', 'BAD_LEASE_TTL', 'ATTEMPT_NOT_FOUND',

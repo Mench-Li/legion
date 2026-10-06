@@ -53,12 +53,25 @@ import { TaskCenterView } from './components/TaskCenterView'
 import { NewSpaceModal } from './components/NewSpaceModal'
 import { SpaceSettingsModal } from './components/SpaceSettingsModal'
 import { ToastHost, toast } from './components/Toast'
+import { LoginView, useIdentityGate } from './components/LoginView'
+import { hasSession, setSessionExpiredHandler } from './identity'
 
 type ConnState = 'connecting' | 'live' | 'error'
 
 const MAX_ACTIVITY = 80
 
 export default function App(): React.JSX.Element {
+  // 账号会话的门。只在 Hub **要求**远程鉴权时才会拦（见 `useIdentityGate`）：
+  // 本机单机部署时它恒为 false，指挥台与加登录墙之前逐字相同。
+  const { status: identityStatus } = useIdentityGate()
+  const [signedOut, setSignedOut] = useState(false)
+  useEffect(() => {
+    // 令牌过期且刷新失败时回到登录页。没有这条，一个开着页面过夜的人会
+    // 拿到一片 401，而界面上**没有任何地方**能让他重新登录。
+    setSessionExpiredHandler(() => setSignedOut(true))
+    return () => setSessionExpiredHandler(null)
+  }, [])
+
   const [board, setBoard] = useState<BoardData | null>(null)
   const [missions, setMissions] = useState<Mission[]>([])
   const [scopeAware, setScopeAware] = useState(false)
@@ -486,6 +499,49 @@ export default function App(): React.JSX.Element {
       }
     })
   }, [hubMode])
+
+  // ── 会话门 ────────────────────────────────────────────────────────────────
+  //
+  // ★ 它必须排在下面那两个 `conn` 提前返回**之前**。
+  //
+  // 实测踩过：Hub 要求远程鉴权、而浏览器手上没有会话时，每一个请求都是 401，
+  // `conn` 于是变成 `error`——界面显示「无法连接数据源 http://127.0.0.1:4820，
+  // 错误：401 Unauthorized」，外加一句"请在 Legion 安装目录运行
+  // node scrum/serve.mjs --port 4820"。**那是句错话**：数据源好好的，
+  // 用户只是还没登录，而他会照着那句话去起一个本地的开发服务端。
+  //
+  //   > 一个把"你还没登录"说成"连不上、请去启动服务"的界面，
+  //   > 会把人送去修一个没坏的东西——而真正该做的那一件事（登录）
+  //   > 在屏幕上根本没有出现。
+  //
+  // 与手机端 `deriveConnectionState` 里那条「未登录 ≠ Hub 不可达」是同一族问题，
+  // 修法也一样：把判据放在**更靠前**的位置，让更准确的结论先说话。
+  const gateOn = identityStatus !== null
+    && identityStatus.enabled === true
+    && identityStatus.remoteAuthRequired === true
+    && !hasSession()
+  if (gateOn || signedOut) {
+    return (
+      <LoginView
+        status={identityStatus ?? { ok: false, enabled: false, bootstrapped: true, remoteAuthRequired: true, registration: 'closed' }}
+        onSignedIn={() => {
+          // ★ 登录成功后**整页重载**，而不是就地复位状态。
+          //
+          // 本组件的数据 effect 全在挂载时跑过一遍，而那一遍是在**令牌还不存在**
+          // 的时候跑的——它们全都拿到了 401。就地重跑意味着要挨个改十几个
+          // effect 让它们依赖一个"会话版本号"，而**下一个**新加的 effect
+          // 不会记得这件事，于是表现为"登录之后某一个面板永远是空的"。
+          //
+          // 登录是低频动作，一次整页重载买的是"每一个 effect 都必然带着新令牌
+          // 重跑一遍"，这条保证比省下的那一次加载值钱。
+          //
+          // 也**不**在这里清会话：`LoginView` 刚刚把新令牌存进去，清掉就白登了。
+          // 失效那条路上的清理由 `recoverSession` 负责。
+          window.location.reload()
+        }}
+      />
+    )
+  }
 
   if (conn === 'connecting') {
     return (

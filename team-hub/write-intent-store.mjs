@@ -399,6 +399,55 @@ export function createWriteIntentStore(db, { now = () => Date.now(), caseInsensi
       })
     },
 
+    /**
+     * 续期预约：与租约续期同一次心跳里发生。
+     *
+     * ## 为什么必须有它
+     *
+     * 预约在 claim 时把 `expires_at_ms` 写死成 `now + leaseMs`，而在此之前
+     * **没有任何东西**会去延长它。于是一个跑得比租期长的任务，其预约会先"过期"，
+     * 而同一时刻租约因为心跳是新鲜的——两条寿命从此不同步。
+     *
+     * 后果不是"锁提前放了"（`ACTIVE_SQL` 不看 `expires_at_ms`，`reconciling`
+     * 也仍然占位），而是**读数在撒谎**：任何按 `expires_at_ms` 判定的路径
+     * （`sweepExpiredLeases`、运维诊断）都会把一个**正在心跳的活任务**
+     * 读成"进程未确认退出"。而 `reconciling` 是留给对账的冻结态，
+     * 一个假的冻结会让人去查一件根本没发生的事。
+     *
+     * ## 两条纪律
+     *
+     * ① **`reconciling` 一律拒绝续期。** 那个状态的含义是"进程是否还活着没人确认"，
+     *    续期等于把它按回 `reserved`，也就**抹掉了那次冻结**——而正等着看它的人
+     *    是唯一能判断该不该放锁的人。要恢复持有，走 `release` 后重新 `reserve`。
+     * ② **不追加事件。** 心跳是 10–30 秒一次，一次一条事件意味着一天几千行噪音，
+     *    而 `write_intent_events` 是给 metrics 与审计读的。租约续期也不记事件，
+     *    两者保持同一口径。
+     *
+     * `leaseMs` 的语义与 `reserve` 一致：正整数 → 续到 `now + leaseMs`；
+     * `null` → 清掉到期时间（"无到期"是合法状态，不是"没续上"）。
+     */
+    renew({ repoId, taskId, attemptId = null, epoch, leaseMs = null }) {
+      return withTx(db, () => {
+        const row = db.prepare(
+          `SELECT * FROM write_reservations WHERE repo_id = ? AND task_id = ? AND ${ACTIVE_SQL} ORDER BY id DESC LIMIT 1`,
+        ).get(repoId, taskId)
+        if (!row) return Object.freeze({ ok: false, code: WRITE_INTENT_ERRORS.NO_ACTIVE_RESERVATION, reason: '没有活跃的写入预约' })
+        // 栅栏先于状态：epoch 不符时**不能**顺带报出"这是 reconciling"，
+        // 那会让一个已被接管的旧持有者据此判断别人的预约状态。
+        if (Number(row.lease_epoch) !== Number(epoch)) {
+          return Object.freeze({ ok: false, code: WRITE_INTENT_ERRORS.EPOCH_STALE, reason: `epoch 已过期：当前真实 epoch 为 ${row.lease_epoch}`, currentEpoch: row.lease_epoch })
+        }
+        if (attemptId !== null && row.attempt_id !== attemptId) return Object.freeze({ ok: false, code: 'ATTEMPT_MISMATCH', reason: '预约属于另一运行尝试' })
+        if (row.state !== 'reserved') {
+          return Object.freeze({ ok: false, code: 'RECONCILING', reason: '预约处于对账冻结中，续期会抹掉那次冻结；确认后请 release 再重新 reserve' })
+        }
+        const ts = now()
+        const expires = leaseMs === null || leaseMs === undefined ? null : ts + Number(leaseMs)
+        db.prepare('UPDATE write_reservations SET expires_at_ms=?, updated_at_ms=? WHERE id=?').run(expires, ts, row.id)
+        return Object.freeze({ ok: true, renewed: true, reservation: toReservation({ ...row, expires_at_ms: expires, updated_at_ms: ts }) })
+      })
+    },
+
     /** 进程未确认退出：冻结为 reconciling，而不是立即释放。 */
     markReconciling({ repoId, taskId, attemptId = null, epoch, reason = 'lease-expired' }) {
       return withTx(db, () => {

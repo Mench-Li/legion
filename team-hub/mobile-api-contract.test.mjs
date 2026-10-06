@@ -1,0 +1,435 @@
+// team-hub/mobile-api-contract.test.mjs
+// 远程 Agent 通道 S-F：**手机前端与 Hub 的接口契约**。
+//
+// ## 为什么这组用例非有不可
+//
+// `workbench/mobile/app.mjs` 是一份手写的零构建页面，它按**字段名**读后端响应
+// （`r.messages`、`m.meta.source`、`c.convId`…）。字段名对不上时前端不会报错——
+// 它会安安静静地渲染出一个**空时间线**，而 Hub 这边一切正常、日志干净。
+// 用户看到的是"手机上一片空白"，排查方向会被带到网络和鉴权上去。
+//
+//   > 一个"字段名对不上"的契约，与一个"还没有消息"的空会话，
+//   > 在手机屏幕上长得一模一样。
+//
+// 所以这组用例**照着 app.mjs 的顺序**打一遍真实 HTTP，并断言它真正读的那几个字段；
+// 最后把响应喂进 `timelineEntry`，让"前端能把它渲染出来"成为一条断言而不是一个假设。
+import { describe, it, before, after } from 'node:test'
+import assert from 'node:assert/strict'
+import { mkdtempSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+
+import { deriveConnectionState, mergeTimeline, timelineEntry } from '../workbench/mobile/timeline.mjs'
+
+const tmpRoot = mkdtempSync(join(tmpdir(), 'legion-mobile-contract-'))
+const HUB_TOKEN = 'mobile-contract-hub-token'
+const IDENTITY_KEY = 'mobile-contract-identity-key-0123456789'
+let mod
+let base = ''
+
+before(async () => {
+  process.env.TEAM_HUB_DB = join(tmpRoot, 'team.db')
+  process.env.TEAM_HUB_HOST = '127.0.0.1'
+  process.env.TEAM_HUB_TOKEN = HUB_TOKEN
+  process.env.LEGION_IDENTITY_KEY = IDENTITY_KEY
+  process.env.LEGION_REMOTE_AUTH = '1'
+  mod = await import('./server.mjs')
+  await new Promise((resolve) => mod.server.listen(0, '127.0.0.1', resolve))
+  base = `http://127.0.0.1:${mod.server.address().port}`
+
+  // 手机端要看到 Agent，而 Agent 是从 `roster` 同步来的。
+  mod.db.prepare('INSERT INTO roster (scope, role, name, kind, avatar, sort) VALUES (?,?,?,?,?,?)')
+    .run('default', 'general', '总指挥', 'agent', '🤖', 1)
+  mod.db.prepare('INSERT INTO roster (scope, role, name, kind, avatar, sort) VALUES (?,?,?,?,?,?)')
+    .run('default', 'coder', '编码兵', 'agent', '🤖', 2)
+  mod.agentConversations.syncRoster()
+})
+
+after(() => {
+  try { mod?.nodeGateway?.close?.() } catch { /* 已关 */ }
+  try { mod?.server?.closeAllConnections?.() } catch { /* 无连接 */ }
+  try { mod?.server?.close() } catch { /* 已关闭 */ }
+  try { mod?.db?.close() } catch { /* 已关闭 */ }
+  rmSync(tmpRoot, { recursive: true, force: true })
+})
+
+async function call(method, path, { body, token } = {}) {
+  const headers = {}
+  if (token !== undefined) headers.authorization = `Bearer ${token}`
+  if (body !== undefined) headers['content-type'] = 'application/json'
+  const res = await fetch(base + path, { method, headers, body: body === undefined ? undefined : JSON.stringify(body) })
+  const text = await res.text()
+  let json = null
+  try { json = text.length > 0 ? JSON.parse(text) : null } catch { /* 非 JSON */ }
+  return { status: res.status, json, text }
+}
+
+describe('手机端接口契约（照 app.mjs 的顺序）', () => {
+  const ctx = {}
+
+  it('① 能力发现：app.mjs 要靠它决定显示登录页还是初始化引导', async () => {
+    const r = await call('GET', '/api/identity/status')
+    assert.equal(r.status, 200)
+    for (const key of ['ok', 'enabled', 'bootstrapped', 'remoteAuthRequired']) {
+      assert.ok(key in r.json, `缺字段 ${key}`)
+    }
+    assert.equal(r.json.bootstrapped, false)
+  })
+
+  it('② 引导 + 登录：登录响应里那几个字段正是 app.mjs 要存的', async () => {
+    const boot = await call('POST', '/api/identity/bootstrap', {
+      body: { name: 'phone-user', password: 'phone-password-1' }, token: HUB_TOKEN,
+    })
+    assert.equal(boot.status, 200)
+
+    const login = await call('POST', '/api/identity/login', {
+      body: { name: 'phone-user', password: 'phone-password-1', label: '手机' },
+    })
+    assert.equal(login.status, 200)
+    // app.mjs：`state.access = j.accessToken` / `state.refresh = j.refreshToken`
+    assert.equal(typeof login.json.accessToken, 'string')
+    assert.equal(typeof login.json.refreshToken, 'string')
+    ctx.access = login.json.accessToken
+    ctx.refresh = login.json.refreshToken
+    ctx.userId = login.json.userId
+
+    // 这个用户要有空间角色——空间级授权看的就是它（见下面 ⑬）。
+    const invite = await call('POST', '/api/identity/invites', {
+      body: { space: 'default', role: 'member' }, token: ctx.access,
+    })
+    assert.equal(invite.status, 200, JSON.stringify(invite.json))
+    const other = await call('POST', '/api/identity/invites/accept', {
+      body: { code: invite.json.code, name: 'other-user', password: 'other-password-1' },
+    })
+    assert.equal(other.status, 200, JSON.stringify(other.json))
+    ctx.otherAccess = (await call('POST', '/api/identity/login', {
+      body: { name: 'other-user', password: 'other-password-1', label: '别人' },
+    })).json.accessToken
+  })
+
+  it('③ 我的身份：app.mjs 读 `info.roles[0].space` 来挑默认空间', async () => {
+    const r = await call('GET', '/api/identity/me', { token: ctx.access })
+    assert.equal(r.status, 200)
+    assert.equal(typeof r.json.user?.name, 'string')
+    // ★ 这条是"挑默认空间"的分支能不能走通的关键：`roles` 必须是数组，
+    //   且元素带 `space`。缺了它前端会落到 `'default'` 兜底，
+    //   而用户有权限的空间如果不是 default，他会看到一个空列表。
+    assert.ok(Array.isArray(r.json.roles), 'roles 必须是数组')
+    assert.equal(r.json.systemRole, 'admin')
+    // 引导者是系统管理员，但**不是任何空间的成员**——所以这一条还应该是空。
+    // 手机端因此必须容忍空 roles（它落到 'default' 兜底），而空间授权那一条会拒。
+    ctx.scope = 'default'
+  })
+
+  it('④ 空间列表：app.mjs 读 `r.agents`（门禁放行后**路由层**也要认这个用户）', async () => {
+    // 先给这个用户一个空间角色。
+    mod.db.prepare('INSERT OR REPLACE INTO hub_space_roles VALUES (?,?,?,?,?)')
+      .run(ctx.userId, ctx.scope, 'member', 'system', Date.now())
+
+    const r = await call('GET', `/api/agents?scope=${ctx.scope}`, { token: ctx.access })
+    // ★ 这一条曾经返回 **401**：远程门禁用**用户令牌**放行了，而
+    //   `routes/agents.mjs` 里的 `authorized(req)` 只认**机器令牌**，
+    //   于是手机上每个 `/api/agent-*` 都是 401——门禁放行、路由又挡回去，
+    //   两处各自看起来都对。手机端契约用例一跑就露出来了。
+    assert.equal(r.status, 200, `agents 应放行用户令牌，实际 ${r.status}：${r.text.slice(0, 200)}`)
+    assert.ok(Array.isArray(r.json.agents), 'agents 必须是数组')
+    assert.ok(r.json.agents.length >= 1, '应从 roster 同步出 Agent')
+    const a = r.json.agents[0]
+    // app.mjs：`o.value = a.agentId` / `o.textContent = `${a.name}（${a.role}）``
+    assert.equal(typeof a.agentId, 'string')
+    assert.equal(typeof a.name, 'string')
+    assert.equal(typeof a.role, 'string')
+    ctx.agentId = a.agentId
+  })
+
+  it('⑤ 开会话：app.mjs 读 `c.convId`', async () => {
+    const r = await call('POST', '/api/agent-conversations', {
+      body: { agentId: ctx.agentId, scope: ctx.scope, by: 'mobile' }, token: ctx.access,
+    })
+    assert.equal(r.status, 200)
+    assert.equal(typeof r.json.convId, 'number', 'convId 必须是数字（app.mjs 拿它拼 URL）')
+    ctx.convId = r.json.convId
+  })
+
+  it('⑥ 发消息：app.mjs 传 clientRequestId 做幂等', async () => {
+    const r = await call('POST', '/api/agent-messages', {
+      body: {
+        conv: ctx.convId, scope: ctx.scope, by: 'mobile',
+        body: '这个任务做到哪了？', intent: 'ask',
+        clientRequestId: 'mobile-contract-1',
+      },
+      token: ctx.access,
+    })
+    assert.equal(r.status, 200)
+    assert.equal(typeof r.json.messageId, 'number')
+    ctx.messageId = r.json.messageId
+
+    // 同一个 clientRequestId 再来一次：服务端按 (scope,actor,requestId) 去重，
+    // 不该产生第二条消息。手机在弱网下重试是常态。
+    const again = await call('POST', '/api/agent-messages', {
+      body: {
+        conv: ctx.convId, scope: ctx.scope, by: 'mobile',
+        body: '这个任务做到哪了？', intent: 'ask',
+        clientRequestId: 'mobile-contract-1',
+      },
+      token: ctx.access,
+    })
+    assert.equal(again.json.messageId, ctx.messageId, '相同幂等键不得产生第二条消息')
+  })
+
+  it('⑦ 读时间线：`r.messages` 的每个字段都是 app.mjs 真正读的那几个', async () => {
+    const r = await call('GET', `/api/chat/messages?conv=${ctx.convId}&scope=${ctx.scope}&limit=200`, { token: ctx.access })
+    assert.equal(r.status, 200)
+    assert.equal(r.json.conv, ctx.convId)
+    assert.ok(Array.isArray(r.json.messages), 'messages 必须是数组')
+    assert.ok(r.json.messages.length >= 1)
+
+    const m = r.json.messages[0]
+    // `timelineEntry` 逐个读这些；任何一个改名都会让时间线变空。
+    for (const key of ['id', 'author', 'body', 'meta', 'createdAt']) {
+      assert.ok(key in m, `消息缺字段 ${key}（app.mjs 会读到 undefined）`)
+    }
+    // ★ `meta` 必须是**已解析的对象**，不能是 JSON 字符串：
+    //   是字符串时 `meta.source` 恒为 undefined，来源判定会全部落到兜底的 'agent'，
+    //   于是用户自己的消息会被显示成"回复"。
+    assert.equal(typeof m.meta, 'object', 'meta 必须是对象而不是 JSON 字符串')
+    assert.equal(typeof m.meta.source, 'string', 'meta.source 是来源判定的唯一依据')
+  })
+
+  it('⑧ 前端真的能把它渲染出来（把响应喂进 timelineEntry）', async () => {
+    const r = await call('GET', `/api/chat/messages?conv=${ctx.convId}&scope=${ctx.scope}&limit=200`, { token: ctx.access })
+    const entries = r.json.messages.map(timelineEntry)
+    assert.ok(entries.length >= 1)
+    const mine = entries.find((e) => e.id === ctx.messageId)
+    assert.ok(mine, '自己刚发的那条应在时间线里')
+    // 来源必须是 `user` —— 这正是 `meta.source` 那一条在守的东西。
+    assert.equal(mine.source, 'user', '自己发的消息必须被认成 user，而不是 agent')
+    assert.equal(typeof mine.body, 'string')
+    assert.ok('openableTask' in mine)
+
+    // 合并去重：重复投递整批不应产生新条目。
+    const merged = mergeTimeline(entries, r.json.messages.map(timelineEntry))
+    assert.equal(merged.entries.length, entries.length)
+    assert.equal(merged.appended, 0)
+    assert.ok(merged.cursor !== null, '游标要能推出来（手机靠它续读）')
+  })
+
+  it('⑨ Agent 详情：app.mjs 读 `r.agent.tasks` 与 `t.attempt.state`', async () => {
+    const r = await call('GET', `/api/agent-detail?agentId=${ctx.agentId}&scope=${ctx.scope}`, { token: ctx.access })
+    assert.equal(r.status, 200)
+    assert.ok(r.json.agent, 'agent 字段必须存在')
+    assert.ok(Array.isArray(r.json.agent.tasks), 'tasks 必须是数组')
+    // 任务分组（`pendingTasks`）读的是 `t.status` 与 `t.attempt?.state`。
+    for (const t of r.json.agent.tasks) {
+      assert.equal(typeof t.id, 'string')
+      assert.equal(typeof t.status, 'string')
+      assert.ok(t.attempt === null || typeof t.attempt === 'object', 'attempt 要么是对象要么是 null')
+    }
+  })
+
+  it('⑩ 设备在线状态：app.mjs 读 `r.presence` 且有 `online`', async () => {
+    const r = await call('GET', '/api/devices/presence', { token: ctx.access })
+    assert.equal(r.status, 200)
+    assert.ok(Array.isArray(r.json.presence), 'presence 必须是数组')
+    for (const p of r.json.presence) {
+      assert.equal(typeof p.nodeId, 'string')
+      assert.equal(typeof p.online, 'boolean', 'online 必须是布尔（app.mjs 用它算 nodeOnline）')
+    }
+    // 没有设备时 `[]` 是合法读数，前端会把它当成"未知"而不是"离线"。
+    const conn = deriveConnectionState({ hubReachable: true, nodeOnline: r.json.presence.length === 0 ? null : r.json.presence.some((p) => p.online), activeTaskState: null })
+    assert.ok(['NODE_OFFLINE', 'IDLE'].includes(conn.code))
+  })
+
+  it('⑪ SSE：手机用它收进展，且不带 scope 过滤时也能订', async () => {
+    // 只断言"能建立、能立刻收到首帧"——EventSource 的行为由浏览器负责，
+    // 这里要证明的是**服务端没有把它缓冲住**。
+    const controller = new AbortController()
+    const timer = setTimeout(() => controller.abort(), 5000)
+    let firstChunk = ''
+    try {
+      // ★ SSE 走**一次性票据**，不是令牌：查询串会进访问日志/浏览器历史，
+      //   而令牌是 15 分钟、覆盖全部 API。
+      const ticket = await call('POST', '/api/events/ticket', { body: {}, token: ctx.access })
+      assert.equal(ticket.status, 200, ticket.text.slice(0, 160))
+      const res = await fetch(`${base}/api/events?scope=${ctx.scope}&kind=mobile&ticket=${encodeURIComponent(ticket.json.ticket)}`, { signal: controller.signal })
+      assert.equal(res.status, 200)
+      const reader = res.body.getReader()
+      const { value } = await reader.read()
+      firstChunk = Buffer.from(value ?? []).toString('utf8')
+      await reader.cancel().catch(() => {})
+    } finally {
+      clearTimeout(timer)
+    }
+    assert.match(firstChunk, /retry:|:/, '首帧应立刻到达（被缓冲时这里会卡到超时）')
+  })
+
+  it('⑬ 空间级授权：不属于该空间的用户读不到（§13「无权读取未授权项目」）', async () => {
+    // `other-user` 是 `phone-user` 邀请进 default 的，所以他能读 default；
+    // 但另一个空间他一片空白——门禁必须拒。
+    const mine = await call('GET', `/api/agents?scope=${ctx.scope}`, { token: ctx.access })
+    assert.equal(mine.status, 200, '自己有角色的空间应放行')
+
+    const alien = await call('GET', '/api/agents?scope=someone-elses-space', { token: ctx.access })
+    assert.equal(alien.status, 403, `不该读到没角色的空间，实际 ${alien.status}`)
+    assert.equal(alien.json.code, 'SPACE_FORBIDDEN')
+
+    // 邀请进来的那个用户同样读得到（他被授予了 default 的 member）。
+    const invited = await call('GET', '/api/agents?scope=default', { token: ctx.otherAccess })
+    assert.equal(invited.status, 200)
+    // 但读不到别的空间。
+    const invitedAlien = await call('GET', '/api/agents?scope=nope', { token: ctx.otherAccess })
+    assert.equal(invitedAlien.status, 403)
+
+    // 系统管理员**也不**因为"是管理员"就自动能读每个空间——
+    // 系统角色管的是"造邀请/停用账号"，不是"看所有数据"。
+    // 这一条如果哪天变成放行，说明有人把两件事合并了。
+    assert.equal(mod.db.prepare('SELECT COUNT(*) n FROM hub_space_roles WHERE user_id=? AND space=?').get(ctx.userId, 'someone-elses-space').n, 0)
+
+    // 机器令牌不受空间授权影响（它本来就是全权，既有行为不变）。
+    const viaMachine = await call('GET', '/api/agents?scope=someone-elses-space', { token: HUB_TOKEN })
+    assert.equal(viaMachine.status, 200, '机器令牌的既有语义不该被这条改动影响')
+  })
+
+  it('⑭ 事件流同样受空间授权（手机订阅进展走的也是它）', async () => {
+    const controller = new AbortController()
+    const timer = setTimeout(() => controller.abort(), 5000)
+    try {
+      const alienTicket = await call('POST', '/api/events/ticket', { body: {}, token: ctx.access })
+      const res = await fetch(`${base}/api/events?scope=someone-elses-space&ticket=${encodeURIComponent(alienTicket.json.ticket)}`, { signal: controller.signal })
+      assert.equal(res.status, 403, 'SSE 也要按空间拒')
+      const body = await res.text()
+      assert.match(body, /SPACE_FORBIDDEN/)
+    } finally { clearTimeout(timer) }
+  })
+
+  it('⑮ 写路径也受空间授权（scope 在**请求体**里，门禁读不到）', async () => {
+    // ★ 远程门禁只看得到 URL：`?scope=` 它能判，但 **POST 的 scope 在 body 里**，
+    //   而门禁读不到 body —— 读了就把流消耗掉，路由再也拿不到。
+    //   不补这一道的话，任何登录用户只要在 body 里把 scope 换成别人的空间，
+    //   就能往那个空间写消息、建会话、下命令。
+    //
+    //   修法是把判定放进路由族（那里同时有已解析的 body 与已注入的身份）。
+
+    // 造一个**真实存在但该用户没有角色**的空间（带编队）。
+    // 用"不存在的空间"去测是测不准的：那种情况会先在别处 404，
+    // 于是"被空间授权拦住"与"那个空间本来就没有 Agent"分不开。
+    //
+    // 注意 SQL 里的空串要写 `''`（模板字面量里用单引号）：SQLite 把 `""` 当成
+    // **标识符**，会报 `no such column: ""`——那是"列名不存在"，不是"值不合法"。
+    mod.db.prepare(`INSERT OR REPLACE INTO spaces (id,name,private,local_dir,remote_url,createdAt,updatedAt)
+      VALUES (?,?,0,'','',?,?)`).run('other-space', '别人的空间', new Date().toISOString(), new Date().toISOString())
+    mod.db.prepare('INSERT INTO roster (scope, role, name, kind, avatar, sort) VALUES (?,?,?,?,?,?)')
+      .run('other-space', 'coder', '别人的编码兵', 'agent', '🤖', 0)
+    mod.agentConversations.syncRoster()
+    const otherAgentId = mod.db.prepare("SELECT agent_id FROM agent_registry WHERE scope='other-space'").get()?.agent_id
+    assert.ok(otherAgentId, '测试前置：other-space 里要有 Agent')
+
+    const alien = await call('POST', '/api/agent-conversations', {
+      body: { agentId: otherAgentId, scope: 'other-space', by: 'mobile' }, token: ctx.access,
+    })
+    assert.equal(alien.status, 403, `往没角色的空间建会话应 403，实际 ${alien.status}：${alien.text.slice(0, 160)}`)
+    assert.equal(alien.json.code, 'SPACE_FORBIDDEN')
+
+    // 往**有**角色的空间写照常放行（这条防止"一律拒绝"被当成修好了）。
+    const mine = await call('POST', '/api/agent-conversations', {
+      body: { agentId: ctx.agentId, scope: ctx.scope, by: 'mobile' }, token: ctx.access,
+    })
+    assert.equal(mine.status, 200)
+
+    // 机器令牌不受这条影响：同一个空间、同一个 agent，它应当**成功**。
+    const viaMachine = await call('POST', '/api/agent-conversations', {
+      body: { agentId: otherAgentId, scope: 'other-space', by: 'general' }, token: HUB_TOKEN,
+    })
+    assert.equal(viaMachine.status, 200, `机器令牌应放行，实际 ${viaMachine.status}：${viaMachine.text.slice(0, 160)}`)
+  })
+
+  it('⑯ 手机「创建任务」建出的任务**真的可被认领**（不是躺在 backlog 里）', async () => {
+    // ★ 这条守的是整个产品的主标题动作。实测踩过：手机发 intent=create_task →
+    //   时间线里出现"已创建任务 T-001，等待调度"→ 任务**永远停在 `backlog`**，
+    //   Node 领不到它。因为 `createTask` 的默认状态是 `backlog`（看板的"未排期"），
+    //   而认领闸门要求 `status = 'todo'`。
+    //
+    //   失败的样子特别安静：不报错、时间线里那条回执看着也挺对、
+    //   只是任务永远不动。所以断言必须是**可认领性**，不是"任务行存在"。
+    const before = await call('GET', `/api/board?scope=${ctx.scope}`, { token: ctx.access })
+    const idsBefore = new Set((Array.isArray(before.json) ? before.json : before.json.tasks ?? []).map((t) => t.id))
+
+    const sent = await call('POST', '/api/agent-messages', {
+      body: {
+        conv: ctx.convId, scope: ctx.scope, by: 'mobile',
+        body: '端到端契约：请把这个做完', intent: 'create_task',
+        clientRequestId: `contract-create-${Date.now()}`,
+      },
+      token: ctx.access,
+    })
+    assert.equal(sent.status, 200, sent.text.slice(0, 200))
+    const taskId = sent.json.taskId
+    assert.equal(typeof taskId, 'string', 'create_task 应回一个新任务 id')
+
+    const board = await call('GET', `/api/board?scope=${ctx.scope}`, { token: ctx.access })
+    const list = Array.isArray(board.json) ? board.json : board.json.tasks ?? []
+    const created = list.find((t) => t.id === taskId)
+    assert.ok(created, `新任务 ${taskId} 应出现在看板上`)
+    assert.ok(!idsBefore.has(taskId), '它必须是新建的')
+
+    // 核心断言：状态必须是可派发的 `todo`，**不是** `backlog`。
+    assert.equal(created.status, 'todo',
+      `手机建的任务必须可被认领（todo），实际 ${created.status}——` +
+      '`backlog` 不报错、不进队列、也不在任何人的待办里，从界面看只是"没反应"')
+
+    // 更硬的一条：**走真实的运行时认领路由**认一次——闸门全过才算真的可认领。
+    // 只看 `status` 字段会让"状态对了但其它闸门不对"（写预约、hold、退避闸门…）漏过去。
+    // 用 HTTP 而不是直接调 store：路由才是执行面真正会走的那条路。
+    const claimed = await call('POST', '/api/runtime/claim', {
+      body: { workerId: 'contract-probe', scope: ctx.scope }, token: ctx.access,
+    })
+    assert.equal(claimed.status, 200, claimed.text.slice(0, 200))
+    assert.equal(claimed.json.claimed?.taskId, taskId,
+      `新任务应真的可被认领；拿到 ${JSON.stringify(claimed.json.claimed)}，reason=${claimed.json.reason}`)
+    // 还回去，别影响后面的用例。
+    await call('POST', '/api/runtime/release', {
+      body: {
+        attemptId: claimed.json.claimed.attemptId, leaseEpoch: claimed.json.claimed.leaseEpoch,
+        workerId: 'contract-probe', reason: 'contract-probe-release',
+      },
+      token: ctx.access,
+    })
+  })
+
+  it('⑰ 看板视图要的两个端点，同一用户都取得到（缺一半就看不出"执行到哪一步"）', async () => {
+    // 看板是**两个端点拼出来的**：
+    //   · `/api/board` 给空间里所有任务（含别的岗位的）；
+    //   · `/api/agent-detail` 给当前 Agent 的 Attempt。
+    // 只用前者会看不见执行到哪一步，只用后者会看不见别的岗位的任务。
+    // 任一条 401/403，看板就退化成"一列任务名"——而它不会报错，只是什么都不说。
+    const board = await call('GET', `/api/board?scope=${ctx.scope}`, { token: ctx.access })
+    assert.equal(board.status, 200, `看板读不到：${board.status} ${board.text.slice(0, 160)}`)
+    const list = Array.isArray(board.json) ? board.json : board.json.tasks ?? []
+    assert.ok(Array.isArray(list), '看板应是任务数组（或 {tasks:[]}）')
+    for (const t of list) {
+      // 看板卡片要渲染的字段。缺了不会报错，只会画出一个空行。
+      assert.equal(typeof t.id, 'string')
+      assert.equal(typeof t.status, 'string', `任务 ${t.id} 缺 status，列不出状态`)
+    }
+
+    const detail = await call('GET', `/api/agent-detail?agentId=${encodeURIComponent(ctx.agentId)}&scope=${ctx.scope}`, { token: ctx.access })
+    assert.equal(detail.status, 200, `Agent 详情读不到：${detail.status} ${detail.text.slice(0, 160)}`)
+    assert.ok(Array.isArray(detail.json.agent?.tasks), '详情应带 tasks（手机从这里拿 attempt.state）')
+  })
+
+  it('⑫ 刷新凭据能换新令牌（手机会话过 15 分钟靠它）', async () => {
+    const r = await call('POST', '/api/identity/refresh', { body: { refreshToken: ctx.refresh } })
+    assert.equal(r.status, 200)
+    assert.equal(typeof r.json.accessToken, 'string')
+    assert.equal(typeof r.json.refreshToken, 'string')
+    // 轮换：新 refresh 与旧的必须不同（否则"重放旧凭据"这条防线失效）。
+    assert.notEqual(r.json.refreshToken, ctx.refresh)
+
+    // 新令牌能用。
+    const me = await call('GET', '/api/identity/me', { token: r.json.accessToken })
+    assert.equal(me.status, 200)
+    // 旧刷新凭据再用一次必须失效。
+    const reuse = await call('POST', '/api/identity/refresh', { body: { refreshToken: ctx.refresh } })
+    assert.equal(reuse.status, 401)
+  })
+})

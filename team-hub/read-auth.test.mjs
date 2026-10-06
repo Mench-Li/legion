@@ -3,7 +3,8 @@
 // 模拟「非回环监听 + 已配 token」部署：TEAM_HUB_HOST=0.0.0.0 / TEAM_HUB_TOKEN=tk-remote-1
 // （必须在 import server.mjs 之前设置，模块顶部读取）。与 security.test.mjs（纯函数决策）
 // 互补：本文件验证门禁在真实 HTTP 面上生效——读/SSE/写统一 401、config 能力探测放行、
-// 三种 token 携带方式（Bearer / x-dsh-token / ?token=）均可读。
+// 两种 token 携带方式（Bearer / x-dsh-token）可读；**查询串里的令牌不再接受**
+// （SSE 改用一次性票据 `?ticket=`，见 remote-auth.mjs 的 QUERY_TICKET_PATHS）。
 // 运行：node --test team-hub/read-auth.test.mjs
 import { describe, it, before, after } from 'node:test'
 import assert from 'node:assert/strict'
@@ -58,11 +59,15 @@ describe('team-hub 远程监听读面鉴权（TEAM_HUB_HOST=0.0.0.0 + token）',
     assert.ok(Array.isArray(ok.data))
   })
 
-  it('读接口 token 三种携带方式均可：Bearer / x-dsh-token / ?token=', async () => {
+  it('读接口只认头：Bearer / x-dsh-token；★ 查询串里的令牌**不再**接受', async () => {
     const header = await fetch(base + '/api/board', { headers: { 'x-dsh-token': TK } })
     assert.equal(header.status, 200)
+    // 查询串会进访问日志/浏览器历史/Referer。原来这里收 `?token=`（注释写的理由是
+    // "供 EventSource 等无法自定 header 的读订阅"），而那个理由现在由**一次性票据**
+    // 承担（见 remote-auth.mjs 的 QUERY_TICKET_PATHS）——票据只用一次、只活 60 秒、
+    // 只对订阅有效，而令牌是 15 分钟、覆盖全部 API。
     const query = await fetch(base + '/api/board?scope=default&token=' + TK)
-    assert.equal(query.status, 200)
+    assert.equal(query.status, 401, '查询串里的令牌必须不再放行')
   })
 
   it('GET /api/activity：审计读同样受门禁（无 token 401）', async () => {
@@ -79,11 +84,13 @@ describe('team-hub 远程监听读面鉴权（TEAM_HUB_HOST=0.0.0.0 + token）',
     assert.equal(r.data.auth, true)
   })
 
-  it('SSE GET /api/events：无 token → 401；?token= → 200 text/event-stream', async () => {
+  it('SSE GET /api/events：无凭据 → 401；头里带机器令牌 → 200 text/event-stream', async () => {
     const anonRes = await fetch(base + '/api/events')
     assert.equal(anonRes.status, 401)
+    // 用**请求头**（浏览器里的 EventSource 做不到，所以它走一次性票据；
+    // 而这个用例验的是服务端本身接不接受头里的机器令牌）。
     const status = await new Promise((resolve, reject) => {
-      const req = httpGet(base + '/api/events?token=' + TK, (res) => {
+      const req = httpGet(base + '/api/events', { headers: { authorization: `Bearer ${TK}` } }, (res) => {
         res.resume()
         resolve(res.statusCode)
       })

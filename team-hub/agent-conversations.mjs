@@ -216,7 +216,20 @@ export function createAgentConversationService({ db, withTx, audit, clock = Date
       }
       if (intent === 'create_task') {
         if (!createTask) fail('UNSUPPORTED_CAPABILITY','任务创建未接线',409)
-        createdTask = createTask({ by:input.by,scope:a.scope,role:a.role,title:body.slice(0,200),description:body })
+        // ★ 必须显式给 `status: 'todo'`。
+        //
+        // `createTaskInTx` 的默认是 `'backlog'`（看板上的"未排期"），而**认领闸门
+        // 要求 `status = 'todo'`**（见 `claim-policy.mjs` 的 `status-todo`）。
+        // 不给这一项时，手机上"创建任务"建出来的任务会一直躺在 `backlog`——
+        // 不报错、不进队列、也不在任何人的待办里，从界面看只是"没反应"。
+        //
+        // 实测踩过：手机发 intent=create_task → 时间线里出现"已创建任务 T-001，等待调度"
+        // → 任务永远停在 `backlog`，Node 领不到它。
+        //
+        // 用户的意图是"做这件事"，所以它该是**可派发**的 `todo`；
+        // `backlog` 留给看板上人工排期的任务。Legion 自己的目标链
+        //（`insertGoalTask`）用的也是 `todo`，这是同一个口径。
+        createdTask = createTask({ by:input.by,scope:a.scope,role:a.role,title:body.slice(0,200),description:body,status:'todo' })
         insertMessage(b,'system:agent',`已创建任务 ${createdTask.id}，等待调度。`,{ source:'command',taskId:createdTask.id })
       }
       return { messageId,feedbackId,taskId:createdTask?.id ?? t?.id ?? null,convId:b.conv_id }
@@ -543,5 +556,13 @@ export function createAgentConversationService({ db, withTx, audit, clock = Date
   }
   syncRoster()
   return { syncRoster,convergeAgentConversations,list,detail,conversation,send,read,command,runtime,question,reconcile,includeFeedback,getCommand,manualHold,
+    // ★ `report` 要**显式导出**：它是"把一条运行事实投影进会话"的既有原语
+    //   （`reconcile` 用它投影 Attempt/任务状态）。远程派发链路也需要它——
+    //   节点上报的进展要落成会话消息，手机重开时才看得到它做过什么。
+    //
+    //   原先它是模块私有的，于是网关调它得到 `report is not a function`。
+    //   那个失败之所以**当场可见**，是因为调用点包了 warn 而不是静默吞掉；
+    //   否则表现会是"时间线里少了一段进展"，而没有任何地方说过为什么。
+    report,
     binding: (convId) => db.prepare('SELECT * FROM agent_conversation_bindings WHERE conv_id=?').get(Number(convId)) ?? null }
 }

@@ -1,6 +1,7 @@
 import type { ActivityEvent, AgentCatalogItem, AgentModelCfg, ApiConfig, BoardData, CardStatus, ChatAttachmentRef, ChatConversation, ChatHealthInfo, ChatMessage, DirListing, FileListResponse, FilePreview, GoalInfo, GoalStatus, HubActivity, HubAuditEvent, HubDocContent, HubTask, MissionsResponse, ModelOption, OverlapGroup, RepoInspect, RosterResponse, ScenePreset, SkillInfo, SpaceInfo, WebFetchResult, WebHistoryResponse, WebMetaResponse, WebShotResult } from './types'
 import { subscribeHubEventStream } from './hubEventStream.ts'
 import { hubErrorFromBody } from './hub-errors.ts'
+import { getAccessToken, hasSession, recoverSession } from './identity.ts'
 
 /**
  * 数据源地址解析：?api= 查询参数优先，其次 localStorage，最后默认 4820。
@@ -56,7 +57,21 @@ export function setToken(token: string): void {
   localStorage.setItem('legion.workbench.token', token)
 }
 
+/**
+ * 出站凭据：**用户令牌优先**，机器令牌兜底。
+ *
+ * 两者是两件事（`routes/identity.mjs` 开头那条边界）：
+ *   · 用户访问令牌 —— 「你是谁」，来自 `/api/identity/login`，15 分钟；
+ *   · 机器令牌    —— 「你是这台机器上的 Legion 组件」，由启动器写进
+ *     localStorage，本机单机部署用。
+ *
+ * 优先用户令牌的理由很实际：浏览器从外面访问一台公网 Hub 时，机器令牌
+ * **根本不存在**（那台机器不是你现在的浏览器），此时唯一能用的就是用户令牌。
+ * 而本机部署里用户令牌恒为空，取到的一直是机器令牌——既有行为一字不变。
+ */
 function authHeaders(): Record<string, string> {
+  const user = getAccessToken()
+  if (user.length > 0) return { Authorization: `Bearer ${user}` }
   const token = getToken()
   return token ? { Authorization: `Bearer ${token}` } : {}
 }
@@ -68,11 +83,30 @@ function withAuthHeaders(headers?: HeadersInit): Headers {
 }
 
 /**
+ * 401 时抢救一次会话，然后原样重放请求。
+ *
+ * 只在本模块的两条中枢出口（`hubGet` / `hubPost`）上做，不铺到 `apiBase()`
+ * 那一侧：那是 `serve.mjs` 的本地开发面，与账号体系无关。
+ *
+ * 三条纪律：
+ *   ① **只在有刷新凭据时动手**。本机/桌面部署没有它 ⇒ 行为与改动前逐字相同。
+ *   ② **只重放一次**。无限重试会在"刷新成功但令牌立刻又过期"时打成死循环，
+ *      而那个症状（浏览器风扇狂转）与真正的原因（服务端时钟不对）离得很远。
+ *   ③ **重放时重新取头**。刷新换了令牌，沿用旧头等于没刷新。
+ */
+async function fetchWithSessionRetry(input: string, init: RequestInit): Promise<Response> {
+  const res = await fetch(input, init)
+  if (res.status !== 401) return res
+  if (!(await recoverSession())) return res
+  return fetch(input, { ...init, headers: withAuthHeaders(init.headers) })
+}
+
+/**
  * hub GET 统一携带已存 token（P2-2 读面同步：远程受保护中枢的读接口/SSE 必须带 token）。
  * 探测 /api/config 不走本函数（hubBase 可达性探测保持匿名；服务端对 config 能力发现放行）。
  */
 function hubGet(path: string): Promise<Response> {
-  return fetch(`${hubBase()}${path}`, { headers: authHeaders() })
+  return fetchWithSessionRetry(`${hubBase()}${path}`, { headers: authHeaders() })
 }
 
 async function readJson<T>(res: Response): Promise<T> {
@@ -711,22 +745,29 @@ export async function fetchHubCalendarByLink(opts: { taskId?: string; goalId?: s
 
 async function hubPost(path: string, body: Record<string, unknown>): Promise<unknown> {
   // 写请求带超时（20s）：防止代理/中枢无响应时界面无限"卡住"（发布目标等操作无感知失败）。
-  const ctrl = new AbortController()
-  const timer = setTimeout(() => ctrl.abort(), 20_000)
+  //
+  // 超时控制器要在**重放**时重新建一个：沿用同一个已 abort 的 signal，
+  // 重放会在发出前就被自己的中断信号毙掉——而那看起来像"重放也没成功"。
+  const post = async (): Promise<Response> => {
+    const ctrl = new AbortController()
+    const timer = setTimeout(() => ctrl.abort(), 20_000)
+    try {
+      return await fetch(`${hubBase()}${path}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...authHeaders() },
+        body: JSON.stringify({ ...body, by: body.by ?? 'general' }),
+        signal: ctrl.signal,
+      })
+    } finally { clearTimeout(timer) }
+  }
   let res: Response
   try {
-    res = await fetch(`${hubBase()}${path}`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', ...authHeaders() },
-      body: JSON.stringify({ ...body, by: body.by ?? 'general' }),
-      signal: ctrl.signal,
-    })
+    res = await post()
+    if (res.status === 401 && await recoverSession()) res = await post()
   } catch (e) {
-    clearTimeout(timer)
     if (e instanceof DOMException && e.name === 'AbortError') throw new Error(`请求超时（20s）：中枢 ${hubBase()} 无响应，请确认 team-hub 已启动`)
     throw new Error(`无法连接中枢 ${hubBase()}${path}（网络/代理错误），请检查 team-hub 状态`)
   }
-  clearTimeout(timer)
   if (!res.ok) {
     // **保留结构**，不再压成一句字符串。PRT-252 返回的 `code`/`field`/`hint`/
     // `candidates` 过去在这一行被丢掉——于是后端那些**有测试守着**的字段
@@ -996,7 +1037,16 @@ export function subscribeHubAudit(
   return subscribeHubEventStream(`${hubBase()}/api/events`, onEvent, {
     scope: options.scope,
     storage: options.storage,
-    token: getToken() || undefined,
+    // ★ 不是令牌，是**票据**：一次性、只活 60 秒、只对订阅有效。
+    //   访问令牌走查询串会进日志与浏览器历史，而它 15 分钟、覆盖全部 API。
+    //
+    //   没登录时返回 undefined（本机单机部署走的就是这一条：门禁没开，
+    //   订阅本来就不需要凭据）。
+    ticketProvider: async () => {
+      if (!hasSession()) return undefined
+      const r = await hubPost('/api/events/ticket', {})
+      return typeof (r as { ticket?: unknown })?.ticket === 'string' ? (r as { ticket: string }).ticket : undefined
+    },
     onStatus: options.onStatus,
   })
 }

@@ -34,11 +34,28 @@ async function main() {
   try { bytes = await readFile(zip) } catch { bytes = await download(spec.url) }
   if (createHash('sha256').update(bytes).digest('hex') !== spec.sha256) throw new Error('Node archive checksum mismatch')
   await writeFile(zip, bytes)
-  // Script and paths travel as arguments; the command contains no interpolated source.
-  const script = join(build, 'expand-node.ps1')
-  await writeFile(script, 'param([string]$Archive, [string]$Destination)\nExpand-Archive -LiteralPath $Archive -DestinationPath $Destination -Force\n')
+  // 解压：**内联命令 + 环境变量传路径**，不写 .ps1 文件。
+  //
+  // 原来这里写一个 `expand-node.ps1` 再用 `-File` 执行。那条路会撞上机器的
+  // PowerShell 执行策略：策略管的是**脚本文件**，于是 ExecutionPolicy 为
+  // Restricted/AllSigned 的机器上，构建会在这一步失败，而报错是
+  // 「无法加载文件…因为在此系统上禁止运行脚本」——**一句话也没提构建**，
+  // 看的人会去查签名策略，而真正的原因是这个构建步骤不该依赖它。
+  //
+  //   > 一个"因为构建脚本是 .ps1 而被策略拦下"的失败，
+  //   > 与一个"解压真的坏了"的失败，在日志里是同一句话。
+  //
+  // 内联 `-Command` 不经过脚本文件，因此与执行策略无关。命令串是**常量**，
+  // 两个路径走环境变量——原注释要的「命令里没有插值进来的源码」这条性质原样保留。
   await new Promise((resolve, reject) => {
-    const child = spawn('powershell.exe', ['-NoLogo', '-NoProfile', '-NonInteractive', '-File', script, zip, build], { stdio: 'inherit', windowsHide: true })
+    const child = spawn('powershell.exe', [
+      '-NoLogo', '-NoProfile', '-NonInteractive', '-Command',
+      'Expand-Archive -LiteralPath $env:LEGION_EXPAND_ARCHIVE -DestinationPath $env:LEGION_EXPAND_DEST -Force',
+    ], {
+      stdio: 'inherit',
+      windowsHide: true,
+      env: { ...process.env, LEGION_EXPAND_ARCHIVE: zip, LEGION_EXPAND_DEST: build },
+    })
     child.once('error', reject)
     child.once('exit', code => code === 0 ? resolve() : reject(new Error(`Archive extraction failed (${code})`)))
   })

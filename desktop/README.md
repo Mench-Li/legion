@@ -22,6 +22,6 @@ Web 和桌面使用同一套后台和数据。桌面会先验证并连接当前 
 
 生成的 `desktop-release.json` 会记录 Node/npm、Git、DSH 和 Legion 的物理资源。只有 Electron 窗口代码放在 ASAR 中。Windows x64 暂存会在生成清单前移除 node-pty 中仅供 ARM64 使用的二进制，以匹配目标平台和 NSIS 输出。本机已通过安装后首次导入 DSH 和启动 Legion 服务的检查；范围化 Runtime 审批通道、Runtime Contract 就绪、任务执行、升级/恢复和干净虚拟机发行验收仍未完成。内部安装器通过测试不等于已签名的稳定发行版。详见[实施计划](../docs/superpowers/plans/2026-09-29-legion-desktop.md)和[设计方案](../docs/superpowers/specs/2026-09-27-legion-desktop-design.md)。
 
-构建 `dist` 时还会通过官方发行资源 API 准备带固定哈希的 NSIS 资源归档。安装过程中不会从网络下载构建脚本。安装器按当前用户安装，卸载时保留产品数据。当前内部产物未签名，使用 Electron 默认应用图标；实际测试结果和未完成门槛见[验收记录](../docs/release/legion-desktop-acceptance.md)。
+构建 `dist` 时还会通过官方发行资源 API 准备带固定哈希的 NSIS 资源归档。安装过程中不会从网络下载构建脚本。安装器按当前用户安装，卸载时保留产品数据。当前内部产物**未签名**（名字里的 `-internal-` 就是这个标记），使用 Electron 默认应用图标；签名怎么获得见 [SIGNING.md](SIGNING.md)。实际测试结果和未完成门槛见[验收记录](../docs/release/legion-desktop-acceptance.md)。
 
 打包后的后台使用受管理的 `legion-desktop` DSH profile，并在启动时加载补丁。它不依赖另行打开的 Harness Web 或桌面应用。Node 和 Git 由 Legion 私有管理；当前用户作用域的 DPAPI 使用 Windows 自带 PowerShell。核心应用包不包含任意项目所需的编程语言工具链。

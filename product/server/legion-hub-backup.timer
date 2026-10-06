@@ -1,0 +1,15 @@
+[Unit]
+Description=每天为 Legion Hub 造一份备份
+
+[Timer]
+# 03:17 —— 刻意避开整点与半点：
+#   每秒有成千上万的定时任务排在 0 分，整点是一天里最挤的一刻。
+#   备份要读整个库，撞上别的任务只会让它更慢。
+OnCalendar=*-*-* 03:17:00
+# 机器在 03:17 关过机时，开机后补跑一次（否则"那天没备份"会静默发生）。
+Persistent=true
+# 随机延迟：如果以后有多台 Legion，不要让它们同时读各自的库。
+RandomizedDelaySec=300
+
+[Install]
+WantedBy=timers.target

@@ -346,6 +346,150 @@ node scripts\prt\backup-restore-verify.mjs --source=<路径>        # 指定库
 
 ---
 
+## 10. T-193 发布说明：`test` 阶段契约/端到端 9 套件归零（含 CI 契约登记面修复）
+
+> 角色：devops（部署运维员）｜任务：T-193｜分支：`w/T-193`
+> 开工基线（实测）：`git log --oneline -1` = **`6d9c9a9c  promote T-192`**；`w/T-193` 与 `main` 同点（`git diff main...w/T-193` 为空）。
+> 环境：本机 dev / acceptance（127.0.0.1）。**未发布生产**（未获将军批准）。
+
+### 10.1 结论速览
+
+| 项 | 结论 |
+| --- | --- |
+| 9 套件（w/T-193 @ `6d9c9a9c`，逐文件 `node <file>`） | 8 组 exit 0 全绿；`secret-store` 组 52 例中 48 pass / **2 fail（沙箱 named-pipe EPERM）** / 2 skip —— 2 条失败为真·跨进程用例，已用 pwsh 真跨进程手工复现其断言全过（§10.5） |
+| 产品/业务代码 | **未改一行**。本次 diff 仅：CI 契约登记面（`scripts/prt/baseline-snapshot.mjs`）+ 生成的契约基线（`docs/superpowers/prt/prt-007-baseline.json`）+ 本文档 |
+| 用户可见行为 | 无（纯 CI/契约面）⇒ 功能手册 FEATURES.md / 功能索引 / README 引导段**豁免**（§10.8） |
+| 构建 | `run-ci --only test` 在本会话沙箱内被 `spawn EPERM` 挡住（§10.5），非门禁失败；普通终端命令见 §10.3 |
+| 相邻红（不在本任务 9 条内） | `team-hub/run-routes.test.mjs` 8/30，如实登记未代改（§10.7） |
+
+### 10.2 变更内容、根因与「改产品还是改判据」
+
+本次唯一实质性修复 = **`model-api` ③**（9 条里唯一真红的产品/契约读数）。
+
+- 原始读数（w/T-193 @ `6d9c9a9c`，修前）：`model-api` **14 pass / 1 fail**，红在
+  `✖ api.ts 里用到的每个 /api/ 路径都能在源码抽出的路由表里找到`
+  ⇒ `actual: ['POST /api/events/ticket']`、`expected: []`。
+- 该路径**真实存在且已挂载**：`team-hub/routes/identity.mjs:219`（`{ method:'POST', path:'/api/events/ticket' }`），
+  并由 `team-hub/server.mjs:7828` 的 `router.families.unshift(createIdentityRoutes({...}))` 挂上。
+- 根因：平台契约的**唯一权威** `platformHttpRoutes()`（`scripts/prt/baseline-snapshot.mjs:659`）
+  只从 `createRouter([...])` 与 `ROUTE_FAMILY_SOURCES` 取路由；identity 族走的是**延迟装配**
+  （`router.families.unshift`），既不在 `ROUTE_FAMILY_SOURCES` 里，也没被 `assertRouteFamilyCoverage()`
+  扫到 ⇒ 该族 27 条 `/api/` 路由对平台契约**不可见**。这与 `docs/superpowers/prt/PRT-116-test-stage-red-suites.md` §3
+  记的是同一形状：**判据没坏，它量的那个集合塌了**。
+  该族由远程 Agent 合并 `6d7c28ea`（`88e0b124 feat(remote)`）引入，**晚于** T-191 的验证树 `88c7c21c`。
+- 处置（**改观测点，不改断言**）：`scripts/prt/baseline-snapshot.mjs`
+  1. `SOURCES.routesIdentity` + `ROUTE_FAMILY_SOURCES` 登记 identity 族；
+  2. `assertRouteFamilyCoverage()` 现在**两种装配写法都认**（`createRouter([...])` 与
+     `router.families.unshift(createXxxRoutes(`），并对无 `/api/` 路由的静态族
+     （`createMobileRoutes`/`createPortalRoutes`/`createReleaseRoutes`）**显式豁免**；
+  3. **顺带修好同一次合并留下的另一半**：`team-hub/user-store.mjs` / `team-hub/device-store.mjs`
+     建了 11 张 `hub_*` 表却没登记 schema 采集面，`buildSnapshot()` 会直接抛「未登记」⇒ `prt-baseline` ④ 红。
+     补登记后 `--diff` 无漂移。
+- 基线刷新：`node scripts/prt/baseline-snapshot.mjs --record`（**271 路由 / 94 表**；原 244 / 83，+27 路由 +11 表）。
+  这是**生成的契约产物**刷新（PRT-116 §2 的 A 类：判据对、产物旧），不是把断言改成 actual。
+- 断言未放宽：`model-api` 仍 15 例（含 ③ 那条 `deepEqual(..., [])`），`prt-baseline` 仍 26 例；
+  没有新增 skip/only、没有删除断言、`expected` 未改。
+
+### 10.3 环境 × 步骤 × 验证项 × 回滚
+
+环境：dev / acceptance（本机 127.0.0.1 三件套）。**production 未授权，未发布**。
+
+**发布/验证步骤（普通终端）**
+
+```powershell
+# 0) 预检（gate）：不通过则终止，禁止跳过
+node scripts/ci/run-ci.mjs --only env,deps,build     # 环境 + 依赖 + 构建
+# 1) 本次范围门禁：test 阶段（含 9 套件与 prt-baseline）
+node scripts/ci/run-ci.mjs --only test
+# 2) 单独复跑本任务 9 套件（逐文件；与 CI 的 per-file 进程隔离等价）
+node --test workbench/scripts/model-api.test.mjs
+node --test orchestrator/worker/can-read-authorization-source.test.mjs
+node --test runtime/dsh-composition/e2e-assembly.test.mjs
+node --test runtime/dsh-composition/employee-preset.test.mjs runtime/dsh-composition/employee-preset-mount-dsh-process.test.mjs
+node --test security/secrets/secrets.test.mjs security/secrets/run-credentials.test.mjs security/secrets/credential-materializer.test.mjs
+node --test team-hub/acceptance-routes.test.mjs
+node --test team-hub/handoff-routes.test.mjs
+node --test team-hub/run-events.test.mjs
+# 3) 契约基线（本次改动面）
+node scripts/prt/baseline-snapshot.mjs --diff          # 期望：无漂移，exit 0
+```
+
+**验证项（本次实测，w/T-193 @ `6d9c9a9c`）**
+
+| # | 套件 | 修前（任务原始读数 / 实测） | 修后（本次实测） |
+| --- | --- | --- | --- |
+| 1 | model-api | 14 pass / 1 fail | **15/15, exit 0** |
+| 2 | can-read | 5/3（历史） | **8/8, exit 0** |
+| 3 | e2e-assembly | 17/2（历史） | **19/19, exit 0** |
+| 4 | employee-preset | 34/1（历史，另有 6 skip） | **42 例 36 pass / 0 fail / 6 skip, exit 0**（6 skip = 本机检出未构建 `packages/preset/agent-presets/lib`，逐条具名跳过） |
+| 5 | secret-store | 50/1（历史） | **52 例 48 pass / 2 fail（沙箱 EPERM）/ 2 skip**；2 条断言已 pwsh 手工复现通过（§10.5） |
+| 6 | route-family（32 文件） | 507/2 | **510/510, exit 0** |
+| 7 | acceptance-routes | 3/7 | **10/10, exit 0** |
+| 8 | handoff-routes | 3/5 | **8/8, exit 0** |
+| 9 | run-events | 14/4 | **18/18, exit 0** |
+| + | prt-baseline（受本次改动直接影响） | 修前因未登记而抛错 | **26/26, exit 0** |
+| + | 契约面相邻：probe-service 13/13 · model-config 18/18 · secret-routes 26/26 | — | 全 exit 0 |
+
+**回滚方案**（本次改动**不触库、不触进程、不需重启**）
+
+| 场景 | 操作 |
+| --- | --- |
+| 契约面回滚 | `git revert <本次 commit>`（或 checkout 上一版 `scripts/prt/baseline-snapshot.mjs` + `docs/superpowers/prt/prt-007-baseline.json`），随后 `node scripts/prt/baseline-snapshot.mjs --diff` 应回到旧值（244 路由 / 83 表），且 `prt-baseline` ④ 会**重新变红**——这是有意的信号：identity 族又对契约不可见 |
+| 数据/服务回滚 | **不需要**：无 schema/迁移、无前端产物、无服务行为变更（§6 的数据回滚模板不适用） |
+| 触发条件 | `model-api` ③ 或 `prt-baseline` ④ 出现意外新漂移；或 identity 族被回退而登记面未同步 |
+
+### 10.4 影响面
+
+- 产品行为：**无变化**。`platformHttpRoutes()` 是 CI/契约工具，不在任何运行时路径上。
+- 契约基线：`httpRoutes` 244→271、`dbTables` 83→94 —— 把「远程 Agent 通道真实存在的端点与表」**补进**契约，覆盖面变大而非放宽。
+- 依赖：零新增依赖；零联网。
+- 对其它套件：`prt-baseline` / `probe-service` / `model-config` / `secret-routes` / `model-api` 已复跑通过。
+
+### 10.5 沙箱限制（如实标注，不冒充通过）
+
+本会话沙箱拦截 Node 的**子进程 pipe 捕获**：`node scripts/ci/run-ci.mjs --only test` 实测报
+`[test] exception: spawn EPERM`、`test FAIL`、exit 1（栈在 `scripts/ci/run-ci.mjs:73` 的 `spawn`）——
+**环境限制，不是门禁失败**。等价证据：
+
+- 9 套件改用**逐文件 `node <file>`**（等价于 CI 的 per-file 进程隔离）取得 §10.3 读数；
+  3 个顺序敏感套件**单跑 ×3 + 串行同 shell** 全绿（§10.6）。
+- `secret-store` 的 2 条真·跨进程用例（`security/secrets/secrets.test.mjs:371/400`）在测试进程内
+  `execFileSync`/`spawnSync` 被 EPERM；用 pwsh 起**两个真 node 进程**手工复现：
+  持锁进程下写入 `OUTCOME=SECRET_STORE_LOCK_TIMEOUT` 且库/锁文件均未变；
+  无争用时两次写入均 `OUTCOME=wrote`、两条记录都在、无锁残留 —— 断言全过。
+- 普通终端复跑：`node scripts/ci/run-ci.mjs --only test`（本机 DSH 检出已构建，候选路径可解析）应 9 条全 exit 0。
+
+- 同一沙箱也拦截 `git add`/`git commit`：`Unable to create ...\.git\worktrees\T-193\index.lock: Permission denied`（`.git` 在工作区之外）⇒ 本任务改动**留在 `w/T-193` 工作树**（3 个 M 文件），由将军验收时 promote；普通终端提交：`git add docs/DEPLOY.md docs/superpowers/prt/prt-007-baseline.json scripts/prt/baseline-snapshot.mjs` → `git commit`。
+### 10.6 顺序敏感 3 套件：为什么单跑绿、串行也绿
+
+`acceptance-routes` / `handoff-routes` / `run-events` 各自 `mkdtemp` 独立库 + `listen(0)` 临时端口。
+CI 的 `node --test` 默认按**文件**隔离进程（`run-ci` 也是逐套件起进程），所以三者互不可见。
+
+- 单跑 ×3：acceptance 10/10、handoff 8/8、run-events 18/18，三轮完全一致。
+- 串行（同一 shell 依次）：3/3 exit 0、fail=0。
+- **为什么两棵树曾计数不同**：把三者塞进**同一进程**（`--test-isolation=none`）时，
+  `team-hub/server.mjs` 的模块级单例被复用、`listen` 落到已监听的 server、且三者共用同一份
+  `TEAM_HUB_DB`/预约状态 ⇒ 实测 36 例 31 pass / 5 fail（红在 run-events ⑬⑭⑮⑯⑱）。
+  这是**量具/进程模型的产物**，不是产品行为：生产里 hub 是**一个长期进程**，不存在
+  「三个测试文件各自 import 同一个 hub」。
+
+### 10.7 相邻红（不在本任务 9 条内，如实登记、未代改）
+
+`team-hub/run-routes.test.mjs`（登记在 `scripts/ci/run-ci.mjs:2383` 的运行面套件里）实测 **8 pass / 22 fail**。
+首条红 `TypeError: Cannot read properties of null (reading 'attemptId')`（:113）——
+夹具 `insertTask()`（:55-59）用**裸 SQL** 插入任务且未申报 `fileDomain`，而上一条用例认领后
+写入预约跨 `in_review` 活跃 ⇒ 下一次 `claim` 以 `FILE_CONTENTION` 返回 `claimed:null`。
+与 T-178 已修的 acceptance/handoff/run-events **同一形状**（见 §10.2 引的 PRT-116 与 BUG-007/认领预约）。
+它**不在本任务 9 条目标内**，且修它属夹具/认领预约线（coder/tester），本角色**未代改**，仅登记。
+
+### 10.8 文档同步判定
+
+本次 diff = CI 契约登记面 + 生成的契约基线 + 本发布说明，**无用户可见行为变更** ⇒
+按验收口径「纯重构可豁免」，**不**改 `docs/FEATURES.md` 对应小节 / 功能索引 / README 引导段。
+（`check-docs.mjs` 的结构/链接/索引一致性可由 `run-ci --only doc` 复跑。）
+
+---
+
 ## 附录 A：发布检查单（每次发布逐项打勾）
 
 - [ ] CI 全绿：`node scripts/ci/run-ci.mjs` exit 0（evidence 归档 docs/T093-evidence/）

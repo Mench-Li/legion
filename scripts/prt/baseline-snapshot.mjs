@@ -201,6 +201,12 @@ const SCHEMA_SOURCES = [
   'harnessStore',         // team-hub/harness-store.mjs
   'writeIntentStore',     // team-hub/write-intent-store.mjs
   'workflowPackStore',    // product/workflow-packs/pack.mjs
+  // ★★ T-193：远程 Agent 通道的两份 store（11 张 hub_* 表）。
+  //   它们与上面六份是**同一个形状**：文件建了表，却没登记进 schema 采集面 ⇒
+  //   这 11 张表可以随便改列而 `--check` 报"无漂移"（`--diff` 实测直接抛
+  //   "未登记"并 exit 2）。补登记是唯一正确的修法——覆盖面变大，不是把扫描面缩小。
+  'userStore',            // team-hub/user-store.mjs（hub_users / sessions / invites / space_roles / login_failures / registrations / event_tickets / password_resets）
+  'deviceStore',          // team-hub/device-store.mjs（hub_devices / hub_device_pairing_codes / hub_node_presence）
 ]
 
 // 这些模块也一并纳入 sources 哈希：它们变了，基线里的表清单就可能过期。
@@ -232,6 +238,9 @@ SOURCES.deliveryStore = join(ROOT, 'team-hub', 'delivery-store.mjs')
 SOURCES.harnessStore = join(ROOT, 'team-hub', 'harness-store.mjs')
 SOURCES.writeIntentStore = join(ROOT, 'team-hub', 'write-intent-store.mjs')
 SOURCES.workflowPackStore = join(ROOT, 'product', 'workflow-packs', 'pack.mjs')
+// ★★ T-193：远程 Agent 通道的两份 store 路径（见 SCHEMA_SOURCES 里那一段）。
+SOURCES.userStore = join(ROOT, 'team-hub', 'user-store.mjs')
+SOURCES.deviceStore = join(ROOT, 'team-hub', 'device-store.mjs')
 
 // ── PRT-316：已从 `handle()` 提取出去的路由族 ────────────────────────────────
 //
@@ -317,6 +326,14 @@ SOURCES.routesMetrics = join(ROOT, 'team-hub', 'routes', 'metrics.mjs')
 SOURCES.routesChannels = join(ROOT, 'team-hub', 'routes', 'channels.mjs')
 SOURCES.routesHarness = join(ROOT, 'team-hub', 'routes', 'harness.mjs')
 SOURCES.routesAgentWorkflow = join(ROOT, 'team-hub', 'routes', 'agent-workflow.mjs')
+// ★★ T-193 归零：**延迟装配**的 identity 族（远程 Agent 通道）。
+//   它不走 `createRouter([...])`，而是 `router.families.unshift(createIdentityRoutes({...}))`
+//   （条件装配：只有配了身份签名密钥才挂）。后果与"搬了家却没登记"逐字相同：
+//   它的 27 条 `/api/` 路由对平台契约**完全不可见** ⇒ `model-api ③` 把
+//   真实存在的 `POST /api/events/ticket` 报成"前端写了个不存在的端点"，
+//   而那条路由就在 `team-hub/routes/identity.mjs:219`、也确实挂得上。
+//   修法同本文件的老规矩：**把观测点补全**，不动断言一个字。
+SOURCES.routesIdentity = join(ROOT, 'team-hub', 'routes', 'identity.mjs')
 
 /** 已提取出去的路由族模块（值 = 该文件里**声明式**路由的归属名）。 */
 export const ROUTE_FAMILY_SOURCES = Object.freeze([
@@ -381,7 +398,15 @@ export const ROUTE_FAMILY_SOURCES = Object.freeze([
   { module: 'routesArtifactContent', family: 'artifact-content', factory: 'createArtifactContentRoutes' },
   { module: 'routesChannels', family: 'channels', factory: 'createChannelRoutes' },
   { module: 'routesHarness', family: 'harness', factory: 'createHarnessRoutes' },
-  { module: 'routesAgentWorkflow', family: 'agent-workflow', factory: 'createAgentWorkflowRoutes' },])
+  { module: 'routesAgentWorkflow', family: 'agent-workflow', factory: 'createAgentWorkflowRoutes' },
+  // ★★ T-193：**延迟装配**的 identity 族。它不走 `createRouter([...])` 而是
+  //   `router.families.unshift(createIdentityRoutes({...}))`（见 server.mjs:7828），
+  //   所以它压根不在上面那份"装配处"名单里 —— 而它的 27 条 `/api/` 路由是真实端点。
+  //   不登记它，`platformHttpRoutes()` 就少 27 条，`model-api ③` 会把
+  //   `POST /api/events/ticket`（identity.mjs:219，确有其路）报成"前端写了个不存在的端点"。
+  //   ⇒ 补登记 + 让 `assertRouteFamilyCoverage()` 认得延迟装配的写法（两条一起做，
+  //     否则登记的族会被反向检查判成"未装配"）。
+  { module: 'routesIdentity', family: 'identity', factory: 'createIdentityRoutes' },])
 SOURCES.experienceStore = join(ROOT, 'team-hub', 'experience-store.mjs')
 
 /**
@@ -699,16 +724,52 @@ export function routeAssemblySource() {
 }
 
 /**
- * ★★★ 列名齐全性：`server.mjs` 的 `createRouter([...])` 装配处是**权威**。
+ * 延迟装配、且**没有 `/api/` 路由**的族：它们服务静态资源 / HTML / 安装包。
+ *
+ * ★ T-193：这些族用 `router.families.unshift(createXxxRoutes({...}))` 挂载
+ *   （`server.mjs:7907/7916/7929`），既不进 `createRouter([...])`，也没有
+ *   `extractDeclaredRoutes()` 认得出的 `/api/` 字面量路由（实测各 0 条）。
+ *   所以它们**进不了** `ROUTE_FAMILY_SOURCES`（登记了会被用例 ⑩ 的
+ *   "每族至少一条声明式路由"判红）。这里**显式豁免**，而不是让它们对门禁不可见：
+ *   一个"没被门禁看见"的族与一个"门禁漏看了"的族，在读数上是同一个东西。
+ */
+export const NON_API_DEFERRED_ROUTE_FACTORIES = Object.freeze([
+  'createMobileRoutes',
+  'createPortalRoutes',
+  'createReleaseRoutes',
+])
+
+/**
+ * ★★★ 列名齐全性：`server.mjs` 的路由装配处是**权威**。
  *
  * 装配里调用了哪些 `createXxxRoutes(`，就必须在 `ROUTE_FAMILY_SOURCES` 里逐个列到，
  * 且登记的 `factory` 必须与之同名。少了 ⇒ 那个族的路由对基线**完全不可见**，
  * `--check` 会说"与基线一致"。
+ *
+ * ★★★ T-193：装配有**两种**写法，只认第一种会漏掉整个延迟装配的族：
+ *   ① `createRouter([...])` 里的 `createXxxRoutes({...})`（主力）；
+ *   ② `router.families.unshift(createXxxRoutes({...}))`（条件装配：远程 Agent 的
+ *      identity / mobile / portal / releases 四族走这条，见 `server.mjs:7828` 起）。
+ *
+ *   本函数原先只扫①，于是 identity 族的 27 条 `/api/` 路由对平台契约不可见 ——
+ *   而门禁本身**一声不吭**（它根本不知道有这个族）。2026-10 实测的后果是
+ *   `model-api ③` 把真实存在的 `POST /api/events/ticket` 报成"前端写了个不存在的端点"。
+ *
+ *   > 一个"只认一种装配写法"的齐全性门禁，
+ *   > 与一个"另一种写法下的整个路由族都不存在"的门禁，在它自己的读数上是同一个东西。
+ *
+ *   ⇒ 现在两种都认。②里没有 `/api/` 路由的三个静态族由
+ *     `NON_API_DEFERRED_ROUTE_FACTORIES` **显式**豁免（而不是静默漏掉）。
  */
 export function assertRouteFamilyCoverage(serverSource) {
   const block = /createRouter\(\[([\s\S]*?)\]\)/.exec(serverSource)
   must(block !== null, "`server.mjs` 里找不到 `createRouter([...])` 装配处：路由族的列名无从核对")
-  const wired = [...block[1].matchAll(/(\w+)\(/g)].map((m) => m[1]).filter((n) => n.startsWith('create') && n.endsWith('Routes'))
+  const eager = [...block[1].matchAll(/(\w+)\(/g)].map((m) => m[1]).filter((n) => n.startsWith('create') && n.endsWith('Routes'))
+  // ② 延迟装配：`router.families.unshift(createXxxRoutes({...}))`
+  const deferred = [...serverSource.matchAll(/router\.families\.unshift\(\s*(create\w+Routes)\s*\(/g)]
+    .map((m) => m[1])
+    .filter((f) => !NON_API_DEFERRED_ROUTE_FACTORIES.includes(f))
+  const wired = [...eager, ...deferred]
   const listed = ROUTE_FAMILY_SOURCES.map((x) => x.factory)
   const unlisted = wired.filter((f) => !listed.includes(f))
   const stale = listed.filter((f) => !wired.includes(f))

@@ -73,7 +73,7 @@ const state = {
   cursor: null,
   conn: deriveConnectionState({ hubReachable: false }),
   sse: null,
-  view: 'board',
+  view: 'chat',
   intent: DEFAULT_INTENT,
   /** 任务视角（与指挥台任务中心同一条轴）。 */
   boardView: DEFAULT_VIEW,
@@ -94,7 +94,6 @@ const state = {
   /** 能力发现的结果。决定登录页显示"登录"还是"注册+登录"。 */
   identity: { bootstrapped: null, registration: 'closed' },
   /** `/api/identity/me` 的结果（「我的」那一页用）。 */
-  account: null,
   authMode: 'login',
 }
 
@@ -381,7 +380,7 @@ function highlightTask(taskId) {
 }
 
 async function openTask(taskId) {
-  showView('board')
+  showView('tasks')
   await refreshTasks()
   highlightTask(taskId)
 }
@@ -407,6 +406,21 @@ function renderTargets() {
       sel.appendChild(o)
     }
   }
+  // 聊天风格里要一眼看到**在跟谁说话**（web 的 .chat-head 就是干这个的）。
+  const head = $('agent-picker')
+  const cur = state.agents.find((a) => a.agentId === state.agentId) ?? null
+  if (cur === null) {
+    head.textContent = state.agents.length === 0 ? '这个空间还没有 Agent' : ''
+    head.className = 'hint'
+  } else {
+    head.className = 'viewtitle'
+    head.replaceChildren(document.createTextNode(`${cur.name}　`))
+    const r = document.createElement('span')
+    r.className = 'tag'
+    r.textContent = cur.role
+    head.appendChild(r)
+  }
+
   const tsel = $('task-select')
   tsel.replaceChildren()
   const active = state.tasks.filter((t) => !['done', 'canceled'].includes(String(t.status)))
@@ -466,132 +480,22 @@ function chooseTaskForFeedback(taskId) {
 
 // ── 视图切换 ────────────────────────────────────────────────────────────────
 
+/**
+ * 两个视图：**Agent** 与 **任务**。
+ *
+ * 手机端此前有三个（看板 / 对话 / 我的）。砍掉「我的」不是因为它没用，
+ * 而是因为用户对手机端的定义很清楚：**看着我的人干活**。
+ * 账号管理（改口令 / 设备 / 邀请码）在桌面端与网页端都有更合适的落点，
+ * 放在手机上只会让主路径多一个岔口。
+ */
 function showView(view) {
   state.view = view
-  $('view-board').classList.toggle('hidden', view !== 'board')
   $('view-chat').classList.toggle('hidden', view !== 'chat')
-  $('view-account').classList.toggle('hidden', view !== 'account')
-  // 输入框只在前两个视图有意义：在「我的」里让它挡着半个屏幕，
-  // 用户会以为"在这儿打字也能派任务"。
-  $('composer').classList.toggle('hidden', view === 'account')
-  $('tab-board').setAttribute('aria-selected', String(view === 'board'))
+  $('view-tasks').classList.toggle('hidden', view !== 'tasks')
   $('tab-chat').setAttribute('aria-selected', String(view === 'chat'))
-  $('tab-account').setAttribute('aria-selected', String(view === 'account'))
-  if (view === 'board') void refreshTasks()
-  if (view === 'account') void refreshAccount()
+  $('tab-tasks').setAttribute('aria-selected', String(view === 'tasks'))
+  if (view === 'tasks') void refreshTasks()
 }
-
-// ── 我的（账号）──────────────────────────────────────────────────────────────
-//
-// 账号体系里**只有这一页能自己完成的事**，恰恰是最要紧的那两件：
-// 改口令、发邀请。放到指挥台去做的版本会让"我在手机上怀疑账号被盗"
-// 必须先去开电脑——而那时候用户最需要的是一个能立刻执行的按钮。
-
-async function refreshAccount() {
-  const info = await api('/api/identity/me').catch(() => null)
-  if (info === null) return
-  const isAdmin = info.systemRole === 'admin'
-  state.account = { name: info.user?.name ?? '', isAdmin, roles: info.roles ?? [] }
-  $('account-who').textContent =
-    `${info.user?.name ?? ''}　${isAdmin ? '系统管理员' : '普通成员'}\n` +
-    `空间：${(info.roles ?? []).map((r) => `${r.space}（${r.role}）`).join('、') || '还没有加入任何空间'}`
-  $('reg-mode').textContent = state.identity.registration === 'open' ? '开放注册'
-    : state.identity.registration === 'invite' ? '需要邀请码' : '仅限邀请'
-  // 邀请入口只给系统管理员。对普通成员显示一个必然 403 的按钮，
-  // 比不显示更坏——他会以为是自己哪里点错了。
-  $('invite-group').classList.toggle('hidden', !isAdmin)
-  const hubUrl = hubBase()
-  $('about-hub').textContent = `Hub：${hubUrl}\n协议版本：1　注册策略：${state.identity.registration}`
-
-  const s = await api('/api/identity/sessions').catch(() => null)
-  // `current` 由**服务端**给的那一个 id 判出来，不靠"最近使用时间最晚的就是我"——
-  // 那在另一台刚用过的设备上会指错人，而这一页上的每个按钮都会真踢掉一个会话。
-  const currentId = s?.currentSessionId ?? null
-  // 已撤销的会话不再列：它们既踢不动（撤销是幂等的）也不该继续占着屏幕。
-  const list = (s?.sessions ?? []).filter((x) => x.revoked !== true)
-  $('session-count').textContent = String(list.length)
-  const root = $('sessions')
-  root.replaceChildren()
-  if (list.length === 0) {
-    const p = document.createElement('div')
-    p.className = 'hint'
-    p.textContent = '没有可显示的会话。'
-    root.appendChild(p)
-    return
-  }
-  for (const session of list) {
-    const card = document.createElement('div')
-    card.className = 'task'
-    const t = document.createElement('div')
-    t.className = 't'
-    t.textContent = session.label || '未命名设备'
-    card.appendChild(t)
-    const sub = document.createElement('div')
-    sub.className = 's'
-    sub.textContent = `登录于 ${session.createdAt ?? '—'}　最近使用 ${session.lastSeenAt ?? '—'}`
-    card.appendChild(sub)
-    if (session.sessionId === currentId) {
-      const me = document.createElement('div')
-      me.className = 'm'
-      me.textContent = '这台设备（现在）'
-      card.appendChild(me)
-    } else {
-      const acts = document.createElement('div')
-      acts.className = 'acts'
-      const b = document.createElement('button')
-      b.textContent = '退出这台'
-      b.addEventListener('click', async () => {
-        b.disabled = true
-        try {
-          await api('/api/identity/sessions/revoke', { method: 'POST', body: { sessionId: session.sessionId } })
-          await refreshAccount()
-        } catch (e) { notice(`撤销失败：${e.message}`) } finally { b.disabled = false }
-      })
-      acts.appendChild(b)
-      card.appendChild(acts)
-    }
-    root.appendChild(card)
-  }
-}
-
-async function changePassword() {
-  const current = $('pw-current').value
-  const next = $('pw-new').value
-  if (current.length === 0 || next.length === 0) { showLoginError('请填写当前口令与新口令'); return }
-  $('btn-change-pw').disabled = true
-  try {
-    const r = await api('/api/identity/password', { method: 'POST', body: { currentPassword: current, newPassword: next } })
-    $('pw-current').value = ''
-    $('pw-new').value = ''
-    // 把"别处被踢掉"说出来：用户做这件事的动机多半就是怀疑别人在用他的账号，
-    // 而"改成功了"与"改成功了并且那个人已经掉线"是两句不同的话。
-    notice(`口令已改。其它设备上的 ${r.revokedOtherSessions ?? 0} 个登录已退出，这台仍然有效。`)
-    await refreshAccount()
-  } catch (e) {
-    showLoginError(e.message)
-  } finally {
-    $('btn-change-pw').disabled = false
-  }
-}
-
-async function createInvite() {
-  const space = state.scope ?? 'default'
-  $('btn-invite').disabled = true
-  try {
-    const r = await api('/api/identity/invites', {
-      method: 'POST', body: { space, role: $('invite-role').value },
-    })
-    $('invite-code').value = r.code ?? ''
-    $('invite-out').classList.remove('hidden')
-    notice(`邀请码已生成，只能用一次；对方在注册页填它即可加入「${space}」。`)
-  } catch (e) {
-    showLoginError(e.message)
-  } finally {
-    $('btn-invite').disabled = false
-  }
-}
-
-// ── 数据 ────────────────────────────────────────────────────────────────────
 
 async function refreshStatus() {
   try {
@@ -714,7 +618,7 @@ async function refreshTasks() {
   renderBoard()
   renderTargets()
   const badge = attentionCount(state.tasks)
-  const tab = $('tab-board')
+  const tab = $('tab-tasks')
   const old = tab.querySelector('.badge')
   if (old !== null) old.remove()
   if (badge > 0) {
@@ -829,7 +733,7 @@ async function send(text, intentOverride = null) {
     // 派了任务就切到看板并高亮它——"我派的活去哪了"必须在同一屏回答，
     // 否则用户只能自己猜它有没有生效。
     if (plan.intent.id === 'create_task') {
-      showView('board')
+      showView('tasks')
       await refreshTasks()
       if (typeof r?.taskId === 'string') highlightTask(r.taskId)
       notice(`已派任务 ${r?.taskId ?? ''}：电脑上线后会领取执行。`)
@@ -1013,7 +917,9 @@ async function enterApp(me) {
     // 空间没有 Agent 不是致命错误：界面照常显示，让用户去任务页看。
     console.warn('初始化失败', e)
   }
-  showView('board')
+  // 登录后落在 **Agent**（聊天）——那是这个产品的主功能；
+  // 「任务」是查账的地方，不是入口。
+  showView('chat')
 }
 
 function doLogout() {
@@ -1045,12 +951,8 @@ function bind() {
     e.target.style.height = 'auto'
     e.target.style.height = `${Math.min(120, e.target.scrollHeight)}px`
   })
-  $('tab-board').addEventListener('click', () => showView('board'))
+  $('tab-tasks').addEventListener('click', () => showView('tasks'))
   $('tab-chat').addEventListener('click', () => showView('chat'))
-  $('tab-account').addEventListener('click', () => showView('account'))
-  $('btn-change-pw').addEventListener('click', () => { void changePassword() })
-  $('btn-invite').addEventListener('click', () => { void createInvite() })
-  $('btn-logout-2').addEventListener('click', doLogout)
   $('agent-select').addEventListener('change', (e) => { void selectAgent(e.target.value) })
   $('task-select').addEventListener('change', (e) => { state.targetTaskId = e.target.value })
   // ★ 网络恢复时**去问**，而不是把读数重置成"未知"。

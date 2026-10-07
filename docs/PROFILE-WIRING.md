@@ -55,6 +55,41 @@ node scripts/legion-profile.mjs --restore --profile desktop
 **改前必留备份**：`package.json.bak-<时间戳>` 与 `cordis.patch.yml.bak-<时间戳>`，
 与原件同目录。`--restore` 就是读它们。
 
+### 指向远程 Hub（手机要从**服务器**派任务到这台电脑）
+
+默认的 worker 连的是**本机** `http://127.0.0.1:8787` + `scope: software`。
+要让手机在服务器上派的任务落到这台电脑上跑，worker 必须指向那台服务器：
+
+```powershell
+# 方式一：命令行（调 legion-profile.mjs 时用）
+node scripts/legion-profile.mjs --wire --profile web `
+  --hub-url https://legion-si.online --hub-token <令牌> --scope default
+
+# 方式二：环境变量（任何**包着**它跑的入口都能透传，比如 scripts/legion-start.mjs）
+$env:LEGION_HUB_URL_FOR_NODE   = 'https://legion-si.online'
+$env:LEGION_HUB_TOKEN_FOR_NODE = '<令牌>'
+$env:LEGION_HUB_SCOPE_FOR_NODE = 'default'
+node scripts/legion-profile.mjs --wire --profile web
+```
+
+优先级是 **命令行 > 环境变量 > 默认**。不配就是本机——既有部署的行为一字不变。
+
+**★ 三种方式都要配上**（`hubUrl` / `hubToken` / `scope`），只配 URL 会连上但认领不到任务：
+任务是按 `scope` 派发的，scope 对不上就是"连得上、什么都没发生"。
+
+**★ 已经写进补丁行的那一行，本脚本不会自动改。** `--verify` 会如实报出来：
+
+```
+· 已存在但配置过时 1 行：legion-scrum-worker（缺 scope: 'default' / hubUrl: 'https://…'）
+  ⚠ 过时的值**不会自动改**（那一行是既有配置，改它要人来定）
+```
+
+——这是刻意的。改用户档案里既有的那一行，与"追加一行本来没有的"不是同一件事：
+前者是在覆盖别人的决定，后者只是在补缺口。照着报出来的值手工改那一行即可。
+
+**★ `hubToken` 的值不会出现在 `--verify` 的输出里**（`ensure` 只断言"这个键在场"）。
+一条会把令牌明文打进终端与 CI 日志的"过时告警"，比不告警更坏。
+
 ## 4. 几个刻意的设计选择
 
 | 选择 | 理由 |

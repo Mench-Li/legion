@@ -1,16 +1,36 @@
-import { test } from 'node:test'
+import { test as nodeTest } from 'node:test'
 import assert from 'node:assert/strict'
 import { cp, mkdtemp, mkdir, writeFile, readFile, rm, readdir, stat, symlink } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
-import { fileURLToPath } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 import { tmpdir } from 'node:os'
 import { createHash } from 'node:crypto'
+import { existsSync } from 'node:fs'
 import { importBundledRuntime } from './bundled-runtime.mjs'
 import { readActiveRuntime, runtimePathsOf } from './runtime-install.mjs'
 import { inventoryTree, DESKTOP_MANIFEST_FORMAT } from '../release/desktop-manifest.mjs'
 import { prepareInWorker } from './desktop-launcher.mjs'
-import asar from '../../desktop/node_modules/@electron/asar/lib/asar.js'
 import { hashFile } from '../release/desktop-manifest.mjs'
+
+// ★ 本文件整份都建在 `desktop/node_modules/@electron/asar` 之上（打包 ASAR、算版本、
+//   连同 glob/minimatch 一起当 vendor 摆进夹具）。而那套依赖**不在 CI 的 deps 阶段里**
+//   （`run-ci.mjs` 的 `stageDeps` 只处理 `workbench/node_modules`）。
+//
+//   所以缺它时必须**具名跳过**，不能让它以静态 import 的形式在加载期炸掉 ——
+//   后者在读数里长成一条"用例失败"，而真相是"这条用例今天没跑"。
+//
+//   > 把"没跑"显示成"失败"，与把"跳过"显示成"通过"，
+//   > 是同一种坏法的两个方向：都让人去查一个不存在的问题。
+const ASAR_ENTRY = fileURLToPath(new URL('../../desktop/node_modules/@electron/asar/lib/asar.js', import.meta.url))
+const ASAR_SKIP = existsSync(ASAR_ENTRY)
+  ? false
+  : 'SKIP：desktop/node_modules 未安装（CI 的 deps 阶段只装 workbench 的依赖；本机需先 `cd desktop && npm install`）'
+const asar = ASAR_SKIP ? null : (await import(pathToFileURL(ASAR_ENTRY).href)).default
+
+// 整份文件共用同一个跳过理由：这 13 条全部要打 ASAR、要摆 vendor 依赖，缺一即不可跑。
+// 用一个本地 `test` 把它接住，而不是在 13 个调用点上各写一遍 ——
+// 13 处写 13 遍，漏掉的那一处就会在 CI 里变成一条"失败"。
+const test = ASAR_SKIP ? (name, fn) => nodeTest(name, { skip: ASAR_SKIP }, fn) : nodeTest
 
 const release = { productVersion: '0.1.0', legionVersion: '0.1.0', dshVersion: '0.1.5-rc.2',
   dshCompositionPatchVersion: 1, runtimeContractVersion: 1, packProtocolVersion: 1, schemaVersion: 1 }

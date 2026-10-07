@@ -9,6 +9,19 @@ export const SCHEMA = defineSchema({
   title: 'team-hub v2（对话/日程数据面 + SSE + 审计）',
   prefixes: ['TEAM_HUB_', 'CHAT_', 'LEGION_HUB_'],
   fields: [
+    // ★ 桌面模式：Launcher 往 team-hub 与 workbench 两个子进程都注入 `LEGION_DESKTOP_MODE=1`
+    //   （`product/launcher/launcher.mjs`），本进程据它收紧本地 API 鉴权
+    //   （启动守卫见 `server.mjs` 顶部，逐请求门见 `routeRequest`）。
+    //
+    //   这一项曾经**只存在于分支上**：合进 main 的那一笔把"另一会话已 git add 的
+    //   desktop 线登记删除"顺手带走了（`3f1fce2e`），于是 `CFG.values.desktopMode`
+    //   恒为 `undefined` —— 读到它的三处判断全部短路，桌面模式的鉴权**静默失效**，
+    //   而 `product/config-schema.mjs` 里那条"读它的是 workbench / team-hub，
+    //   据'桌面模式'强制鉴权"的声明还在照旧宣称它生效。
+    //
+    //   > 一个读不到自己开关的开关，与一个没有开关的程序，
+    //   > 在"它有没有做出承诺"上不是同一个东西 —— 只不过前者的承诺写在别处。
+    { key: 'desktopMode', env: 'LEGION_DESKTOP_MODE', type: 'bool', default: false, doc: '桌面模式：本地 API 强制鉴权（由 Launcher 注入；非回环或缺 token 时拒绝启动）' },
     // ── 监听、鉴权、存储（P3-2 统一项）──
     // 0 是**合法值**：Node `listen(0)` 语义 = 由 OS 分配空闲端口。契约测试
     // （tests/contract/team-hub-parity.test.mjs）就是「env 设 0 + 自己 listen(0)」，且 /api/config

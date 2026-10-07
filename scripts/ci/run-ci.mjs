@@ -746,6 +746,192 @@ async function stageTest() {
       cwd: ROOT,
     },
     {
+      // 服务器侧三个脚本的判据。它们此前**一个套件都没登记**——
+      // 三份用例写好、全绿（实测 32/32，336ms），而 CI 从不跑它们。
+      //
+      // ★ 这正是上面 `report-cli` 那条注释里说的第八轮那个亏，只是换了个目录：
+      //   `product/server/` 这几份是随"产品侧服务器运维"陆续长出来的
+      //   （口令取值、异地备份、替手机做动作），每一份都当"顺手加的用例"提交，
+      //   而**没有任何一步会问它归谁跑**。
+      //
+      //   > 一份没被任何套件执行的 `*.test.mjs`，
+      //   > 与一份还没写的判据，在"它在保护什么"上是同一个东西——
+      //   > 只不过前者会出现在 `git ls-files` 里，让人以为已经测过了。
+      //
+      // ★ 这三份都**密封**：不碰真服务器、不调 rclone（进程入口那几条走 `--dry-run`）、
+      //   不读真实口令文件（各用好参数的临时目录）。所以它们可以无条件跑。
+      //
+      // ★ `phone-act` 守的是一个**不报错**的缺陷：`verify-experience.sh` 原来用 `$*`
+      //   把参数拼进 ssh 命令串，远端 shell 再分词一次，带空格的参数在第一个空格处
+      //   被切开——任务照建、照跑、照完成，只是目标少了一半（服务器上看板留着的
+      //   标题就是截断后的样子）。它现在跑子进程断言"坏参数当场具名退出"。
+      label: 'server-scripts（口令取值 / 异地备份 / 替手机做动作的参数解码）',
+      files: [
+        'product/server/read-credentials.test.mjs',
+        'product/server/offsite.test.mjs',
+        'product/server/phone-act.test.mjs',
+      ],
+      cwd: ROOT,
+    },
+    // ═══════════════════════════════════════════════════════════════════════════
+    // 远程 Agent 通道 / 账号体系那一批的**补登记**（2026-10-07）
+    //
+    // 这一批用例（`feat/remote-agent-architecture` 与账号体系两条线带来的）此前
+    // **一个套件都没登记**。它们在 `git ls-files` 里躺着，在 `suites` 里没有归属 ——
+    // 于是 CI 从不执行它们。实测：`套件清单完备性`一次报出 **56 个**文件。
+    //
+    //   > 56 份用例，约 500 条断言，全绿 —— 而 CI 一条都没跑。
+    //   > 这不是"测过了"，这是"以为测过了"。
+    //
+    // **第一次真跑它们，就抓到两个真缺陷**（同一批，另两笔提交）：
+    //   · `desktop-auth` / `desktop-security` —— 桌面模式的本地 API 鉴权**静默失效**
+    //     （`CFG.values.desktopMode` 无人声明，读到它的五处判断全部短路）；
+    //   · `scripts/config/config.test.mjs` 的 secret 期望值过期了整整三天。
+    //   两个都是"代码在、断言在、没人跑"才活得下来的东西。
+    //
+    // ★ 分组按**功能面**，不按目录：`agent-workflow` 那 11 份散在五个目录里
+    //   （contracts / adapters / team-hub routes / dsh-composition / workbench），
+    //   它们描述的是**同一份契约的五个面**，排障时要一起看。
+    //
+    // ★ 唯一需要条件的：`bundled-runtime` 依赖 `desktop/node_modules`
+    //   （本 CI 的 deps 阶段只装 workbench 的依赖）。它现在**具名 SKIP**，
+    //   而不是以 import 失败的样子长成一条"用例失败"。
+    {
+      // desktop 包**自带** test 脚本（`main.mjs` + 两个 prepare 脚本），此前 CI 从不捡它。
+      // 照 `whiteboard` 那条的既有做法：文件列表从 package.json **算出来**，不写死。
+      label: 'desktop（Electron 主进程 + 载荷准备 + 平台过滤）',
+      files: (() => {
+        const pkg = JSON.parse(readFileSync(join(ROOT, 'desktop', 'package.json'), 'utf8'))
+        return ((pkg.scripts && pkg.scripts.test) || '').split(/\s+/).filter(t => t.endsWith('.mjs'))
+      })(),
+      cwd: join(ROOT, 'desktop'),
+    },
+    {
+      // 桌面启动器那一组：DSH 载荷导入、与 Electron 主进程的桥、真实的本地 API 鉴权。
+      // `desktop-security` 是**真起 Launcher + 两个子进程**的那条（不是 mock）——
+      // 上面那个桌面模式鉴权缺陷，就是它抓出来的。
+      label: 'product-launcher-desktop（载荷导入/主进程桥/启动器/协议/本地鉴权/桌面设置）',
+      files: [
+        'product/launcher/bundled-runtime.test.mjs',
+        'product/launcher/desktop-bridge.test.mjs',
+        'product/launcher/desktop-launcher.test.mjs',
+        'product/launcher/desktop-protocol.test.mjs',
+        'product/launcher/desktop-security.test.mjs',
+        'product/launcher/desktop-settings.test.mjs',
+      ],
+      cwd: ROOT,
+    },
+    {
+      // 电脑侧执行节点（远程 Agent 的"电脑端"）：Agent 循环、出网白名单、执行器、账本。
+      label: 'product-node（电脑端执行节点：Agent/出网/执行器/账本）',
+      files: [
+        'product/node/agent.test.mjs',
+        'product/node/egress.test.mjs',
+        'product/node/executor.test.mjs',
+        'product/node/ledger.test.mjs',
+      ],
+      cwd: ROOT,
+    },
+    {
+      // `packages/shared` 的节点协议三件套 —— 手机↔Hub↔电脑都用它。
+      label: 'node-protocol（节点协议：帧形状 / WS 客户端 / 帧编解码）',
+      files: [
+        'packages/shared/test/node-protocol.test.mjs',
+        'packages/shared/test/ws-client.test.mjs',
+        'packages/shared/test/ws-frames.test.mjs',
+      ],
+      cwd: ROOT,
+    },
+    {
+      // ★ 一份契约的**五个面**，散在五个目录里（见上面那段说明）。
+      label: 'agent-workflow（跨五个目录：契约/适配器/路由/组合/看板视图）',
+      files: [
+        'runtime/contracts/agent-workflow.test.mjs',
+        'runtime/contracts/agent-workflow-definition.test.mjs',
+        'runtime/contracts/agent-workflow-checkpoints.test.mjs',
+        'runtime/contracts/agent-provider-policy.test.mjs',
+        'runtime/contracts/agent-model-selection.test.mjs',
+        'runtime/adapters/dsh/external-agent.test.mjs',
+        'runtime/adapters/dsh/pin-drift.test.mjs',
+        'runtime/adapters/dsh/workflow-run.test.mjs',
+        'runtime/dsh-composition/plugins/runtime-contract-registrar-row.test.mjs',
+        'team-hub/routes/agent-workflow.test.mjs',
+        'workbench/scripts/agent-workflow-view.test.mjs',
+      ],
+      cwd: ROOT,
+    },
+    {
+      // 远程通道的**电脑侧**：出站 WSS 网关、上下文、断线恢复、设备身份。
+      label: 'team-hub-remote（节点网关/上下文/恢复/设备/手机路由/身份远端）',
+      files: [
+        'team-hub/node-gateway.test.mjs',
+        'team-hub/node-context.test.mjs',
+        'team-hub/node-recovery.test.mjs',
+        'team-hub/device-store.test.mjs',
+        'team-hub/mobile-routes.test.mjs',
+        'team-hub/mobile-api-contract.test.mjs',
+        'team-hub/identity-remote.test.mjs',
+      ],
+      cwd: ROOT,
+    },
+    {
+      // 账号体系：注册（含限流）、用户存储、门户与版本下载。
+      label: 'team-hub-account（注册/限流/用户存储/门户/版本下载/工作流包路由）',
+      files: [
+        'team-hub/identity-registration.test.mjs',
+        'team-hub/identity-registration-limit.test.mjs',
+        'team-hub/user-store.test.mjs',
+        'team-hub/portal-routes.test.mjs',
+        'team-hub/releases-routes.test.mjs',
+        'team-hub/workflow-packs-routes.test.mjs',
+      ],
+      cwd: ROOT,
+    },
+    {
+      // 手机端看板与场景：与 web/桌面端**同源**的看板投影 + 场景状态机。
+      label: 'workbench-mobile（手机看板投影/时间线/刷新循环/与 web 的看板一致性）',
+      files: [
+        'workbench/mobile/board.test.mjs',
+        'workbench/mobile/timeline.test.mjs',
+        'workbench/mobile/refresh-loop.test.mjs',
+        'workbench/scripts/mobile-board-parity.test.mjs',
+      ],
+      cwd: ROOT,
+    },
+    {
+      // 看板宿主的桌面线：本地鉴权、身份闸、场景（控制器/布局/归属/状态）、Service Worker 外壳。
+      label: 'workbench-desktop（本地鉴权/身份闸/场景四件套/SW 外壳）',
+      files: [
+        'workbench/scripts/desktop-auth.test.mjs',
+        'workbench/scripts/identity-gate.test.mjs',
+        'workbench/scripts/scene-controller.test.mjs',
+        'workbench/scripts/scene-layout.test.mjs',
+        'workbench/scripts/scene-ownership.test.mjs',
+        'workbench/scripts/scene-state.test.mjs',
+        'workbench/scripts/sw-shell.test.mjs',
+      ],
+      cwd: ROOT,
+    },
+    {
+      // 杂项：把 Legion 接进宿主档案的接线、桌面发布清单、工作流包。
+      label: '接线与打包（宿主档案接线 / 桌面发布清单 / 工作流包 / 编排侧 Agent 通道）',
+      files: [
+        'scripts/legion-profile.test.mjs',
+        'product/release/desktop-manifest.test.mjs',
+        'product/workflow-packs/pack.test.mjs',
+        'orchestrator/worker/agent-channel.test.mjs',
+      ],
+      cwd: ROOT,
+    },
+    {
+      // T-004 端到端验收的交付物（手机下发 → Hub 派工 → 电脑执行 → 产出回传）的用例。
+      // 它断言的是那个**演示函数**自身，不是平台行为 —— 但它确实是仓库里跟踪着的判据，
+      // 所以给它一个归属，而不是留成"谁都不跑"。
+      label: 'e2e-acceptance（T-004 演示交付物的用例）',
+      files: ['tests/e2e-acceptance/greet.test.mjs'],
+      cwd: ROOT,
+    },
+    {
       // PRT-905（spec §10 line 988）：数据导出入口。
       //
       // 备份与恢复已由 `product/upgrade/backup.mjs`（PRT-806/812）实现；

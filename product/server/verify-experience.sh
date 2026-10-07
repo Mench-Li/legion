@@ -15,7 +15,21 @@ set -uo pipefail
 SSH="ssh -i /c/Users/11150/.ssh/legion.pem -o BatchMode=yes root@117.72.146.36"
 NODE_DIR=/tmp/legion-node
 ENTRY=/d/project/DSH/legion/.claude/worktrees/legion-remote-agent/product/node/entry.mjs
-phone() { $SSH "set -a; . /etc/legion-hub.env; set +a; node /srv/legion-hub/_phone-act.mjs $*" 2>&1; }
+# ★ 参数**逐个 base64** 之后再拼进 ssh 命令串。
+#
+# 原来写的是 `$*`。它把参数按空格拼成一个字符串，交给远端 shell 再分词一次——
+# 于是带空格的参数（"端到端验收：请写一个 greet 函数并跑一次测试"）在**第一个空格**
+# 处被切开，`_phone-act.mjs` 只拿到前半句。任务照建、照跑、照完成，只是目标少了一半，
+# **哪里都不报错**。看板上留下的标题就是截断后的样子（`端到端验收：请写一个`）。
+#
+#   > 一个"参数在传输层被悄悄切开"的脚本，
+#   > 与一个"用户只写了半句话"的脚本，在日志里是同一个东西——
+#   > 只不过前者永远修不好，因为没有人会去怀疑自己的参数。
+phone() {
+  local enc=() a
+  for a in "$@"; do enc+=("$(printf %s "$a" | base64 -w0)"); done
+  $SSH "set -a; . /etc/legion-hub.env; set +a; node /srv/legion-hub/_phone-act.mjs --b64 ${enc[*]}" 2>&1
+}
 
 cleanup() { [ -n "${PID:-}" ] && kill "$PID" 2>/dev/null; }
 trap cleanup EXIT

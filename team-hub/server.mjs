@@ -7948,14 +7948,17 @@ if (REMOTE_AGENT_ENABLED) {
   // 下载地址的取法：**显式配置优先**；没配就**从发布目录里现找**最新的一份安装包。
   // 后者不是便利，是那条纪律的落地——门口页只链接**确实存在**的文件。
   // 让运营者手填一个 URL，就等于把这个保证换成了"希望他填对了"。
+  //
+  // ★ 传的是**函数**，不是算好的字符串：传字符串会把"最新的一份"冻在服务启动那一刻，
+  //   于是发一份新版本之后门口页还在发旧的，而**没有任何地方会报错**
+  //   （2026-10-07 实测：上传新发布后首页仍指向上一版，重启才对）。
   const explicitDownload = String(CFG.values.downloadUrl ?? '').trim()
-  const foundInstaller = explicitDownload.length === 0 && releasesDir.length > 0
-    ? latestInstaller(releasesDir)
-    : null
   router.families.unshift(createPortalRoutes({
-    downloadUrl: explicitDownload.length > 0
-      ? explicitDownload
-      : foundInstaller === null ? '' : `/legion/releases/${encodeURIComponent(foundInstaller.releaseId)}/Legion-Setup-win-x64.exe`,
+    downloadUrl: () => {
+      if (explicitDownload.length > 0) return explicitDownload
+      const found = releasesDir.length > 0 ? latestInstaller(releasesDir) : null
+      return found === null ? '' : `/legion/releases/${encodeURIComponent(found.releaseId)}/Legion-Setup-win-x64.exe`
+    },
     version: CFG.values.desktopVersion ?? '',
     registration: CFG.values.registration ?? 'closed',
   }))

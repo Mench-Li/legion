@@ -129,9 +129,27 @@ a.card.primary { border-color:var(--accent); }
  *
  * 只有一条 GET `/`。**不做**重定向到手机端：那样一来，来人还没看清这是什么
  * 就被送进一个登录页——而登录页回答不了"这服务是什么"。
+ *
+ * ## `downloadUrl` 可以是**函数**：发布一份新版本之后，门口页必须立刻指向它
+ *
+ * 这里原来把整页 HTML 渲染成**常量**（`const html = renderPortal(...)`），
+ * 于是"最新的一份安装包"被冻在**服务启动的那一刻**——
+ *
+ *   实际代价（2026-10-07）：往发布目录里传了一份新版本，
+ *   首页**仍然**指向上一版，因为服务是传之前启动的。
+ *   重启之后就对了 —— 而"要重启"这件事没有任何一处写得出来，
+ *   症状是"发了新版，用户下到的还是旧版"，**没有一个地方会报错**。
+ *
+ *   > 一个把"最新"算在启动时的页面，与一个把"最新"算在配置里的页面，
+ *   > 在运营者按下"上传"之后的那一分钟里，是同一个东西 ——
+ *   > 都是发旧版，且都看起来正常。
+ *
+ * 所以：`downloadUrl` 传字符串就照旧（显式配置那条路不变），
+ * 传函数就**每次请求现算**。现算的代价是每个首页请求几次 `readdir`/`stat`，
+ * 而这一页本来就是最冷的页面。
  */
 export function createPortalRoutes({ downloadUrl = '', version = '', registration = 'closed', mobilePath = '/mobile/' } = {}) {
-  const html = renderPortal({ downloadUrl, version, registration, mobilePath })
+  const resolveUrl = typeof downloadUrl === 'function' ? downloadUrl : () => downloadUrl
   const routes = [
     { method: 'GET', path: '/' },
     { method: 'HEAD', path: '/' },
@@ -142,6 +160,7 @@ export function createPortalRoutes({ downloadUrl = '', version = '', registratio
     async dispatch(req, res, ctx) {
       if (req.method !== 'GET' && req.method !== 'HEAD') return false
       if (ctx.path !== '/') return false
+      const html = renderPortal({ downloadUrl: resolveUrl(), version, registration, mobilePath })
       const body = Buffer.from(html, 'utf8')
       res.writeHead(200, {
         'content-type': 'text/html; charset=utf-8',

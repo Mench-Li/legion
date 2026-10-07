@@ -10,6 +10,7 @@ import { validateWorkflowPack } from '../../product/workflow-packs/pack.mjs'
 import { createSoftwareCollaborationPack } from './software-collaboration-pack.mjs'
 import { pruneWindowsX64Payload } from './platform-filter.mjs'
 import { DESKTOP_SHELL_DIRS, DESKTOP_SHELL_FILES, HELPER_ENTRY, SHELL_PRODUCT_FILES, helperClosure } from './shell-files.mjs'
+import { isShippablePayloadFile } from './payload-filter.mjs'
 
 const root = fileURLToPath(new URL('../../', import.meta.url))
 const build = join(root, '.desktop-build')
@@ -59,6 +60,14 @@ for (const path of paths) {
   if (!production || /(^|\/)(tests?|__tests__|node_modules|archive|fixtures?|probes)(\/|$)/.test(path) || /\.(test|spec)\.[cm]?[jt]s$/.test(path)) continue
   // Legacy task/daemon snapshots belong to a user's data, never an installation.
   if (path.startsWith('scrum/') && !/\.(mjs|sql|html|css)$/.test(path)) continue
+  // ★ 数据库与备份**永远不进包**。这一段清单是 `git ls-files` **加上未跟踪文件**，
+  //   而"未跟踪"只等于"`.gitignore` 没盖住"——那不是"它该发给用户"。
+  //   实测（2026-10-07）：三个 33.9 MB 的 `team-hub/team.db.bak-*` 差点被打进
+  //   给所有人下载的安装包。判据抽在 `payload-filter.mjs`，那里有完整的来龙去脉。
+  if (!isShippablePayloadFile(path)) {
+    console.log(`  Skipping non-shippable file: ${path}`)
+    continue
+  }
   if ((await lstat(join(root, path))).isSymbolicLink()) throw new Error(`Production link rejected: ${path}`)
   const target = join(resources, 'legion', ...path.split('/'))
   await mkdir(dirname(target), { recursive: true })

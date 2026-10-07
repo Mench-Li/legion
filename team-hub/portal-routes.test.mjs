@@ -100,3 +100,42 @@ test('其它路径与方法不由本族接管（否则会把 API 全吞掉）', 
   assert.equal((await fetchPortal(routes, { path: '/mobile/' })).handled, false)
   assert.equal((await fetchPortal(routes, { method: 'POST', path: '/' })).handled, false)
 })
+
+// ── 发布之后，门口页必须立刻改口 ─────────────────────────────────────────────
+//
+// 2026-10-07 实测的事故：往发布目录里传了一份新版本，首页**仍然**指向上一版 ——
+// 因为整页 HTML 是在**服务启动时**渲染成常量的，"最新的一份"被冻在了那一刻。
+// 重启之后就对了，而"要重启"这件事没有任何一处写得出来：
+// 症状是"发了新版，用户下到的还是旧版"，**没有一个地方会报错**。
+
+test('★ 建路由之后再发一份新的：页面**当次请求**就改口（无需重启）', async () => {
+  let url = '/legion/releases/r-2026-10-06_0.1.0/Legion-Setup-win-x64.exe'
+  const routes = createPortalRoutes({ downloadUrl: () => url, registration: 'open' })
+
+  const before = await fetchPortal(routes)
+  assert.match(before.body, /r-2026-10-06_0\.1\.0/, '前提：建路由时指向旧版')
+
+  // 运营者上传了一份新的（`latestInstaller` 按 mtime 取最新，这里直接模拟它的返回值）
+  url = '/legion/releases/r-2026-10-07_0.1.0/Legion-Setup-win-x64.exe'
+
+  const after = await fetchPortal(routes)
+  assert.match(after.body, /r-2026-10-07_0\.1\.0/, '换了之后必须立刻改口')
+  assert.doesNotMatch(after.body, /r-2026-10-06_0\.1\.0/, '旧版不该还留在页面上')
+})
+
+test('★ 函数返回空串 = 尚未发布：如实说没发布，不给假链接', async () => {
+  // 发布目录被清空 / 还没有任何发布时，`latestInstaller` 返回 null，
+  // server.mjs 把它转成空串 —— 这条路也要走通，不能残留上一次的链接。
+  let url = '/legion/releases/r-2026-10-06_0.1.0/Legion-Setup-win-x64.exe'
+  const routes = createPortalRoutes({ downloadUrl: () => url })
+  assert.match((await fetchPortal(routes)).body, /r-2026-10-06/)
+  url = ''
+  const r = await fetchPortal(routes)
+  assert.match(r.body, /尚未发布/)
+  assert.doesNotMatch(r.body, /r-2026-10-06/, '发布没了，旧链接也必须跟着消失')
+})
+
+test('传字符串仍然照旧（显式配置那条路不变）', async () => {
+  const routes = createPortalRoutes({ downloadUrl: 'https://example.test/a.exe' })
+  assert.match((await fetchPortal(routes)).body, /https:\/\/example\.test\/a\.exe/)
+})

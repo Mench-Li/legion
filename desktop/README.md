@@ -24,4 +24,34 @@ Web 和桌面使用同一套后台和数据。桌面会先验证并连接当前 
 
 构建 `dist` 时还会通过官方发行资源 API 准备带固定哈希的 NSIS 资源归档。安装过程中不会从网络下载构建脚本。安装器按当前用户安装，卸载时保留产品数据。当前内部产物**未签名**（名字里的 `-internal-` 就是这个标记），使用 Electron 默认应用图标；签名怎么获得见 [SIGNING.md](SIGNING.md)。实际测试结果和未完成门槛见[验收记录](../docs/release/legion-desktop-acceptance.md)。
 
+### 构建环境上的两个坑（2026-10-07 实测）
+
+**① 别在 `D:\tmp` 下面构建。** `electron-builder` 的路径拒止清单里有一条 **POSIX** 的
+`/tmp`（`app-builder-lib/out/asar/asarUtil.js`），而它用 `path.resolve('/tmp')` 展开 ——
+在 D 盘上那就是 `D:\tmp`。于是打包会在第一个文件上停下：
+
+```
+⨯ denied access to system or unsafe path  source=D:\tmp\...\shell\desktop\assets\icon.icns
+Error: Cannot copy file [...] symlinked to file [...] outside the package
+```
+
+那句 "symlinked" 是**误导的**：文件根本不是符号链接，是**路径**撞上了拒止清单
+（白名单只放行 `os.tmpdir()` 与 `os.homedir()`）。换个盘符或目录名即可，
+例如 `D:\legion-build`。
+
+> 一条写死 POSIX 前缀的清单，在 Windows 上会被 `path.resolve` 按**当前盘**解释 ——
+> 它拦的不是 `/tmp`，是"盘符恰好对上的那个 `\tmp`"。而报错说的是"符号链接"。
+
+**② 从**干净树**构建，不要在主检出里直接构建。** `stage.mjs` 的清单是
+`git ls-files` **加上未跟踪文件**（`--others --exclude-standard`）——"未跟踪"只等于
+"`.gitignore` 没盖住"，**不等于**"该发给用户"。实测：主检出里三个
+`team-hub/team.db.bak-*`（各 33.9 MB 的完整库副本）会被拷进载荷。
+现在 `payload-filter.mjs` 把数据库与备份挡在门外了，但**用干净树仍然更省心**：
+
+```powershell
+git worktree add --detach D:\legion-build main   # 零未跟踪文件
+# 再把已准备好的 .desktop-build\{dsh,git,node-v*} 拷进去，接上 desktop/node_modules
+```
+
+
 打包后的后台使用受管理的 `legion-desktop` DSH profile，并在启动时加载补丁。它不依赖另行打开的 Harness Web 或桌面应用。Node 和 Git 由 Legion 私有管理；当前用户作用域的 DPAPI 使用 Windows 自带 PowerShell。核心应用包不包含任意项目所需的编程语言工具链。

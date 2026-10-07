@@ -29,7 +29,7 @@ import { existsSync } from 'node:fs'
 
 import { hasBlockingDiagnostic, layoutDiagnostics } from '../paths.mjs'
 import { join } from 'node:path'
-import { entryAbsolutePath, materializeProcessPlan, validateProcessPlan } from '../process-manifest.mjs'
+import { PROCESS_SPECS, entryAbsolutePath, materializeProcessPlan, validateProcessPlan } from '../process-manifest.mjs'
 import {
   DSH_OVERLAY_PROCESS_KEY,
   overlayArgsFor,
@@ -91,6 +91,30 @@ import {
 } from './run-record.mjs'
 import * as nodeFs from 'node:fs'
 import { publishBackend } from './shared-backend.mjs'
+// 升级维护闸门（自动更新设计 §8 line 182）。**只看磁盘**：维护屏障文件与
+// 事务日志。不读任何 UI 状态——设计里那句「不只依赖最后一条 UI 状态」
+// 说的正是这件事。
+import { startupGate } from '../update/barrier.mjs'
+import { planRecovery } from '../update/journal.mjs'
+
+/**
+ * 默认的升级维护闸门。
+ *
+ * `dataDir` 为空时放行：没有数据目录就说明这次启动还没进入"有业务数据"
+ * 的世界（首次设置路径），门禁本身没有意义。
+ *
+ * 出任何异常也放行——但**只放行这一条**：一次"读屏障时抛了个异常"不该
+ * 让 Legion 完全起不来，而屏障本身读不出来时 `readBarrier` 已经按
+ * "维护中"处理（见 `barrier.mjs`），所以真正的危险路径不靠这个兜底。
+ */
+function defaultUpdateGate({ dataDir = null } = {}) {
+  if (typeof dataDir !== 'string' || dataDir === '') return Object.freeze({ allowed: true })
+  try {
+    return startupGate({ dataDir, planRecovery: (args) => planRecovery(args) })
+  } catch {
+    return Object.freeze({ allowed: true, code: null, reason: null })
+  }
+}
 
 /** 产品级状态 → 用户可见文案（spec §6.3 的「产品状态」列）。 */
 export const PRODUCT_STATE_TEXT = Object.freeze({
@@ -113,6 +137,47 @@ const PORT_ENV_KEYS = Object.freeze({
   'team-hub': 'TEAM_HUB_PORT',
   whiteboard: 'PORT',
 })
+
+/**
+ * **认领者**：`process-manifest.mjs` 里那个负责「扫单 / 认领 / 派工」的进程。
+ *
+ * 自动更新设计 §8 第 3 步说「Launcher 停止认领」，而"认领"这件事在进程清单
+ * 里是有明确的承担者的——它是 `kind: 'worker'` 的 `orchestrator`，
+ * **不是**某个数据面服务。所以"停止认领"必须是"只停这一个"，而不是
+ * "停掉一切"：停掉一切是同一份设计的第 6 步，而第 4、5 步（维护屏障、
+ * 备份）还夹在中间，它们需要数据面服务继续在跑。
+ *
+ * 写成具名常量而不是在方法里内联 `'orchestrator'`，是为了让
+ * `selfCheckLauncher()` 能对它做一条判据：**这个 key 必须真的在进程清单里、
+ * 而且必须是 worker**。改了清单却忘了这里，会在装载期就红，而不是等到
+ * 某一次升级在第三步停住。
+ */
+const CLAIMER_PROCESS_KEY = 'orchestrator'
+
+/**
+ * 装载期自检：**认领者这个 key 必须真的存在，而且必须是 worker**。
+ *
+ * 这条判据守的是那两行注释里许下的承诺。`CLAIMER_PROCESS_KEY` 是一个**跨文件
+ * 的名字**——它指的是 `process-manifest.mjs` 里的一个条目。清单改了名、
+ * 或者那个条目从 worker 变成了 server，这里应该**在装载期就红**，而不是等到
+ * 某一次升级在第三步停住、而现场表现是"停止任务认领失败"。
+ *
+ *   > 一个指着别处的名字，与一个不存在的名字，
+ *   > 只有在**有人去用它**的那一刻才分得开——而那时已经在升级路上了。
+ *
+ * 与其它模块的 `*_CHECKED` 同一个形态：纯数据核对，不触碰任何运行态。
+ */
+export const LAUNCHER_CHECKED = (() => {
+  const problems = []
+  const claimer = Array.isArray(PROCESS_SPECS) ? PROCESS_SPECS.find((p) => p?.key === CLAIMER_PROCESS_KEY) : undefined
+  if (claimer === undefined) {
+    problems.push(`认领者 ${CLAIMER_PROCESS_KEY} 不在 PROCESS_SPECS 里（改过进程清单？）`)
+  } else if (claimer.kind !== 'worker') {
+    problems.push(`认领者 ${CLAIMER_PROCESS_KEY} 的 kind 是 ${claimer.kind}，不是 worker：
+       "停止认领"这件事默认它是可以单独起停的常驻进程`)
+  }
+  return Object.freeze({ ok: problems.length === 0, problems: Object.freeze(problems), claimerKey: CLAIMER_PROCESS_KEY })
+})()
 
 /**
  * 「进程 → 数据写路径环境变量」映射（关闭 PRT-003 实测的 4 处越界写入）。
@@ -281,6 +346,16 @@ export function createLauncher({
   runtimeEnv = {},
   /** 日志策略（PRT-709）。缺省用 `DEFAULT_LOG_POLICY`。 */
   logPolicy = {},
+  /**
+   * 升级维护闸门（自动更新设计 §8 line 182）。
+   *
+   * 「新旧 Launcher 均识别未完成事务，在恢复结束前禁止正常业务启动。」
+   *
+   * 注入点而不是硬编码，是因为这条判据要能被"驱动到"——真实世界里没法按需
+   * 制造一次断电中断的升级事务。默认实现读**磁盘**上的维护屏障与事务日志
+   * （`product/update/barrier.mjs` + `journal.mjs`），不看任何 UI 状态。
+   */
+  updateGate = defaultUpdateGate,
   /**
    * 单实例锁的**拿锁实现**（PRT-708）。默认 `acquireSingleInstance`（真实现）。
    *
@@ -707,6 +782,37 @@ export function createLauncher({
   let stoppedAt = null
   let portDiagnostics = []
   let secretsDiagnostics = []
+
+  // ---------------------------------------------------------------------------
+  // 认领者的读数（`suspendClaiming` / `resumeClaiming` 共用）
+  // ---------------------------------------------------------------------------
+
+  /**
+   * 认领者当前的状态读数（一行）。读不到就是空数组——**不是**一行假的
+   * `stopped`：那会把"没有这个进程"说成"它已经停了"。
+   */
+  function claimerStates() {
+    if (supervisor === null) return Object.freeze([])
+    const key = CLAIMER_PROCESS_KEY
+    return Object.freeze(supervisor.status().filter((s) => s.key === key))
+  }
+
+  /**
+   * 认领者**此刻是否还在认领**。
+   *
+   * ★ 判据是"进程还活着"，而不是"状态字符串等于 running"。
+   *   `supervisor.mjs` 的状态取值是 `pending/starting/ready/stopped/failed/
+   *   circuit-open/restarting`——**没有 `running`**。写一条等同
+   *   `state === 'running'` 的判据会恒为假，于是"没停掉"被报成"停掉了"。
+   *   （同一个坑在 `desktop/update-wiring.mjs` 的 `drainInFlight` 里真的
+   *   出现过一次，方向是 fail-open：它把"服务都还在跑"读成了"已经收敛"。）
+   *
+   *   `isAlive` 是监督对象直接给出的**事实**，不受状态字符串的取值域影响。
+   */
+  function claimerStillClaiming(handle) {
+    return handle?.isAlive?.() === true
+  }
+
   /**
    * 单实例锁（PRT-708）。
    *
@@ -1485,6 +1591,33 @@ export function createLauncher({
 
     /** 只做检查，不启动任何东西。产品入口在真正启动前调用它。 */
     async preflight() {
+      // ── 升级维护闸门：排在**所有**检查之前（自动更新设计 §8 line 182）──
+      //
+      // 位置是这条判据的全部内容。一次升级中断时，数据库可能已经跑过一部分
+      // 迁移；而"端口占用""密钥库可读"这些检查此刻都可能通过——于是服务会
+      // 正常起来，开始往一个旧版本读不懂的结构上写。
+      //
+      // 反过来说：把一个"停在切换之前"（程序未被动过）的中断也算成
+      // "禁止启动"是对的——维护屏障在那时已经立着，恢复要先把屏障处理掉。
+      const gate = updateGate === null ? { allowed: true } : updateGate({ dataDir: layout.dataDir ?? null })
+      if (gate !== null && gate !== undefined && gate.allowed === false) {
+        return Object.freeze({
+          ok: false,
+          phase: 'update-maintenance',
+          code: gate.code ?? 'UPDATE_MAINTENANCE',
+          // 诊断走既有的 `diagnostics` 形状，所以桌面端与 CLI 不需要为它
+          // 新增一条渲染路径。
+          diagnostics: Object.freeze([
+            ...planDiagnostics,
+            Object.freeze({
+              severity: 'error', process: 'update', code: gate.code ?? 'UPDATE_MAINTENANCE',
+              message: gate.reason ?? 'Legion 正在维护中',
+              ...(typeof gate.advice === 'string' ? { advice: gate.advice } : {}),
+              ...(typeof gate.recoveryVerdict === 'string' ? { recoveryVerdict: gate.recoveryVerdict } : {}),
+            }),
+          ]),
+        })
+      }
       const blocking = planDiagnostics.filter((d) => d.severity === 'error')
       if (blocking.length > 0) {
         return Object.freeze({ ok: false, phase: 'plan', diagnostics: Object.freeze([...planDiagnostics]) })
@@ -1846,6 +1979,99 @@ export function createLauncher({
     async retry() {
       await this.stop({ reason: '重试前清理' })
       return this.start()
+    },
+
+    /**
+     * **停止认领**（桌面自动更新设计 §8 第 3 步：「Launcher 停止认领，等待在途
+     * 任务结束」）。
+     *
+     * 认领者是 `orchestrator` worker——`process-manifest.mjs` 给它的 label 就是
+     * 「扫单 / 认领 / 派工」。所以"停止认领"就是**只停它**：
+     *
+     *   · 数据面服务（team-hub / workbench / runtime）**继续跑**。它们必须继续
+     *     跑，因为紧接着的第 4 步（建立维护屏障并刷新数据）与第 5 步（备份）
+     *     都发生在这之后，而**停止受管服务是第 6 步**。
+     *   · 停的是"认领新的活"，不是"杀掉正在干的活"。在途任务靠第 3 步的后半
+     *     段（等待收敛）处理，超时按设计 §7 line 150「回到可选择界面，不默认
+     *     强杀」。
+     *
+     * ★ 为什么这个方法此前**不存在**：桌面的安装事务一直在向 Launcher 发
+     *   `stop-claiming`，而协议表（`desktop-protocol.mjs` 的 `TYPES`）里没有
+     *   这个类型 ⇒ Launcher 以 `UNKNOWN_TYPE` 拒绝 ⇒ 桌面侧抛错 ⇒
+     *   `install.mjs` 判 `install-services-refused` 并进维护态。
+     *   **每一次真实安装都停在第三步。**
+     *
+     *   用例没发现它，是因为接线层的替身 bridge 自己实现了 `stop-claiming`
+     *   （替身比真货更能干），而全链路用例注入了一个 stub —— 两者都替生产
+     *   补齐了缺失的能力。
+     *
+     * @returns {Promise<{ok: boolean, skipped?: boolean, code: string|null, reason: string, states: ReadonlyArray<object>}>}
+     */
+    async suspendClaiming({ graceMs = 5000 } = {}) {
+      if (supervisor === null) {
+        return Object.freeze({
+          ok: false, skipped: false, code: 'no-supervisor',
+          reason: '没有正在运行的受管进程，无法停止认领', states: Object.freeze([]),
+        })
+      }
+      const handle = supervisor.handles.get(CLAIMER_PROCESS_KEY)
+      if (handle === undefined) {
+        // 没有这个进程就是**没有认领者**——一件已经成立的事，不是失败。
+        // 与"想停但停不掉"必须分开：前者可以继续升级，后者不能。
+        return Object.freeze({
+          ok: true, skipped: true, code: null,
+          reason: `本次启动没有包含 ${CLAIMER_PROCESS_KEY} 进程（没有认领者）`,
+          states: claimerStates(),
+        })
+      }
+      const result = await handle.stop({ graceMs })
+      const stillUp = claimerStillClaiming(handle)
+      return Object.freeze({
+        ok: !stillUp,
+        skipped: false,
+        code: stillUp ? 'claimer-still-running' : null,
+        reason: stillUp
+          ? `${CLAIMER_PROCESS_KEY} 在 ${graceMs}ms 内没有退出，仍在认领`
+          : `已停止认领（${CLAIMER_PROCESS_KEY} 已退出）`,
+        stopped: result?.stopped === true,
+        states: claimerStates(),
+      })
+    },
+
+    /**
+     * **恢复认领**：中止路径上用（设计 §8 失败表第一行「当前版本继续运行」）。
+     *
+     * 这条是"停止认领"的**配对**，没有它就不该停：一旦停了认领而升级在后面的
+     * 某一步放弃，用户手上会留下一个"服务都在跑、但再也领不到活"的 Legion
+     * ——而界面上没有任何东西提示这件事。设计 §7 line 150 对超时说的
+     * 「回到可选择界面」正是指这个状态必须可恢复。
+     */
+    async resumeClaiming() {
+      if (supervisor === null) {
+        return Object.freeze({
+          ok: false, skipped: false, code: 'no-supervisor',
+          reason: '没有正在运行的受管进程，无法恢复认领', states: Object.freeze([]),
+        })
+      }
+      const handle = supervisor.handles.get(CLAIMER_PROCESS_KEY)
+      if (handle === undefined) {
+        return Object.freeze({
+          ok: true, skipped: true, code: null,
+          reason: `本次启动没有包含 ${CLAIMER_PROCESS_KEY} 进程（不需要恢复）`,
+          states: claimerStates(),
+        })
+      }
+      const result = handle.start()
+      return Object.freeze({
+        ok: claimerStillClaiming(handle),
+        skipped: false,
+        code: result?.started === true ? null : (result?.reason ?? null),
+        reason: result?.started === true
+          ? `已恢复认领（${CLAIMER_PROCESS_KEY} 已重新启动）`
+          : `恢复认领没有真正启动进程：${result?.reason ?? '未知原因'}`,
+        started: result?.started === true,
+        states: claimerStates(),
+      })
     },
 
     /** 只读状态（产品状态映射见 `productStateOf`）。 */

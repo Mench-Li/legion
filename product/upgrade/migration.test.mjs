@@ -27,8 +27,10 @@ import {
   ROLLBACK_SAFETY,
   checksumOf,
   createMemoryMigrationStore,
+  EMPTY_MIGRATION_PLAN_DIGEST,
   defineMigration,
   lastAdditiveBoundary,
+  migrationPlanDigest,
   planRollback,
   runMigrations,
   sampleMigrations,
@@ -340,4 +342,38 @@ test('④ ★ 示例集合真的能跑起来（自检里的定义不是纸面的
   // 示例里的第 3 份是 breaking 且没有 down → 回滚可达性是 forward-fix-required。
   const plan = planRollback({ applied: r.applied, migrations: sampleMigrations() })
   assert.equal(plan.safety, 'forward-fix-required')
+})
+
+// ---------------------------------------------------------------------------
+// 迁移计划摘要（发行清单里的 `migrationPlanDigest`）
+// ---------------------------------------------------------------------------
+
+test('★★★ 计划摘要覆盖内容，不只覆盖版本号', () => {
+  // `checksumOf` 覆盖了 `up` 的**源码**，所以"版本号没变、实现变了"也会改变
+  // 计划摘要。这一条证明摘要是**内容**的摘要。
+  const plan = sampleMigrations()
+  const before = migrationPlanDigest(plan)
+  const tampered = plan.map((m, i) => (i === 0 ? { ...m, checksum: 'sha256:00000000000000000000000000000000' } : m))
+  assert.notEqual(migrationPlanDigest(tampered), before)
+})
+
+test('★★ 计划摘要与顺序无关，且空计划有固定值', () => {
+  // 顺序无关是"同一份计划只有一个摘要"的前提。
+  const plan = sampleMigrations()
+  assert.equal(migrationPlanDigest([...plan].reverse()), migrationPlanDigest(plan))
+  // 空计划是**固定**值（不是 null）："本次发行没有迁移"是一个可声明的断言。
+  assert.match(EMPTY_MIGRATION_PLAN_DIGEST, /^[0-9a-f]{64}$/)
+  assert.equal(EMPTY_MIGRATION_PLAN_DIGEST, migrationPlanDigest([]))
+  assert.notEqual(EMPTY_MIGRATION_PLAN_DIGEST, migrationPlanDigest(plan))
+})
+
+test('非数组的计划摘要不抛，按空计划处理（只读函数不该在坏输入上炸）', () => {
+  assert.equal(migrationPlanDigest(null), EMPTY_MIGRATION_PLAN_DIGEST)
+  assert.equal(migrationPlanDigest(undefined), EMPTY_MIGRATION_PLAN_DIGEST)
+  assert.equal(migrationPlanDigest('nope'), EMPTY_MIGRATION_PLAN_DIGEST)
+})
+
+test('★★ 多一份迁移就换一个摘要（"加了一迁移却忘了改摘要"会被发现）', () => {
+  const plan = sampleMigrations()
+  assert.notEqual(migrationPlanDigest(plan.slice(0, 2)), migrationPlanDigest(plan.slice(0, 3)))
 })

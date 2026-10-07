@@ -487,6 +487,216 @@ async function stageTest() {
       cwd: ROOT,
     },
     {
+      // 自动更新（spec: docs/superpowers/specs/2026-10-02-legion-desktop-auto-update-design.md）。
+      //
+      // 与上面那套（阶段 8：安装/升级/回滚）的分工是：
+      //   · product-upgrade 管**本机内部**的事务原语（备份、迁移、切换、审计）；
+      //   · 这一套管**跨网络**的那一层——从公网取清单、验签、下载、
+      //     以及"停在维护状态还是能把程序换回去"。
+      //
+      // 三套各自的重点：
+      //   · `client.test.mjs` 用**真签名、真摘要、真文件**驱动一次完整更新，
+      //     所以它守的是"接线"而不是"判据"：协议件各自的单测都过，而
+      //     "验签之后的摘要有没有比对""被拒的清单有没有抬高 sequence 水位"
+      //     这些问题只在把件装起来之后才存在。
+      //   · `install.test.mjs` 逐个驱动设计 §8 的失败表——每一个失败点都必须
+      //     能被真的走到，因为真实世界里没法按需制造"服务拒绝退出"。
+      //   · `modules.test.mjs` 汇总 17 个模块的装载期自检，并要求**读得出
+      //     真读数**：一条永远返回 ok 的自检比没有自检更糟，它会让"有人放宽了
+      //     某条拒绝"看起来已经通过。
+      //
+      // ⚠️ 诚实边界：这些是**判据与用例自洽**，加上一次**真实托管**上的实测
+      //   （公网回读 + 真实客户端检查/下载/就绪 + 未知 keyId/篡改/过期三条负向
+      //   + 撤回演练；见实施记录 §7.3）。测试替身与测试通道通过**不等于**
+      //   Windows 真机升级验收（设计 §10 最后一行原话）：
+      //   **签名真实安装包、干净机器首次安装、N-1 → N、文件占用/断电故障注入
+      //   仍未执行**——那些需要真机。
+      //   ★ 撤回演练只完成了"协议那一半"：发布方撤回之后**已下载目标被拒绝安装**
+      //     已在真实托管上验过；没做的是它在真机上的另一半（真装一个坏版本、
+      //     真撤回、真验证已升级用户的处置）。
+      label: 'product-update（自动更新：协议验签、下载缓存、状态机、事务与恢复）',
+      files: [
+        'product/update/client.test.mjs',
+        'product/update/errors.test.mjs',
+        // ★ 信任根自己的判据（设计 §5）。在补这个文件之前，`envelope.mjs`
+        //   **没有自己的用例文件**——它的正确性只被 client/publish 间接经过，
+        //   于是 `selectKey` 的三条密钥窗口判据（未生效 / 已过期 / 已吊销）
+        //   一次都没被碰过。而吊销是设计 §5 line 128 那条"私钥泄漏后的紧急
+        //   恢复"的实现：一句"泄漏之后可以吊销它"如果没有判据守着，
+        //   泄漏那天才会知道它坏没坏——而那是最不该做实验的时刻。
+        'product/update/envelope.test.mjs',
+        // ★ 通道 sequence 高水位的判据：回退拒绝、**续签接受**、同 sequence
+        //   换摘要/换 releaseId 拒绝、高水位按 channel/platform/arch 分键。
+        //   续签那一条是**防止一个看起来很自然的错误修法**：给
+        //   `releaseId → manifestSha256` 加一条"绑定并不许变"的判据，
+        //   会把每一次正常续签判成攻击（续签必然改签发时间 ⇒ 字节必然变）。
+        'product/update/feed.test.mjs',
+        'product/update/extract.test.mjs',
+        'product/update/zip.test.mjs',
+        'product/update/health.test.mjs',
+        'product/update/platform-build.test.mjs',
+        'product/update/install.test.mjs',
+        // ★ 数据备份恢复入口（设计 §8 line 190/192）：三档安全性 + 三条纪律
+        //   （要确认的没确认就**一个字节都不写** / refused 档确认也打不开 /
+        //   目标只能是快照自己的数据目录）。
+        'product/update/recovery.test.mjs',
+        // ★ 同一个入口在 **CLI 这一层**的判据：退出码 0/12/13、输出里那句
+        //   "本次没有写入任何文件"、以及**盘上有没有真的被改**。
+        //   单独一层的理由：设计要的是"提供…**入口**"，而一个判据齐全、
+        //   用例全绿、却没有任何人能敲出来的模块，与一个不存在的模块在部署上
+        //   是同一个东西——只不过前者的报告是绿的。
+        'product/launcher/cli-recovery.test.mjs',
+        // ★ 全链路集成：发布 → 托管 → 检查 → 下载 → 安装事务 → helper → 提交。
+        //   它不注入任何业务读数，所以是"六条判据都有生产方"的联合守卫。
+        'product/update/integration.test.mjs',
+        // ★★ 取件层的**网络行为**判据（设计 §5 line 124、§6 line 134/140）。
+        //
+        //   这个文件此前**不存在**，而 `transport.mjs` 的自检里写着
+        //   「网络行为的证据在 `transport.test.mjs` 里」——指向一个从来没有被
+        //   写出来的文件。于是三条设计要求（跨 origin 重定向、空闲/整体超时、
+        //   流式限长）只有"常量等于设计数字"这一层证据。
+        //
+        //   ★ 补上它之后**当场**发现一个生产缺陷：流式限长超限时的
+        //     `this.#onTrip()?.()` 会去调用回调的**返回值**，而调用点给的是
+        //     `() => deadline.signal`——一个信号对象。于是设计好的
+        //     `NET_TOO_LARGE` 被一句 TypeError 顶掉，上层把它归成
+        //     `net-offline`（"网络不可达"）。见实施记录 §5 的 ㊼。
+        //
+        //   > 一个没有用例的文件，与"这个文件里的判据都通过了"，
+        //   > 在读报告的人眼里长得一样。
+        'product/update/transport.test.mjs',
+        // ★★ 闭包协议的判据。这个文件此前**不存在**，而 `extract.mjs` 里写着
+        //   「两条常量各自声明，`closure.test.mjs` 有一条断言要求它们相等」——
+        //   于是那两条 `MAX_CLOSURE_BYTES` 只靠人工保持一致（当时恰好相等）。
+        //   本文件的第一条用例就是那条被承诺的断言。
+        //
+        //   > 一句"这个契约由某条判据守着"，比没有这句话更坏：
+        //   > 它让下一个人**不去检查**。
+        'product/update/closure.test.mjs',
+        'product/update/modules.test.mjs',
+        // 在途任务读数：词表（两套真实词表的一致性）与生产端。
+        // 这两条守的是"接上真实读数会不会永久阻塞升级"那个缺陷。
+        'product/upgrade/task-state.test.mjs',
+        'product/upgrade/task-readings.test.mjs',
+        // ★ `product/upgrade/preflight.test.mjs` **刻意不列在这里**：它已经在
+        //   上面的 product-upgrade 套件里（那份按 `product/upgrade/*.test.mjs`
+        //   逐文件列出）。同一个文件登记进两个套件会让它跑两遍，而套件的
+        //   `tests=` 读数也会把它算两次——两个套件的数字加起来就**不是**全集。
+        //   本分支最早那份改动把它重复登记了一次，这里去掉。
+        //   （它守的"在途任务读数"那一半，product-update 侧由
+        //   `product/update/install.test.mjs` 的对应用例覆盖。）
+        'product/launcher/update-gate.test.mjs',
+        'desktop/update-service.test.mjs',
+        'desktop/update-wiring.test.mjs',
+        'desktop/update-panel.test.mjs',
+        // ★ 这个文件此前**没有被任何套件登记**（CI 那条"套件清单不完备"的判据
+        //   报的就是它）。它与自动更新的关系是**桌面那一半的门禁展示**：
+        //   `desktop/main.mjs` 在一次中断的升级进行中必须挡住正常启动，
+        //   并且要对用户说「正在升级」而不是「无法启动」——设计 §8 要求
+        //   「新旧 Launcher 均识别未完成事务，在恢复结束前禁止正常业务启动」。
+        //
+        //   ★ 那条判据的形状值得记：Launcher 那一半（`update-gate.test.mjs`）
+        //     在 CI 里跑着，而**桌面这一半从来没有**。于是"挡住了启动"有人守，
+        //     "挡住之后对用户说了什么"没人守——而后者才是用户真正看到的东西。
+        'desktop/main.test.mjs',
+        // ★ 桌面与 Launcher 之间的那种进程边界桥：**更新接线层从它读端口**。
+        //
+        //   `desktop/main.mjs:14` 按路径装载 `product/launcher/desktop-bridge.mjs`，
+        //   把它作为 `bridge` 交给 `update-wiring.mjs` 的 `readLauncherPorts()`，
+        //   而那个读数是**健康探针规格**里端口那一项的来源。所以这两个文件
+        //   不是"桌面杂项"，而是更新链路上的一环：
+        //
+        //     main.mjs ──装载──▶ desktop-bridge.mjs ──▶ readLauncherPorts()
+        //                              │                        │
+        //                              └── speak ──▶ desktop-protocol.mjs ──▶ healthProbeSpec.ports
+        //
+        //   ⚠️ 本仓此前**没有**登记它们，而我在 §6.1 里把理由写成"与自动更新
+        //      无关"。那句话是错的（见 §5 的 ㊷）——我核对的是"文件名里有没有
+        //      update"，而不是"更新链路会不会走到它"。这两个文件都实测是绿的
+        //      （11 + 3 条），所以登记它们只减不减红：未登记数 30 → 28。
+        'product/launcher/desktop-bridge.test.mjs',
+        'product/launcher/desktop-protocol.test.mjs',
+        'desktop/scripts/shell-files.test.mjs',
+        'desktop/scripts/update-payload.test.mjs',
+        'scripts/update/publish.test.mjs',
+        // ★ 公钥轮换的端到端判据（设计 §5 line 128 + §10 验收表第 8 行）：
+        //   rotate 签增量 → apply 落到随包信任表 → **新钥匙签的清单能被接受**，
+        //   并有"不在表里的钥匙""重放同 sequence""新钥匙给自己背书"三条负向。
+        //   少了这条，`envelope.applyTrustUpdate()` 就是一个生产里调用方数为 0
+        //   的函数——那种东西与不存在的函数在部署上是同一个东西。
+        'scripts/update/rotation.test.mjs',
+        // ★ 「装完之后核对」的判据（设计 §10 验收表第 ①③⑨ 行的**离线可判**部分）。
+        //   设计 §10 说真机验收不能被测试替身替代；而真机验收里有一半是
+        //   "在真机上取读数、然后**离线判定**"——那一半做成一条命令，
+        //   验收记录就不再依赖"人眼比对两份目录列表"。
+        //   其中最有价值的一条是把本模块与 `extract.verifyExtractedTree()`
+        //   **对拍**：刻意分开的两处实现不能对同一份输入给出相反结论。
+        'scripts/update/verify-install.test.mjs',
+        // ★ 托管 nginx 配置**生成器**的判据。仓库里原先只有"核对托管对不对"的
+        //   `verify-host.mjs`，没有任何东西能把它**建对**——那份配置只存在于
+        //   托管机的 `/etc/nginx/sites-available/` 上。加了这个生成器之后，
+        //   "`UPLOAD_TARGETS` 声明的每棵树都要有落点"才第一次成为一条可跑的判据
+        //   （当时生产前缀 `/legion` 在托管上根本没有 location，而按
+        //   `upload-plan.txt` 走完生产发布之后，回读那一步必然 404）。
+        //   其中最有价值的一条是把渲染出的缓存头**再喂回** `host.mjs` 的
+        //   `evaluateResponse()` —— 生成器与验证器用同一个函数连起来，
+        //   两处就不可能各自漂移。
+        'scripts/update/host-config.test.mjs',
+        // ★★★ 回读核对里**产物那一段**的判据（`artifact-package` /
+        //   `artifact-installer` / `artifact-notes`）。
+        //
+        //   这三条检查此前**在任何地方都没有被断言过**——而且更关键的是，
+        //   它们**只有一半的分支是活的**：`publish.test.mjs` 的替身把每个响应
+        //   都截到 4 KiB 并声明截断后的长度，于是传输层永远走 `head.ok`；
+        //   而真实发布的三个产物都远大于 4 KiB ⇒ 走的是 `net-too-large`
+        //   那条分支。一个"只有真实使用才会走到"的分支，此前零覆盖。
+        //
+        //   ★ 顺带记下这一轮在**替身保真度**上学到的三件事（都写进了那个文件）：
+        //     ① 裁到"实现恰好能接受的长度"的响应，会让真实使用走的分支永不执行；
+        //     ② 只给 `entries()` 不给 `get()` 的 headers 替身，会让
+        //        "服务器声明了 50 MB" 与"什么都没声明"在被测代码眼里一样；
+        //     ③ `publish.immutable` 的大产物是 `{ bytes: null, localPath }`
+        //        ——假定每个条目都带字节的替身，会恰好在那三个产物上取到 null。
+        'scripts/update/verify-host.test.mjs',
+      ],
+      cwd: ROOT,
+    },
+    // 桌面打包脚本的两条判据：它们守的是**升级载荷的身份**。
+    //
+    // ★ 为什么它们属于自动更新的证据面，而不是"桌面构建的杂项"：
+    //
+    //   ① `platform-filter.test.mjs` —— Windows x64 打包会剔除 ARM64 的
+    //      node-pty 二进制，代码里的原话是"让**签名的发行清单**准确描述
+    //      x64 安装器真正能交付的东西"。而"清单描述了现实"正是更新客户端
+    //      校验闭包所依赖的那条性质：清单说有的东西，装上之后必须真的有。
+    //
+    //   ② `prepare-payload.test.mjs` —— 载荷里的 dsh 家族必须**逐层钉死**版本
+    //      （上游 range 允许更新版本时也不许漂）。这条直接顶着设计 §5 的
+    //      `dshPatchBindings`：发行清单里声明的是
+    //      `{dshVersion, compositionPatchVersion}`，而客户端的预检要拿**装上
+    //      之后的**那个 dshVersion 去比对。载荷若漂了版本，升级后本机读数
+    //      就与清单声明的绑定对不上——那时要么升级被自己的预检拒掉，
+    //      要么更糟：绑定形同虚设。
+    //
+    //   ★ 两个文件此前都**不在任何套件里**（`desktop/package.json` 的 test
+    //     脚本列了它们，但 CI 不跑那个脚本）。CI 那条"套件清单不完备"的判据
+    //     一直在报它们：**一个没有任何套件执行的用例文件，等于一条不存在的
+    //     断言**——它绿着，而那个绿没有任何人拿到。
+    //
+    //   > "这个仓库测过它"与"这个仓库里有一个测它的文件"，
+    //   > 在"下次有人改坏时会不会被拦下"这个问题上不是同一个东西。
+    //
+    //   两条都实测过是绿的（3 条用例），所以登记它们**只减不减**红：
+    //   未登记数 32 → 30。
+    {
+      label: 'desktop-payload-packaging（升级载荷的身份：签名清单描述的东西 = x64 安装器交付的东西；载荷里的 dsh 家族必须钉死版本）',
+      files: [
+        'desktop/scripts/platform-filter.test.mjs',
+        'desktop/scripts/prepare-payload.test.mjs',
+      ],
+      cwd: ROOT,
+    },
+    {
       // PRT-907（spec §10 line 990）：支持诊断与故障处置手册。
       //
       // 这一套盯的**不是**"有没有一份手册"，而是**支持人员照着它做的时候会不会撞墙**。

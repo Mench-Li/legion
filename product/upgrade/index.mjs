@@ -103,7 +103,12 @@ export const UPGRADE_CODES = Object.freeze({
   MIGRATION_PLAN_INCOMPATIBLE: 'upgrade-migration-plan-incompatible',
   STAGE_FAILED: 'upgrade-stage-failed',
   COMMITTED: 'upgrade-committed',
-  ROLLED_BACK: 'upgrade-rolled-back',
+  // ★ 原本这里还有一个 `ROLLED_BACK: 'upgrade-rolled-back'`，已删除。
+  //   "已经回退过"这件事走的是 **`verdict: 'rolled-back'`**（一个**裁决字符串**），
+  //   而顶层 `code` 报的是**最终处置**（迁移自己的码，或 `STAGE_FAILED`）——
+  //   那是刻意的：一次"迁移失败 → 回退成功"的运行里，读者要知道的是
+  //   哪一份迁移出了什么事，而不是"回退过了"。
+  //   声明了却不发出的码会让人以为顶层 `code` 有时会是 `upgrade-rolled-back`。
   FORWARD_FIX: 'upgrade-forward-fix-required',
   /** 编排的输入不完整。 */
   BAD_INPUT: 'upgrade-bad-input',

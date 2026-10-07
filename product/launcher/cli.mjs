@@ -60,6 +60,15 @@ import { createManifest, digestOf, validateManifest } from '../upgrade/manifest.
 // 而 `tray-wiring.mjs` 不知道产品跑没跑。
 import { attachLauncherTray } from './tray-wiring.mjs'
 import { SHIPPED_MANIFEST_PATH, SHIPPED_MANIFEST_RELATIVE_PATH } from './runtime-manifest.mjs'
+// ★ 设计 §8 line 190 的"数据备份恢复入口"：别名导入（`recoveryPlanOf`）而不是
+//   直接叫 `planRecovery`，避免与 `journal.mjs` 的 `planRecovery` 撞名——
+//   那两个词指的是**不同的东西**（"事务走到哪一步了" vs "有哪些备份能恢复"），
+//   撞名会让读代码的人以为它们是同一个判据。
+import {
+  RECOVERY_CODES as RECOVERY_CODES_FOR_CLI,
+  planRecoveryFromBackups as recoveryPlanOf,
+  restoreFromBackup,
+} from '../update/recovery.mjs'
 
 /**
  * 安装目录的默认值：**Launcher 自己所在的那棵树**。
@@ -149,6 +158,26 @@ export const CLI_FLAGS = Object.freeze([
   { name: '--doctor', kind: 'boolean', doc: '（PRT-257）修复入口：读 stdin 上的一份自检结论/拒绝，' +
     '把「该修哪几项、或者回滚」讲清楚。**只提示、不自动改**。' +
     '退出码：0 全过 / 1 有待修项 / **3 拿不到诊断（不是 0）**' },
+  // ── 设计 §8 line 190：数据备份恢复入口 ──────────────────────────────────
+  //
+  // 设计 §8 失败表最后一行要求：维护态下「提供向前修复**或明确的数据备份恢复入口**」。
+  // 在加这两条之前，`restoreSnapshot()` 是"导出的、有用例的、而用户侧入口只有
+  // `docs/DEPLOY.md` 的手工步骤"——一个能力齐全而没有人能敲出来的入口，
+  // 与一个不存在的入口，在部署上是同一个东西。
+  //
+  // ★ 与 `--runtime-install-*` 同一条纪律：**默认的那一边零副作用**。
+  //   所以"列出来看看"与"真的恢复"是两条开关，不是一个开关加 `--apply`。
+  { name: '--recovery-plan', kind: 'boolean', doc: '（设计 §8 line 190）列出可恢复的数据备份，' +
+    '并逐份说明它的安全性档位：`safe-automatic`（未提交事务且屏障已证明，可自动恢复）/ ' +
+    '`needs-confirmation`（已提交或证据不足，恢复可能丢新写入）/ `refused`（快照不完整，**确认也打不开**）。' +
+    '**零副作用**：只读事务日志与快照描述，一个字节都不写' },
+  { name: '--restore-backup=<snapshotId>', kind: 'value', doc: '（设计 §8 line 190）从指定的数据备份恢复。' +
+    '**先算计划再决定动不动手**：要确认的档位在缺少 `--confirm-restore` 时**一个字节都不写**并返回 12；' +
+    '`refused` 档**确认也拒绝**（坏备份恢复出来的不是旧数据）。' +
+    '目标只能是这份快照**自己的**数据目录——恢复到别处会静默覆盖另一个部署的数据' },
+  { name: '--confirm-restore', kind: 'boolean', doc: '与 --restore-backup 同用：显式承担' +
+    '「恢复会丢掉提交之后的新写入」。**设计 §8 line 192 要求这件事必须被明确告知并取得确认**，' +
+    '所以它是一条独立开关，而不是默认打开' },
   // ── PRT-257：DSH 运行时安装的**生产调用方** ─────────────────────────────
   //
   // 在加这两条之前，`runtime-install.mjs` 的调用方只有它自己的用例：
@@ -948,6 +977,75 @@ function printDiagnostics(diagnostics, write = console.log) {
   }
 }
 
+/**
+ * 恢复相关的**独立退出码**（设计 §8 line 190）。
+ *
+ * ★ 为什么不并进 `EXIT_CODES`：上表是**启动流程**的读数，而这两档说的是
+ *   "数据恢复"这件事的结果。把"需要确认"混进 `2`（参数错误）会让脚本无法区分
+ *   「用户还没确认」与「命令敲错了」——而前者的正确处置是**再问一次**，
+ *   后者是**改命令**。两件事共用一个数字，自动化就没法做对的事。
+ *
+ *   `12` 与 `13` 取两个未被占用的值（`EXIT_CODES` 用到 0/2/3/4/5/6/7，
+ *   运行时安装用 0/1/3/10，向导用 9）。
+ */
+export const RECOVERY_EXIT = Object.freeze({
+  /** 需要 `--confirm-restore` 才能继续；**一个字节都没写**。 */
+  confirmationRequired: 12,
+  /** 这份快照不可恢复（含"确认也打不开"），或底层恢复失败。 */
+  refused: 13,
+})
+
+/** 把一份恢复计划渲染成人能读的几段。 */
+export function renderRecoveryPlan(plan) {
+  const L = []
+  L.push('数据备份恢复计划（设计 §8 line 190）')
+  L.push(`  备份目录：${plan.backupDir ?? '（没有）'}`)
+  // ★ 用 `== null` 而不是 `!== null`：`null` 与 `undefined` 在这里是**同一个
+  //   意思**（"没有未完成的事务"），而写成 `!== null` 会让"字段缺失"走进
+  //   "有事务"那一支，然后在读 `.txnId` 时崩掉——症状是一条与本意无关的
+  //   TypeError。模块那边也保证了形状一致；这里是第二道。
+  const txn = plan.activeTransaction ?? null
+  if (txn !== null) {
+    L.push(`  未完成的事务：${txn.txnId}（阶段 ${txn.phase}）`)
+  } else {
+    L.push('  未完成的事务：没有')
+  }
+  L.push(`  维护屏障：${plan.barrierHeld === true ? '立着' : '没立'}`)
+  const candidates = Array.isArray(plan.candidates) ? plan.candidates : []
+  if (candidates.length === 0) {
+    L.push(`  没有可恢复的备份：${plan.reason}`)
+    return L.join('\n')
+  }
+  L.push(`  共 ${candidates.length} 份快照，其中 ${plan.restorableCount ?? 0} 份可恢复：`)
+  for (const c of candidates) {
+    const when = c.createdAtMs > 0 ? new Date(c.createdAtMs).toISOString() : '（时间读不出来）'
+    L.push(`    · ${c.id}`)
+    L.push(`      ${when}｜${c.status}｜${c.fileCount} 个文件｜${c.label ?? '（无标签）'}`)
+    L.push(`      档位：${c.safety}${c.requiresConfirmation ? '（恢复前必须显式确认）' : ''}`)
+    L.push(`      理由：${c.reason}`)
+  }
+  L.push('')
+  L.push('★ 零副作用：这一条只读了事务日志与快照描述，没有写过任何文件。')
+  L.push('  要真的恢复：--restore-backup=<snapshotId>（需要确认的档位还要加 --confirm-restore）')
+  return L.join('\n')
+}
+
+/** 渲染一条"拒绝恢复"的读数——**必须让人看懂下一步是什么**。 */
+export function renderRestoreRefusal(reading) {
+  const L = []
+  L.push('恢复被拒绝')
+  L.push(`  码：${reading.code}`)
+  if (reading.snapshotId !== undefined && reading.snapshotId !== null) L.push(`  快照：${reading.snapshotId}`)
+  if (reading.safety !== undefined && reading.safety !== null) L.push(`  档位：${reading.safety}`)
+  L.push(`  原因：${reading.reason}`)
+  if (typeof reading.hint === 'string') L.push(`  下一步：${reading.hint}`)
+  if (Array.isArray(reading.candidates) && reading.candidates.length > 0) {
+    L.push('  可用的快照：')
+    for (const c of reading.candidates) L.push(`    · ${c.id}（${c.safety}）`)
+  }
+  return L.join('\n')
+}
+
 /** 向导写模型密钥用的引用名。**只有名字，没有值。** */
 const MODEL_KEY_REF = 'model/api-key'
 const MODEL_NAME_REF = 'model/name'
@@ -1072,6 +1170,37 @@ async function defaultTrayAttach({ launcher, options }) {
     detach: () => attached.disconnect('cli-shutdown'),
   })
 }
+
+// 退出码（脚本与验收依赖它们，因此是契约的一部分）：
+//   0 = 成功；2 = 参数错误；3 = 目录布局未确定；4 = --check 未通过；
+//   5 = 启动失败；6 = 产品配置文件有 error；7 = 初始化未完成。
+//   11 = --connect-existing 没有发现后台（不启动任何服务）。
+//   9 = `--wizard` 自己抛错（HEAD 起就在用，只是此前一直没写进这份契约——
+//       一条"已经在用但没登记"的退出码，与一条没人用的退出码，
+//       在读这份契约的人眼里是同一个东西：都不存在）。
+//
+// ★ PRT-257 的运行时安装入口**不复用**上表，它有自己的四档
+//   （`RUNTIME_INSTALL_CLI_EXIT`，前三档与 `doctor.mjs` 的 `DOCTOR_EXIT` 同形）：
+//     0 = 计划可执行；1 = 计划被拒绝（附下一步）；3 = 算不出计划（缺清单）；
+//     10 = 计划过了但没装成。
+//   为什么不并进 `EXIT_CODES`：上表是**启动流程**的读数，而这几档是**安装**的
+//   读数；`1` 在本 CLI 里是全新的一个值（此前没有任何路径返回过它）。
+//   `3` 两处含义一致（"拿不到结论，不能自动往前走"），不需要第二个数字；
+//   而 `10` 取下一个没被占的数（`9` 是向导的），因为"向导抛错"与
+//   "运行时装不上"是两件不同的、需要做不同下一步的事。
+//
+// ★★ 这个声明**必须排在 `run()` 前面**。它原先在文件末尾（`if (isMain)` 之后），
+//   而 `if (isMain)` 在**调用** `run()`——`const` 会提升但不初始化，于是
+//   `run()` 里任何一处 `return EXIT_CODES.ok` 都会抛
+//   `ReferenceError: Cannot access 'EXIT_CODES' before initialization`。
+//
+//   这个坑的形状值得记：**报告生成器把它显示成了 `cli.mjs:1343` 那一行**，
+//   于是症状读起来像"恢复分支有问题"，而真正的位置在文件末尾的声明顺序上。
+//   一个"用起来才知道"的顺序约束，比一个写错的表达式难查得多——
+//   因为出错的代码与要改的代码不在同一个地方。
+export const EXIT_CODES = Object.freeze({
+  ok: 0, args: 2, layout: 3, check: 4, start: 5, config: 6, init: 7,
+})
 
 export async function run({
   argv = process.argv.slice(2), env = process.env, write = console.log, waitForSignal = true,
@@ -1214,6 +1343,64 @@ export async function run({
     if (json) write(JSON.stringify(rep, null, 2))
     else write(renderDoctor(rep))
     return rep.exitCode
+  }
+
+  // ── 数据备份恢复：计划（零副作用）与**显式确认**的恢复（设计 §8 line 190/192）──
+  //
+  // ★ 与 `--doctor` / `--runtime-install-*` 同一条理由放在**布局门禁之前**：
+  //   "还能不能从备份恢复"这件事最需要在产品已经坏掉、布局可能不完整的时候被问到。
+  //   数据目录没定下来时如实报一条拒绝，而不是被别的门禁换成一个无关的错误。
+  if (parsed.flags['recovery-plan'] === true
+    || (typeof parsed.flags['restore-backup'] === 'string' && parsed.flags['restore-backup'] !== 'true')) {
+    const dataDir = options.layout?.dataDir ?? null
+    if (typeof dataDir !== 'string' || dataDir === '') {
+      const reading = Object.freeze({
+        ok: false, code: 'recovery-no-data-dir',
+        reason: '数据目录没定下来：恢复的对象就是它，所以不能先猜一个再恢复',
+      })
+      write(json ? JSON.stringify(reading, null, 2) : `恢复不可用：${reading.reason}`)
+      return EXIT_CODES.layout
+    }
+    if (parsed.flags['recovery-plan'] === true) {
+      const plan = recoveryPlanOf({
+        dataDir,
+        // ★ 备份目录**不在这里拼**：它的约定（`<dataDir>/backups`）由
+        //   `update/recovery.mjs` 一处持有，`desktop/update-wiring.mjs` 也用它。
+        //   这里再写一份，两处就会在某次改名之后错开，而症状是"永远找不到备份"。
+        configPath: options.layout?.productConfigPath ?? null,
+      })
+      if (json) write(JSON.stringify(plan, null, 2))
+      else write(renderRecoveryPlan(plan))
+      return EXIT_CODES.ok
+    }
+    const snapshotId = parsed.flags['restore-backup']
+    const confirmed = parsed.flags['confirm-restore'] === true
+    const plan = recoveryPlanOf({
+      dataDir, configPath: options.layout?.productConfigPath ?? null,
+    })
+    const target = plan.candidates.find((c) => c.id === snapshotId)
+    // ★ 先算计划、再动手：这一层把"要确认 / 不可恢复"两种拒绝**在写盘之前**分开报。
+    if (target !== undefined && target.requiresConfirmation === true && confirmed !== true) {
+      const reading = Object.freeze({
+        ok: false, code: RECOVERY_CODES_FOR_CLI.CONFIRMATION_REQUIRED,
+        snapshotId, safety: target.safety, reason: target.reason,
+        hint: '确认这些新写入可以丢失之后，再加 --confirm-restore 重跑。**本次没有写入任何文件。**',
+      })
+      write(json ? JSON.stringify(reading, null, 2) : renderRestoreRefusal(reading))
+      return RECOVERY_EXIT.confirmationRequired
+    }
+    const result = restoreFromBackup({
+      dataDir, configPath: options.layout?.productConfigPath ?? null,
+      snapshotId, confirm: confirmed,
+    })
+    if (result.ok !== true) {
+      write(json ? JSON.stringify(result, null, 2) : renderRestoreRefusal(result))
+      if (result.code === RECOVERY_CODES_FOR_CLI.CONFIRMATION_REQUIRED) return RECOVERY_EXIT.confirmationRequired
+      return RECOVERY_EXIT.refused
+    }
+    if (json) write(JSON.stringify(result, null, 2))
+    else write(`已从快照 ${result.snapshotId} 恢复 ${result.restored.length} 个文件到 ${dataDir}（档位 ${result.safety}）`)
+    return EXIT_CODES.ok
   }
 
   // ── DSH 运行时安装：计划（零副作用）与**显式**应用（PRT-257）───────────
@@ -1915,26 +2102,5 @@ if (isMain) {
   // 退出前不调用 process.exit()：让 stdout 自然刷出（管道被提前关闭时会截断输出）
   process.exitCode = code
 }
-
-// 退出码（脚本与验收依赖它们，因此是契约的一部分）：
-//   0 = 成功；2 = 参数错误；3 = 目录布局未确定；4 = --check 未通过；
-//   5 = 启动失败；6 = 产品配置文件有 error；7 = 初始化未完成。
-//   11 = --connect-existing 没有发现后台（不启动任何服务）。
-//   9 = `--wizard` 自己抛错（HEAD 起就在用，只是此前一直没写进这份契约——
-//       一条"已经在用但没登记"的退出码，与一条没人用的退出码，
-//       在读这份契约的人眼里是同一个东西：都不存在）。
-//
-// ★ PRT-257 的运行时安装入口**不复用**上表，它有自己的四档
-//   （`RUNTIME_INSTALL_CLI_EXIT`，前三档与 `doctor.mjs` 的 `DOCTOR_EXIT` 同形）：
-//     0 = 计划可执行；1 = 计划被拒绝（附下一步）；3 = 算不出计划（缺清单）；
-//     10 = 计划过了但没装成。
-//   为什么不并进 `EXIT_CODES`：上表是**启动流程**的读数，而这几档是**安装**的
-//   读数；`1` 在本 CLI 里是全新的一个值（此前没有任何路径返回过它）。
-//   `3` 两处含义一致（"拿不到结论，不能自动往前走"），不需要第二个数字；
-//   而 `10` 取下一个没被占的数（`9` 是向导的），因为"向导抛错"与
-//   "运行时装不上"是两件不同的、需要做不同下一步的事。
-export const EXIT_CODES = Object.freeze({
-  ok: 0, args: 2, layout: 3, check: 4, start: 5, config: 6, init: 7,
-})
 
 export { DEFAULT_BACKOFF }

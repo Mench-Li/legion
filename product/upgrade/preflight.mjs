@@ -33,6 +33,12 @@
 // ============================================================================
 
 import { compareVersions, isExactVersion, upgradeWindow } from './manifest.mjs'
+import { ACTIVE_TASK_STATES, TERMINAL_TASK_STATES, WAITING_TASK_STATES } from './task-state.mjs'
+// 发行方声明的升级窗口的成员判定。★ 复用 `product/update/semver.mjs` 里的
+// `isSupportedFrom()`，而不是在这里再写一遍 `includes()`——那个函数本来就是
+// 为设计 §5 的 `supportedFromVersions` 写的（它的注释引着那一条），
+// 在这里调用它才让它从"声明了没人用"变成承重的一环。
+import { isSupportedFrom } from '../update/semver.mjs'
 
 /** 本模块的三个检查 id。顺序即 spec §9.4 的句子顺序。 */
 export const PREFLIGHT_CHECKS = Object.freeze(['compatibility', 'disk', 'in-flight-tasks'])
@@ -164,9 +170,21 @@ export function classifyPreflightChecks(checks, { kinds = PREFLIGHT_VERDICT_KIND
 }
 
 export const PREFLIGHT_CODES = Object.freeze({
-  COMPATIBLE: 'preflight-compatible',
+  // ★ 这里原本有三个"成功"码（`COMPATIBLE` / `DISK_OK` / `TASKS_DRAINED`），
+  //   已删除。本模块的三态裁决是 **`verdict`**（`ok` / `blocked` / `unknown`），
+  //   而**成功时 `code` 是 `null`**（见下面的 `ok()`）——那是刻意的：
+  //   `code` 的用途是"出问题时给一个具名读数"，成功不需要。
+  //
+  //   ★ 一条"成功也发一个码"的设计会带来一个真实成本：调用方为了判断
+  //     "过了没有"，得去比对一个**字符串**，而不是读 `verdict`——
+  //     而字符串比对在有人改文案时会静默失效。见 `errors.test.mjs` 里
+  //     `NON_ERROR_CODES` 那张豁免名单：它存在的**唯一**原因就是
+  //     `feed-newer-available` 这一个"成功但有码"的例外，而它需要逐项写理由。
   /** N-1 窗口外（N-2、更旧或降级）。 */
-  WINDOW_VIOLATION: 'preflight-window-violation',
+  // ★ 这一条也是**故意**不用的：窗口判定只在 `manifest.mjs` 一处，
+  //   它的拒绝码由 `upgradeWindow()` 一并给出（`MANIFEST_CODES.*`），
+  //   而本模块把它原样带进 `reasons`。所以这里不需要再声明一个码——
+  //   声明了却不发出的码会让人以为本模块也会产出它。
   /** 通道不同。 */
   CHANNEL_MISMATCH: 'preflight-channel-mismatch',
   /** 产品 ID 不同（拿另一个产品的包来升）。 */
@@ -179,14 +197,32 @@ export const PREFLIGHT_CODES = Object.freeze({
   DSH_TOO_OLD: 'preflight-dsh-too-old',
   /** 清单本身不合法。 */
   MANIFEST_INVALID: 'preflight-manifest-invalid',
+  /**
+   * 本机当前版本**不在发行清单声明的升级窗口里**（设计 §5 的
+   * `supportedFromVersions`）。
+   *
+   * ★ 它与 `MANIFEST_CODES.UPGRADE_NOT_ALLOWED`（`upgradeWindow()` 那条）
+   *   **不是同一条判据**，两者必须都留着：
+   *
+   *   | | 判据是什么 | 谁的值 |
+   *   |---|---|---|
+   *   | `upgradeWindow()` | **主版本算术**（N-1 政策：不许跳多个主版本） | 策略，写在代码里 |
+   *   | 这一条 | 发行方**声明的精确集合**（"这份包从哪些版本验过"） | 数据，写在签过名的清单里 |
+   *
+   *   两者会不一致，而且**声明可以更严**：`1.0.5 → 1.1.0` 在同一主版本内，
+   *   `upgradeWindow()` 放行；而若这份发行声明的是 `supportedFromVersions:
+   *   ["1.0.0"]`，那么 1.0.5 这台机器**不在**它验证过的窗口里。
+   *
+   *   > 一条只按主版本算术放行的策略窗口，与一条"发行方声明的窗口"，
+   *   > 在"这份包在这个版本上验过没有"这个问题上不是同一个读数。
+   */
+  SOURCE_VERSION_UNSUPPORTED: 'preflight-source-version-unsupported',
 
-  DISK_OK: 'preflight-disk-ok',
   /** 可用空间不足。 */
   DISK_INSUFFICIENT: 'preflight-disk-insufficient',
   /** 没有磁盘读数——**不是**"空间充足"。 */
   DISK_UNOBSERVED: 'preflight-disk-unobserved',
 
-  TASKS_DRAINED: 'preflight-tasks-drained',
   /** 仍有在途任务。 */
   TASKS_IN_FLIGHT: 'preflight-tasks-in-flight',
   /** 没有任务状态读数——**不是**"没有在途任务"。 */
@@ -233,6 +269,7 @@ const unknown = (check, code, reason) => Object.freeze({
  */
 export function checkCompatibility({
   current, target, platform = null, minDshVersionMajor = null, patchPair = null,
+  supportedFromVersions = null,
 } = {}) {
   const reasons = []
   if (current === null || typeof current !== 'object') {
@@ -260,6 +297,32 @@ export function checkCompatibility({
   // 这里不重写一遍——两份"能不能升"的判定必然漂移，而漂移的方向是放行。
   const window = upgradeWindow(current.productVersion, target.productVersion)
   if (!window.allowed) reasons.push(`${window.code}: ${window.reason}`)
+
+  // ★★ 发行方**声明的**升级窗口（设计 §5 的 `supportedFromVersions`）。
+  //
+  //   与上面那条是**两个不同的读数**：上面那条是策略（主版本算术），
+  //   这一条是数据（这份包从哪些版本验过）。见 `SOURCE_VERSION_UNSUPPORTED`
+  //   的注释。判定复用 `semver.mjs` 的 `isSupportedFrom()`——它一直存在、
+  //   注释里引着设计 §5，而在加上这一段之前**全仓没有任何调用点**：
+  //   一份"发行方声明了它只支持从哪些版本升"的清单，此前在读它的人眼里
+  //   与没有这份声明是一样的。
+  //
+  //   ★ 只有**拿到**声明时才判（`null` = 调用方没给这个读数）。
+  //     这个取舍是刻意的：`runPreflight()` 的既有调用方里有只想体检磁盘与
+  //     在途任务的，让"没给"直接变成拦人会把那些用法一起打断。代价是
+  //     "没给"与"支持"在这里读数相同——所以**必须有一条判据钉住生产路径
+  //     真的把它接上了**（见 `install.test.mjs` 的"接线"那条），
+  //     否则这一段会像它替换掉的那个空洞一样安静。
+  if (Array.isArray(supportedFromVersions) && supportedFromVersions.length > 0) {
+    if (typeof current.productVersion === 'string'
+      && !isSupportedFrom(current.productVersion, supportedFromVersions)) {
+      reasons.push(
+        `${PREFLIGHT_CODES.SOURCE_VERSION_UNSUPPORTED}: ` +
+        `本机是 ${current.productVersion}，而这份发行声明只支持从 ` +
+        `${supportedFromVersions.join(' / ')} 升级（设计 §5 的 supportedFromVersions 是**精确集合**）`,
+      )
+    }
+  }
 
   if (current.channel !== undefined && target.channel !== undefined && current.channel !== target.channel) {
     reasons.push(
@@ -412,15 +475,29 @@ export function checkDiskSpace({ freeBytes = null, packageBytes = null, backupBy
 // ③ 在途任务
 // ---------------------------------------------------------------------------
 
-/** 认作"不能切"的任务状态。与 §6.3 表里 `upgrading` 一行的 `drain` 语义一致。 */
-export const ACTIVE_TASK_STATES = Object.freeze([
-  'claimed', 'running', 'awaiting-approval', 'cancelling', 'retrying',
-])
-
-/** 认作"已经收敛"的状态。 */
-export const TERMINAL_TASK_STATES = Object.freeze([
-  'completed', 'failed', 'cancelled', 'dead-letter',
-])
+/**
+ * 认作"不能切"的任务状态。与 §6.3 表里 `upgrading` 一行的 `drain` 语义一致。
+ *
+ * ★★ 这两份清单**不再手写** —— 它们从产品里两套**真实**词表派生
+ *     （看板任务与运行尝试），见 `task-state.mjs` 的文件头。
+ *
+ *     原先这里手写的 `['claimed','running','awaiting-approval','cancelling','retrying']`
+ *     与产品里任何一个真实生产方都对不上（真实的是 `in_progress` 与
+ *     `Running` 那一族）。两个方向同时错，而且后果都很严重：
+ *
+ *       · 真实的"在跑"状态被当成认不出 → 按活跃处理（侥幸安全）；
+ *       · 真实的"已完成"状态（`done` / `canceled` / `Completed`）**也被当成
+ *         认不出** → 同样按活跃处理 → **一台有过任务历史的机器升级被永久拦下**，
+ *         而被点名的 id 全是早就做完的。
+ *
+ *     这也解释了为什么在此之前**没有任何生产方**写 `pendingTasks`：
+ *     接上真实数据就会永久阻塞，于是那一头一直是 `null`（同样拦）。
+ *     两头都拦，升级一次都跑不成。
+ *
+ *     `task-state.test.mjs` 与 `preflight.test.mjs` 各有一条用例**读真实源码**
+ *     比对这两份清单：词表在那边改了，这里会红。
+ */
+export { ACTIVE_TASK_STATES, TERMINAL_TASK_STATES }
 
 /**
  * 在途任务检查。
@@ -440,9 +517,27 @@ export const TERMINAL_TASK_STATES = Object.freeze([
  *
  * `leaseGraceMs`：给了当前时刻与最老活跃任务的 lease 到期时刻时，
  * 可以判定"等 `n` 毫秒即可收敛"，从而把"再等一下"与"必须人工介入"分开。
+ *
+ * ## 三档，不是两档：`waiting` 与 `unrecognized` 必须分开
+ *
+ * 「认不出的状态按活跃处理」这条判据的理由是：**新**加了一个状态而这里
+ * 没跟上时，把它当完成会让升级踩着它开始。
+ *
+ * 但产品里存在一组状态是**已知且不执行**的：`backlog`(排队)、`todo`(排队)、
+ * `in_review`(等人评审)、`blocked`(等人解阻)。它们与"从没见过的状态"是
+ * 两件事：
+ *
+ *   · 前者我们**知道**它没在跑；
+ *   · 后者我们**不知道**。
+ *
+ * 把前者也按活跃处理，后果是一个很具体的坏结果——**一个被遗忘的评审
+ * 或一个卡住的阻塞会永久阻塞这台机器的所有升级**，而它们恰恰是最容易
+ * 被遗忘的两类。所以这里显式接受一份 `waitingStates`（默认
+ * `WAITING_TASK_STATES`），它们既不活跃也不算认不出。
  */
 export function checkInFlightTasks({
-  tasks = null, activeStates = ACTIVE_TASK_STATES, nowMs = null, oldestLeaseExpiryMs = null,
+  tasks = null, activeStates = ACTIVE_TASK_STATES, waitingStates = WAITING_TASK_STATES,
+  nowMs = null, oldestLeaseExpiryMs = null,
 } = {}) {
   if (!Array.isArray(tasks)) {
     return unknown(
@@ -451,10 +546,16 @@ export function checkInFlightTasks({
     )
   }
   const activeSet = new Set(activeStates)
+  const waitingSet = new Set(waitingStates)
   const active = tasks.filter((t) => activeSet.has(t?.state))
   // 认不出的状态按**活跃**处理：新加了一个状态而这里没跟上时，
   // "当成已完成"会让一次升级踩着它开始，而"当成活跃"只会让升级多等一轮。
-  const unrecognized = tasks.filter((t) => !activeSet.has(t?.state) && !TERMINAL_TASK_STATES.includes(t?.state))
+  //
+  // `waitingSet` 里的状态**不算**认不出（见函数头：已知不执行 ≠ 不知道）。
+  // 缺状态（`state: null`）**算**认不出——一个读不懂的记录不该被当成"没在跑"。
+  const unrecognized = tasks.filter((t) => !activeSet.has(t?.state)
+    && !TERMINAL_TASK_STATES.includes(t?.state)
+    && !(typeof t?.state === 'string' && waitingSet.has(t.state)))
 
   if (active.length === 0 && unrecognized.length === 0) {
     return Object.freeze({
@@ -508,11 +609,14 @@ export function runPreflight({
   current, target, stage = 'pre-switch', platform = null, minDshVersionMajor = null,
   patchPair = null, freeBytes = null, packageBytes = null, backupBytes = 0, dataDirBytes = 0,
   tasks = null, nowMs = null, oldestLeaseExpiryMs = null, diskPolicy = DEFAULT_DISK_POLICY,
+  supportedFromVersions = null,
 } = {}) {
   if (stage !== 'pre-download' && stage !== 'pre-switch') {
     throw preflightError('preflight-stage-unknown', `未知的体检阶段 ${JSON.stringify(stage)}`)
   }
-  const compatibility = checkCompatibility({ current, target, platform, minDshVersionMajor, patchPair })
+  const compatibility = checkCompatibility({
+    current, target, platform, minDshVersionMajor, patchPair, supportedFromVersions,
+  })
   const disk = checkDiskSpace({ freeBytes, packageBytes, backupBytes, dataDirBytes, policy: diskPolicy })
   const inFlight = checkInFlightTasks({ tasks, nowMs, oldestLeaseExpiryMs })
 
@@ -585,8 +689,14 @@ export function selfCheckPreflight() {
     current: good, target, stage: 'pre-switch', patchPair: 'unverified',
     freeBytes: 10 ** 9, packageBytes: 10 ** 6, tasks: [],
   })
-  const badTask = pair(good, 'pre-switch', { tasks: [{ id: 'x', state: '在飞' }] })
-  const convergedTask = pair(good, 'pre-switch', { tasks: [{ id: 'x', state: 'completed' }] })
+  // ★ 用**真实**词表：`in_progress`（看板）与 `done`（看板终态）。
+  //   原先这里用的是 `'在飞'` / `'completed'`——后者根本不是产品里的状态
+  //   （看板用 `done`），所以这条"已收敛的任务本该不拦"的自检在旧词表下
+  //   **恰好**通过，而真实读数会全部被当成"认不出 → 按活跃"。
+  const badTask = pair(good, 'pre-switch', { tasks: [{ id: 'x', state: '认不出的状态' }] })
+  const runningTask = pair(good, 'pre-switch', { tasks: [{ id: 'x', state: 'in_progress' }] })
+  const convergedTask = pair(good, 'pre-switch', { tasks: [{ id: 'x', state: 'done' }, { id: 'y', state: 'Completed' }] })
+  const waitingTask = pair(good, 'pre-switch', { tasks: [{ id: 'x', state: 'blocked' }, { id: 'y', state: 'todo' }] })
 
   if (okAtPreDownload.ok !== true) problems.push(`齐全输入 + matching pair 本该通过：${okAtPreDownload.reasons.join('；')}`)
   if (diskNoReading.ok !== true) problems.push('pre-download 阶段没有磁盘读数本该被容忍')
@@ -598,7 +708,11 @@ export function selfCheckPreflight() {
   if (badWindow.ok !== false) problems.push('1.2.0 → 2.0.0 本该被 N-1 窗口拦住')
   if (unverifiedPair.ok !== false) problems.push('补丁层成对关系为 unverified 时本该被拦')
   if (badTask.ok !== false) problems.push('状态认不出的在途任务本该被拦')
+  if (runningTask.ok !== false) problems.push('真实词表里"在跑"的任务本该被拦')
   if (convergedTask.ok !== true) problems.push('已收敛的任务本该不拦')
+  // ★ 已知但**不执行**的状态（等人评审 / 排队 / 等人解阻）不该拦。
+  //   不区分它们与"认不出的状态"，会让一个被遗忘的评审永久阻塞所有升级。
+  if (waitingTask.ok !== true) problems.push('已知不在执行的任务（blocked/todo）本该不拦')
   if (okAtPreDownload.remedies.disk !== null) problems.push('磁盘通过时 remedies.disk 本该是 null')
 
   let stageGuard = false
@@ -621,7 +735,9 @@ export function selfCheckPreflight() {
       badWindowCode: badWindow.checks.find((c) => c.check === 'compatibility').code,
       unverifiedPairOk: unverifiedPair.ok,
       badTaskOk: badTask.ok,
+      runningTaskOk: runningTask.ok,
       convergedTaskOk: convergedTask.ok,
+      waitingTaskOk: waitingTask.ok,
       toleratesOnlyDisk: [...diskNoReading.toleratedUnknown],
       stageGuard,
     }),

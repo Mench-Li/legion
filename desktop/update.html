@@ -1,0 +1,101 @@
+<!doctype html>
+<!--
+  desktop/update.html —— 「关于 Legion / 更新」面板（设计 §7）
+
+  这个页面的每一条界面规则都对应设计里的一句话。列在这里，是因为"界面
+  看起来能用"和"界面按要求做事"是两件事：
+
+    · 显示当前版本、通道、上次成功检查时间及"检查更新"    §7 line 146
+    · 发现新版后展示版本、发布说明、"下载更新"和"稍后"    §7 line 146
+    · 稍后仅收起提醒，设置页仍可见                        §7 line 146
+    · 下载页显示真实字节进度和取消                        §7 line 148
+    · 校验阶段显示"正在验证更新"                          §7 line 148
+    · 就绪后提供"安装并重启"和"稍后安装"                  §7 line 148
+    · 关闭窗口、退出或托盘退出均不自动安装                §7 line 148
+    · 安装确认显示是否有在途任务；默认等待任务结束        §7 line 150
+
+  页面**不做任何决策**：它把 `legionUpdate` 的读数画出来，并把点击转成
+  一个命令。所有判据（能不能下载、能不能安装、身份对不对）都在主进程，
+  因为渲染进程是可以被页面脚本影响的那一侧。
+
+  加载方式与 `startup.html` 完全一致（本地 `<script type="module">`，
+  不加载任何远程内容）。**所有**动态内容都经 `textContent` 写入，页面里
+  没有一处 `innerHTML`——发布说明是发布方提供的文本，把它当标记渲染
+  正是设计 §5 选择"纯文本说明"要避开的那件事。
+-->
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <title>Legion 更新</title>
+  <style>
+    :root { color-scheme: dark; font-family: "Segoe UI", "Microsoft YaHei", sans-serif; }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0; padding: 22px 24px 26px; background: #101726; color: #e6edf7;
+      font-size: 13px; line-height: 1.65;
+    }
+    h1 { margin: 0 0 4px; font-size: 17px; font-weight: 600; }
+    .sub { color: #8b9bb4; font-size: 12px; margin-bottom: 18px; }
+    dl { display: grid; grid-template-columns: 88px 1fr; gap: 5px 12px; margin: 0 0 16px; }
+    dt { color: #8b9bb4; }
+    dd { margin: 0; overflow-wrap: anywhere; }
+    .row { display: flex; gap: 9px; flex-wrap: wrap; margin-top: 14px; }
+    button {
+      border: 1px solid #2c3f60; border-radius: 8px; padding: 9px 16px;
+      background: #1d2b44; color: #e6edf7; font: inherit; cursor: pointer;
+    }
+    button:hover:not(:disabled) { background: #24344f; }
+    button.primary { background: #357dff; border-color: #357dff; }
+    button.primary:hover:not(:disabled) { background: #4a8bff; }
+    button:disabled { opacity: .45; cursor: wait; }
+    .status { margin-top: 16px; padding: 11px 13px; border-radius: 8px; background: #172239; }
+    .status.error { background: #3a1f26; color: #ffd9d9; }
+    .status.ready { background: #16352a; color: #d8ffee; }
+    .bar { height: 6px; border-radius: 4px; background: #22304c; overflow: hidden; margin: 12px 0 6px; }
+    .bar > i { display: block; height: 100%; width: 0; background: #357dff; transition: width .2s; }
+    .notes {
+      margin-top: 16px; padding: 11px 13px; border: 1px solid #1e2a42; border-radius: 8px;
+      background: #0d1526; max-height: 190px; overflow: auto; white-space: pre-wrap;
+      font-family: Consolas, "Courier New", monospace; font-size: 12px;
+    }
+    .muted { color: #8b9bb4; font-size: 12px; }
+    [hidden] { display: none !important; }
+  </style>
+</head>
+<body>
+  <h1>关于 Legion</h1>
+  <div class="sub">自动检查更新；下载与安装都必须由你确认。</div>
+
+  <dl>
+    <dt>当前版本</dt><dd id="version">—</dd>
+    <dt>更新通道</dt><dd id="channel">—</dd>
+    <dt>上次检查</dt><dd id="last-check">尚未检查</dd>
+    <dt>最新版本</dt><dd id="latest">—</dd>
+    <!-- 设计 §7 line 150：安装确认要显示**是否有**在途任务。
+         三态（未知 / 没有 / 有 N 个）由 describePendingTasks 决定，
+         而"读不到"不会被显示成"没有"。 -->
+    <dt>在途任务</dt><dd id="pending-tasks">—</dd>
+  </dl>
+
+  <div id="status" class="status">正在读取更新状态…</div>
+
+  <div id="progress" hidden>
+    <div class="bar"><i id="bar"></i></div>
+    <div class="muted" id="progress-text"></div>
+  </div>
+
+  <div id="notes" class="notes" hidden></div>
+
+  <div class="row">
+    <button id="check">检查更新</button>
+    <button id="download" class="primary" hidden>下载更新</button>
+    <button id="cancel" hidden>取消下载</button>
+    <button id="snooze" hidden>稍后</button>
+    <button id="install" class="primary" hidden>安装并重启</button>
+    <button id="close">关闭</button>
+  </div>
+  <div class="muted" id="hint" style="margin-top:14px"></div>
+
+  <script type="module" src="./update-panel.mjs"></script>
+</body>
+</html>

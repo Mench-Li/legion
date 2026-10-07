@@ -25,8 +25,25 @@ const text = {
   'verifying-runtime': '校验初始化后的文件…',
 }
 
+/**
+ * ★ 升级期间的启动拒绝**不是故障**，所以不能按故障渲染。
+ *
+ *   这两个码来自 `barrier.mjs` 的 `startupGate`，意思是"有一次升级正在进行
+ *   或尚未收尾"——一个**正常的、会自己结束**的状态。而在此之前它们落到
+ *   通用分支，标题是「Legion 暂时无法启动」、正文是「请查看诊断信息后重试。」
+ *
+ *   那句话会让人去重装、去删数据目录、去联系管理员——而其中任何一个动作
+ *   都可能把一次进行中的升级弄坏。所以这里：
+ *
+ *     · 标题说"正在升级"，不说"无法启动"；
+ *     · 不显示进度条（进度条在"卡住了"和"正在做"之间传达的是前者）；
+ *     · 保留「重试」按钮：升级可能刚好做完了，而那是用户唯一该做的事。
+ */
+const upgradingCodes = new Set(['UPDATE_MAINTENANCE', 'UPDATE_TRANSACTION_UNFINISHED'])
+
 function render(state) {
   const failed = state?.state === 'failed'
+  const upgrading = failed && upgradingCodes.has(state?.code)
   const configuring = state?.state === 'setup-required'
   setup.hidden = !configuring || state.phase !== 'workspace'
   description.textContent = configuring ? state.phase === 'workspace'
@@ -46,13 +63,17 @@ function render(state) {
     actions.hidden = true
     return
   }
-  heading.textContent = failed ? 'Legion 暂时无法启动' : state?.state === 'stopped' ? 'Legion 服务已停止' : '正在启动 Legion'
+  heading.textContent = upgrading ? 'Legion 正在升级'
+    : failed ? 'Legion 暂时无法启动'
+      : state?.state === 'stopped' ? 'Legion 服务已停止' : '正在启动 Legion'
   detail.textContent = failed
-    ? `错误代码：${state.code ?? 'START_FAILED'}。${failureMessage(state.code)}${portConflictMessage(state.portConflict) ? `\n${portConflictMessage(state.portConflict)}` : ''}`
+    ? `${upgrading ? '' : `错误代码：${state.code ?? 'START_FAILED'}。`}${failureMessage(state.code)}${portConflictMessage(state.portConflict) ? `\n${portConflictMessage(state.portConflict)}` : ''}`
     : text[state?.phase] ?? '正在检查服务状态…'
   if (!failed && Number.isSafeInteger(state?.completed) && Number.isSafeInteger(state?.total) && state.total > 0 && state.completed >= 0 && state.completed <= state.total) {
     detail.textContent += `（${Math.floor(state.completed * 100 / state.total)}%）`
   }
+  // ★ 升级中**不显示**进度条：这里没有可报告的进度，而一条不动的进度条
+  //   读起来是"卡住了"。用户该做的只有等，或者点重试。
   progress.hidden = failed || state?.state === 'stopped'
   actions.hidden = !failed && state?.state !== 'stopped'
 }

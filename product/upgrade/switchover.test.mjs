@@ -16,9 +16,10 @@
 // ============================================================================
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { createHash } from 'node:crypto'
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 
 import { defineMigration, sampleMigrations } from '../../product/upgrade/migration.mjs'
 import {
@@ -524,4 +525,160 @@ test('⑤ ★ 指针文件是 JSON 且写得下 previousVersion（回滚唯一�
     assert.equal(raw.activatedAtMs, 22)
     assert.equal(raw.protocol, 'legion/switchover@1')
   } finally { f.cleanup() }
+})
+
+// ---------------------------------------------------------------------------
+// ★★★★ 升级的**写入面**必须被限制住（设计 §8 line 176 / line 180）
+// ---------------------------------------------------------------------------
+
+/**
+ * 把一棵目录树完整快照成 `路径 → 内容指纹`。
+ *
+ * 用内容而不是 mtime：`rename` 与 `writeFileSync` 在同一毫秒内发生是常态，
+ * 而 mtime 的分辨率在 Windows 上可能只有 ~15ms —— 用它做"有没有被改过"
+ * 的判据会产生假阴性（改过但时间戳没变）。
+ */
+function snapshotTree(root) {
+  const out = new Map()
+  const walk = (dir, prefix) => {
+    let entries
+    try { entries = readdirSync(dir, { withFileTypes: true }) } catch { return }
+    for (const entry of entries) {
+      const rel = prefix === '' ? entry.name : `${prefix}/${entry.name}`
+      const abs = join(dir, entry.name)
+      if (entry.isDirectory()) { walk(abs, rel); continue }
+      let content
+      try { content = readFileSync(abs) } catch { content = Buffer.from('<unreadable>') }
+      out.set(rel, createHash('sha256').update(content).digest('hex'))
+    }
+  }
+  walk(root, '')
+  return out
+}
+
+/** 两个快照的差集：新增、删除、内容变化。 */
+function diffTrees(before, after) {
+  const added = [...after.keys()].filter((k) => !before.has(k)).sort()
+  const removed = [...before.keys()].filter((k) => !after.has(k)).sort()
+  const changed = [...before.keys()].filter((k) => after.has(k) && before.get(k) !== after.get(k)).sort()
+  return { added, removed, changed }
+}
+
+test('★★★★ 升级的写入面只限于 `versions/` 与活动指针——稳定入口与引导层一个字节都不许动', () => {
+  const ctx = fixture(['0.8.0', '0.9.0'])
+  // ★ 这条是设计 §8 line 176/180 的**机械形式**：
+  //
+  //   · line 176「解压并验证目标版本目录，在**同一卷内**原子切换活动指针；
+  //     稳定入口启动目标程序，**不能原地覆盖运行中的 EXE**」
+  //   · line 180「首期正常更新**不得改变引导协议**；需要变更引导层时引导用户
+  //     使用已签名安装器」
+  //
+  //   这两句话此前**没有任何判据**。它们的共同含义是八条设计纪律里最难用
+  //   单测表达的一种：**否定式的范围声明**（"只写这些"）。
+  //
+  //   > 一个"只写 versions/ 和指针"的声明，与一个"其实还顺手重写了稳定入口"
+  //   > 的实现，在功能测试上完全一样——后者甚至更"顺"，
+  //   > 因为重写入口看起来像是在帮忙。
+  //
+  //   所以判据不能问"升级成功了吗"，只能问**磁盘上什么变了**。
+  try {
+  writeFileSync(join(ctx.installRoot, 'versions', '0.9.0', 'app.bin'), 'new-version-bytes', 'utf8')
+  // ★ 三个"不属于版本目录"的东西，各自代表一句设计原话：
+  //   · 稳定入口（line 176）—— 它是被启动的那个 EXE，升级不替换它；
+  //   · 引导层配置（line 180）—— 引导协议的载体；
+  //   · 一个与升级无关的用户文件 —— 防"顺手清理"。
+  writeFileSync(join(ctx.installRoot, 'Legion.exe'), 'stable-entry-binary', 'utf8')
+  writeFileSync(join(ctx.installRoot, 'bootstrap.json'), '{"protocol":"legion/bootstrap@1"}', 'utf8')
+  writeFileSync(join(ctx.installRoot, 'user-notes.txt'), 'do not touch me', 'utf8')
+
+  // ★ 先把指针指到**旧**版本，让 `rollbackUpgrade` 有地方可退
+  //   （它要求指针里有 `previousVersion`，或 versions/ 里有更早的目录）。
+  const firstActivate = activateVersion(ctx.installRoot, '0.8.0', { nowMs: 1 })
+  assert.equal(firstActivate.ok, true, firstActivate.reason)
+
+  const before = snapshotTree(ctx.installRoot)
+
+  const activated = activateVersion(ctx.installRoot, '0.9.0', { nowMs: 2 })
+  assert.equal(activated.ok, true, activated.reason)
+
+  // ── ① 唯一允许变化的，是活动指针 ──
+  //
+  // ★★ **必须在"切到新版本之后"也查一次**，不能只在往返之后查一次。
+  //
+  //   我第一版只在 `activate(0.9.0)` + `rollback → 0.8.0` **之后**取了差集。
+  //   于是变异测试里一个"把稳定入口改写成 `entry-for-${version}`"的实现
+  //   **没有被①抓到**：回滚又把 0.8.0 那次的内容写回去了，
+  //   而**往返之后的两端是同一个版本** ⇒ 净差为零。
+  //
+  //   > 一次 0.8.0 → 0.9.0 → 0.8.0 的往返，会掩盖任何"只依赖版本号"的写入：
+  //   > 起点与终点是同一个版本，于是差分判据看见的是"什么都没变"。
+  //
+  //   所以这里在**中间点**也取一次差集。两端的差集与中间点的差集是互补的：
+  //   前者管"净残留"，后者管"过程中碰过什么"。
+  const allowed = new Set([ACTIVE_POINTER])
+  const assertConfined = (label, reference, current) => {
+    const d = diffTrees(reference, current)
+    const bad = [...d.added, ...d.removed, ...d.changed].filter((p) => !allowed.has(p))
+    assert.deepEqual(bad, [],
+      `${label}：升级动了版本目录与活动指针之外的东西：\n`
+      + bad.map((p) => `  ${p}（${d.added.includes(p) ? '新增' : d.removed.includes(p) ? '删除' : '内容变了'}）`).join('\n')
+      + '\n★ 设计 §8 line 176/180：稳定入口与引导层在任何一次正常更新里都不应该被碰。')
+  }
+  assertConfined('切到新版本之后', before, snapshotTree(ctx.installRoot))
+
+  const rolled = rollbackUpgrade({ installRoot: ctx.installRoot, migrations: [], nowMs: 2 })
+  assert.equal(rolled.ok, true, rolled.reason)
+  assertConfined('回滚到旧版本之后（往返的净差）', before, snapshotTree(ctx.installRoot))
+
+  // ── ② 三样东西必须**逐字节**还在（上面那条只证明"没变"，这里证明"还在"）──
+  //
+  //   上一条的差集是空的也算过——如果实现把整个 installRoot 删了再从别处重建、
+  //   恰好把这三个文件的**内容**写回一样，差集同样是空的。所以再直接断言一次
+  //   它们的字节。
+  //
+  //   ★ 这一条是**绝对**断言（对着一个写死的期望值），与①的**差分**断言互补：
+  //     ①看不见"基线之前就发生、且每次都写成同一个值"的写入（基线里已经有了），
+  //     ②看不见"基线之后发生、但又被后续步骤改回去"的写入（①的中间点检查管这个）。
+  for (const [name, expected] of [
+    ['Legion.exe', 'stable-entry-binary'],
+    ['bootstrap.json', '{"protocol":"legion/bootstrap@1"}'],
+    ['user-notes.txt', 'do not touch me'],
+  ]) {
+    assert.equal(readFileSync(join(ctx.installRoot, name), 'utf8'), expected,
+      `${name} 的内容被改动了 —— 它不在升级的写入面里`)
+  }
+
+  // ── ③ ★ 「同一卷内」原子切换：临时文件必须与指针**同目录** ──
+  //
+  //   `rename` 只在同一卷内是原子的。一个把临时文件放到别处（比如系统 temp）
+  //   的实现，`rename` 会退化成"复制 + 删除"——于是断电时可能留下半截指针。
+  //   判据是结构性的：观察 `rename` 的**两个参数**。
+  const renames = []
+  const activated2 = activateVersion(ctx.installRoot, '0.9.0', {
+    nowMs: 3,
+    renameImpl: (from, to) => { renames.push([from, to]); renameSync(from, to) },
+  })
+  assert.equal(activated2.ok, true, activated2.reason)
+  assert.equal(renames.length, 1, `活动指针的写入不是**一次** rename（观察到 ${renames.length} 次）`)
+  const [tmpPath, finalPath] = renames[0]
+  assert.equal(dirname(tmpPath), dirname(finalPath),
+    `临时文件 ${tmpPath} 与指针 ${finalPath} 不在同一个目录 —— 那次 rename 不是同卷原子替换`)
+  assert.equal(finalPath, join(ctx.installRoot, ACTIVE_POINTER))
+
+  // ── ④ 临时文件不许留下 ──
+  const residue = [...snapshotTree(ctx.installRoot).keys()].filter((p) => p.endsWith('.tmp'))
+  assert.deepEqual(residue, [], `升级留下了临时文件：${residue.join('、')}`)
+
+  // ── ⑤ ★ 失败路径同样不许扩大写入面 ──
+  //
+  //   ★ 这一半最容易被漏掉：**成功路径**的写入面往往是对的，而失败路径
+  //     为了"清理现场"顺手多删/多写。设计 §8 的失败表要求"保留旧版本"。
+  const beforeFail = snapshotTree(ctx.installRoot)
+  const failed = activateVersion(ctx.installRoot, 'no-such-version', { nowMs: 4 })
+  assert.equal(failed.ok, false)
+  assert.equal(failed.code, SWITCH_CODES.TARGET_MISSING)
+  const failDiff = diffTrees(beforeFail, snapshotTree(ctx.installRoot))
+  assert.deepEqual([...failDiff.added, ...failDiff.removed, ...failDiff.changed], [],
+    '目标不存在时**盘上不该有任何变化**（连活动指针都不该动）')
+  } finally { ctx.cleanup() }
 })

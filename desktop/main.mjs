@@ -3,7 +3,8 @@ import { spawn } from 'node:child_process'
 import { randomBytes } from 'node:crypto'
 import { join } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
-import { canNavigate, closeAction, createBridgeClient, desktopRequestHeaders, externalUrl, workbenchTarget } from './runtime.mjs'
+import { canNavigate, closeAction, createBridgeClient, createInteractiveMarker, desktopRequestHeaders, externalUrl, workbenchTarget } from './runtime.mjs'
+import { resolveUpdateRuntime, trayLabelFor } from './update-wiring.mjs'
 
 const desktopDir = fileURLToPath(new URL('.', import.meta.url))
 const startupPath = join(desktopDir, 'startup.html')
@@ -25,6 +26,15 @@ let viewGeneration = 0
 let current = { state: 'starting', phase: 'preparing' }
 let selectedWorkspace = null
 let choosingWorkspace = false
+let updateRuntime = null
+let updateState = null
+/**
+ * ★★ 「桌面可交互」的一次性标记 —— 用 `createInteractiveMarker` 而不是一个
+ *    裸布尔量。理由见 `runtime.mjs` 那段长注释：裸布尔量会在
+ *    `updateRuntime` 还是 `null` 时被**空操作消费掉**，于是自动检查永远不开始。
+ *    而"窗口画出来"与"运行时装载完成"哪个先到是**竞态**。
+ */
+const markUpdateInteractiveOnce = createInteractiveMarker({ readRuntime: () => updateRuntime })
 
 function showWindow() {
   if (!window) return
@@ -89,7 +99,11 @@ function createWindow() {
       window.hide()
     }
   })
-  window.once('ready-to-show', showWindow)
+  window.once('ready-to-show', () => {
+    showWindow()
+    // ① 桌面达到可交互状态 → 首次检查开始计时（设计 §6 line 132）。
+    markUpdateInteractive()
+  })
   window.webContents.on('did-finish-load', () => report(current))
   void window.loadURL(startupUrl).catch(() => report({ state: 'failed', code: 'STARTUP_PAGE_FAILED' }))
 }
@@ -99,14 +113,136 @@ function createTray() {
   tray = new Tray(icon)
   tray.setToolTip('Legion · 正在启动')
   tray.on('double-click', showWindow)
-  tray.setContextMenu(Menu.buildFromTemplate([
+  tray.setContextMenu(buildTrayMenu())
+}
+
+/**
+ * 托盘菜单。
+ *
+ * 更新相关的两项按设计 §7 来的：
+ *   · 「检查更新 / 关于 Legion」打开更新面板（面板里才有"检查更新"按钮，
+ *     因为手动检查要能显示错误与重试）；
+ *   · 有新版且**不在 24 小时"稍后"期内**时，菜单项直接写出发现的新版本。
+ *
+ * ★ 这里**没有**"下载并安装"或"安装更新"这样的菜单项。设计 §7 line 148
+ *   把"就绪后安装"放在面板里的用户确认之后：一个托盘菜单上的"安装更新"
+ *   会让一次误点触发真实的程序切换，而托盘图标是很容易被误点的。
+ * ★ 「退出桌面端」**不触发安装**（设计 §7 line 148：「关闭窗口、退出或
+ *   托盘退出均不自动安装」）。所以这里的退出项与更新状态完全无关。
+ */
+function buildTrayMenu() {
+  return Menu.buildFromTemplate([
     { label: '打开 Legion', click: showWindow },
     { label: '运行状态', click: () => { showWindow(); if (window?.webContents.getURL() !== startupUrl) void window.loadURL(startupUrl).catch(() => report({ state: 'failed', code: 'STARTUP_PAGE_FAILED' })) } },
     { label: '重新启动服务', click: () => void restartServices() },
     { label: '停止共享后台（Web 和桌面均停止服务）', click: () => void stopServices().catch(error => report({ state: 'failed', code: error?.code ?? 'STOP_FAILED' })) },
     { type: 'separator' },
+    {
+      label: trayLabelFor(updateState ?? { usable: false, state: 'idle' }),
+      click: () => void openUpdatePanel(),
+    },
+    { type: 'separator' },
     { label: '退出桌面端（后台继续运行）', click: () => app.quit() },
-  ]))
+  ])
+}
+
+function refreshTray() {
+  if (!tray) return
+  try { tray.setContextMenu(buildTrayMenu()) } catch { /* 托盘重建失败不该影响主流程 */ }
+}
+
+async function openUpdatePanel() {
+  if (updateRuntime === null || updateRuntime.ok !== true) {
+    dialog.showMessageBox({
+      type: 'info', title: '更新不可用', message: '当前无法检查更新',
+      detail: updateRuntime?.reason ?? '更新运行时尚未准备好，请稍后重试。',
+    }).catch(() => {})
+    return
+  }
+  // ① 用户主动打开面板 = 桌面已经可交互。首次自动检查的 30～90 秒从这一刻
+  //    开始计时（设计 §6 line 132），而不是从进程启动开始。
+  markUpdateInteractive()
+  try { await updateRuntime.service.showPanel({ parent: window }) } catch { /* 面板打开失败不该中断应用 */ }
+}
+
+/**
+ * 标记"桌面已可交互"，首次自动检查从这一刻起计时（设计 §6 line 132）。
+ *
+ * ★ 返回值带 `delivered`：**只有投递成功才消费那个一次性标记**。
+ *   调用方（尤其是 `startUpdateRuntime` 里装载完成之后那一次补投）要看它。
+ */
+function markUpdateInteractive() {
+  try { return markUpdateInteractiveOnce() } catch {
+    // 标记失败不该影响启动（更新不可用不是应用不可用）。
+    return { delivered: false, alreadyDelivered: false, reason: '标记可交互时抛错' }
+  }
+}
+
+/**
+ * 启动更新运行时。
+ *
+ * 全部失败都**只记录**：更新不可用不是应用不可用。这条纪律对应设计 §10 的
+ * 第一行验收判据——「无更新、离线、超时、CDN 返回旧清单 → 现有工作不受影响」。
+ */
+function startUpdateRuntime() {
+  const cacheDir = join(app.getPath('userData'), 'updates')
+  void (async () => {
+    try {
+      updateRuntime = await resolveUpdateRuntime({
+        installRoot,
+        cacheDir,
+        // 数据目录与 update-config 读的是同一份安装布局；`--data-dir` 的
+        // 覆盖由 Launcher 负责，这里用 userData 下的固定位置。
+        dataDir: join(app.getPath('userData'), 'legion-data'),
+        desktopDir,
+        // ★ 安装事务要通过 bridge 请求 Launcher 停认领/停服务。
+        //   它是**同一批要被停掉的进程**的控制通道，所以必须在 Electron 退出
+        //   之前完成"停止服务"那一步；切换程序本身交给独立 helper。
+        get bridge() { return bridge },
+        nodePath,
+        helperEntry: join(process.resourcesPath ?? installRoot, 'update', 'helper-entry.mjs'),
+        onNotify: (snapshot) => {
+          // 主动提醒（设计 §7 line 146）：同一发行 24 小时内不重复。
+          // 只有托盘气泡，不弹模态窗口——自动检查不该打断用户工作。
+          try {
+            if (tray && typeof tray.displayBalloon === 'function') {
+              tray.displayBalloon({
+                title: 'Legion 有新版本',
+                content: `${snapshot.productVersion ?? ''} 已可用。打开"检查更新"查看发布说明。`,
+              })
+            }
+          } catch { /* 气泡失败不是错误 */ }
+        },
+        log: (line) => { if (!app.isPackaged) process.stdout.write(`${line}\n`) },
+      })
+      if (updateRuntime.ok !== true) return
+      try {
+        updateRuntime.client.subscribe((snapshot) => { updateState = snapshot; refreshTray() })
+      } catch { /* 订阅失败只影响托盘文案 */ }
+      /**
+       * ★★★ 装载完成之后**补投一次**「可交互」标记 —— 这是那个竞态的另一半。
+       *
+       *   启动顺序是 `createWindow()` → `createTray()` → `startUpdateRuntime()`，
+       *   而 `ready-to-show`（窗口真的画出来）与 `resolveUpdateRuntime()`（这里）
+       *   都要等异步，**谁先到不确定**：
+       *
+       *     · 窗口先到 ⇒ 那一次标记投递时 `updateRuntime` 还是 `null`（空操作），
+       *       标记**不被消费**（`createInteractiveMarker` 保证），于是这里补投；
+       *     · 运行时先到 ⇒ 窗口那次会正常投递，这里补投是**幂等的空操作**。
+       *
+       *   ★ 两种顺序都必须得到同一个结果：**首次检查被安排**。没有这一次补投，
+       *     第一种顺序下自动检查永远不会开始——而它在开发模式下（Vite dev
+       *     server 加载慢）恰好是第二种顺序，于是**只有打包版会中招**。
+       */
+      const marked = markUpdateInteractive()
+      if (marked.delivered !== true && marked.reason !== null) {
+        // 不是错误：窗口还没画出来时这是正常的，窗口那次会投递。
+        if (!app.isPackaged) process.stdout.write(`[update] 可交互标记暂未投递：${marked.reason}\n`)
+      }
+    } catch (error) {
+      updateRuntime = { ok: false, reason: `更新运行时启动失败：${error?.message ?? error}` }
+    }
+  })()
 }
 
 function connectBridge() {
@@ -190,6 +326,10 @@ if (!app.requestSingleInstanceLock()) {
   app.quit()
 } else {
   app.on('second-instance', showWindow)
+  app.on('resume', () => {
+    // ③ 系统唤醒：只在到期时补一次，不累计执行错过的周期（设计 §6 line 132）。
+    try { updateRuntime?.client?.notifyResume?.() } catch { /* 唤醒补检失败不该影响应用 */ }
+  })
   app.on('before-quit', (event) => {
     if (allowQuit) return
     event.preventDefault()
@@ -201,6 +341,10 @@ if (!app.requestSingleInstanceLock()) {
     report({ state: 'stopping' })
     void (async () => {
       try {
+        // ★ 退出**不**自动安装（设计 §7 line 148）。这里只做一件事：
+        //   让调度器停止计时并让出 IPC，避免退出流程里又发起一次检查或
+        //   在进程收尾阶段触发下载。
+        try { updateRuntime?.close?.() } catch { /* 退出清理失败不该阻断退出 */ }
         if (bridge) {
           const acknowledgement = await bridge.request('detach')
           if (acknowledgement?.state !== 'detached') throw Object.assign(new Error('Detach unconfirmed'), { code: 'DETACH_FAILED' })
@@ -220,6 +364,9 @@ if (!app.requestSingleInstanceLock()) {
     Menu.setApplicationMenu(null)
     createWindow()
     createTray()
+    // 更新运行时在窗口建好之后才装载：它要读打包时写入的配置，
+    // 而"配置坏了"绝不能影响窗口出现（设计 §10 第一行验收）。
+    startUpdateRuntime()
     ipcMain.handle('legion:command', async (event, command, payload) => {
       if (!window || event.sender !== window.webContents || event.senderFrame !== window.webContents.mainFrame || event.senderFrame?.url !== startupUrl) throw new Error('IPC_FORBIDDEN')
       if (command === 'status') return current

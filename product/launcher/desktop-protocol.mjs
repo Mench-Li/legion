@@ -1,6 +1,19 @@
 export const DESKTOP_PROTOCOL_VERSION = 1
 export const MAX_LINE_BYTES = 64 * 1024
-const TYPES = new Set(['start', 'status', 'stop', 'detach', 'restart', 'prepare-runtime', 'configure-workspace', 'configure-identity', 'configure-model'])
+// `tasks` 是一个**读**命令（在途任务读数，设计 §7 line 150）。
+// 与 `status` 并列放在前面：它们都不改变产品状态。
+const TYPES = new Set(['start', 'status', 'tasks', 'stop', 'detach', 'restart', 'prepare-runtime', 'configure-workspace', 'configure-identity', 'configure-model',
+  // ★ 升级事务的第 3 步（设计 §8）：「Launcher 停止认领，等待在途任务结束」。
+  //
+  //   这两个类型此前**不在表里**，而 `desktop/update-wiring.mjs` 一直在发
+  //   `stop-claiming` ⇒ Launcher 以 `UNKNOWN_TYPE` 拒绝 ⇒ 桌面抛错 ⇒
+  //   安装事务判 `install-services-refused` 并进维护态。
+  //   **每一次真实安装都停在第三步。**
+  //
+  //   两条一起加是刻意的：`resume-claiming` 是 `stop-claiming` 的配对。
+  //   只加停的那一条，会让"升级中止"留下一个"服务都在跑、但再也领不到活"
+  //   的 Legion（设计 §7 line 150「超时回到可选择界面」要求它可恢复）。
+  'stop-claiming', 'resume-claiming'])
 
 export function protocolError(code) {
   const error = new Error(code)

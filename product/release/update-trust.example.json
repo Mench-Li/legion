@@ -1,0 +1,22 @@
+{
+  "_comment": [
+    "Legion 发布签名信任表（设计 §5）。",
+    "",
+    "客户端在启动时读 installRoot/product/release/update-trust.json，用里面的",
+    "公钥验签通道清单与发行清单。**没有公钥 = 检查更新不可用**，而不是",
+    "'跳过验签'——那两种处理在平时看起来一样，只在托管被改写的那一天分开。",
+    "",
+    "★ 私钥不在这里，也永远不该进安装包。它只在发布机或 CI 密钥存储里。",
+    "★ 换密钥的顺序是硬的（设计 §5 line 128）：先用**旧**私钥签一份信任表增量",
+    "   预置新公钥（scripts/update/keygen.mjs rotate），再切换发布签名。",
+    "   新公钥在下发的那一刻还签发不了它自己，必须由旧钥匙担保。",
+    "",
+    "生成方式：",
+    "  node scripts/update/keygen.mjs new --key-id release-2026-a --out ./keys",
+    "  node scripts/update/keygen.mjs trust --install-root . --key-id release-2026-a \\",
+    "       --public-key ./keys/release-2026-a.pub.pem"
+  ],
+  "format": "legion/update-trust@1",
+  "sequence": 1,
+  "keys": []
+}

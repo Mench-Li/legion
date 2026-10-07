@@ -11,6 +11,7 @@ import { DEFAULT_PORTS } from '../process-manifest.mjs'
 import { readDesktopSettings, selectedWorkspace, validateDesktopIdentity } from './desktop-settings.mjs'
 import { ENFORCEMENT_IDENTITY_ENV } from './enforcement-identity.mjs'
 import { discoverBackend } from './shared-backend.mjs'
+import { readPendingTasksFromLauncher } from '../upgrade/task-readings.mjs'
 
 export function desktopOptionsFrom({ workspace, env = process.env, nodePath = process.execPath } = {}) {
   const initial = launcherOptionsFrom({ env, nodePath })
@@ -48,7 +49,26 @@ function publicPortConflict(result) {
 
 function publicStatus(status) {
   const processes = Array.isArray(status?.processes) ? status.processes.map((p) => ({
-    key: p.key, state: p.state, required: p.required === true,
+    key: p.key,
+    state: p.state,
+    required: p.required === true,
+    /**
+     * 实际端口。
+     *
+     * ★ 为什么要透出来：升级 helper 的健康检查里有一条**身份断言**
+     *   （`expectJson: { port }`），而它的用途正是区分「我们自己的实例」与
+     *   「上一次升级前留下的旧实例 / 别的程序占了同一个端口」
+     *   （见 `process-manifest.mjs` 的 team-hub 条目）。
+     *
+     *   拿 `DEFAULT_PORTS` 去代替真实读数，在最坏的情况下会得到一次
+     *   **看似通过**的健康检查：旧实例应答了 200，而它的 port 字段恰好
+     *   等于默认值。所以健康规格必须用 Launcher 真正用的那一组端口，
+     *   而这份读数的唯一来源就是这里（`launcher.status()` 已经带 `port`）。
+     *
+     * 只透出"够用的形状"：整数、在合法区间内，否则 `null`——而不是把原始值
+     * 原样带出去。
+     */
+    port: Number.isSafeInteger(p.port) && p.port > 0 && p.port <= 65535 ? p.port : null,
   })) : []
   const workbench = status?.processes?.find((p) => p.key === 'workbench' && p.state === 'ready')
   const url = workbench?.url
@@ -243,6 +263,74 @@ export function createDesktopBridge({
         stopPending = false
         return { version: DESKTOP_PROTOCOL_VERSION, id, type: 'result', ok: true, payload: { state: 'stopped' } }
       }
+      // ── 停止 / 恢复认领（设计 §8 第 3 步；见 desktop-protocol 的 TYPES）──
+      //
+      // ★ 只在**自己拥有生命周期**时才允许：如果后台是别人（另一个入口）启的，
+      //   停它的认领等于替别人改运行状态，而桌面端没有那个授权。这与 `stop`
+      //   的判据同形（`ownsLifecycle && launcher !== null`）。
+      if (type === 'stop-claiming' || type === 'resume-claiming') {
+        if (!ownsLifecycle || launcher === null) {
+          return { version: DESKTOP_PROTOCOL_VERSION, id, type: 'result', ok: false,
+            payload: { code: 'CLAIM_CONTROL_UNAVAILABLE', reason: '共享后台不由桌面端管理，无法停止或恢复它的任务认领' } }
+        }
+        const method = type === 'stop-claiming' ? 'suspendClaiming' : 'resumeClaiming'
+        if (typeof launcher[method] !== 'function') {
+          return { version: DESKTOP_PROTOCOL_VERSION, id, type: 'result', ok: false,
+            payload: { code: 'CLAIM_CONTROL_UNSUPPORTED', reason: `Launcher 没有实现 ${method}` } }
+        }
+        const result = await launcher[method]()
+        return {
+          version: DESKTOP_PROTOCOL_VERSION, id, type: 'result', ok: result?.ok === true,
+          payload: {
+            state: type === 'stop-claiming' ? 'claiming-suspended' : 'claiming-active',
+            ...(result?.ok === true ? {} : { code: safeCode(result?.code, 'CLAIM_CONTROL_FAILED'), reason: result?.reason ?? null }),
+            skipped: result?.skipped === true,
+            detail: result?.reason ?? null,
+          },
+        }
+      }
+      // ── 在途任务读数（设计 §7 line 150：安装确认要显示有没有在途任务）──
+      //
+      // ★ 这是一个**读**命令，所以它不走队列（与 `status` 同样处置）：
+      //   它要能被用来回答"现在能不能装"，而排队等一次 start/stop 才能回答
+      //   这个问题会让答案在等待期间过期。
+      //
+      // ★ 读不到时返回 `ok: false` 且**不带** `tasks` 字段。
+      //   一个"读不到就返回空数组"的读数会让升级在**任务正在跑**的时候
+      //   认为环境是干净的——那是本模块最不能犯的错。
+      if (type === 'tasks') {
+        if (launcher === null) {
+          // ★ Launcher 还没起来 → **不**报"没有在途任务"。
+          //
+          //   常见的第一反应是返回空数组（"没起来当然没有任务"）。这里不这么做，
+          //   因为同一条推理在**别的**情况下会错：`launcher === null` 也可能是
+          //   "上一次启动留下了没被收敛的进程，而这次还没接管"。那种情况下
+          //   报空数组就是让升级在一个未知环境上动手。
+          //
+          //   代码与理由分开给出，于是"升级被拦"能查到**拦的原因是什么**——
+          //   而一个笼统的"没有拿到任务读数"会把排查方向引向任务本身。
+          return { version: DESKTOP_PROTOCOL_VERSION, id, type: 'result', ok: false,
+            payload: {
+              code: 'TASKS_LAUNCHER_NOT_STARTED',
+              reason: 'Launcher 未启动，因此读不到在途任务：这不等于没有在途任务（未收敛的旧进程也算）',
+            } }
+        }
+        const reading = await readPendingTasksFromLauncher(launcher.status(), {
+          token: credentials?.hub ?? null,
+        })
+        if (reading.ok !== true) {
+          return { version: DESKTOP_PROTOCOL_VERSION, id, type: 'result', ok: false,
+            payload: { code: safeCode(reading.code, 'TASKS_UNREADABLE'), reason: reading.reason } }
+        }
+        return { version: DESKTOP_PROTOCOL_VERSION, id, type: 'result', ok: true,
+          payload: {
+            tasks: reading.tasks,
+            total: reading.total,
+            observedAtMs: reading.observedAtMs,
+            source: reading.source,
+            summary: reading.summary,
+          } }
+      }
       return { version: DESKTOP_PROTOCOL_VERSION, id, type: 'result', ok: false, payload: { code: 'UNKNOWN_TYPE' } }
     } catch (error) {
       return { version: DESKTOP_PROTOCOL_VERSION, id, type: 'result', ok: false,
@@ -252,7 +340,10 @@ export function createDesktopBridge({
 
   function handle(request) {
     if (request.type === 'stop') { stopPending = true; launcher?.cancelPreparation?.() }
-    if (request.type === 'status') return Promise.resolve(run(request))
+    // ★ `status` 与 `tasks` 都是**读**命令，不进队列。
+    //   `tasks` 要能被用来回答"现在能不能装"；排队等一次 start/stop 才能
+    //   回答这个问题，会让答案在等待期间过期——而它正是升级前那一刻要用的。
+    if (request.type === 'status' || request.type === 'tasks') return Promise.resolve(run(request))
     const work = queue.then(() => run(request))
     queue = work.catch(() => {})
     return work

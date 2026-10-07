@@ -1,7 +1,7 @@
-# 任务：Legion 启动后 orchestrator 报 `no-executor` —— 先量出**是哪个拒绝码**
+# 任务：orchestrator 报 `no-executor` —— **拒绝码已量出**，缺的是两处接线
 
-> 状态：**待实测**。本文件是一份任务描述，不是结论。
-> 立此存照的原因：这条缺口在验收记录里出现过，而**它的根因没有被量过**。
+> 状态：**根因已实测**（见下面"实测读数"）。本文件记录读数与要补的东西。
+> 立此存照的原因：这条缺口在验收记录里出现过，而它的根因此前**没有被量过**。
 
 ## 症状
 
@@ -9,85 +9,88 @@
 
 > Orchestrator 进入 `no-executor` 安全状态，**未认领任务**……按设计 fail-closed
 
-对用户的表现是：**任务一直没人做**。状态文件里只有一个词（`no-executor` 或 `no-stages`），
-没有任何错误。手机上派了活，电脑上什么都没发生。
+对用户的表现是：**任务一直没人做**。手机上派了活，电脑上什么都没发生。
 
-## 已经查清的：**接线是存在的**，所以"没接"不是结论
+## 实测读数（2026-10-07）
 
-这条线常被当成"还没实现"。实测不是：
+直接跑 `product/orchestrator/worker.mjs`，用环境变量逐级打开 —— **不需要改任何档案**：
 
-| 环节 | 位置 | 状态 |
-| --- | --- | --- |
-| 同进程注册口 | `orchestrator/worker/executor-binding.mjs` 的 `bindDshRuntime()` | 存在；**只有测试在调** |
-| 跨进程契约（客户端） | `orchestrator/worker/runtime-contract-client.mjs` | 存在 |
-| 跨进程契约（服务端） | `runtime/dsh-composition/runtime-contract-server.mjs` | 存在 |
-| **环境变量的生产方** | `product/launcher/launcher.mjs:943` `out.LEGION_RUNTIME_URL = runtimeContractEndpoint.url` | **存在，真的在注入** |
-| 进程清单声明 | `product/process-manifest.mjs` 的 `orchestrator` 项 | 声明了 `LEGION_RUNTIME_URL` / `LEGION_RUNTIME_TOKEN` / `LEGION_WORKSPACE_DIR` |
+| 环境 | worker 报的码 |
+| --- | --- |
+| 什么都不设 | `EXECUTOR_BAD_WIRING`（未设置 `TEAM_HUB_URL`） |
+| 给 `TEAM_HUB_URL`（死地址） | `EXECUTOR_HOST_PORT_REQUIRED`（跨进程那条路也还没配） |
+| 再给 `LEGION_RUNTIME_URL`（死地址） | **`EXECUTOR_CAN_READ_REQUIRED`** ← 跨进程那条路**真的走到了** |
 
-`desktop-launcher.mjs` 用的就是这个 `createLauncher`，所以**打包版与单入口走同一条接线**。
-
-    > 「这段代码存在」与「这条链路在真实部署里通了」，
-    > 只有在一次真实启动之后才不是同一句话 ——
-    > 而验收记录里那句 `no-executor` 是**上一次**启动的读数，没人知道这一版报的是什么。
-
-## 本任务的**第一步**：量出拒绝码，不要先改代码
-
-`orchestrator/worker/executor.mjs` 的 `EXECUTOR_CODES` 是一张**可裁决**的表 ——
-每个码对应**不同的修法**，混起来会让值班的人去查错的地方：
-
-| 码 | 含义 | 该去哪里看 |
-| --- | --- | --- |
-| `EXECUTOR_HOST_PORT_REQUIRED` | 既没有同进程绑定，也没有 `LEGION_RUNTIME_URL` | 启动方有没有注入；端口发布文件在不在 |
-| `EXECUTOR_RUNTIME_UNREACHABLE` | **配了**端点但连不上 | 那台 Runtime 进程为什么没起来（与上一条修法完全不同） |
-| `EXECUTOR_SELF_CHECK_INCOMPATIBLE` | 自检未过：补丁层 / 运行时探测 / 沙箱管制有其一没生效 | `runtime/dsh-composition/` 的强制面 |
-| `EXECUTOR_CAN_READ_REQUIRED` | 有绑定但没给 `canRead` | 装配阶段的权限来源 |
-| `EXECUTOR_BAD_WIRING` | 参数缺失或形状不对 | `post` / `get` 适配器 |
-
-**另有一个不在 executor 侧的嫌疑**：`process-manifest.mjs` 那段注释写着，缺
-`LEGION_WORKSPACE_DIR` 时 worker 的状态是 **`no-stages`**（不是 `no-executor`），
-同样**一个任务都不认领，且没有任何错误**。两个症状在用户那里一模一样。
-
-## 复现步骤
+复现：
 
 ```bash
-# 1. 起 Legion（单入口会接线 + 起宿主 + 盯就绪）
-node scripts/legion-start.mjs
-
-# 2. 读两处，**缺一不可**：
-#    ① orchestrator 的状态文件（`state` 字段 + 它带出来的 extra，如 missingStages / claimGate）
-#    ② worker 的**日志**：状态变迁那一刻会打一行"为什么不干活"的解释
+# ③ 那一条
+TEAM_HUB_URL=http://127.0.0.1:9 TEAM_HUB_TOKEN=x \
+LEGION_RUNTIME_URL=http://127.0.0.1:9 LEGION_RUNTIME_TOKEN=t \
+LEGION_DATA_DIR=<临时目录> node product/orchestrator/worker.mjs
+# ⚠ [worker] 执行引擎未接线（EXECUTOR_CAN_READ_REQUIRED）：跨进程路径需要调用方显式给出 canRead…
 ```
 
-★ 只读状态文件会看到 `no-executor` 四个字母，而**理由在日志行里** ——
-`publish()` 在状态变迁的那一刻打一条具名说明（见 `orchestrator/worker/main.mjs` 的那几个分支）。
-只看状态文件，`no-executor` 与 `no-stages` 在排障的人眼里是同一句话："不认领"。
+## 结论：两条取得引擎的路，各自卡在不同的一环
 
-预期两种之一：
+| 路 | 怎么走 | 卡在哪 |
+| --- | --- | --- |
+| **同进程** | DSH 进程内调 `bindDshRuntime({host, selfCheck, canRead})` | **没有任何生产代码调它**（只有 `executor-binding-sources.test.mjs`） |
+| **跨进程** | Launcher 注入 `LEGION_RUNTIME_URL`（`launcher.mjs:943`，**真的在注入**） | 走到了，但 **`canRead` 没人给** |
 
-- `state: 'claiming'|'idle'|'executing'` —— 引擎真的造出来了，验收记录那句已过时，**如实记下并关闭本任务**；
-- 上面表里某一个具名码 / 具名状态 —— **那才是本任务要修的东西**。
+而 **`orchestrator/worker.mjs` 这两样都不传** —— 它是生产入口，`grep canRead` 在这个文件里
+**一行都没有**。跨进程路要 `canRead` 是**worker 侧**的责任（见下面为什么），
+权威也在它手里（lease / 岗位清单），可它没给。
+
+    > 一个"调用方必须给、而生产入口从不给"的参数，
+    > 与一个不存在的参数，在部署上是同一个东西 ——
+    > 只不过前者的报错文案会把排查的人引向"去配那个变量"，而变量早就配好了。
+
+## 为什么 `canRead` 不是"补个默认值"就完事
+
+这一点必须写清楚，否则下一个人会顺手补一个 `() => ({all:true})` 就交差。
+
+代码里三处独立地拒绝对它给默认值：
+
+- `executor.mjs`：`canRead` 缺失 → `BAD_WIRING`，理由是"一个**默认都能读**的默认值会让一次接线遗漏变成一次**静默越权**"
+- `context-stage.mjs:300`：`canRead` 不给就抛，理由是"路由不替调用方决定权限，这里也不猜"
+- `executor-binding.mjs`：`bindDshRuntime` 明确区分"canRead 是函数"与"这个进程里没有来源"
+
+所以**补这一环需要先定一条策略**：这次 Attempt 的角色能读哪些来源。
+权威是 `lease` + 岗位清单（`/api/roster?scope=`），而 `context-stage.mjs` 已经把它
+规范成 `canRead(meta, {lease, scope, inputs}) → true | {all:true} | string[] | {ids:[]}`。
+**本仓今天没有任何一处把这个映射实现出来**（`git grep canRead` 的生产方只有消费者，没有生产者）。
 
 ## 交付判据
 
-1. **一个实测读数**：一次真实启动后 orchestrator 的 `state` 与日志里那条理由。
-2. 若为具名码 / 具名状态：**该码对应的那一环**的修复 —— 不是"让它别报这个"。
-3. 回归：这条路径上**不能再出现"没配却看起来正常"**的形状。本仓在这上面已经栽过三次
-   （`LEGION_DATA_DIR` 声明了没人给值 / `LEGION_WORKSPACE_DIR` 连声明都没有 /
-   `LEGION_RUNTIME_URL` 消费方会读而生产方不写），三处的注释都还在。
+1. **一条策略**：写清"哪个角色的 Attempt 能读哪些来源"，并说明它从哪里取得权威
+   （不得回落到"默认都能读"）。
+2. 把 `canRead` 接到 `orchestrator/worker.mjs` 的 `productionExecutorProviderFromEnv` 调用上。
+3. **一个实测读数**：接上之后同一条命令不再报 `EXECUTOR_CAN_READ_REQUIRED`；
+   若 Runtime 仍不可达，应当报 `EXECUTOR_RUNTIME_UNREACHABLE`（**与上一条修法不同**：
+   那一条去查那台进程为什么没起来）。
+4. 端到端：派一条任务 → 见到 Attempt 真的起来（而不是 `no-executor`）。
 
-## 一个已经量到的旁证：**它一定是"要么全通、要么全不干"**
+## 一个已经量到的性质：它是**二元**的
 
-`publish('no-executor')` 那条日志本身写着设计意图：
+`publish('no-executor')` 那条日志写着设计意图：
 
-> 未配置执行引擎：**不认领任何任务**（认领会立刻失败并把重试额度烧光，
-> 最终表现为「任务都在跑但全都失败」）。配置执行引擎后重启即可开始工作。
+> 认领会立刻失败并把重试额度烧光，最终表现为「任务都在跑但全都失败」
 
-所以这条缺口的**用户表现**是二元的：要么任务真的被执行，要么**一条都不会被认领**。
-不存在"部分能跑"的中间态 —— 这也意味着**它很适合被一条端到端用例钉住**
-（派一条任务 → 要么见到 Attempt 起来，要么见到那个具名码）。
+所以这条缺口的用户表现是二元的：要么任务真被执行，要么**一条都不会被认领**。
+没有中间态 —— 这意味着它很适合被一条端到端用例钉住。
 
-## 诚实边界（本文件写的时候）
+## 另一个同症状的嫌疑（未量）
 
-- **没有跑过**真实启动。上面那张"接线存在"的表是**读代码**读出来的。
-- 因此本文件**不能**用来声称"打包版不认领任务"。那句话需要一次实跑才能说。
-- 验收记录（2026-10-03）是这条缺口唯一的现场记录，而它没有留下拒绝码。
+缺 `LEGION_WORKSPACE_DIR` 时 worker 的状态是 **`no-stages`**（`main.mjs:475`），
+同样一个任务都不认领、同样没有任何错误。**与 `no-executor` 在用户那里一模一样**，
+而修法完全不同。排障时**两处都要读**：状态文件的 `state`，以及 `publish()` 在状态变迁
+那一刻打的那行日志（只读状态文件会看到四个字母，理由在日志里）。
+
+## 诚实边界
+
+- 上面三个码是**实测**的；但第 ③ 条用的是**死地址**，所以只证明了"跨进程路走到了
+  `canRead` 这一关"，**没有**证明"给了 canRead 之后能连上 Runtime"。
+- `bindDshRuntime` 在生产上没人调，是 `git grep` 读出来的（那条路是给 DSH 进程内用的）。
+- 本文件**不声称**打包版一定报这个码：打包版由 Launcher 启动，环境与上面手工跑的不同。
+  要断言它，得跑一次 `scripts/legion-start.mjs` 并读它自己的输出。

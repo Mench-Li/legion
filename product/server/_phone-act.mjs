@@ -10,12 +10,37 @@
 //   create <目标>   发一条 intent=create_task 的消息（手机上的"创建任务"）
 //   timeline        读回那条会话的完整时间线（含 Agent 的进展与回复）
 //   task <任务id>   读任务与它的尝试/事件
+//
+// ★ 参数可以带 `--b64` 前缀，表示**后面的每个参数都是 base64 编码的**。
+//
+//   这是为了穿**两层 shell**：`verify-experience.sh` 把命令拼成一个字符串交给
+//   `ssh <host> "<命令>"`，远端再交给一个 shell 去分词。带空格的参数（比如
+//   「端到端验收：请写一个 greet 函数并跑一次测试」）会在那里被切成好几段，
+//   而本脚本的 `argv.slice(2)` 只取前两个 —— 于是**消息在第一个空格处被截断**，
+//   任务标题变成「端到端验收：请写一个」。
+//
+//   那个缺陷**不会报错**：任务照建、照跑、照完成，只是目标少了一半。
+//   实测就是这么发现的——看板上留下的标题就是截断后的样子。
+//
+//     > 一个"参数在传输层被悄悄切开"的脚本，
+//     > 与一个"用户只写了半句话"的脚本，在日志里是同一个东西——|
+//     > 只不过前者永远修不好，因为没有人会去怀疑自己的参数。
 import { readFileSync } from 'node:fs'
 
 const HUB = process.env.HUB ?? 'http://127.0.0.1:8787'
 const PW_FILE = process.env.PW_FILE ?? '/etc/legion-hub/first-admin-password.txt'
 const SCOPE = process.env.SCOPE ?? 'default'
 const AGENT_ROLE = process.env.AGENT_ROLE ?? 'coder'
+
+// ★ 参数在**任何网络调用之前**解出来。
+//
+//   原先这一行排在登录、找 Agent、开会话之后——于是"参数是坏的"这件事要等
+//   跑完两三个 HTTP 往返才被发现，而那几趟的失败会把真正的原因盖住
+//   （实测：本地用坏参数试，报的是 `fetch failed`，而参数本身压根没问题）。
+//
+//   参数校验属于"输入"，输入该在做事之前判——跑一趟网络再告诉你参数不对，
+//   与先校验再动手，在用户那边是"慢且看不懂"与"当场就懂"的差别。
+const [cmd, arg] = decodeArgs(process.argv.slice(2))
 
 const password = readFileSync(PW_FILE, 'utf8').replace(/[\r\n]+$/, '')
 
@@ -45,7 +70,21 @@ const conv = await call('POST', '/api/agent-conversations', {
 })
 const convId = conv.convId
 
-const [cmd, arg] = process.argv.slice(2)
+/**
+ * 解参数：`--b64` 之后每个参数都是 base64。见文件头「穿两层 shell」那段。
+ *
+ * 解不开就**具名退出**，不静默当成原文——把一段 base64 当消息发出去，
+ * 与把一条截断的消息发出去，是同一种坏法（都不报错）。
+ */
+function decodeArgs(argv) {
+  if (argv[0] !== '--b64') return argv
+  return argv.slice(1).map((a, i) => {
+    const s = Buffer.from(a, 'base64').toString('utf8')
+    // base64 解出来可能是乱码（截断/非法）。中文消息一定含多字节，空串也不合法。
+    if (s.length === 0) { console.error(`--b64 的第 ${i + 1} 个参数解出来是空的`); process.exit(2) }
+    return s
+  })
+}
 
 if (cmd === 'ask' || cmd === 'create') {
   const msg = await call('POST', '/api/agent-messages', {

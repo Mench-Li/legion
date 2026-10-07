@@ -10,6 +10,7 @@ export const SCHEMA = defineSchema({
   title: '军团指挥台（workbench 宿主：静态托管 + /hub 代理 + 文件/浏览器 API）',
   prefixes: ['DSH_WORKBENCH_', 'DSH_WEB_', 'DSH_HUB_', 'DSH_MODELS_'],
   fields: [
+    { key: 'desktopMode', env: 'LEGION_DESKTOP_MODE', type: 'bool', default: false, doc: '桌面模式：敏感读写及代理入口强制鉴权' },
     // ── 监听与鉴权（P3-2 统一项）──
     // 0 合法（Node listen(0) = OS 分配空闲端口）；契约测试有用 `?root=` + 导入式用法，勿收紧为 >= 1
     { key: 'port', env: 'DSH_WORKBENCH_PORT', cli: 'port', type: 'int', default: 5173, min: 0, max: 65535, doc: '监听端口（生产实例默认 5173；0 = 由 OS 分配）' },

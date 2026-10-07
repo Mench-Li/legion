@@ -50,11 +50,25 @@ export function renderPortal({ downloadUrl = '', version = '', registration = 'c
     : '<p class="hint">这台 Hub 未开放自助注册；请向管理员索取邀请码。</p>'
 
   // 下载卡片：有地址给链接，没有就给一句实话 + 该找谁要。
+  //
+  // ★ 那段"Windows 会拦一下"是**未签名构建**专有的，不是永远为真 ——
+  //   手上这份发布（`r-2026-10-06_0.1.0`）的 PE 证书表是空的（实测），
+  //   manifest 自己也写着"双击会被 Windows SmartScreen 拦"。
+  //
+  //   将来出签名构建时，**这段必须跟着改**（或变成按构建是否签名来开关）：
+  //   一段对着不会出现的警告做说明的文案，与一段漏掉真会出现的警告的文案，
+  //   在用户那里同形 —— 都是"照它说的做，然后发现对不上"，而后者更坏一点，
+  //   因为它教会人忽略这一块。这也是把它放在**拿到链接之前**的原因：
+  //   用户该在点之前知道要发生什么，而不是拦下来之后去猜是不是自己下坏了。
   const downloadCard = hasDownload
     ? `<a class="card primary" href="${esc(downloadUrl)}">
       <strong>下载电脑版</strong>
       <span>Windows x64${version ? `　v${esc(version)}` : ''}</span>
-    </a>`
+    </a>
+    <p class="notice">安装包<b>尚未做代码签名</b>（那要一张证书）。所以 Windows 会拦一下 —— 那是预期的，不是包坏了：<br />
+      ① 浏览器下载时若提示"不常见"，点<b>保留</b>；<br />
+      ② 双击运行时出现"未知发布者"，点<b>更多信息 → 仍要运行</b>。<br />
+      ⚠️ 例外：若系统开着 <b>Smart App Control</b>（Windows 11 全新安装默认开），它会<b>直接阻止且不给"仍要运行"</b>。关掉它可以装，但关掉之后要重装系统才能再打开 —— 这台机器请改用别的机器下载。</p>`
     : `<div class="card disabled">
       <strong>电脑版尚未发布</strong>
       <span>安装包还没上传到这台 Hub；先向管理员索取。</span>
@@ -85,6 +99,8 @@ a.card.primary { border-color:var(--accent); }
 .card strong { display:block; font-size:16px; }
 .card span { display:block; color:var(--muted); font-size:13px; margin-top:2px; }
 .card.disabled { opacity:.6; }
+.notice { color:var(--muted); font-size:13px; line-height:1.7; margin:10px 2px 0; }
+.notice b { color:var(--fg); }
 .hint { color:var(--muted); font-size:13px; margin-top:18px; }
 </style>
 </head>

@@ -797,25 +797,28 @@ async function stageTest() {
     //   （本 CI 的 deps 阶段只装 workbench 的依赖）。它现在**具名 SKIP**，
     //   而不是以 import 失败的样子长成一条"用例失败"。
     {
-      // desktop 包**自带** test 脚本（`main.mjs` + 两个 prepare 脚本），此前 CI 从不捡它。
-      // 照 `whiteboard` 那条的既有做法：文件列表从 package.json **算出来**，不写死。
-      label: 'desktop（Electron 主进程 + 载荷准备 + 平台过滤）',
-      files: (() => {
-        const pkg = JSON.parse(readFileSync(join(ROOT, 'desktop', 'package.json'), 'utf8'))
-        return ((pkg.scripts && pkg.scripts.test) || '').split(/\s+/).filter(t => t.endsWith('.mjs'))
-      })(),
-      cwd: join(ROOT, 'desktop'),
-    },
-    {
-      // 桌面启动器那一组：DSH 载荷导入、与 Electron 主进程的桥、真实的本地 API 鉴权。
-      // `desktop-security` 是**真起 Launcher + 两个子进程**的那条（不是 mock）——
-      // 上面那个桌面模式鉴权缺陷，就是它抓出来的。
-      label: 'product-launcher-desktop（载荷导入/主进程桥/启动器/协议/本地鉴权/桌面设置）',
+      // ★ 桌面启动器那一组：DSH 载荷导入、与 Electron 主进程的桥、真实的本地 API 鉴权。
+      //   `desktop-security` 是**真起 Launcher + 两个子进程**的那条（不是 mock）——
+      //   那个"桌面模式鉴权静默失效"的缺陷，就是它抓出来的。
+      //
+      //   ⚠️ 这里**刻意不放** `desktop-bridge` / `desktop-protocol`，也**不放** `desktop/`
+      //      整包：origin/main 那条自动更新线已经把 `desktop/package.json` 的 test 脚本
+      //      扩到 18 个文件（含 `../product/update/*`），并分别登记进
+      //      `product-update` 与 `desktop-payload-packaging`。
+      //
+      //      同一文件登记进两个套件会让它跑两遍，而套件的 `tests=` 读数也会把它算两次 ——
+      //      两个套件的数字加起来就**不是**全集（origin/main 里有一条写着这个理由的注释）。
+      //
+      //      本分支最早那版是从 `desktop/package.json` **算**出清单再登记一次。
+      //      "从真相推导"这个做法本身没问题 —— 问题在于**算出来的东西已经被别人登记过了**：
+      //
+      //   > 一份"从真相推导出来的清单"，与一份"手工维护的清单"，
+      //   > 在"它会不会和别人的清单撞车"上不是同一个东西 ——
+      //   > 前者只是不会写错，不是不会重复。
+      label: 'product-launcher-desktop（载荷导入/启动器/本地鉴权/桌面设置）',
       files: [
         'product/launcher/bundled-runtime.test.mjs',
-        'product/launcher/desktop-bridge.test.mjs',
         'product/launcher/desktop-launcher.test.mjs',
-        'product/launcher/desktop-protocol.test.mjs',
         'product/launcher/desktop-security.test.mjs',
         'product/launcher/desktop-settings.test.mjs',
       ],

@@ -439,20 +439,78 @@ getaddrinfo → 117.72.146.36, 2606:4700:3030::ac43:b4e4, …
 > 一个"解析器还留着旧地址"的本地状态，看起来完全像"服务端坏了"。
 > 从**第二个观察点**（更新主机本身）一看就分开了。
 
+### 收尾（2026-10-07 同日）：Always Use HTTPS 打开 + token 补齐
+
+上面"仍未做"里的前两项**已做完**，第三项（token 轮换）按运营者意愿暂缓。
+
+#### ① 示例配置已指向真实域名
+
+`product/release/update-config.example.json` 的 stable/canary 改成
+`https://updates.legion-si.online` + `/legion`；`internal` 仍指向测试树
+（`http://117.72.146.36/test/legion` + `allowInsecureHttp: true`，未动）。
+
+#### ② 边缘打开 Always Use HTTPS
+
+Zone 设置 `always_use_https` 由 **off → on**。现在明文在**边缘**就被 301
+（比源站层那条 `$http_x_forwarded_proto` 守卫更早生效）。两层都留着：
+一层挡住"没到源站"的，一层挡住"到了源站但协议是 http"的。
+
+#### ③ ★★ 补齐 `cloudflared` 的 token 文件（一个真实的单点故障）
+
+**症状**：`cloudflared.service` 的 `ExecStart` 指向
+`--token-file /etc/cloudflared/token`，而**该文件不存在**。服务从
+`2026-10-05 00:00:35` 起已连续跑了两天多（`NRestarts=0`）——因为 token 是
+**启动时读一次**，之后进程一直活着。所以这个缺失**看不出来**，直到某次重启。
+
+**后果**：一旦机器重启（内核更新、云厂商维护、任何原因），隧道起不来，
+`legion-si.online`（hub）与 `updates.legion-si.online`（更新树）**同时下线**。
+
+**修复的关键是先找到正确的 token**，而它在别处已经存在：
+`/etc/legion-hub/tunnel.token`（185 字节，`0600`，由 hub 的
+`setup-tunnel.sh` 写入）。★ 但它是不是**这条**隧道的？——解码核对
+（cloudflared 的 token 就是 `base64(JSON{a:accountTag,t:tunnelID,s:secret})`）：
+
+```
+解出的结构（值打码）:  a = 6587314557d4051af952812ee01fc621
+                       t = 81dba534-2221-4107-bd9b-ebdc8468bd67   ← 与 hub 的 CNAME 一致
+比对目标隧道: tunnel id 匹配 True   account tag 匹配 True
+```
+
+**修复前先做了非破坏性验证**：用那个 token 起一个**前台** cloudflared
+（不碰运行中的服务），看它能否注册 —— `Registered tunnel connection` × 4 ✓。
+
+> 同一条隧道上的多个连接器都在**这台机器**上、都指向同一个本地 origin，
+> 所以这个试跑是安全的。`setup-tunnel.sh` 注释警告的是"**另一台机器**上的
+> 第二个连接器"——那种才会造成间歇性 502。
+
+**修复**：`install -m 600 /etc/legion-hub/tunnel.token /etc/cloudflared/token`，
+然后 `systemctl restart cloudflared`。
+
+**修复后验证**（这才是修复的意义——证明"重启能自己回来"）：
+
+| 判据 | 结果 |
+|---|---|
+| `systemctl is-enabled cloudflared` | **enabled**（`WantedBy=multi-user.target`） |
+| unit 指向的文件 | 存在、`0600`、185 字节 |
+| 用 **ExecStart 里那条命令** + 这个文件前台试跑 | ✓ `Registered tunnel connection` |
+| 重启后服务状态 | `active (running)`，新 PID，`NRestarts=0` |
+| `https://legion-si.online/healthz` | **401**（hub，未受影响） |
+| `https://updates.legion-si.online/healthz` | **200** `tls=0` |
+| 明文 `http://` | **301**（边缘层） |
+
+★★ **一个要记住的形状**：`/etc/legion-hub/tunnel.token` 与
+`/etc/cloudflared/token` 现在是**同一份密钥的两个副本**（本次已核对内容相同）。
+将来轮换 token 时**两处都要写**，否则会出现"改了却不生效"或"重启后回退"。
+
+> 一个"启动时读一次、之后一直活着"的服务，会让**它依赖的文件缺失**
+> 这件事完全不可见——直到某个不相关的事件（一次重启）把它变成一次全线故障。
+
 ### 仍未做
 
-- 把 `update-config.example.json` 的 stable/canary `origin` 填成
-  `https://updates.legion-si.online`（`prefix` 保持 `/legion`）——
-  ★ 这一步**还没做**，目前示例里仍是 `https://updates.example.com`。
-- 建议在 Cloudflare 打开 **Always Use HTTPS**（SSL/TLS → Edge Certificates）：
-  那是边缘层的同一条判据，比源站层更早生效。本轮只做了源站层（因为
-  token 没有 `Zone Settings:Edit`）。
-- ★★ `cloudflared.service` 的 `/etc/cloudflared/token` **仍然不存在**——
-  这次改动让 `legion-si.online`（hub）与 `updates.legion-si.online` **都**依赖
-  这条隧道，所以那个风险比之前更大了。请尽快从控制台重新导出 token。
 - ★ Cloudflare API token 现在存在主机 `/root/.legion-cf-token`（`0600`，
   acme.sh 续期要用，它把 `CF_Token` 也写进了 `/root/.acme.sh/account.conf`）。
   **拿到那台机器就等于拿到这个 token**，建议在信任边界变化时轮换它。
+  ★ 运营者已表示**暂不处理**。
 - 灰云直连（彻底不依赖 Cloudflare）仍只差 **ICP 备案**；
   备案之后删掉代理 CNAME、恢复那条灰云 A 记录即可（记录字段已存档）。
 

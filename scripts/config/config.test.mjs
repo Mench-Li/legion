@@ -496,7 +496,15 @@ test('P3-4：类型面 config.d.mts 与引擎导出集合一致（防类型文�
 
 test('一致性：三份 schema 的 process 名与登记表一致，且 secret 字段确有其数', () => {
   assert.deepEqual(Object.keys(SCHEMAS).sort(), ['board-plugin', 'plugins', 'services-plugin', 'team-hub', 'whiteboard', 'workbench'])
-  assert.deepEqual(HUB.secretKeys(), ['token'])
+  // ★ team-hub 有两个 secret 字段：`token`（团队 token）与 `identityKey`（`LEGION_IDENTITY_KEY`，
+  //   远程 Agent 的身份密钥 —— 长度不足 16 就开不了 `REMOTE_AGENT_ENABLED`）。
+  //   这条期望值在 `identityKey` 加进来时（`88e0b124`，2026-10-04）**没有跟着改**。
+  //
+  //   它一直红着，不是因为没人跑它 —— 本套件是在 CI `suites` 清单里的。
+  //   红是因为**整个 `test` 阶段从那时起就是红的**：一条已经红的阶段会把后面所有
+  //   新出现的红都染成同一种颜色。一份过期了的守卫，与一份不存在的守卫，
+  //   在"它拦住了什么"上是同一个东西。
+  assert.deepEqual(HUB.secretKeys().sort(), ['identityKey', 'token'])
   assert.deepEqual(WB.secretKeys().sort(), ['teamHubToken', 'token'])
   assert.deepEqual(BOARD.secretKeys(), ['token'])
   // P3-4 插件族：能配 token 的两个插件必须标 sensitive（摘要/--json 都走脱敏）

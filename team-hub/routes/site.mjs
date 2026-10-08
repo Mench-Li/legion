@@ -101,7 +101,6 @@ const COPY = Object.freeze({
     notYet: '电脑版尚未发布',
     notYetHint: '安装包还没上传到这台 Hub；先向管理员索取。',
     downloadTitle: '下载电脑版',
-    history: '全部历史版本',
     mobile: '打开手机端',
     mobileHint: '看板与对话；可安装到主屏',
     regOpen: '这台 Hub 开放注册。打开手机端即可注册。',
@@ -126,7 +125,6 @@ const COPY = Object.freeze({
     notYet: 'Desktop build not yet published',
     notYetHint: 'No installer has been uploaded to this Hub yet; ask the administrator.',
     downloadTitle: 'Download for Windows',
-    history: 'All previous versions',
     mobile: 'Open the mobile app',
     mobileHint: 'Board and conversations; installable to your home screen',
     regOpen: 'This Hub is open for sign-up. Open the mobile app to register.',
@@ -153,14 +151,11 @@ const COPY = Object.freeze({
  * @param {string} [input.version]    版本号（可空 —— 空就不显示这一行，不猜）
  * @param {string} [input.size]       已格式化的体积（可空）
  * @param {string} [input.date]       发布日期（可空）
- * @param {string} [input.releaseId]  安装包所在的发布号。**只有它来自发布目录时才非空** ——
- *        「全部历史版本」指向 `/legion/`，而那个族在没配发布目录时**不注册**，
- *        所以只有确认发布目录在用，才敢给这个链接（否则又是一个点开 404 的假链接）。
  * @param {string} [input.registration] 'closed' | 'invite' | 'open'
  * @param {string} [input.mobilePath]
  */
 export function renderLiveBlocks({
-  lang = 'zh', downloadUrl = '', version = '', size = '', date = '', releaseId = '',
+  lang = 'zh', downloadUrl = '', version = '', size = '', date = '',
   registration = 'closed', mobilePath = MOBILE_PATH_DEFAULT,
 } = {}) {
   const c = COPY[lang] ?? COPY.zh
@@ -183,14 +178,22 @@ export function renderLiveBlocks({
     ${has ? `<p class="hint">${c.ctaWarn}</p>` : ''}`
 
   // ② 下载区整块。
-  const history = String(releaseId).length > 0
-    ? `<p class="hint"><a href="/legion/">${c.history}</a></p>`
-    : ''
+  //
+  // ★ 这里**曾经**有一行「全部历史版本 → /legion/」。实测（2026-10-08 上线后）
+  //   `/legion/` 是 **404**：发布目录那一族只发**文件**，从不列目录
+  //   （`releases.mjs` 头部：目录不存在就如实 404，不假装）。也就是说我加了一个
+  //   **点开 404 的假链接** —— 正是 `portal.mjs` 立下那条纪律要防的形状，
+  //   而当时的守卫（"releaseId 非空"）测的是错的方向：它证明了"安装包来自发布目录"，
+  //   却证明不了"那个路径下有可读的东西"。
+  //
+  //   > 一个"链接指向确实存在的安装包"的守卫，与一个"链接指向确实存在的**页面**"
+  //   > 的守卫，在没人点过那个链接的时候，是同一个东西。
+  //
+  // 所以：站上不承诺任何版本历史/清单浏览。要加，得先有一个真的列表端点。
   const download = has
     ? `<div class="dl-row">${cta}</div>
        ${meta}
-       ${c.unsigned}
-       ${history}`
+       ${c.unsigned}`
     : `<div class="dl-row">${cta}</div>
        <p class="hint">${c.notYetHint}</p>`
 
@@ -314,7 +317,6 @@ export function createSiteRoutes({
       version: r.version ?? '',
       size: formatSize(r.sizeBytes),
       date: formatDate(r.at),
-      releaseId: r.releaseId ?? '',
       registration,
       mobilePath,
     })

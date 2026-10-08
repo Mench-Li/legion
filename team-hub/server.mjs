@@ -7959,17 +7959,14 @@ if (REMOTE_AGENT_ENABLED) {
   const desktopVersion = CFG.values.desktopVersion ?? ''
   function describeDownload() {
     if (explicitDownload.length > 0) {
-      // 显式配置那条路：只知道地址，不知道发布目录在不在用，所以 `releaseId` 留空
-      //（官网据它决定要不要给「全部历史版本」链接——指过去 404 的链接不能给）。
-      return { url: explicitDownload, releaseId: '', sizeBytes: null, at: null, version: desktopVersion }
+      return { url: explicitDownload, sizeBytes: null, at: null, version: desktopVersion }
     }
     const found = releasesDir.length > 0 ? latestInstaller(releasesDir) : null
     if (found === null) {
-      return { url: '', releaseId: '', sizeBytes: null, at: null, version: desktopVersion }
+      return { url: '', sizeBytes: null, at: null, version: desktopVersion }
     }
     return {
       url: `/legion/releases/${encodeURIComponent(found.releaseId)}/Legion-Setup-win-x64.exe`,
-      releaseId: found.releaseId,
       sizeBytes: found.sizeBytes,
       at: found.mtimeMs,
       version: desktopVersion,

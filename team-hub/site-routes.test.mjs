@@ -64,7 +64,7 @@ async function call(routes, { method = 'GET', path = '/' } = {}) {
   return { handled, status: res.status, headers, body: Buffer.concat(chunks).toString('utf8') }
 }
 
-const FIXED = () => ({ url: '/legion/releases/r-1/Legion-Setup-win-x64.exe', releaseId: 'r-1', sizeBytes: 104857600, at: Date.UTC(2026, 9, 6), version: '0.1.0' })
+const FIXED = () => ({ url: '/legion/releases/r-1/Legion-Setup-win-x64.exe', sizeBytes: 104857600, at: Date.UTC(2026, 9, 6), version: '0.1.0' })
 
 describe('官网：入口页', () => {
   test('① `GET /` 发中文页，`GET /en` 与 `/en/` 发英文页（语言是真的，不是客户端换的）', async (t) => {
@@ -141,7 +141,7 @@ describe('官网：下载区诚实地缺席', () => {
     let rel = FIXED()
     const routes = createSiteRoutes({ root: makeSite(t), readRelease: () => rel })
     assert.match((await call(routes, { path: '/' })).body, /r-1\//)
-    rel = { ...rel, url: '/legion/releases/r-2/Legion-Setup-win-x64.exe', releaseId: 'r-2' }
+    rel = { ...rel, url: '/legion/releases/r-2/Legion-Setup-win-x64.exe' }
     const after = await call(routes, { path: '/' })
     assert.match(after.body, /r-2\//, '换了之后必须立刻改口')
     assert.doesNotMatch(after.body, /r-1\//, '旧链接不该还留在页面上')
@@ -157,15 +157,20 @@ describe('官网：下载区诚实地缺席', () => {
     assert.doesNotMatch(r.body, /r-1/)
   })
 
-  test('★ 「全部历史版本」只在链接确实指向发布目录时才给（否则又是点开 404 的假链接）', async (t) => {
-    // 显式配置那条路：不知道发布目录在不在用 → releaseId 为空 → 不给历史链接
-    const explicit = createSiteRoutes({ root: makeSite(t), readRelease: () => ({ url: 'https://cdn.test/a.exe', releaseId: '' }) })
-    const a = await call(explicit, { path: '/' })
-    assert.match(a.body, /https:\/\/cdn\.test\/a\.exe/)
-    assert.doesNotMatch(a.body, /href="\/legion\/"/, '发布目录没在用，就不能指向 /legion/')
+  test('★ 不给 `/legion/` 这类**目录**链接（那一族只发文件，目录一律 404）', async (t) => {
+    // 这条是上线后实测补的：曾经有过一行「全部历史版本 → /legion/」，
+    // 而 `/legion/` 是 404 —— 发布目录那族从不列目录。守卫当时测的是
+    // "安装包来自发布目录"（为真），而不是"那个路径下有可读的东西"（为假）。
+    // 所以现在无论发布是否配置，站上都不出现任何目录链接。
+    const fromReleases = await call(createSiteRoutes({ root: makeSite(t), readRelease: FIXED }), { path: '/' })
+    assert.doesNotMatch(fromReleases.body, /href="\/legion\/"/, '不能指向发布目录本身')
+    assert.doesNotMatch(fromReleases.body, /全部历史版本/, '不该承诺一个不存在的历史版本页')
 
-    const fromReleases = createSiteRoutes({ root: makeSite(t), readRelease: FIXED })
-    assert.match((await call(fromReleases, { path: '/' })).body, /href="\/legion\/"/)
+    const explicit = await call(
+      createSiteRoutes({ root: makeSite(t), readRelease: () => ({ url: 'https://cdn.test/a.exe' }) }), { path: '/' },
+    )
+    assert.doesNotMatch(explicit.body, /href="\/legion\/"/)
+    assert.match(explicit.body, /https:\/\/cdn\.test\/a\.exe/, '显式配置那条路照旧')
   })
 
   test('★ 未签名说明只在有链接时出现（对着不会出现的警告做说明，与漏掉真会出现的警告同形）', async (t) => {

@@ -22,11 +22,13 @@ const MARKER_CTA = '<!-- legion:cta -->'
 const MARKER_DOWNLOAD = '<!-- legion:download -->'
 const MARKER_HUB = '<!-- legion:hub-line -->'
 
-/** 一份最小的模板：带三个标记与足以断言语言的东西。 */
+/** 一份最小的模板：带三个标记、样式表链接，与足以断言语言的东西。 */
 function template(lang) {
   return `<!doctype html>
 <html lang="${lang === 'zh' ? 'zh-CN' : 'en'}">
-<head><title>${lang}</title></head>
+<head><title>${lang}</title>
+<link rel="stylesheet" href="/site/assets/site.css">
+</head>
 <body>
 <nav><a href="${lang === 'zh' ? '/en' : '/'}">switch</a></nav>
 ${MARKER_CTA}
@@ -267,6 +269,39 @@ describe('官网：下载区诚实地缺席', () => {
     const zh = await call(withEn, { path: '/' })
     assert.match(zh.body, /修了鉴权/)
     assert.doesNotMatch(zh.body, /Fixed auth/)
+  })
+
+  test('★ 入口页引用的样式表**带版本串**（否则边缘缓存会把新 HTML 配上旧 CSS）', async (t) => {
+    // 2026-10-08 线上实测：`site.css` 无内容哈希、无 ETag，却发 `max-age=86400`。
+    // 隧道经 Cloudflare，边缘缓存 24 小时；入口页是 `no-store`。于是重新部署后
+    // 访问者拿到**新 HTML + 旧 CSS** —— 实测症状是 `.sha` 那段塌成行内、摘要溢出，
+    // 而服务器上那份 CSS 明明是对的。版本串把它变成新 URL，问题消失。
+    const routes = createSiteRoutes({ root: makeSite(t), readRelease: FIXED })
+    const r = await call(routes, { path: '/' })
+    assert.match(r.body, /href="\/site\/assets\/site\.css\?v=[^"]+"/, '样式表必须带版本串')
+    assert.doesNotMatch(r.body, /href="\/site\/assets\/site\.css"/, '不该出现没版本的无参形态')
+    // 两页都要，不能只顾中文页。
+    assert.match((await call(routes, { path: '/en' })).body, /site\.css\?v=/)
+  })
+
+  test('★ 改了样式表 ⇒ 版本串跟着变（否则新 CSS 会被长缓存挡在门外）', async (t) => {
+    const root = makeSite(t)
+    const routes = createSiteRoutes({ root, readRelease: FIXED })
+    const first = (await call(routes, { path: '/' })).body.match(/site\.css\?v=([^"]+)/)[1]
+    const p = join(root, 'assets', 'site.css')
+    writeFileSync(p, 'body{color:red}')
+    const t2 = Date.now() / 1000 + 5
+    utimesSync(p, t2, t2)
+    const second = (await call(routes, { path: '/' })).body.match(/site\.css\?v=([^"]+)/)[1]
+    assert.notEqual(first, second, '样式表变了，版本串必须变')
+  })
+
+  test('静态资源的缓存策略：CSS 长缓存、图片短缓存、其余 no-store', async (t) => {
+    const root = makeSite(t)
+    writeFileSync(join(root, 'assets', 'icon.png'), 'x')
+    const routes = createSiteRoutes({ root })
+    assert.match((await call(routes, { path: '/site/assets/site.css' })).headers['cache-control'], /immutable/)
+    assert.match((await call(routes, { path: '/site/assets/icon.png' })).headers['cache-control'], /max-age=3600/)
   })
 
   test('注册策略三种取值措辞互不相同', async (t) => {

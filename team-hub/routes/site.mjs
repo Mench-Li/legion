@@ -316,6 +316,32 @@ export function createSiteRoutes({
   // 模板缓存：只缓存**没有替换过**的模板，替换每次请求都做。
   const templates = new Map()
 
+  /**
+   * 样式表的版本串。取 `mtimeMs:size` —— 改一次样式就是一个新串。
+   *
+   * ★ 为什么必须要有它（2026-10-08 线上实测）：样式表没有内容哈希、也没有 ETag，
+   *   而静态资源原本发 `max-age=86400`。隧道经 Cloudflare，边缘就把 `site.css`
+   *   **缓存 24 小时**；入口页却是 `no-store`。于是重新部署之后，
+   *   访问者拿到的是**新 HTML + 旧 CSS**：
+   *
+   *     实测症状 —— 页面上 `.sha` 那一段塌成行内、64 位摘要横着溢出，
+   *     而 CSS 文件在服务器上明明是对的（`curl` 拉下来能看到规则）。
+   *     浏览器里那份只有 122 条规则，且 **一条 `.sha*` 都没有**。
+   *
+   *   > 一个"文件在服务器上是新的"的事实，与一个"访问者拿到的是新的"的事实，
+   *   > 在没人看过 DevTools 的 Network 面板时，是同一个东西。
+   *
+   *   版本串把它变成一个新 URL：既绕开边缘上已经缓存的那份，又让长缓存重新成立
+   *   （URL 变了就是另一个资源）。比"把 max-age 调小"更好——调小只是把
+   *   24 小时的窗口缩成几分钟，问题仍在，而每次访问都要回源。
+   */
+  function assetVersion() {
+    try {
+      const st = statSync(join(absRoot, 'assets', 'site.css'))
+      return `${Math.round(st.mtimeMs)}-${st.size}`
+    } catch { return '0' }
+  }
+
   function readTemplate(abs) {
     let st
     try { st = statSync(abs) } catch { return null }
@@ -357,6 +383,22 @@ export function createSiteRoutes({
     return { abs, ext, size: st.size, mime: MIME[ext] }
   }
 
+  /**
+   * 静态资源的缓存策略。**按"改了会不会坏页面"分，不按文件类型分。**
+   *
+   * · `.css` 长缓存 —— 但它的 URL 带版本串（`assetVersion()`），改了就是新 URL，
+   *   所以长缓存是安全的，也是这里唯一值得长缓存的（每个页面都要它）。
+   * · **图片短缓存（1 小时）** —— 文件名是固定的，重新截一张图不会换名。
+   *   长缓存会让新截图最多 24 小时不生效；`no-store` 又让每次访问都重下 1MB。
+   *   1 小时是这两者之间的选择：改图最迟 1 小时生效，重复访问不用重下。
+   * · 其余一律 `no-store` —— 白名单里剩下的都是小文件，稳妥优先。
+   */
+  function cacheControlFor(ext) {
+    if (ext === '.css') return 'public, max-age=86400, immutable'
+    if (ext === '.png' || ext === '.svg' || ext === '.ico') return 'public, max-age=3600'
+    return 'no-store'
+  }
+
   function sendPlain(res, status, code) {
     const body = Buffer.from(code, 'utf8')
     res.writeHead(status, {
@@ -387,7 +429,12 @@ export function createSiteRoutes({
       registration,
       mobilePath,
     })
-    const body = Buffer.from(injectLiveBlocks(template, blocks), 'utf8')
+    // 样式表 URL 挂上版本串（理由见 `assetVersion()`）。
+    // 用 split/join 而不是 replace：替换串里没有 `$` 序列，但保持与注入同一套写法，
+    // 免得将来有人在这里塞进一个带 `$&` 的值。
+    const versioned = template
+      .split('href="/site/assets/site.css"').join(`href="/site/assets/site.css?v=${assetVersion()}"`)
+    const body = Buffer.from(injectLiveBlocks(versioned, blocks), 'utf8')
     res.writeHead(200, {
       'content-type': 'text/html; charset=utf-8',
       'content-length': String(body.length),
@@ -430,7 +477,7 @@ export function createSiteRoutes({
         'content-type': found.mime,
         'content-length': String(found.size),
         'x-content-type-options': 'nosniff',
-        'cache-control': 'public, max-age=86400',
+        'cache-control': cacheControlFor(found.ext),
       }
       if (req.method === 'HEAD') { res.writeHead(200, headers); res.end(); return true }
       res.writeHead(200, headers)

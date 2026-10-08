@@ -243,6 +243,32 @@ describe('官网：下载区诚实地缺席', () => {
     assert.doesNotMatch(r.body, /本次更新/)
   })
 
+  test('★ 英文页的更新条目：优先读英文；没有就退回中文**并标明是原文**', async (t) => {
+    // 发布清单只有发布端写的语言。英文页空着 = 丢信息；把中文当英文 = 骗人。
+    // 所以第三条路：照录 + 注明出处。
+    const zhOnly = createSiteRoutes({
+      root: makeSite(t),
+      readRelease: () => ({ url: '/legion/releases/r-1/x.exe', changes: ['修了鉴权'], changesEn: [] }),
+    })
+    const en = await call(zhOnly, { path: '/en' })
+    assert.match(en.body, /修了鉴权/, '英文页不能把信息丢掉')
+    assert.match(en.body, /only wrote release notes in Chinese/, '必须标明这是原文，不能悄悄当英文')
+
+    const withEn = createSiteRoutes({
+      root: makeSite(t),
+      readRelease: () => ({ url: '/legion/releases/r-1/x.exe', changes: ['修了鉴权'], changesEn: ['Fixed auth'] }),
+    })
+    const en2 = await call(withEn, { path: '/en' })
+    assert.match(en2.body, /Fixed auth/)
+    assert.doesNotMatch(en2.body, /修了鉴权/, '有英文条目时不该再出现中文')
+    assert.doesNotMatch(en2.body, /only wrote release notes/)
+
+    // 中文页只用中文条目，不受 changesEn 影响。
+    const zh = await call(withEn, { path: '/' })
+    assert.match(zh.body, /修了鉴权/)
+    assert.doesNotMatch(zh.body, /Fixed auth/)
+  })
+
   test('注册策略三种取值措辞互不相同', async (t) => {
     const one = async (registration) => (await call(
       createSiteRoutes({ root: makeSite(t), readRelease: () => ({ url: '' }), registration }), { path: '/' },

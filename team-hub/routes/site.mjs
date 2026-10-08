@@ -95,6 +95,11 @@ function normalizeSha(value) {
   return /^[0-9a-f]{64}$/.test(s) ? s : ''
 }
 
+/** 只留非空字符串。清单字段可能是任意类型，别让一个数字把渲染带崩。 */
+function asList(value) {
+  return Array.isArray(value) ? value.filter((s) => typeof s === 'string' && s.trim().length > 0) : []
+}
+
 /** mtime → `2026-10-06`。 */
 function formatDate(ms) {
   if (!Number.isFinite(ms) || ms <= 0) return ''
@@ -116,6 +121,7 @@ const COPY = Object.freeze({
     notYetHint: '安装包还没上传到这台 Hub；先向管理员索取。',
     downloadTitle: '下载电脑版',
     updates: '本次更新',
+    updatesZhOnly: '发布端只写了中文说明，原文照录。',
     sha: '安装包 sha256',
     shaHint: '取自随包发布的清单；下载后可自行比对，确认拿到的是这一份。',
     copy: '复制',
@@ -145,6 +151,7 @@ const COPY = Object.freeze({
     notYetHint: 'No installer has been uploaded to this Hub yet; ask the administrator.',
     downloadTitle: 'Download for Windows',
     updates: "What's new",
+    updatesZhOnly: 'The publisher only wrote release notes in Chinese; shown verbatim.',
     sha: 'Installer sha256',
     shaHint: 'Taken from the manifest published alongside the build; compare it after downloading to confirm you got this exact file.',
     copy: 'Copy',
@@ -183,7 +190,7 @@ const COPY = Object.freeze({
  */
 export function renderLiveBlocks({
   lang = 'zh', downloadUrl = '', version = '', size = '', date = '',
-  sha256 = '', changes = [], registration = 'closed', mobilePath = MOBILE_PATH_DEFAULT,
+  sha256 = '', changes = [], changesEn = [], registration = 'closed', mobilePath = MOBILE_PATH_DEFAULT,
 } = {}) {
   const c = COPY[lang] ?? COPY.zh
   const has = String(downloadUrl).trim().length > 0
@@ -227,10 +234,16 @@ export function renderLiveBlocks({
       <p class="hint">${c.shaHint}</p>`
     : ''
 
-  const list = Array.isArray(changes) ? changes.filter((s) => typeof s === 'string' && s.trim().length > 0) : []
+  // 更新条目：英文页优先读 `changesEn`，没有就退回 `changes` 并**标明是发布端原文**。
+  // 让英文页空着是丢信息；把中文悄悄当英文是骗人；标明出处是唯一诚实的第三条路。
+  const zhList = asList(changes)
+  const enList = asList(changesEn)
+  const list = lang === 'en' ? (enList.length > 0 ? enList : zhList) : zhList
+  const borrowed = lang === 'en' && enList.length === 0 && zhList.length > 0
   const updatesBlock = list.length > 0
     ? `<div class="updates">
         <h3>${c.updates}</h3>
+        ${borrowed ? `<p class="hint">${c.updatesZhOnly}</p>` : ''}
         <ul>${list.map((s) => `<li>${inlineBold(s)}</li>`).join('')}</ul>
       </div>`
     : ''
@@ -366,6 +379,7 @@ export function createSiteRoutes({
       date: formatDate(r.at),
       sha256: r.sha256 ?? '',
       changes: r.changes ?? [],
+      changesEn: r.changesEn ?? [],
       registration,
       mobilePath,
     })

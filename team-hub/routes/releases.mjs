@@ -124,9 +124,15 @@ export function manifestSha256(manifest) {
   return typeof v === 'string' && /^[0-9a-f]{64}$/i.test(v) ? v.toLowerCase() : ''
 }
 
-/** 清单里的更新条目：只留非空字符串。 */
-export function manifestChanges(manifest) {
-  const v = manifest?.changes
+/**
+ * 清单里的更新条目：只留非空字符串。
+ *
+ * `key` 默认 `changes`（发布端写的主语言版本）。官网英文页会先找 `changesEn`，
+ * 找不到再退回 `changes` 并**标明这是发布端原文**——比让英文页空着强，
+ * 也比悄悄把中文当英文强。
+ */
+export function manifestChanges(manifest, key = 'changes') {
+  const v = manifest?.[key]
   return Array.isArray(v) ? v.filter((s) => typeof s === 'string' && s.trim().length > 0) : []
 }
 

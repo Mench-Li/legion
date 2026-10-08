@@ -7977,6 +7977,7 @@ if (REMOTE_AGENT_ENABLED) {
       version: manifestVersion.length > 0 ? manifestVersion : desktopVersion,
       sha256: manifestSha256(manifest),
       changes: manifestChanges(manifest),
+      changesEn: manifestChanges(manifest, 'changesEn'),
     }
   }
   router.families.unshift(createPortalRoutes({

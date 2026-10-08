@@ -10,7 +10,7 @@ import { mkdtempSync, mkdirSync, rmSync, writeFileSync, utimesSync } from 'node:
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { createReleaseRoutes, latestInstaller, manifestChanges, manifestSha256, readReleaseManifest } from './routes/releases.mjs'
+import { createReleaseRoutes, latestInstaller, manifestSha256, readReleaseManifest } from './routes/releases.mjs'
 
 /** 造一个发布目录现场。返回 { root, req } 之类的工具。 */
 function scene(t, { releaseIds = ['r-2026-10-01', 'r-2026-10-05'], withExe = true } = {}) {
@@ -169,10 +169,13 @@ describe('挑最新那一份安装包', () => {
 
 // ── 发布清单（`releases/<id>/manifest.json`） ────────────────────────────────
 //
-// 官网的下载区拿它显示 sha256 与「本次更新」。守两条：
+// 官网的下载区拿它取 sha256 与版本号。守两条：
 //   · 读不到 / 字段不对 ⇒ **当作没有**，不是抛错，也不是给一个空值
 //     （一个显示成空的校验值看起来像"校验过了"）；
 //   · `releaseId` 不能靠它往目录外读。
+//
+// 注：这里**曾经**还测过 `manifestChanges()`（清单里的 `changes[]`）。
+// 业主看过官网后要求撤掉「本次更新」那一块，该函数已随之删除。
 
 describe('读发布清单', () => {
   const SHA = 'b8be07da8fcb0dc6dff3561328ce8385a9193256b8d42ef883d60dce7b0ffee3'
@@ -185,16 +188,16 @@ describe('读发布清单', () => {
     return root
   }
 
-  test('读到清单：取出 sha256 与更新条目', (t) => {
+  test('读到清单：取出 productVersion 与 sha256', (t) => {
     const root = withManifest(t, {
       releaseId: 'r-1', productVersion: '0.1.0',
       artifacts: { installer: { path: 'Legion-Setup-win-x64.exe', sizeBytes: 204641180, sha256: SHA } },
+      // 清单独有这个字段；官网已经不显示它了，解析层也不该去读（见文件头）。
       changes: ['把**正文**送到电脑端', '修了鉴权'],
     })
     const m = readReleaseManifest(root, 'r-1')
     assert.equal(m.productVersion, '0.1.0')
     assert.equal(manifestSha256(m), SHA)
-    assert.deepEqual(manifestChanges(m), ['把**正文**送到电脑端', '修了鉴权'])
   })
 
   test('★ 缺文件 / 坏 JSON / 非法 releaseId ⇒ null，不抛', (t) => {
@@ -215,12 +218,5 @@ describe('读发布清单', () => {
     assert.equal(manifestSha256({ artifacts: { installer: { sha256: 'abc' } } }), '')
     assert.equal(manifestSha256({ artifacts: { installer: { sha256: SHA.toUpperCase() } } }), SHA, '大写要归一成小写')
     assert.equal(manifestSha256({ artifacts: {} }), '')
-  })
-
-  test('更新条目只留非空字符串', () => {
-    assert.deepEqual(manifestChanges({ changes: ['a', '', '   ', 42, null, 'b'] }), ['a', 'b'])
-    assert.deepEqual(manifestChanges({ changes: '不是数组' }), [])
-    assert.deepEqual(manifestChanges({}), [])
-    assert.deepEqual(manifestChanges(null), [])
   })
 })

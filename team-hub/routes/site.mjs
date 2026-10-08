@@ -81,23 +81,10 @@ function formatSize(bytes) {
   return `${(bytes / 1048576).toFixed(1)} MB`
 }
 
-/**
- * 发布清单里的条目用 `**粗体**` 标注。**先转义、再换标记** —— 顺序反了就是一个注入口。
- * `esc()` 不碰 `*`，所以转义之后捕捉组里不可能再有原始 `<`。
- */
-function inlineBold(text) {
-  return esc(text).replace(/\*\*([^*]+)\*\*/g, '<b>$1</b>')
-}
-
 /** sha256 只认 64 位十六进制；其余（含缺失、含 `undefined`）一律视为"没有"。 */
 function normalizeSha(value) {
   const s = String(value ?? '').trim().toLowerCase()
   return /^[0-9a-f]{64}$/.test(s) ? s : ''
-}
-
-/** 只留非空字符串。清单字段可能是任意类型，别让一个数字把渲染带崩。 */
-function asList(value) {
-  return Array.isArray(value) ? value.filter((s) => typeof s === 'string' && s.trim().length > 0) : []
 }
 
 /** mtime → `2026-10-06`。 */
@@ -123,8 +110,6 @@ const COPY = Object.freeze({
     deployWin: '桌面与 Web 共享后台和数据。当前为内部验证阶段：安装包未做代码签名，Windows 会拦一下 —— 那是预期的，不是包坏了。',
     deployWinEmpty: '桌面端安装包还没上传到这台 Hub；先向管理员索取。',
     notYet: '电脑版尚未发布',
-    updates: '本次更新',
-    updatesZhOnly: '发布端只写了中文说明，原文照录。',
     sha: '安装包 sha256',
     shaHint: '取自随包发布的清单；下载后可自行比对，确认拿到的是这一份。',
     copy: '复制',
@@ -152,8 +137,6 @@ const COPY = Object.freeze({
     deployWin: 'Desktop and web share one backend and one set of data. It is at internal-validation stage: the installer is not code-signed, so Windows will push back — that is expected, not a broken download.',
     deployWinEmpty: 'No desktop installer has been uploaded to this Hub yet; ask the administrator.',
     notYet: 'Desktop build not yet published',
-    updates: "What's new",
-    updatesZhOnly: 'The publisher only wrote release notes in Chinese; shown verbatim.',
     sha: 'Installer sha256',
     shaHint: 'Taken from the manifest published alongside the build; compare it after downloading to confirm you got this exact file.',
     copy: 'Copy',
@@ -183,13 +166,12 @@ const COPY = Object.freeze({
  * @param {string} [input.date]       发布日期（可空）
  * @param {string} [input.sha256]     安装包摘要。**只在是合法 64 位十六进制时显示**；
  *        空/畸形一律不显示那一行 —— 一个空的 sha256 比没有 sha256 更坏，它看起来像"校验过了"。
- * @param {string[]} [input.changes]  发布清单里的更新条目（可空数组）
  * @param {string} [input.registration] 'closed' | 'invite' | 'open'
  * @param {string} [input.mobilePath]
  */
 export function renderLiveBlocks({
   lang = 'zh', downloadUrl = '', version = '', size = '', date = '',
-  sha256 = '', changes = [], changesEn = [], registration = 'closed', mobilePath = MOBILE_PATH_DEFAULT,
+  sha256 = '', registration = 'closed', mobilePath = MOBILE_PATH_DEFAULT,
 } = {}) {
   const c = COPY[lang] ?? COPY.zh
   const has = String(downloadUrl).trim().length > 0
@@ -232,19 +214,15 @@ export function renderLiveBlocks({
       <p class="small">${c.shaHint}</p>`
     : ''
 
-  // 更新条目：英文页优先读 `changesEn`，没有就退回 `changes` 并**标明是发布端原文**。
-  // 让英文页空着是丢信息；把中文悄悄当英文是骗人；标明出处是唯一诚实的第三条路。
-  const zhList = asList(changes)
-  const enList = asList(changesEn)
-  const list = lang === 'en' ? (enList.length > 0 ? enList : zhList) : zhList
-  const borrowed = lang === 'en' && enList.length === 0 && zhList.length > 0
-  const updatesBlock = list.length > 0
-    ? `<div class="updates">
-        <h4>${c.updates}</h4>
-        ${borrowed ? `<p class="borrowed">${c.updatesZhOnly}</p>` : ''}
-        <ul>${list.map((s) => `<li>${inlineBold(s)}</li>`).join('')}</ul>
-      </div>`
-    : ''
+  // ★ 这里**曾经**渲染「本次更新」（清单里的 `changes[]`）。业主看过之后要求撤掉：
+  //   那张卡片已经承载了下载、版本/体积/日期、未签名说明与摘要校验，
+  //   再挂四段更新条目就不是"一张卡片"而是一页文档了。
+  //
+  //   > 一张卡片上能读的东西是有上限的；超过之后**每一段都变便宜了** ——
+  //   > 包括那段真正要紧的"Windows 会拦你，点保留"。
+  //
+  // 清单里的 `changes` 仍在（发布端写的），要再显示就是加回这一块的事；
+  // 但**不再解析**它 —— 没人读的字段留着就是死代码。
 
   // 元信息：有哪几项就写哪几项，一项都没有就不出现这一行。等宽，与稿子的标签同一路。
   const metaBits = ['Windows x64', version ? `v${esc(version)}` : '', esc(size), esc(date)].filter((s) => s.length > 0)
@@ -252,16 +230,17 @@ export function renderLiveBlocks({
     ? `<p class="dl-meta">${metaBits.map((bit) => `<span>${bit}</span>`).join('<span class="sep">·</span>')}</p>`
     : ''
 
+  // 下载卡片：一句话 + **一个**动作 + 元信息 + 未签名说明 + 摘要。
+  // 按钮只留下载那一个 —— "查看协作界面"在首屏已经是第二个动作，这张卡片里再放一次
+  // 是重复；而这张卡片的主题就是"把这个包装到你机器上"。
   const download = has
     ? `<p>${c.deployWin}</p>
        <div class="dl-actions">
          <a class="btn primary" href="${href}">${c.cta}</a>
-         <a class="btn" href="#workflow">${c.ctaSecond}</a>
        </div>
        ${meta}
        ${c.unsigned}
-       ${shaBlock}
-       ${updatesBlock}`
+       ${shaBlock}`
     : `<p>${c.deployWinEmpty}</p>
        <div class="dl-actions"><span class="btn" aria-disabled="true">${c.notYet}</span></div>`
 
@@ -424,8 +403,6 @@ export function createSiteRoutes({
       size: formatSize(r.sizeBytes),
       date: formatDate(r.at),
       sha256: r.sha256 ?? '',
-      changes: r.changes ?? [],
-      changesEn: r.changesEn ?? [],
       registration,
       mobilePath,
     })

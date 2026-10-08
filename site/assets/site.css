@@ -135,18 +135,13 @@ html[data-theme=dark] .hero:before { opacity: .6; }
   border-radius: 11px; box-shadow: var(--shadow); overflow: hidden; text-align: left;
 }
 
-/* 大屏上让产品窗口**突破文字列**（满宽）。
-   理由：`agent-conversation.png` 是 2880 宽，塞进 1104 的内容列等于缩到 **0.38×**，
-   里面 13px 的正文渲染出来只有 5px —— 那才是"截图糊"的真正来源（源图本身是清晰的：
-   按 1:1 裁出来字口锐利）。放宽到 1360 后是 0.47×，虽然还不是 1:1，
-   但每一个字的可用像素多了近四分之一。文字列仍守 1104，只有产品窗口放宽。 */
-@media (min-width: 1240px) {
-  .product, .live-shot-frame {
-    width: min(1360px, calc(100vw - 48px));
-    margin-left: 50%;
-    transform: translateX(-50%);
-  }
-}
+/* ★ 这里**曾经**让产品窗口在大屏上突破文字列（满宽 1360px），想让截图少缩一点、
+   看起来清一点。业主否了：产品窗口必须和文字**左右对齐、留白相同**。
+   一条经验留在下面：
+   「让图更大」与「让图更清」是两件事 —— 页面里的截图必然要缩（2880 宽的应用界面
+   在任何列宽下都要缩到 0.4× 上下），把图撑大只是把这件事从"缩得多"变成"缩得少"，
+   并没有让它变清。真正解决"看清"的是**放大预览按 1:1 显示**（见下面 #lightbox-image），
+   那才是把原始像素交到用户手里。所以现在图回到文字列内，与页头、段落同一左边界。 */
 .windowbar {
   height: 42px; display: flex; align-items: center; justify-content: space-between;
   border-bottom: 1px solid var(--line); padding: 0 17px; background: var(--soft);
@@ -284,7 +279,15 @@ html[data-theme=dark] .hero:before { opacity: .6; }
 .deploy-item { border-top: 1px solid var(--line); padding: 20px 0; }
 .deploy-item h3 { font-size: 14px; font-weight: 550; display: flex; justify-content: space-between; align-items: center; gap: 10px; }
 .deploy-item p { font-size: 12px; color: var(--muted); margin-top: 11px; }
-.deploy-item a { display: inline-block; margin-top: 13px; color: var(--accent); font-size: 12px; }
+/* ★ `:not(.btn)` 是**必须**的：这张卡片里同时有"文字链接"和"下载按钮"，
+   两者都是 `<a>`。不加这个限制时，`.deploy-item a`（0,1,1）比 `.primary`（0,1,0）
+   更具体，于是把按钮的文字也染成了 `--accent` —— 而按钮底色也是 `--accent`，
+   结果**青绿字压青绿底，按钮上的字看不见**（2026-10-08 业主报的"下载按钮没有文字"）。
+
+   > 一个"给卡片里的链接上色"的规则与一个"按钮自己上色"的规则，
+   > 在它们恰好选了同一个 `a` 元素时，谁赢看的是选择器权重 —— 而这种事没有第二次机会：
+   > 用户看到的就是一个空按钮。 */
+.deploy-item a:not(.btn) { display: inline-block; margin-top: 13px; color: var(--accent); font-size: 12px; }
 
 .label { font-size: 10px; color: var(--accent); background: var(--tint); padding: 4px 8px; border-radius: 3px; white-space: nowrap; }
 .label.human { color: var(--orange); background: var(--orange-bg); }
@@ -314,14 +317,6 @@ html[data-theme=dark] .hero:before { opacity: .6; }
 }
 .sha-copy:hover { filter: none; border-color: var(--accent); color: var(--accent); }
 .sha-copy[data-done] { border-color: var(--orange); color: var(--orange); }
-
-.updates { margin-top: 16px; padding-top: 13px; border-top: 1px solid var(--line); }
-.updates h4 { font: 10px var(--mono); letter-spacing: 1.2px; color: var(--muted); margin: 0 0 10px; font-weight: 500; text-transform: uppercase; }
-.updates ul { margin: 0; padding: 0; list-style: none; }
-.updates li { position: relative; padding-left: 14px; margin-bottom: 7px; font-size: 11.5px; line-height: 1.75; color: var(--muted); }
-.updates li:before { content: ''; position: absolute; left: 2px; top: .72em; width: 4px; height: 4px; border-radius: 50%; background: var(--line); }
-.updates li b { color: var(--ink); font-weight: 550; }
-.updates .borrowed { font-size: 11px; color: var(--muted); margin: 0 0 9px; line-height: 1.7; }
 
 .hub-line { margin-top: 16px; font-size: 11px; color: var(--muted); line-height: 1.9; }
 .hub-line a { color: var(--accent); }

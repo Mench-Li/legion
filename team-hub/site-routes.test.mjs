@@ -209,66 +209,35 @@ describe('官网：下载区诚实地缺席', () => {
     assert.match(r.body, new RegExp(`data-copy="${sha}"`))
   })
 
-  test('★ 「本次更新」渲染成列表，`**粗体**` 转成 <b> 而不是原样漏出', async (t) => {
+  test('★ 下载卡片里**没有**「本次更新」那一块（业主看过之后要求撤掉）', async (t) => {
+    // 那张卡片已经承载了下载、版本/体积/日期、未签名说明与摘要校验。
+    // 再挂四段更新条目就不是"一张卡片"而是一页文档了 —— 超过上限之后
+    // **每一段都变便宜了**，包括那段真正要紧的"Windows 会拦你，点保留"。
     const routes = createSiteRoutes({
       root: makeSite(t),
-      readRelease: () => ({ url: '/legion/releases/r-1/x.exe', changes: ['把**正文**送到电脑端', '修了鉴权'] }),
+      readRelease: () => ({ url: '/legion/releases/r-1/x.exe', changes: ['把**正文**送到电脑端'], changesEn: [] }),
     })
-    const zh = await call(routes, { path: '/' })
-    assert.match(zh.body, /class="updates"/)
-    assert.match(zh.body, /本次更新/)
-    assert.match(zh.body, /把<b>正文<\/b>送到电脑端/)
-    assert.doesNotMatch(zh.body, /\*\*/, '标记必须被消化掉，不能原样出现在页面上')
-
-    const en = await call(createSiteRoutes({
-      root: makeSite(t),
-      readRelease: () => ({ url: '/legion/releases/r-1/x.exe', changes: ['x'] }),
-    }), { path: '/en' })
-    assert.match(en.body, /What&#39;s new|What's new/)
+    for (const path of ['/', '/en']) {
+      const r = await call(routes, { path })
+      assert.doesNotMatch(r.body, /class="updates"/, `${path} 不该有更新块`)
+      assert.doesNotMatch(r.body, /本次更新/, `${path} 不该有更新标题`)
+      assert.doesNotMatch(r.body, /送到电脑端/, `${path} 不该出现更新条目正文`)
+      assert.doesNotMatch(r.body, /\*\*/, `${path} 不该出现未消化的粗体标记`)
+    }
   })
 
-  test('★ 更新条目里的 HTML 被转义（先转义再换粗体标记，顺序反了就是注入口）', async (t) => {
-    const routes = createSiteRoutes({
-      root: makeSite(t),
-      readRelease: () => ({ url: '/legion/releases/r-1/x.exe', changes: ['<img src=x onerror=alert(1)> **ok**'] }),
-    })
+  test('★ 下载卡片里只有一个按钮，且不是「查看协作界面」', async (t) => {
+    // 2026-10-08 业主报"下载按钮没有文字"。真因是 `.deploy-item a`（0,1,1）比
+    // `.primary`（0,1,0）更具体，把按钮文字染成了 `--accent` —— 而按钮底色也是
+    // `--accent`，青绿字压青绿底。CSS 权重那种事只有真看渲染才算数，
+    // 这里钉住"只有一个按钮"，权重那条由下面 `真实模板不漂移` 里的源码断言守着。
+    const routes = createSiteRoutes({ root: makeSite(t), readRelease: () => ({ url: '/legion/releases/r-1/x.exe' }) })
     const r = await call(routes, { path: '/' })
-    assert.doesNotMatch(r.body, /<img src=x/)
-    assert.match(r.body, /&lt;img src=x/)
-    assert.match(r.body, /<b>ok<\/b>/, '转义之后粗体标记仍然生效')
-  })
-
-  test('没有更新条目就不出那一块（不出现一个空标题）', async (t) => {
-    const routes = createSiteRoutes({ root: makeSite(t), readRelease: () => ({ url: '/legion/releases/r-1/x.exe', changes: [] }) })
-    const r = await call(routes, { path: '/' })
-    assert.doesNotMatch(r.body, /class="updates"/)
-    assert.doesNotMatch(r.body, /本次更新/)
-  })
-
-  test('★ 英文页的更新条目：优先读英文；没有就退回中文**并标明是原文**', async (t) => {
-    // 发布清单只有发布端写的语言。英文页空着 = 丢信息；把中文当英文 = 骗人。
-    // 所以第三条路：照录 + 注明出处。
-    const zhOnly = createSiteRoutes({
-      root: makeSite(t),
-      readRelease: () => ({ url: '/legion/releases/r-1/x.exe', changes: ['修了鉴权'], changesEn: [] }),
-    })
-    const en = await call(zhOnly, { path: '/en' })
-    assert.match(en.body, /修了鉴权/, '英文页不能把信息丢掉')
-    assert.match(en.body, /only wrote release notes in Chinese/, '必须标明这是原文，不能悄悄当英文')
-
-    const withEn = createSiteRoutes({
-      root: makeSite(t),
-      readRelease: () => ({ url: '/legion/releases/r-1/x.exe', changes: ['修了鉴权'], changesEn: ['Fixed auth'] }),
-    })
-    const en2 = await call(withEn, { path: '/en' })
-    assert.match(en2.body, /Fixed auth/)
-    assert.doesNotMatch(en2.body, /修了鉴权/, '有英文条目时不该再出现中文')
-    assert.doesNotMatch(en2.body, /only wrote release notes/)
-
-    // 中文页只用中文条目，不受 changesEn 影响。
-    const zh = await call(withEn, { path: '/' })
-    assert.match(zh.body, /修了鉴权/)
-    assert.doesNotMatch(zh.body, /Fixed auth/)
+    const from = r.body.indexOf('class="dl-actions"')
+    const actions = r.body.slice(from, r.body.indexOf('</div>', from))
+    assert.equal((actions.match(/<a /g) || []).length, 1, '下载卡片里只该有一个链接按钮')
+    assert.match(actions, /下载电脑版/)
+    assert.doesNotMatch(actions, /查看协作界面/)
   })
 
   test('★ 入口页引用的样式表**带版本串**（否则边缘缓存会把新 HTML 配上旧 CSS）', async (t) => {
@@ -488,6 +457,23 @@ describe('官网：真实模板不漂移', () => {
         assert.equal(html.includes(ch), false, `${p} 里不该出现「${ch}」`)
       }
     }
+  })
+
+  test('★ 产品窗口与文字左右对齐（不许突破文字列）', () => {
+    // 业主否掉了"让产品窗口满宽多吃宽度"的做法：产品窗口必须和文字左右对齐、留白相同。
+    // 这条守的是**布局边界**，不是审美 —— 一旦有人再加一次满宽 hack，就红。
+    const css = readFileSync(fileURLToPath(new URL('../site/assets/site.css', import.meta.url)), 'utf8')
+    assert.doesNotMatch(css, /translateX\(-50%\)[\s\S]{0,120}\.product/, '不该用位移把窗口撑出列宽')
+    assert.doesNotMatch(css, /\.product,\s*\.live-shot-frame\s*\{/, '不该给产品窗口单独放宽')
+  })
+
+  test('★ `.deploy-item a` 必须是 `:not(.btn)` 作用域', () => {
+    // 2026-10-08 的线上故障：`.deploy-item a { color: var(--accent) }` 权重 0,1,1，
+    // 压过了 `.primary` 的 0,1,0 —— 下载按钮的文字被染成青绿，而底色也是青绿，
+    // **按钮上的字整块看不见**。修法就是把它限定在非按钮链接上。
+    const css = readFileSync(fileURLToPath(new URL('../site/assets/site.css', import.meta.url)), 'utf8')
+    assert.match(css, /\.deploy-item a:not\(\.btn\)/, '必须限定为 :not(.btn)')
+    assert.doesNotMatch(css, /^\.deploy-item a \{/m, '不该存在无限定的 .deploy-item a 规则')
   })
 
   test('★ 真实模板里不含任何真实项目数据（门口那条纪律）', () => {

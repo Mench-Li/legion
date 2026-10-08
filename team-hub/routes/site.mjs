@@ -200,13 +200,13 @@ export function renderLiveBlocks({
   //    而不是给一个点开 404 的按钮。
   const cta = has
     ? `<div class="actions">
-        <a href="${href}" class="btn primary">${c.cta} <span>↓</span></a>
-        <a href="#workflow" class="btn">${c.ctaSecond} <span>↓</span></a>
+        <a href="${href}" class="btn primary">${c.cta}</a>
+        <a href="#workflow" class="btn">${c.ctaSecond}</a>
       </div>
       <p class="hero-warn"><span class="warn">⚠</span> ${c.ctaWarnShort}</p>`
     : `<div class="actions">
-        <a href="#workflow" class="btn primary">${c.ctaSecond} <span>↓</span></a>
-        <a href="#capabilities" class="btn">${c.explore} <span>↗</span></a>
+        <a href="#workflow" class="btn primary">${c.ctaSecond}</a>
+        <a href="#capabilities" class="btn">${c.explore}</a>
       </div>`
 
   // ② 下载块（部署区里那张 Windows 卡片的内容）。
@@ -271,7 +271,7 @@ export function renderLiveBlocks({
     : registration === 'invite' ? c.regInvite
       : c.regClosed
   const hub = `<p>${reg}</p>
-    <a href="${esc(mobilePath)}">${c.mobile} <span class="arrow">↗</span></a>`
+    <a href="${esc(mobilePath)}">${c.mobile}</a>`
 
   return { cta, download, hub }
 }

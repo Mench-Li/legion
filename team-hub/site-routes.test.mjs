@@ -466,6 +466,30 @@ describe('官网：真实模板不漂移', () => {
     assert.ok(zh.includes('"deploy"'), '部署/下载锚点必须在')
   })
 
+  test('★ 品牌标记用**产品图标**，不是自绘的近似图形', () => {
+    // 2026-10-08 业主指出：左上角那个图标不对。之前这里放的是一段自绘的内联 SVG
+    // （六边形近似图），而产品指定图标是 `legion-icon-64.png`（三叶结）。
+    //   > 一个"看起来像 Logo"的图形与"产品自己的标记"，在没人逐像素对比过的时候，
+    //   > 是同一个东西 —— 但它会在每一个并排放着真 Logo 的场合露出来。
+    for (const p of ['index.html', join('en', 'index.html')]) {
+      const html = read(p)
+      assert.match(html, /class="mark" src="\/site\/assets\/legion-icon-64\.png"/, `${p} 的标记必须是产品图标`)
+      assert.doesNotMatch(html, /<svg class="mark"/, `${p} 不该再有自绘的内联 SVG 标记`)
+      assert.doesNotMatch(html, /viewBox="0 0 512 512"/, `${p} 里不该残留自绘标记的 path`)
+    }
+  })
+
+  test('★ 模板里没有装饰性箭头（↗ / ↓ / →）', () => {
+    // 业主指出箭头用多了。装饰箭头一律去掉；`→` 只允许出现在服务端渲染的
+    // Windows 提示里（"更多信息 → 仍要运行"），那是**真实的菜单路径**，不是装饰。
+    for (const p of ['index.html', join('en', 'index.html')]) {
+      const html = read(p)
+      for (const ch of ['↗', '↓', '→']) {
+        assert.equal(html.includes(ch), false, `${p} 里不该出现「${ch}」`)
+      }
+    }
+  })
+
   test('★ 真实模板里不含任何真实项目数据（门口那条纪律）', () => {
     // 自绘示意图里的示例数据是允许的（`T-001`/`T-002` 一眼是假的）；
     // 不允许的是**真实**任务号、本机绝对路径、内部文档名。真实任务号一旦漏进模板，

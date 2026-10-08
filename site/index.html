@@ -28,7 +28,7 @@
 
 <header class="nav">
   <a class="brand" href="#home" aria-label="Legion 首页">
-    <svg class="mark" viewBox="0 0 512 512" aria-hidden="true"><rect x="28" y="28" width="456" height="456" rx="100" fill="#0d1220"/><g stroke="#e6e9f0" stroke-width="15" stroke-linecap="round" fill="none"><path d="M256 234Q268 186 256 118M322 296Q356 304 374 326M190 296Q156 304 138 326"/></g><path d="M256 198 306 227 306 285 256 314 206 285 206 227Z" fill="#93c5fd"/><g fill="#e6e9f0"><circle cx="256" cy="118" r="21"/><circle cx="374" cy="326" r="21"/><circle cx="138" cy="326" r="21"/></g></svg>Legion
+    <img class="mark" src="/site/assets/legion-icon-64.png" width="31" height="31" alt="">Legion
   </a>
   <nav class="nav-links" aria-label="主导航">
     <a href="#capabilities">产品能力</a>
@@ -38,7 +38,7 @@
   <div class="nav-end">
     <span class="lang"><a href="/" aria-current="page">中</a><a href="/en" hreflang="en" lang="en">EN</a></span>
     <button class="theme" type="button" id="theme-toggle" aria-label="切换为深色设计" aria-pressed="false">◐</button>
-    <a class="btn" href="#deploy">了解部署 <span class="arrow">↗</span></a>
+    <a class="btn" href="#deploy">了解部署</a>
   </div>
 </header>
 
@@ -68,7 +68,7 @@
     </div>
     <button class="shot-open hero-shot" type="button" aria-label="放大查看目标与任务进展截图">
       <img id="hero-screenshot" src="/site/assets/shots/goal-detail.png" width="2160" height="734" alt="本地 Legion 目标详情：一个目标拆成八个阶段任务，分别对应需求、方案、拆解、测试设计、编码、审查、测试与部署角色，8/8 已完成。">
-      <span class="zoom-hint">放大查看 ↗</span>
+      <span class="zoom-hint">放大查看</span>
     </button>
     <div class="shot-bottom">
       <span id="shot-description">一个目标，八个阶段。每一步都有任务与负责岗位。</span>
@@ -94,19 +94,19 @@
       <div class="index">01 / ORGANIZE</div>
       <h3>按目标，组织你的团队</h3>
       <p>为工作空间绑定项目与角色编队。将目标拆成阶段任务，让岗位与职责对应起来。</p>
-      <div class="feature-foot">工作空间 → 编队 → 目标</div>
+      <div class="feature-foot">工作空间 · 编队 · 目标</div>
     </article>
     <article class="feature">
       <div class="index">02 / COORDINATE</div>
       <h3>按依赖，让工作接力</h3>
       <p>前置任务完成后，后续角色接手。需要你决策时停下，也支持暂停、转派和打回重做。</p>
-      <div class="feature-foot">任务依赖 → 阶段交接 → 人工闸门</div>
+      <div class="feature-foot">任务依赖 · 阶段交接 · 人工闸门</div>
     </article>
     <article class="feature">
       <div class="index">03 / VERIFY</div>
       <h3>看证据，再确认交付</h3>
       <p>将文件改动、测试结果和交付产物关联到任务。打开任务，就能看到结果及其来由。</p>
-      <div class="feature-foot">实现补丁 → 测试报告 → 验收记录</div>
+      <div class="feature-foot">实现补丁 · 测试报告 · 验收记录</div>
     </article>
   </div>
 </section>
@@ -128,7 +128,7 @@
     </div>
     <button class="shot-open" type="button" aria-label="放大查看 Agent 沟通交流截图">
       <img src="/site/assets/shots/agent-conversation.png" width="2880" height="1800" loading="lazy" alt="本地运行的 Legion Agent 对话页：左侧按岗位列出团队，中间是用户消息与编码工程师的回复及任务状态消息，下方为消息输入区。">
-      <span class="zoom-hint">放大查看 ↗</span>
+      <span class="zoom-hint">放大查看</span>
     </button>
   </div>
   <div class="shot-points">
@@ -161,7 +161,7 @@
     <h2>从一个目标，开始团队协作。</h2>
     <p>工作台与项目数据由你管理；使用远程模型时，相关上下文仍会发送给模型服务。</p>
   </div>
-  <a class="btn" href="#deploy">了解如何开始 <span class="arrow">↗</span></a>
+  <a class="btn" href="#deploy">了解如何开始</a>
 </section>
 
 <!-- ── 部署 / 下载 ──────────────────────────────────────────────────────── -->
@@ -185,7 +185,7 @@
 
 <footer class="footer">
   <a class="brand" href="#home">
-    <svg class="mark" viewBox="0 0 512 512" aria-hidden="true"><rect x="28" y="28" width="456" height="456" rx="100" fill="#0d1220"/><g stroke="#e6e9f0" stroke-width="15" stroke-linecap="round" fill="none"><path d="M256 234Q268 186 256 118M322 296Q356 304 374 326M190 296Q156 304 138 326"/></g><path d="M256 198 306 227 306 285 256 314 206 285 206 227Z" fill="#93c5fd"/><g fill="#e6e9f0"><circle cx="256" cy="118" r="21"/><circle cx="374" cy="326" r="21"/><circle cx="138" cy="326" r="21"/></g></svg>Legion
+    <img class="mark" src="/site/assets/legion-icon-64.png" width="31" height="31" alt="">Legion
   </a>
   <div class="footer-links">
     <a href="#capabilities">产品能力</a>
@@ -204,6 +204,7 @@
   </div>
   <img id="lightbox-image" alt="产品截图">
   <p id="lightbox-caption"></p>
+  <p class="lightbox-hint">按原始像素显示（1:1），可滚动查看。</p>
 </dialog>
 
 <script>

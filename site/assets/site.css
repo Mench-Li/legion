@@ -81,7 +81,6 @@ section { scroll-margin-top: 80px; }
 .mono { font-family: var(--mono); }
 .small { font-size: 12px; color: var(--muted); }
 .eyebrow { font: 11px var(--mono); letter-spacing: 2px; color: var(--accent); margin-bottom: 20px; }
-.arrow { padding-left: 12px; }
 
 .btn {
   display: inline-flex; align-items: center; justify-content: center; gap: 12px;
@@ -91,7 +90,7 @@ section { scroll-margin-top: 80px; }
 .primary { background: var(--accent); border-color: var(--accent); color: #fff; }
 .dark .primary, html[data-theme=dark] .primary { background: var(--accent); color: #102c30; }
 .dot { display: inline-block; width: 6px; height: 6px; border-radius: 50%; background: var(--accent); flex: none; }
-.mark { width: 31px; height: 31px; display: block; }
+.mark { width: 31px; height: 31px; display: block; border-radius: 7px; flex: none; }
 .brand { display: inline-flex; align-items: center; gap: 10px; font-size: 19px; font-weight: 650; letter-spacing: -.6px; }
 
 /* 语言切换：稿子里没有这一件，但本站是双语的。做成与 .nav-links 同样的字号与色调，
@@ -135,6 +134,19 @@ html[data-theme=dark] .hero:before { opacity: .6; }
   margin-top: 45px; background: var(--surface); border: 1px solid var(--line);
   border-radius: 11px; box-shadow: var(--shadow); overflow: hidden; text-align: left;
 }
+
+/* 大屏上让产品窗口**突破文字列**（满宽）。
+   理由：`agent-conversation.png` 是 2880 宽，塞进 1104 的内容列等于缩到 **0.38×**，
+   里面 13px 的正文渲染出来只有 5px —— 那才是"截图糊"的真正来源（源图本身是清晰的：
+   按 1:1 裁出来字口锐利）。放宽到 1360 后是 0.47×，虽然还不是 1:1，
+   但每一个字的可用像素多了近四分之一。文字列仍守 1104，只有产品窗口放宽。 */
+@media (min-width: 1240px) {
+  .product, .live-shot-frame {
+    width: min(1360px, calc(100vw - 48px));
+    margin-left: 50%;
+    transform: translateX(-50%);
+  }
+}
 .windowbar {
   height: 42px; display: flex; align-items: center; justify-content: space-between;
   border-bottom: 1px solid var(--line); padding: 0 17px; background: var(--soft);
@@ -165,8 +177,16 @@ html[data-theme=dark] .hero:before { opacity: .6; }
 }
 .shot-open img { display: block; width: 100%; height: auto; }
 .shot-open:hover { filter: none; }
-.hero-shot { height: 460px; display: flex; align-items: center; justify-content: center; }
-.hero-shot img { width: 100%; height: 100%; object-fit: contain; }
+
+/* ★ 这里**曾经**是 `height:460px` + `object-fit:contain`（照抄设计稿）。
+   实测（DPR=2、内容宽 1102）它有两个实打实的代价：
+     · 宽图（首屏那张 2160×734，2.94:1）在 460px 高的盒子里只填 374px，
+       上下各留 43px 空白；而盒子按 460px 算设备像素 ⇒ 源图**被放大 1.02×**；
+     · `contain` 居中落在 42.5px 处 —— **半像素偏移**，浏览器要插值，画面发虚。
+   现在让图片按自身比例铺满整宽：不再拉伸、不再有半像素偏移、也不再有空白。
+   代价是切标签页时首屏高度会变（宽图 374、竖图 690）—— 这是"看清"换来的，
+   比把一个可读的界面压进固定的框里更值。 */
+.hero-shot { display: flex; align-items: center; justify-content: center; }
 .zoom-hint {
   position: absolute; right: 16px; bottom: 14px; border: 1px solid #dce4df; border-radius: 4px;
   color: #315462; background: #fffffff0; padding: 9px 12px; font-size: 10px; line-height: 1.2;
@@ -192,13 +212,21 @@ html[data-theme=dark] .hero:before { opacity: .6; }
 /* 放大预览 */
 #shot-lightbox {
   border: 1px solid var(--line); background: var(--surface); color: var(--ink);
-  border-radius: 8px; padding: 17px; width: calc(100vw - 44px); max-width: 1600px; max-height: 94vh; overflow: auto;
+  border-radius: 8px; padding: 17px; width: calc(100vw - 44px); max-width: 1600px; max-height: 94vh;
+  overflow: auto;
 }
 #shot-lightbox::backdrop { background: #071b29c9; }
 .lightbox-header { display: flex; align-items: center; justify-content: space-between; gap: 20px; margin-bottom: 13px; }
 .lightbox-header span { font-size: 12px; color: var(--muted); }
 .lightbox-header button { border: 1px solid var(--line); border-radius: 5px; background: var(--soft); color: var(--ink); min-width: 66px; min-height: 40px; font-size: 12px; }
-#lightbox-image { display: block; width: 100%; height: auto; max-height: 76vh; object-fit: contain; }
+#lightbox-image { display: block; width: auto; max-width: none; height: auto; }
+/* ★ 灯箱按**原始像素**给图（1:1），而不是塞进容器宽度。
+   页面里的截图必然要缩（2880 宽的应用界面在任何列宽下都要缩到 0.38–0.47×），
+   所以"看清"这个需求只能由这个视图来满足 —— 缩在容器里再放大预览，
+   等于把已经丢掉的像素再放大一遍。图大就让它滚动，那是诚实的代价。
+   窄屏上仍限制在容器内，免得一屏放不下还得左右拖。 */
+@media (max-width: 900px) { #lightbox-image { max-width: 100%; } }
+.lightbox-hint { font-size: 11px; color: var(--muted); margin: 8px 0 0; }
 #lightbox-caption { font-size: 11px; line-height: 1.8; margin-top: 12px; color: var(--muted); }
 
 /* ── 分节 ─────────────────────────────────────────────────────────────────── */

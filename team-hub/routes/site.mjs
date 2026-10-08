@@ -118,6 +118,8 @@ const COPY = Object.freeze({
     regOpen: '这台 Hub 开放注册，打开手机端即可注册。',
     regInvite: '这台 Hub 开放注册（需要邀请码），打开手机端即可注册。',
     regClosed: '这台 Hub 未开放自助注册，请向管理员索取邀请码。',
+    trial: '在线试用（只读演示）',
+    trialNote: '一个目标拆出的八个阶段任务，可点开看描述、验收标准与证据。示例数据，不连实例。',
     // ★ 未签名构建专有的说明。换签名构建时**这段必须跟着改**，否则它会变成
     //   "照它说的做、然后发现对不上"，而那种文案教会人忽略这一块。
     unsigned:
@@ -145,6 +147,8 @@ const COPY = Object.freeze({
     regOpen: 'This Hub is open for sign-up — open the mobile app to register.',
     regInvite: 'This Hub is open for sign-up (invite code required) — open the mobile app to register.',
     regClosed: 'This Hub does not allow self sign-up; ask the administrator for an invite code.',
+    trial: 'Online trial (read-only demo)',
+    trialNote: 'One goal split into eight staged tasks — open any of them to see its description, acceptance criteria and evidence. Sample data; not connected to an instance.',
     unsigned:
       '<p class="dl-note">The installer is <b>not code-signed</b> (that needs a certificate). So:<br />' +
       '① If the browser says the file is “uncommon”, choose <b>Keep</b>;<br />' +
@@ -250,6 +254,8 @@ export function renderLiveBlocks({
     : registration === 'invite' ? c.regInvite
       : c.regClosed
   const hub = `<p>${reg}</p>
+    <p><a href="/demo">${c.trial}</a></p>
+    <p class="small">${c.trialNote}</p>
     <a href="${esc(mobilePath)}">${c.mobile}</a>`
 
   return { cta, download, hub }
@@ -290,7 +296,12 @@ export function createSiteRoutes({
   const resolveRelease = typeof readRelease === 'function' ? readRelease : () => ({ url: String(readRelease ?? '') })
 
   /** 两个入口页。`/` 是中文，`/en` 是英文（路径式双语，见方案）。 */
-  const PAGES = { zh: join(absRoot, 'index.html'), en: join(absRoot, 'en', 'index.html') }
+  /** 入口页。`/` 是中文，`/en` 是英文（路径式双语），`/demo` 是只读演示。 */
+  const PAGES = {
+    zh: join(absRoot, 'index.html'),
+    en: join(absRoot, 'en', 'index.html'),
+    demo: join(absRoot, 'demo', 'index.html'),
+  }
 
   // 模板缓存：只缓存**没有替换过**的模板，替换每次请求都做。
   const templates = new Map()
@@ -389,23 +400,30 @@ export function createSiteRoutes({
     res.end(body)
   }
 
-  /** 发入口页：读模板 → 注入动态块 → 送出。**入口页永不缓存**（它带着当次算出的下载地址）。 */
-  function servePage(req, res, lang) {
+  /**
+   * 发入口页：读模板 → 注入动态块 → 送出。**入口页永不缓存**（它带着当次算出的下载地址）。
+   *
+   * `live: false` 的那一页（演示页）没有动态块，所以不调 `resolveRelease()` ——
+   * 那是一次发布目录扫描，为一个静态页面每请求跑一遍是白花。
+   */
+  function servePage(req, res, lang, { live = true } = {}) {
     const abs = PAGES[lang]
     const template = readTemplate(abs)
     // 模板不存在 = 这个部署没有官网。返回 `false` 让请求落到门口页。
     if (template === null) return false
-    const r = resolveRelease() ?? {}
-    const blocks = renderLiveBlocks({
-      lang,
-      downloadUrl: r.url ?? '',
-      version: r.version ?? '',
-      size: formatSize(r.sizeBytes),
-      date: formatDate(r.at),
-      sha256: r.sha256 ?? '',
-      registration,
-      mobilePath,
-    })
+    const r = live ? (resolveRelease() ?? {}) : {}
+    const blocks = live
+      ? renderLiveBlocks({
+        lang,
+        downloadUrl: r.url ?? '',
+        version: r.version ?? '',
+        size: formatSize(r.sizeBytes),
+        date: formatDate(r.at),
+        sha256: r.sha256 ?? '',
+        registration,
+        mobilePath,
+      })
+      : { cta: '', download: '', hub: '' }
     // 样式表 URL 挂上版本串（理由见 `assetVersion()`）。
     // 用 split/join 而不是 replace：替换串里没有 `$` 序列，但保持与注入同一套写法，
     // 免得将来有人在这里塞进一个带 `$&` 的值。
@@ -428,6 +446,8 @@ export function createSiteRoutes({
     { method: 'HEAD', path: '/' },
     { method: 'GET', path: '/en' },
     { method: 'HEAD', path: '/en' },
+    { method: 'GET', path: '/demo' },
+    { method: 'HEAD', path: '/demo' },
     { method: 'GET', path: `${prefix}/*` },
     { method: 'HEAD', path: `${prefix}/*` },
   ]
@@ -439,9 +459,10 @@ export function createSiteRoutes({
       if (req.method !== 'GET' && req.method !== 'HEAD') return false
       const path = ctx.path
 
-      // 入口页：**只有这两条**。其余路径一律不认，免得把 `/api/*` 之类吞掉。
+      // 入口页：**只有这三条**。其余路径一律不认，免得把 `/api/*` 之类吞掉。
       if (path === '/') return servePage(req, res, 'zh')
       if (path === '/en' || path === '/en/') return servePage(req, res, 'en')
+      if (path === '/demo' || path === '/demo/') return servePage(req, res, 'demo', { live: false })
 
       // 静态资源。前缀比对带分隔符，`/siteofsomething` 不被吞。
       if (path !== prefix && !path.startsWith(`${prefix}/`)) return false

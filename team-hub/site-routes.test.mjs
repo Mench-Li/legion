@@ -440,7 +440,8 @@ describe('官网：真实模板不漂移', () => {
     // （六边形近似图），而产品指定图标是 `legion-icon-64.png`（三叶结）。
     //   > 一个"看起来像 Logo"的图形与"产品自己的标记"，在没人逐像素对比过的时候，
     //   > 是同一个东西 —— 但它会在每一个并排放着真 Logo 的场合露出来。
-    for (const p of ['index.html', join('en', 'index.html')]) {
+    // 演示页也是对外发布的页面，一并纳入。
+    for (const p of ['index.html', join('en', 'index.html'), join('demo', 'index.html')]) {
       const html = read(p)
       assert.match(html, /class="mark" src="\/site\/assets\/legion-icon-64\.png"/, `${p} 的标记必须是产品图标`)
       assert.doesNotMatch(html, /<svg class="mark"/, `${p} 不该再有自绘的内联 SVG 标记`)
@@ -449,13 +450,80 @@ describe('官网：真实模板不漂移', () => {
   })
 
   test('★ 模板里没有装饰性箭头（↗ / ↓ / →）', () => {
-    // 业主指出箭头用多了。装饰箭头一律去掉；`→` 只允许出现在服务端渲染的
-    // Windows 提示里（"更多信息 → 仍要运行"），那是**真实的菜单路径**，不是装饰。
+    // 业主指出箭头用多了。装饰箭头一律去掉。允许保留 `→` 的只有两种情形，
+    // 都在**内容**里而不是装饰里：
+    //   · 服务端渲染的 Windows 提示 —— "更多信息 → 仍要运行"（真实菜单路径）；
+    //   · 演示页的示例正文 —— "缺失键 → en → 原键名"（描述真实回退路径）。
+    // 所以这里只扫两个落地页模板；演示页单独由下面那条只看装饰位置。
     for (const p of ['index.html', join('en', 'index.html')]) {
       const html = read(p)
       for (const ch of ['↗', '↓', '→']) {
         assert.equal(html.includes(ch), false, `${p} 里不该出现「${ch}」`)
       }
+    }
+  })
+
+  test('★ `/demo` 发演示页；它没有动态块，所以不该去扫发布目录', async (t) => {
+    const root = makeSite(t)
+    mkdirSync(join(root, 'demo'), { recursive: true })
+    writeFileSync(join(root, 'demo', 'index.html'), '<!doctype html><html lang="zh-CN"><head><link rel="stylesheet" href="/site/assets/site.css"></head><body>示例数据 · 静态快照</body></html>')
+    let scanned = 0
+    const routes = createSiteRoutes({ root, readRelease: () => { scanned++; return {} } })
+    const r = await call(routes, { path: '/demo' })
+    assert.equal(r.status, 200)
+    assert.match(r.headers['content-type'], /text\/html/)
+    assert.match(r.body, /示例数据/)
+    assert.match(r.body, /site\.css\?v=/, '演示页也要带版本串')
+    assert.equal(scanned, 0, '静态演示页不该触发发布目录扫描')
+    // HEAD 与 /demo/ 也要通
+    assert.equal((await call(routes, { method: 'HEAD', path: '/demo' })).status, 200)
+    assert.equal((await call(routes, { path: '/demo/' })).status, 200)
+  })
+
+  test('`/demo` 的模板不存在时返回 false（与落地页同一套让路逻辑）', async (t) => {
+    const routes = createSiteRoutes({ root: makeSite(t), readRelease: FIXED })
+    assert.equal((await call(routes, { path: '/demo' })).handled, false)
+  })
+
+  test('★ 演示页必须**标明是示例数据**（一个看起来像真产品的演示会骗人）', () => {
+    // 只读演示的整个价值在于：它看起来像产品，所以**必须**在显眼处说清它是示例、
+    // 是静态快照、不连任何实例。少了这一句，演示就变成了一次误导。
+    const html = read(join('demo', 'index.html'))
+    assert.match(html, /示例数据/, '必须写明是示例数据')
+    assert.match(html, /静态快照/, '必须写明是静态快照')
+    assert.match(html, /不连接任何在线实例/, '必须写明不连实例')
+    assert.match(html, /name="robots" content="noindex"/, '演示页不该被索引（它是样本数据，不是内容）')
+    // 与落地页一样要挂版本串的样式表。
+    assert.match(html, /href="\/site\/assets\/site\.css"/)
+  })
+
+  test('★ 演示页可点：八个阶段、三个证据种类都得在', () => {
+    // 演示的主张是"看证据，再确认交付"，所以证据必须是可看的内容，
+    // 不能是一句"已完成"。三种证据（文档 / 补丁 / 用例清单）都要有样本。
+    const html = read(join('demo', 'index.html'))
+    const data = JSON.parse(html.slice(html.indexOf('<script type="application/json"'), html.indexOf('</script>', html.indexOf('<script type="application/json"'))).replace(/^[^>]*>/, ''))
+    assert.equal(data.stages.length, 8, '八个阶段')
+    assert.equal(data.goal.total, 8)
+    const kinds = new Set(data.stages.map((s) => s.evidence.kind))
+    for (const k of ['doc', 'diff', 'list']) assert.ok(kinds.has(k), `缺证据种类 ${k}`)
+    // 一处在等待人工决定 —— 演示的重点就是"需要你决定"这件事。
+    assert.equal(data.stages.filter((s) => s.status === 'human').length, 1, '应恰好有一处人工闸门')
+    for (const s of data.stages) {
+      assert.ok(s.desc && s.acceptance.length > 0, `${s.id} 缺描述或验收标准`)
+    }
+  })
+
+  test('★ 演示页的示例数据里没有真实项目数据，编号也一眼是假的', () => {
+    // 演示数据是**编的**。这两条防的是两件事：
+    //   ① 顺手把真任务/真路径粘进去 —— 那会让一个标着"示例数据"的页面成为内部信息出口；
+    //   ② 用了**看起来像真实编号**的 ID（`T-101`）—— 访客分不清它和 Hub 里真任务的区别。
+    //      所以演示编号统一带 `demo` 段（`T-demo-01`），一眼看得出是编的。
+    const html = read(join('demo', 'index.html'))
+    for (const re of [/[A-Za-z]:[\\/]/, /superpowers/, /team\.db/, /docs\/STATUS/, /\/api\//]) {
+      assert.doesNotMatch(html, re, `演示页不该命中 ${re}`)
+    }
+    for (const id of html.match(/\bT-[A-Za-z0-9-]+/g) ?? []) {
+      assert.match(id, /^T-demo-/, `${id} 这个编号看起来像真任务号，演示里必须一眼是假的`)
     }
   })
 

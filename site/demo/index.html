@@ -1,0 +1,259 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Legion — 在线试用（只读演示）</title>
+<meta name="description" content="Legion 的只读演示：一个目标拆出的八个阶段任务，点开任一阶段可以看到它的描述、验收标准、证据与验收记录。全部为示例数据。">
+<meta name="robots" content="noindex">
+<link rel="icon" href="/site/assets/favicon.png" sizes="32x32">
+<link rel="icon" href="/site/assets/legion-icon.png" sizes="512x512">
+<link rel="apple-touch-icon" href="/site/assets/legion-icon-180.png">
+<link rel="canonical" href="/demo">
+<link rel="stylesheet" href="/site/assets/site.css">
+<script>
+(function () {
+  try {
+    if (localStorage.getItem('legion-theme') === 'dark') document.documentElement.dataset.theme = 'dark'
+  } catch (e) {}
+})()
+</script>
+</head>
+<body>
+<div class="wrap">
+
+<header class="nav">
+  <a class="brand" href="/" aria-label="Legion 首页">
+    <img class="mark" src="/site/assets/legion-icon-64.png" width="31" height="31" alt="">Legion
+  </a>
+  <nav class="nav-links" aria-label="主导航">
+    <a href="/#capabilities">产品能力</a>
+    <a href="/#workflow">Agent 沟通</a>
+    <a href="/#delivery">交付与验收</a>
+  </nav>
+  <div class="nav-end">
+    <button class="theme" type="button" id="theme-toggle" aria-label="切换为深色设计" aria-pressed="false">◐</button>
+    <a class="btn" href="/">返回官网</a>
+  </div>
+</header>
+
+<main>
+
+<section class="section" style="padding-top:44px">
+  <div class="eyebrow">ONLINE TRIAL · READ-ONLY</div>
+  <h1 style="font-size:clamp(28px,3.4vw,40px);letter-spacing:-1.2px;line-height:1.3;max-width:22em">在线试用</h1>
+  <p class="sub" style="margin:16px 0 0">
+    一个目标拆出的八个阶段任务。点开任一阶段，看它的描述、验收标准、证据与验收记录 ——
+    这就是 Legion 里「验收不离开浏览器」的样子。
+  </p>
+
+  <div class="demo-banner">
+    <span>⚠</span>
+    <span><b>示例数据</b>。这一页是<strong>静态快照</strong>，不连接任何在线实例，也不代表你的数据。</span>
+    <span class="mono">SAMPLE DATA / STATIC SNAPSHOT</span>
+  </div>
+
+  <div class="demo-shell">
+    <div>
+      <div class="demo-goal" id="goal"></div>
+      <ul class="demo-chain" id="chain" role="list"></ul>
+      <p class="demo-legend" style="margin-top:14px">图中状态含一处在<b>等待你决定</b>的人工闸门 —— 那是刻意留的。</p>
+    </div>
+    <div class="demo-panel" id="panel" aria-live="polite"></div>
+  </div>
+</section>
+
+</main>
+
+<footer class="footer">
+  <a class="brand" href="/">
+    <img class="mark" src="/site/assets/legion-icon-64.png" width="25" height="25" alt="">Legion
+  </a>
+  <div class="footer-links">
+    <a href="/#capabilities">产品能力</a>
+    <a href="/#workflow">协作流程</a>
+    <a href="/#deploy">部署方式</a>
+  </div>
+  <span>© 2026 Legion</span>
+</footer>
+
+</div>
+
+<script type="application/json" id="demo-data">
+{
+  "goal": {
+    "id": "G-demo-01",
+    "title": "给导出功能加上多语言支持",
+    "note": "示例目标 · 演示用",
+    "progress": 5,
+    "total": 8
+  },
+  "stages": [
+    {
+      "id": "T-demo-01", "role": "需求分析师", "roleKey": "requirement", "name": "需求澄清", "status": "done",
+      "desc": "明确要覆盖哪些语言、日期与数字的格式约定，以及缺失翻译时怎么回退。",
+      "acceptance": ["覆盖 zh-CN / en / ja 三种语言", "缺失翻译时回退到 en，并在导出文件里标注", "结论写入目标级文档"],
+      "evidence": { "kind": "doc", "label": "需求与方案文档", "body": "范围：zh-CN / en / ja。\n回退：缺失键 → en → 原键名（不静默丢内容）。\n日期与数字：按 locale 格式化，导出时写死为生成时刻的 locale。\n未决：是否需要 RTL 支持 —— 本轮不做，记在待办。" },
+      "record": "已验收 · 结论与上面三条验收标准逐条对应"
+    },
+    {
+      "id": "T-demo-02", "role": "方案研究员", "roleKey": "researcher", "name": "方案搜索", "status": "done",
+      "desc": "比较现有 i18n 方案在「导出」这个场景下的取舍。",
+      "acceptance": ["至少比较两个方案", "给出选型理由与已知代价"],
+      "evidence": { "kind": "doc", "label": "选型说明", "body": "方案 A：运行时查词典，导出时按 locale 渲染。\n  优：一处维护；缺：导出的产物依赖运行时，CI 里要能跑起来。\n方案 B：导出时预展开成静态串。\n  优：产物自包含；缺：每次加语言要重跑导出。\n选 A。代价是 CI 必须能加载词典 —— 已记入 T-demo-08 的验收。" },
+      "record": "已验收"
+    },
+    {
+      "id": "T-demo-03", "role": "任务拆解师", "roleKey": "breaker", "name": "任务拆解", "status": "done",
+      "desc": "把目标拆成可独立验收的阶段任务，并标出依赖。",
+      "acceptance": ["每个任务有单一负责人", "依赖关系明确"],
+      "evidence": { "kind": "list", "label": "拆解结果", "items": ["T-demo-04 测试用例设计（依赖 T-demo-01）", "T-demo-05 编码实现（依赖 T-demo-04）", "T-demo-06 代码审查（依赖 T-demo-05）", "T-demo-07 测试执行（依赖 T-demo-06 通过）", "T-demo-08 部署与 CI/CD（依赖 T-demo-07 通过）"] },
+      "record": "已验收"
+    },
+    {
+      "id": "T-demo-04", "role": "测试设计师", "roleKey": "test-designer", "name": "测试用例设计", "status": "done",
+      "desc": "为导出路径设计可自动执行的用例，含回退与格式两个方向。",
+      "acceptance": ["覆盖三种语言各一条", "覆盖缺失翻译的回退", "覆盖日期与数字格式"],
+      "evidence": { "kind": "list", "label": "用例清单", "items": ["export.zh-cn 导出 zh-CN，断言表头与日期格式", "export.en 导出 en，断言数字千分位", "export.ja 导出 ja", "export.missing-key 缺键时落回 en 并带标注", "export.unknown-locale 未知 locale 时明确报错，不静默用默认"] },
+      "record": "已验收"
+    },
+    {
+      "id": "T-demo-05", "role": "编码工程师", "roleKey": "coder", "name": "编码实现", "status": "done",
+      "desc": "在导出路径上接入 locale 解析与回退。",
+      "acceptance": ["自测通过", "不改变默认（无 locale）时的输出"],
+      "evidence": { "kind": "diff", "label": "实现补丁（节选）", "body": "--- a/src/export/render.mjs\n+++ b/src/export/render.mjs\n@@ -12,6 +12,14 @@ export function render(rows, opts = {}) {\n-  const head = columns.map((c) => c.label)\n+  const locale = resolveLocale(opts.locale)\n+  const head = columns.map((c) => translate(c.label, locale))\n   const body = rows.map((r) => columns.map((c) => format(r[c.key], c, locale)))\n   return [...]\n }\n+\n+// 缺失键回退到 en，并在表头加 * 标注（不静默丢内容）。\n+function translate(key, locale) {\n+  return dict[locale]?.[key] ?? dict.en?.[key] ?? `${key} *`\n+}" },
+      "record": "已验收 · 自测与回归各跑一遍"
+    },
+    {
+      "id": "T-demo-06", "role": "代码审查员", "roleKey": "reviewer", "name": "代码审查", "status": "human",
+      "desc": "审查 T-demo-05 的补丁。有一条需要你拍板。",
+      "acceptance": ["审查意见逐条给出结论", "阻塞项已处理或明确接受"],
+      "evidence": { "kind": "list", "label": "审查意见", "items": ["① `translate()` 对未知 locale 直接落回 en —— 但 export.unknown-locale 要求明确报错。**两条互相矛盾，需要拍板**：是让未知 locale 报错（严格），还是落回 en 并标注（宽松）？", "② 表头尾部的 `*` 是一个 magic string，建议提成常量。", "③ 补丁没有改动默认路径，这一条对。"] },
+      "gate": "等你决定：未知 locale 是报错还是落回。定了之后我会把 ① 与 ② 一并处理。"
+    },
+    {
+      "id": "T-demo-07", "role": "测试执行员", "roleKey": "tester", "name": "测试执行", "status": "todo",
+      "desc": "前置任务完成后执行 T-demo-04 设计的用例并回报结果。",
+      "acceptance": ["全部用例执行并留档", "失败项有结论"],
+      "evidence": { "kind": "pending", "label": "尚未执行", "body": "等待 T-demo-06 通过。" }
+    },
+    {
+      "id": "T-demo-08", "role": "部署运维员", "roleKey": "devops", "name": "部署与 CI/CD", "status": "todo",
+      "desc": "把导出路径的词典加载接进 CI（T-demo-02 选型的已知代价）。",
+      "acceptance": ["CI 里能加载词典", "导出产物有版本标记"],
+      "evidence": { "kind": "pending", "label": "尚未开始", "body": "等待 T-demo-07 通过。" }
+    }
+  ]
+}
+</script>
+
+<script>
+(function () {
+  // ── 主题 ──────────────────────────────────────────────────────────────────
+  var tb = document.getElementById('theme-toggle')
+  tb.addEventListener('click', function () {
+    var dark = document.documentElement.dataset.theme !== 'dark'
+    document.documentElement.dataset.theme = dark ? 'dark' : 'light'
+    tb.setAttribute('aria-pressed', String(dark))
+    tb.setAttribute('aria-label', dark ? '切换为浅色设计' : '切换为深色设计')
+    try { localStorage.setItem('legion-theme', dark ? 'dark' : 'light') } catch (e) {}
+  })
+  if (document.documentElement.dataset.theme === 'dark') {
+    tb.setAttribute('aria-pressed', 'true'); tb.setAttribute('aria-label', '切换为浅色设计')
+  }
+
+  var data = JSON.parse(document.getElementById('demo-data').textContent)
+  var STATUS = { done: ['已完成', 'done'], human: ['待你决定', 'human'], todo: ['待办', ''] }
+
+  /** 造元素的小工具。**一律用 textContent 填数据** —— 演示数据也不走 innerHTML，
+      免得"示例"变成一条注入路径。 */
+  function el(tag, cls, text) {
+    var n = document.createElement(tag)
+    if (cls) n.className = cls
+    if (text !== undefined && text !== null) n.textContent = text
+    return n
+  }
+
+  // ── 目标卡 ────────────────────────────────────────────────────────────────
+  var g = data.goal
+  var goal = document.getElementById('goal')
+  goal.appendChild(el('div', 'k', '当前目标'))
+  goal.appendChild(el('div', 't', g.title))
+  var m = el('div', 'm')
+  m.appendChild(el('span', 'mono', g.id))
+  m.appendChild(el('span', 'mono', g.progress + ' / ' + g.total + ' 阶段已完成'))
+  goal.appendChild(m)
+  var bar = el('div', 'bar'); var fill = el('i')
+  fill.style.width = Math.round((g.progress / g.total) * 100) + '%'
+  bar.appendChild(fill); goal.appendChild(bar)
+
+  // ── 阶段链 ────────────────────────────────────────────────────────────────
+  var chain = document.getElementById('chain')
+  var panel = document.getElementById('panel')
+
+  function renderPanel(stage) {
+    panel.textContent = ''
+    var ph = el('div', 'ph')
+    ph.appendChild(el('h3', null, stage.name))
+    var st = STATUS[stage.status] || ['', '']
+    ph.appendChild(el('span', 'pill ' + st[1], st[0]))
+    panel.appendChild(ph)
+    panel.appendChild(el('div', 'crumb', stage.id + ' · ' + stage.role + ' · ' + stage.roleKey))
+
+    panel.appendChild(el('h4', null, '任务描述'))
+    panel.appendChild(el('p', null, stage.desc))
+
+    panel.appendChild(el('h4', null, '验收标准'))
+    var ul = el('ul')
+    stage.acceptance.forEach(function (a) { ul.appendChild(el('li', null, a)) })
+    panel.appendChild(ul)
+
+    var ev = stage.evidence
+    panel.appendChild(el('h4', null, '证据 · ' + ev.label))
+    if (ev.kind === 'list') {
+      var ul2 = el('ul')
+      ev.items.forEach(function (i) { ul2.appendChild(el('li', null, i)) })
+      panel.appendChild(ul2)
+    } else if (ev.kind === 'pending') {
+      panel.appendChild(el('p', null, ev.body))
+    } else {
+      // doc / diff 都按等宽块显示：内容是数据，用 textContent 填。
+      panel.appendChild(el('pre', null, ev.body))
+    }
+
+    panel.appendChild(el('h4', null, '验收'))
+    if (stage.gate) panel.appendChild(el('div', 'gate', stage.gate))
+    else if (stage.record) panel.appendChild(el('div', 'rec', stage.record))
+    else panel.appendChild(el('p', null, '尚未到验收环节。'))
+  }
+
+  var buttons = []
+  data.stages.forEach(function (stage, i) {
+    var li = el('li')
+    var b = el('button', 'demo-step')
+    b.type = 'button'
+    b.appendChild(el('span', 'n', String(i + 1).padStart(2, '0')))
+    var who = el('span')
+    who.appendChild(el('span', 'who', stage.role))
+    who.appendChild(el('div', 'what', stage.name))
+    b.appendChild(who)
+    var st = STATUS[stage.status] || ['', '']
+    b.appendChild(el('span', 'pill ' + st[1] + ' st', st[0]))
+    b.addEventListener('click', function () {
+      buttons.forEach(function (x) { x.setAttribute('aria-current', 'false') })
+      b.setAttribute('aria-current', 'true')
+      renderPanel(stage)
+    })
+    buttons.push(b)
+    li.appendChild(b)
+    chain.appendChild(li)
+  })
+
+  // 默认打开**人工闸门**那一阶段 —— 演示的重点就是"需要你决定"这件事。
+  var idx = Math.max(0, data.stages.findIndex(function (s) { return s.status === 'human' }))
+  buttons[idx].setAttribute('aria-current', 'true')
+  renderPanel(data.stages[idx])
+})()
+</script>
+</body>
+</html>

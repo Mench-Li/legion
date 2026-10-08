@@ -7687,6 +7687,7 @@ import { createIdentityRoutes } from './routes/identity.mjs'
 import { createMobileRoutes } from './routes/mobile.mjs'
 import { createPortalRoutes } from './routes/portal.mjs'
 import { createReleaseRoutes, latestInstaller } from './routes/releases.mjs'
+import { createSiteRoutes } from './routes/site.mjs'
 import { createUserStore } from './user-store.mjs'
 import { createDeviceStore } from './device-store.mjs'
 import { createNodeGateway } from './node-gateway.mjs'
@@ -7952,14 +7953,49 @@ if (REMOTE_AGENT_ENABLED) {
   // ★ 传的是**函数**，不是算好的字符串：传字符串会把"最新的一份"冻在服务启动那一刻，
   //   于是发一份新版本之后门口页还在发旧的，而**没有任何地方会报错**
   //   （2026-10-07 实测：上传新发布后首页仍指向上一版，重启才对）。
+  //
+  // 门口页与官网共用**这一个**取法：两处各算一次，就有两处算出不同答案的余地。
   const explicitDownload = String(CFG.values.downloadUrl ?? '').trim()
+  const desktopVersion = CFG.values.desktopVersion ?? ''
+  function describeDownload() {
+    if (explicitDownload.length > 0) {
+      // 显式配置那条路：只知道地址，不知道发布目录在不在用，所以 `releaseId` 留空
+      //（官网据它决定要不要给「全部历史版本」链接——指过去 404 的链接不能给）。
+      return { url: explicitDownload, releaseId: '', sizeBytes: null, at: null, version: desktopVersion }
+    }
+    const found = releasesDir.length > 0 ? latestInstaller(releasesDir) : null
+    if (found === null) {
+      return { url: '', releaseId: '', sizeBytes: null, at: null, version: desktopVersion }
+    }
+    return {
+      url: `/legion/releases/${encodeURIComponent(found.releaseId)}/Legion-Setup-win-x64.exe`,
+      releaseId: found.releaseId,
+      sizeBytes: found.sizeBytes,
+      at: found.mtimeMs,
+      version: desktopVersion,
+    }
+  }
   router.families.unshift(createPortalRoutes({
-    downloadUrl: () => {
-      if (explicitDownload.length > 0) return explicitDownload
-      const found = releasesDir.length > 0 ? latestInstaller(releasesDir) : null
-      return found === null ? '' : `/legion/releases/${encodeURIComponent(found.releaseId)}/Legion-Setup-win-x64.exe`
-    },
-    version: CFG.values.desktopVersion ?? '',
+    downloadUrl: () => describeDownload().url,
+    version: desktopVersion,
+    registration: CFG.values.registration ?? 'closed',
+  }))
+
+  // 官网（`GET /` 与 `GET /en`、静态资源 `GET /site/*`）**再 unshift 一次**，
+  // 于是它排在门口页**之前**：先问官网；官网答不了（`site/index.html` 不存在，
+  // 或路径不归它管）就返回 false，落到门口页。
+  //
+  // 这带来两条性质，都是刻意的：
+  //   · 没有 `site/` 的部署，`/` 仍旧由门口页回答 —— **不需要任何新配置**，
+  //     别的 Hub 部署者不受影响；不想要官网的，删掉 `site/index.html` 即可退回。
+  //   · 门口页**不删**：它是那条"最新安装包每次现算"回归的看门人
+  //     （`portal-routes.test.mjs`），也是官网缺位时的兜底。
+  //
+  // 站点目录硬编码为 `<仓库>/site`，与 `mobile.mjs` 硬编码
+  // `join(ROOT,'workbench','mobile')` 同一先例——因此不新增任何配置项。
+  router.families.unshift(createSiteRoutes({
+    root: join(ROOT, 'site'),
+    readRelease: describeDownload,
     registration: CFG.values.registration ?? 'closed',
   }))
 

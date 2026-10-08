@@ -1,0 +1,234 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<meta name="color-scheme" content="dark light" />
+<title>Legion — An AI Office for multi-agent delivery</title>
+<meta name="description" content="Legion is a local-first multi-agent collaboration and delivery platform. You issue goals as the general; a roster turns each goal into a staged task chain, and the process and its evidence settle back onto the task. Code and credentials stay on your own machine." />
+<link rel="icon" href="/mobile/icon-192.png" />
+<link rel="canonical" href="/en" />
+<link rel="alternate" hreflang="zh-CN" href="/" />
+<link rel="alternate" hreflang="en" href="/en" />
+<link rel="alternate" hreflang="x-default" href="/" />
+<link rel="stylesheet" href="/site/assets/site.css" />
+</head>
+<body>
+
+<header class="nav">
+  <div class="wrap nav-inner">
+    <a class="brand" href="/en">
+      <svg viewBox="0 0 24 24" aria-hidden="true">
+        <rect x="1" y="1" width="22" height="22" rx="5.5" fill="#0d1220" />
+        <g stroke="#e6e9f0" stroke-width="1.4" stroke-linecap="round">
+          <path d="M12 10.4 V5.9" /><path d="M15 13.1 L18.4 15.1" /><path d="M9 13.1 L5.6 15.1" />
+        </g>
+        <polygon points="12,8.5 14.5,10 14.5,13 12,14.5 9.5,13 9.5,10" fill="#93c5fd" />
+        <circle cx="12" cy="4.7" r="1.7" fill="#e6e9f0" />
+        <circle cx="19.3" cy="16" r="1.7" fill="#e6e9f0" />
+        <circle cx="4.7" cy="16" r="1.7" fill="#e6e9f0" />
+      </svg>
+      Legion
+    </a>
+    <nav class="nav-links">
+      <a href="#features">Capabilities</a>
+      <a href="#ui">Interface</a>
+      <a href="#download">Download</a>
+      <a href="#start">Get started</a>
+    </nav>
+    <div class="nav-right">
+      <span class="switch">
+        <a href="/" hreflang="zh-CN" lang="zh-CN">中文</a>
+        <a href="/en" aria-current="page">EN</a>
+      </span>
+      <a class="btn btn-primary" href="#download">Download</a>
+    </div>
+  </div>
+</header>
+
+<main>
+
+  <!-- ── Hero ─────────────────────────────────────────────────────────────── -->
+  <section class="hero" id="ui">
+    <div class="wrap">
+      <span class="eyebrow">Public preview</span>
+      <h1>Put a <span class="grad">roster of agents</span> on delivery</h1>
+      <p class="lede">
+        Most tools ask you to write instruction after instruction. In Legion you act as the
+        <b>general</b>: you state the goal, the roster breaks it into a staged task chain and works
+        through it — while the diffs, test evidence and acceptance records settle back onto the task.
+        Your code, terminal and credentials <b>never leave your own machine</b>.
+      </p>
+
+      <!-- legion:cta -->
+
+      <!-- legion:hub-line -->
+
+      <div class="shots">
+        <figure class="shot">
+          <!-- Illustrative UI: sample data only, no real project content -->
+          <div class="mock" role="img" aria-label="Illustration of the command console (sample data)">
+            <div class="mock-bar"><i></i><i></i><i></i></div>
+            <div class="mock-body">
+              <div class="mock-rail"><i></i><i class="on"></i><i></i><i></i><i></i></div>
+              <div class="mock-side">
+                <div class="mock-space">Sample space</div>
+                <div class="mock-search">Search roles or spaces</div>
+                <div class="mock-agent on"><span class="av">C</span><span><span class="nm">Coder</span><br /><span class="st">Idle · 1 active task</span></span></div>
+                <div class="mock-agent"><span class="av">R</span><span><span class="nm">Requirements analyst</span><br /><span class="st">Idle</span></span></div>
+                <div class="mock-agent"><span class="av">S</span><span><span class="nm">Solution researcher</span><br /><span class="st">Idle</span></span></div>
+                <div class="mock-agent"><span class="av">T</span><span><span class="nm">Test runner</span><br /><span class="st">Idle</span></span></div>
+                <div class="mock-agent"><span class="av">D</span><span><span class="nm">DevOps</span><br /><span class="st">Grouped · 1 active task</span></span></div>
+              </div>
+              <div class="mock-main">
+                <div class="mock-head"><div class="nm">Coder</div><div class="st">Sample space · coder · idle · 21/22 done</div></div>
+                <div class="mock-tabs"><span class="on">Chat</span><span>Tasks</span></div>
+                <div class="mock-card">
+                  <div class="mock-card-h"><span>Task summary</span><em class="mock-pill">Idle</em></div>
+                  <div class="mock-count">1 active task · 21 completed</div>
+                  <div class="mock-row"><span>T-001 · [sample] placeholder task title</span><em>To claim</em></div>
+                  <div class="mock-row"><span>T-002 · [sample] diffs and test evidence</span><em>Done</em></div>
+                </div>
+                <div class="mock-input"><span>Message Coder…</span><em>Send</em></div>
+              </div>
+            </div>
+          </div>
+          <figcaption class="ill">Command console · <b>illustration with sample data</b>, not a live screenshot</figcaption>
+        </figure>
+
+        <figure class="shot phone">
+          <div class="mock-phone" role="img" aria-label="Illustration of the mobile app (sample data)">
+            <div class="scr">
+              <div class="nm">Coder</div>
+              <div class="st">Sample space · idle · 21/22 done</div>
+              <div class="card">
+                <div class="mock-card-h"><span>Task summary</span><em class="mock-pill">Idle</em></div>
+                <div class="mock-count">1 active task · 21 completed</div>
+                <div class="row"><span>T-001 · [sample] placeholder</span><em>To claim</em></div>
+                <div class="row"><span>T-002 · [sample] evidence</span><em>Done</em></div>
+              </div>
+              <div class="mock-input"><span>Message…</span><em>Send</em></div>
+            </div>
+          </div>
+          <figcaption class="ill">Mobile app · <b>illustration</b></figcaption>
+        </figure>
+      </div>
+    </div>
+  </section>
+
+  <!-- ── Capabilities ─────────────────────────────────────────────────────── -->
+  <section class="band" id="features">
+    <div class="wrap">
+      <h2>You issue goals, not chores</h2>
+      <p class="sub">
+        Most tools ask you to write instruction after instruction. Legion asks what you want done.
+        The roster splits it, assigns it, executes and verifies it — and leaves the evidence on the
+        task. You just accept the result.
+      </p>
+      <div class="cards">
+        <div class="card">
+          <span class="ico">🎯</span>
+          <h3>A goal becomes a task chain</h3>
+          <p>Publish one goal; it is split into staged tasks that flow by dependency. Every transition runs through a state machine — traceable, pausable, cancellable.</p>
+        </div>
+        <div class="card">
+          <span class="ico">👥</span>
+          <h3>A roster, each with one job</h3>
+          <p>Every space has its own roster. The software pipeline ships with eight roles, from requirements clarification all the way to deploy and CI/CD.</p>
+        </div>
+        <div class="card">
+          <span class="ico">🔒</span>
+          <h3>Code stays on your machine</h3>
+          <p>Local-first: repos, terminal, build tools and model credentials live on your computer. The Hub only handles identity, routing and records.</p>
+        </div>
+        <div class="card">
+          <span class="ico">📎</span>
+          <h3>Evidence settles onto the task</h3>
+          <p>Patches, diffs, test output, artifacts and acceptance records all hang off the same task. Acceptance never leaves the browser.</p>
+        </div>
+      </div>
+
+      <div class="roster">
+        <span>Requirements analyst</span><span>Solution researcher</span><span>Task breaker</span><span>Test designer</span>
+        <span>Coder</span><span>Reviewer</span><span>Test runner</span><span>DevOps</span>
+      </div>
+      <p class="hint">The default roster of the software pipeline. A roster is a portable, versioned artifact — you can define your own roles and stages.</p>
+    </div>
+  </section>
+
+  <!-- ── Architecture ─────────────────────────────────────────────────────── -->
+  <section class="band" id="arch">
+    <div class="wrap">
+      <h2>Three layers, each doing its part</h2>
+      <p class="sub">
+        The Hub runs neither your code nor a large model. Your computer dials out from inside the
+        network, so no inbound port has to be opened on the router.
+      </p>
+      <div class="arch">
+        <div class="arch-box">
+          <div class="tag">Phone</div>
+          <h4>See and direct</h4>
+          <p>Who is online, who is busy, who is stuck. Talk to agents, publish goals, approve risky actions. Installable to your home screen.</p>
+        </div>
+        <div class="arch-box">
+          <div class="tag">Hub</div>
+          <h4>Always-on central point</h4>
+          <p>Identity, task routing, conversations and progress events, presence and notifications. The authority for tasks and collaboration records.</p>
+        </div>
+        <div class="arch-box">
+          <div class="tag">Your computer</div>
+          <h4>Where the work happens</h4>
+          <p>Repos, terminal, builds and tests, local models. When it is offline, tasks queue — the Hub will not read your workspace for it.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ── Download ─────────────────────────────────────────────────────────── -->
+  <section class="band" id="download">
+    <div class="wrap">
+      <h2>Download for Windows</h2>
+      <p class="sub">The desktop app bundles the Hub, the workbench and the execution node — install it, then connect from your phone.</p>
+      <div class="dl">
+        <!-- legion:download -->
+      </div>
+    </div>
+  </section>
+
+  <!-- ── Get started ──────────────────────────────────────────────────────── -->
+  <section class="band" id="start">
+    <div class="wrap">
+      <h2>Three steps</h2>
+      <p class="sub">From download to your first roster running.</p>
+      <div class="steps">
+        <div class="step">
+          <h3>Install the desktop app</h3>
+          <p>Download and install; it starts the local Hub and workbench. The first launch walks you through creating a space.</p>
+        </div>
+        <div class="step">
+          <h3>Connect your phone</h3>
+          <p>Open <code>/mobile/</code> on your phone and install it to the home screen. Desktop and mobile share one account.</p>
+        </div>
+        <div class="step">
+          <h3>Publish your first goal</h3>
+          <p>Write what you want done in the console. The roster takes over; progress and evidence come back onto the task for you to accept.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+</main>
+
+<footer>
+  <div class="wrap foot-inner">
+    <span>Legion · an AI Office for multi-agent delivery</span>
+    <span class="foot-links">
+      <a href="/mobile/">Mobile app</a>
+      <a href="/api/identity/status">Service status</a>
+    </span>
+    <span class="foot-copy">© 2026 Legion</span>
+  </div>
+</footer>
+
+</body>
+</html>

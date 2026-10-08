@@ -1,0 +1,231 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<meta name="color-scheme" content="dark light" />
+<title>Legion —— AI Office 军团作战平台</title>
+<meta name="description" content="Legion 是一套本地优先的多智能体协作与交付平台：你以将军身份发布目标，编队把目标拆成阶段任务链执行，过程与证据沉淀回任务。代码和凭证留在你自己的机器上。" />
+<link rel="icon" href="/mobile/icon-192.png" />
+<link rel="canonical" href="/" />
+<link rel="alternate" hreflang="zh-CN" href="/" />
+<link rel="alternate" hreflang="en" href="/en" />
+<link rel="alternate" hreflang="x-default" href="/" />
+<link rel="stylesheet" href="/site/assets/site.css" />
+</head>
+<body>
+
+<header class="nav">
+  <div class="wrap nav-inner">
+    <a class="brand" href="/">
+      <svg viewBox="0 0 24 24" aria-hidden="true">
+        <rect x="1" y="1" width="22" height="22" rx="5.5" fill="#0d1220" />
+        <g stroke="#e6e9f0" stroke-width="1.4" stroke-linecap="round">
+          <path d="M12 10.4 V5.9" /><path d="M15 13.1 L18.4 15.1" /><path d="M9 13.1 L5.6 15.1" />
+        </g>
+        <polygon points="12,8.5 14.5,10 14.5,13 12,14.5 9.5,13 9.5,10" fill="#93c5fd" />
+        <circle cx="12" cy="4.7" r="1.7" fill="#e6e9f0" />
+        <circle cx="19.3" cy="16" r="1.7" fill="#e6e9f0" />
+        <circle cx="4.7" cy="16" r="1.7" fill="#e6e9f0" />
+      </svg>
+      Legion
+    </a>
+    <nav class="nav-links">
+      <a href="#features">能力</a>
+      <a href="#ui">界面</a>
+      <a href="#download">下载</a>
+      <a href="#start">开始</a>
+    </nav>
+    <div class="nav-right">
+      <span class="switch">
+        <a href="/" aria-current="page">中文</a>
+        <a href="/en" hreflang="en" lang="en">EN</a>
+      </span>
+      <a class="btn btn-primary" href="#download">下载</a>
+    </div>
+  </div>
+</header>
+
+<main>
+
+  <!-- ── Hero ─────────────────────────────────────────────────────────────── -->
+  <section class="hero" id="ui">
+    <div class="wrap">
+      <span class="eyebrow">公开预览</span>
+      <h1>让一支 <span class="grad">Agent 编队</span>替你交付</h1>
+      <p class="lede">
+        你以<b>将军</b>身份发布目标，而不是逐个派任务：目标自动拆成阶段任务链，
+        交给这个空间专属的<b>编队</b>执行，过程、补丁、测试证据与验收记录统一沉淀回任务。
+        而代码、终端与凭证，<b>始终留在你自己的机器上</b>。
+      </p>
+
+      <!-- legion:cta -->
+
+      <!-- legion:hub-line -->
+
+      <div class="shots">
+        <figure class="shot">
+          <!-- 界面示意：示例数据，不含任何真实项目内容 -->
+          <div class="mock" role="img" aria-label="军团指挥台界面示意（示例数据）">
+            <div class="mock-bar"><i></i><i></i><i></i></div>
+            <div class="mock-body">
+              <div class="mock-rail"><i></i><i class="on"></i><i></i><i></i><i></i></div>
+              <div class="mock-side">
+                <div class="mock-space">示例空间</div>
+                <div class="mock-search">搜索岗位或空间</div>
+                <div class="mock-agent on"><span class="av">编</span><span><span class="nm">编码工程师</span><br /><span class="st">空闲 · 1 个活动任务</span></span></div>
+                <div class="mock-agent"><span class="av">需</span><span><span class="nm">需求分析师</span><br /><span class="st">空闲</span></span></div>
+                <div class="mock-agent"><span class="av">方</span><span><span class="nm">方案研究员</span><br /><span class="st">空闲</span></span></div>
+                <div class="mock-agent"><span class="av">测</span><span><span class="nm">测试执行员</span><br /><span class="st">空闲</span></span></div>
+                <div class="mock-agent"><span class="av">部</span><span><span class="nm">部署运维员</span><br /><span class="st">受组 · 1 个活动任务</span></span></div>
+              </div>
+              <div class="mock-main">
+                <div class="mock-head"><div class="nm">编码工程师</div><div class="st">示例空间 · coder · 空闲 · 已完成 21/22</div></div>
+                <div class="mock-tabs"><span class="on">对话</span><span>任务</span></div>
+                <div class="mock-card">
+                  <div class="mock-card-h"><span>仓库任务摘要</span><em class="mock-pill">空闲</em></div>
+                  <div class="mock-count">1 个活动任务 · 21 个已完成</div>
+                  <div class="mock-row"><span>T-001 ·【示例】占位任务标题，用来看板形态</span><em>待认领</em></div>
+                  <div class="mock-row"><span>T-002 ·【示例】任务详情里有改动与测试证据</span><em>已完成</em></div>
+                </div>
+                <div class="mock-input"><span>发消息给 编码工程师…</span><em>发送</em></div>
+              </div>
+            </div>
+          </div>
+          <figcaption class="ill">军团指挥台 · <b>界面示意（示例数据）</b>，非真实运行截图</figcaption>
+        </figure>
+
+        <figure class="shot phone">
+          <div class="mock-phone" role="img" aria-label="手机端界面示意（示例数据）">
+            <div class="scr">
+              <div class="nm">编码工程师</div>
+              <div class="st">示例空间 · 空闲 · 已完成 21/22</div>
+              <div class="card">
+                <div class="mock-card-h"><span>任务摘要</span><em class="mock-pill">空闲</em></div>
+                <div class="mock-count">1 个活动任务 · 21 个已完成</div>
+                <div class="row"><span>T-001 ·【示例】占位标题</span><em>待认领</em></div>
+                <div class="row"><span>T-002 ·【示例】改动与证据</span><em>已完成</em></div>
+              </div>
+              <div class="mock-input"><span>发消息…</span><em>发送</em></div>
+            </div>
+          </div>
+          <figcaption class="ill">手机端 · <b>界面示意</b></figcaption>
+        </figure>
+      </div>
+    </div>
+  </section>
+
+  <!-- ── 能力 ─────────────────────────────────────────────────────────────── -->
+  <section class="band" id="features">
+    <div class="wrap">
+      <h2>你发布目标，不是派任务</h2>
+      <p class="sub">
+        大多数工具要你写一条条指令。Legion 要你说清"要什么"，然后由编队把它拆开、分工、执行、
+        验证，并把每一步的凭据留在任务上——你只负责验收。
+      </p>
+      <div class="cards">
+        <div class="card">
+          <span class="ico">🎯</span>
+          <h3>目标自动拆成任务链</h3>
+          <p>发布一个目标，它被拆成阶段任务，按依赖依次流转；每次流转都由状态机管着，可追溯、可暂停、可取消。</p>
+        </div>
+        <div class="card">
+          <span class="ico">👥</span>
+          <h3>编队各司其职</h3>
+          <p>每个空间有自己的岗位编队。软件流水线默认八个岗位，从需求澄清一路走到部署与 CI/CD。</p>
+        </div>
+        <div class="card">
+          <span class="ico">🔒</span>
+          <h3>代码留在你自己的机器上</h3>
+          <p>本地优先：仓库、终端、构建工具与模型凭证都在你的电脑，Hub 只做身份、路由与记录。</p>
+        </div>
+        <div class="card">
+          <span class="ico">📎</span>
+          <h3>过程与证据沉淀回任务</h3>
+          <p>补丁、diff、测试输出、产物与验收记录都挂在同一条任务上，验收不离开浏览器。</p>
+        </div>
+      </div>
+
+      <div class="roster">
+        <span>需求分析师</span><span>方案研究员</span><span>任务拆解师</span><span>测试设计师</span>
+        <span>编码工程师</span><span>代码审查员</span><span>测试执行员</span><span>部署运维员</span>
+      </div>
+      <p class="hint">软件流水线的默认编队。编队是一份可打包、可移植的工件，你也可以定义自己的岗位与阶段。</p>
+    </div>
+  </section>
+
+  <!-- ── 架构 ─────────────────────────────────────────────────────────────── -->
+  <section class="band" id="arch">
+    <div class="wrap">
+      <h2>三层，各安其位</h2>
+      <p class="sub">
+        Hub 不必跑代码、不必跑大模型；你的电脑从内网主动连出来，不需要在路由器上开任何入站端口。
+      </p>
+      <div class="arch">
+        <div class="arch-box">
+          <div class="tag">手机</div>
+          <h4>查看与指挥</h4>
+          <p>看谁在线、谁在忙、谁卡住；和 Agent 对话、发布目标、审批高风险动作。可安装到主屏。</p>
+        </div>
+        <div class="arch-box">
+          <div class="tag">Hub</div>
+          <h4>随时在线的中枢</h4>
+          <p>身份、任务路由、对话与进展事件、在线状态与通知。是任务和协作记录的权威来源。</p>
+        </div>
+        <div class="arch-box">
+          <div class="tag">你的电脑</div>
+          <h4>真正干活的地方</h4>
+          <p>仓库、终端、构建与测试、本地模型都在这儿。电脑离线时任务排队，不会替它读你的工作区。</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ── 下载 ─────────────────────────────────────────────────────────────── -->
+  <section class="band" id="download">
+    <div class="wrap">
+      <h2>下载电脑版</h2>
+      <p class="sub">桌面端把 Hub、工作台与执行节点装成一体，装完即可在手机上连上它。</p>
+      <div class="dl">
+        <!-- legion:download -->
+      </div>
+    </div>
+  </section>
+
+  <!-- ── 开始 ─────────────────────────────────────────────────────────────── -->
+  <section class="band" id="start">
+    <div class="wrap">
+      <h2>三步开始</h2>
+      <p class="sub">从下载到第一支编队跑起来。</p>
+      <div class="steps">
+        <div class="step">
+          <h3>装桌面版</h3>
+          <p>下载并安装，桌面端会拉起本地的 Hub 与工作台。首次启动会引导你建立空间。</p>
+        </div>
+        <div class="step">
+          <h3>手机连上它</h3>
+          <p>在手机上打开 <code>/mobile/</code>，装上主屏；电脑版与手机端共用同一套账号。</p>
+        </div>
+        <div class="step">
+          <h3>发布第一个目标</h3>
+          <p>在指挥台写清你要什么。编队接手后，进展与证据会回到任务里，你在上面验收。</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+</main>
+
+<footer>
+  <div class="wrap foot-inner">
+    <span>Legion · AI Office 军团作战平台</span>
+    <span class="foot-links">
+      <a href="/mobile/">手机端</a>
+      <a href="/api/identity/status">服务状态</a>
+    </span>
+    <span class="foot-copy">© 2026 Legion</span>
+  </div>
+</footer>
+
+</body>
+</html>

@@ -182,6 +182,67 @@ describe('官网：下载区诚实地缺席', () => {
     assert.doesNotMatch(without.body, /Smart App Control/)
   })
 
+  test('★ 清单里没有 sha256 ⇒ 那一行**整行不出现**（空的校验值比没有更坏）', async (t) => {
+    // 一个显示成空的 sha256 看起来像"校验过了"。所以：拿不到就一行都不给。
+    const routes = createSiteRoutes({ root: makeSite(t), readRelease: () => ({ url: '/legion/releases/r-1/x.exe', sha256: '' }) })
+    const r = await call(routes, { path: '/' })
+    assert.doesNotMatch(r.body, /sha256/)
+    assert.doesNotMatch(r.body, /class="sha/)
+    assert.doesNotMatch(r.body, /data-copy/)
+  })
+
+  test('★ 畸形 sha256 也当没有：不是 64 位十六进制就不显示', async (t) => {
+    for (const bad of ['abc', 'zz'.repeat(32), 'ab'.repeat(31), '', 'undefined']) {
+      const routes = createSiteRoutes({ root: makeSite(t), readRelease: () => ({ url: '/legion/releases/r-1/x.exe', sha256: bad }) })
+      const r = await call(routes, { path: '/' })
+      assert.doesNotMatch(r.body, /class="sha-value"/, `坏值 ${JSON.stringify(bad)} 不该显示`)
+    }
+  })
+
+  test('★ 合法 sha256 就显示，并带可复制的数据属性', async (t) => {
+    const sha = 'b8be07da8fcb0dc6dff3561328ce8385a9193256b8d42ef883d60dce7b0ffee3'
+    const routes = createSiteRoutes({ root: makeSite(t), readRelease: () => ({ url: '/legion/releases/r-1/x.exe', sha256: sha.toUpperCase() }) })
+    const r = await call(routes, { path: '/' })
+    assert.match(r.body, new RegExp(`class="sha-value">${sha}<`), '应显示（且小写归一）')
+    assert.match(r.body, new RegExp(`data-copy="${sha}"`))
+  })
+
+  test('★ 「本次更新」渲染成列表，`**粗体**` 转成 <b> 而不是原样漏出', async (t) => {
+    const routes = createSiteRoutes({
+      root: makeSite(t),
+      readRelease: () => ({ url: '/legion/releases/r-1/x.exe', changes: ['把**正文**送到电脑端', '修了鉴权'] }),
+    })
+    const zh = await call(routes, { path: '/' })
+    assert.match(zh.body, /class="updates"/)
+    assert.match(zh.body, /本次更新/)
+    assert.match(zh.body, /把<b>正文<\/b>送到电脑端/)
+    assert.doesNotMatch(zh.body, /\*\*/, '标记必须被消化掉，不能原样出现在页面上')
+
+    const en = await call(createSiteRoutes({
+      root: makeSite(t),
+      readRelease: () => ({ url: '/legion/releases/r-1/x.exe', changes: ['x'] }),
+    }), { path: '/en' })
+    assert.match(en.body, /What&#39;s new|What's new/)
+  })
+
+  test('★ 更新条目里的 HTML 被转义（先转义再换粗体标记，顺序反了就是注入口）', async (t) => {
+    const routes = createSiteRoutes({
+      root: makeSite(t),
+      readRelease: () => ({ url: '/legion/releases/r-1/x.exe', changes: ['<img src=x onerror=alert(1)> **ok**'] }),
+    })
+    const r = await call(routes, { path: '/' })
+    assert.doesNotMatch(r.body, /<img src=x/)
+    assert.match(r.body, /&lt;img src=x/)
+    assert.match(r.body, /<b>ok<\/b>/, '转义之后粗体标记仍然生效')
+  })
+
+  test('没有更新条目就不出那一块（不出现一个空标题）', async (t) => {
+    const routes = createSiteRoutes({ root: makeSite(t), readRelease: () => ({ url: '/legion/releases/r-1/x.exe', changes: [] }) })
+    const r = await call(routes, { path: '/' })
+    assert.doesNotMatch(r.body, /class="updates"/)
+    assert.doesNotMatch(r.body, /本次更新/)
+  })
+
   test('注册策略三种取值措辞互不相同', async (t) => {
     const one = async (registration) => (await call(
       createSiteRoutes({ root: makeSite(t), readRelease: () => ({ url: '' }), registration }), { path: '/' },

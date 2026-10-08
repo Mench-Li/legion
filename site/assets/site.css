@@ -268,3 +268,32 @@ footer { border-top: 1px solid var(--line); padding: 34px 0 44px; color: var(--m
 .mock-phone .row { font-size: 11px; color: var(--muted); display: flex; justify-content: space-between; gap: 8px; padding: 3px 0; }
 
 figcaption.ill { padding: 11px 14px; font-size: 13px; color: var(--muted); border-top: 1px solid var(--line); }
+
+/* ── 校验值（sha256） ─────────────────────────────────────────────────────── */
+
+.sha {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 10px;
+  margin-top: 16px; padding-top: 14px; border-top: 1px solid var(--line);
+}
+.sha-label { font-size: 13px; color: var(--muted); flex: none; }
+.sha-value {
+  font-size: 12.5px; padding: 4px 8px; border-radius: 6px;
+  background: var(--bg-deep); border: 1px solid var(--line);
+  color: var(--fg); word-break: break-all; flex: 1 1 100%; order: 3;
+}
+.sha-copy {
+  font: inherit; font-size: 12.5px; cursor: pointer; flex: none;
+  padding: 4px 12px; border-radius: 8px;
+  background: transparent; border: 1px solid var(--line); color: var(--muted);
+}
+.sha-copy:hover { border-color: var(--accent); color: var(--fg); }
+.sha-copy[data-done] { border-color: var(--green); color: var(--green); }
+@media (min-width: 720px) { .sha-value { flex: 1 1 auto; order: 0; } }
+
+/* ── 本次更新 ─────────────────────────────────────────────────────────────── */
+
+.updates { margin-top: 18px; padding-top: 14px; border-top: 1px solid var(--line); }
+.updates h3 { font-size: 14px; margin: 0 0 8px; font-weight: 640; color: var(--fg); }
+.updates ul { margin: 0; padding-left: 18px; }
+.updates li { color: var(--muted); font-size: 13.5px; line-height: 1.75; margin-bottom: 5px; }
+.updates li b { color: var(--fg); }

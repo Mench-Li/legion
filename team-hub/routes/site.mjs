@@ -81,6 +81,20 @@ function formatSize(bytes) {
   return `${(bytes / 1048576).toFixed(1)} MB`
 }
 
+/**
+ * 发布清单里的条目用 `**粗体**` 标注。**先转义、再换标记** —— 顺序反了就是一个注入口。
+ * `esc()` 不碰 `*`，所以转义之后捕捉组里不可能再有原始 `<`。
+ */
+function inlineBold(text) {
+  return esc(text).replace(/\*\*([^*]+)\*\*/g, '<b>$1</b>')
+}
+
+/** sha256 只认 64 位十六进制；其余（含缺失、含 `undefined`）一律视为"没有"。 */
+function normalizeSha(value) {
+  const s = String(value ?? '').trim().toLowerCase()
+  return /^[0-9a-f]{64}$/.test(s) ? s : ''
+}
+
 /** mtime → `2026-10-06`。 */
 function formatDate(ms) {
   if (!Number.isFinite(ms) || ms <= 0) return ''
@@ -101,6 +115,11 @@ const COPY = Object.freeze({
     notYet: '电脑版尚未发布',
     notYetHint: '安装包还没上传到这台 Hub；先向管理员索取。',
     downloadTitle: '下载电脑版',
+    updates: '本次更新',
+    sha: '安装包 sha256',
+    shaHint: '取自随包发布的清单；下载后可自行比对，确认拿到的是这一份。',
+    copy: '复制',
+    copied: '已复制',
     mobile: '打开手机端',
     mobileHint: '看板与对话；可安装到主屏',
     regOpen: '这台 Hub 开放注册。打开手机端即可注册。',
@@ -125,6 +144,11 @@ const COPY = Object.freeze({
     notYet: 'Desktop build not yet published',
     notYetHint: 'No installer has been uploaded to this Hub yet; ask the administrator.',
     downloadTitle: 'Download for Windows',
+    updates: "What's new",
+    sha: 'Installer sha256',
+    shaHint: 'Taken from the manifest published alongside the build; compare it after downloading to confirm you got this exact file.',
+    copy: 'Copy',
+    copied: 'Copied',
     mobile: 'Open the mobile app',
     mobileHint: 'Board and conversations; installable to your home screen',
     regOpen: 'This Hub is open for sign-up. Open the mobile app to register.',
@@ -151,12 +175,15 @@ const COPY = Object.freeze({
  * @param {string} [input.version]    版本号（可空 —— 空就不显示这一行，不猜）
  * @param {string} [input.size]       已格式化的体积（可空）
  * @param {string} [input.date]       发布日期（可空）
+ * @param {string} [input.sha256]     安装包摘要。**只在是合法 64 位十六进制时显示**；
+ *        空/畸形一律不显示那一行 —— 一个空的 sha256 比没有 sha256 更坏，它看起来像"校验过了"。
+ * @param {string[]} [input.changes]  发布清单里的更新条目（可空数组）
  * @param {string} [input.registration] 'closed' | 'invite' | 'open'
  * @param {string} [input.mobilePath]
  */
 export function renderLiveBlocks({
   lang = 'zh', downloadUrl = '', version = '', size = '', date = '',
-  registration = 'closed', mobilePath = MOBILE_PATH_DEFAULT,
+  sha256 = '', changes = [], registration = 'closed', mobilePath = MOBILE_PATH_DEFAULT,
 } = {}) {
   const c = COPY[lang] ?? COPY.zh
   const has = String(downloadUrl).trim().length > 0
@@ -190,10 +217,30 @@ export function renderLiveBlocks({
   //   > 的守卫，在没人点过那个链接的时候，是同一个东西。
   //
   // 所以：站上不承诺任何版本历史/清单浏览。要加，得先有一个真的列表端点。
+  const sha = normalizeSha(sha256)
+  const shaBlock = sha.length > 0
+    ? `<div class="sha">
+        <span class="sha-label">${c.sha}</span>
+        <code class="sha-value">${sha}</code>
+        <button type="button" class="sha-copy" data-copy="${sha}" data-copied="${c.copied}">${c.copy}</button>
+      </div>
+      <p class="hint">${c.shaHint}</p>`
+    : ''
+
+  const list = Array.isArray(changes) ? changes.filter((s) => typeof s === 'string' && s.trim().length > 0) : []
+  const updatesBlock = list.length > 0
+    ? `<div class="updates">
+        <h3>${c.updates}</h3>
+        <ul>${list.map((s) => `<li>${inlineBold(s)}</li>`).join('')}</ul>
+      </div>`
+    : ''
+
   const download = has
     ? `<div class="dl-row">${cta}</div>
        ${meta}
-       ${c.unsigned}`
+       ${c.unsigned}
+       ${shaBlock}
+       ${updatesBlock}`
     : `<div class="dl-row">${cta}</div>
        <p class="hint">${c.notYetHint}</p>`
 
@@ -317,6 +364,8 @@ export function createSiteRoutes({
       version: r.version ?? '',
       size: formatSize(r.sizeBytes),
       date: formatDate(r.at),
+      sha256: r.sha256 ?? '',
+      changes: r.changes ?? [],
       registration,
       mobilePath,
     })

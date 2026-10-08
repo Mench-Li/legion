@@ -10,7 +10,7 @@ import { mkdtempSync, mkdirSync, rmSync, writeFileSync, utimesSync } from 'node:
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { createReleaseRoutes, latestInstaller } from './routes/releases.mjs'
+import { createReleaseRoutes, latestInstaller, manifestChanges, manifestSha256, readReleaseManifest } from './routes/releases.mjs'
 
 /** 造一个发布目录现场。返回 { root, req } 之类的工具。 */
 function scene(t, { releaseIds = ['r-2026-10-01', 'r-2026-10-05'], withExe = true } = {}) {
@@ -164,5 +164,63 @@ describe('挑最新那一份安装包', () => {
     t.after(() => rmSync(root, { recursive: true, force: true }))
     assert.equal(latestInstaller(root), null)
     assert.equal(latestInstaller(join(root, 'nope')), null)
+  })
+})
+
+// ── 发布清单（`releases/<id>/manifest.json`） ────────────────────────────────
+//
+// 官网的下载区拿它显示 sha256 与「本次更新」。守两条：
+//   · 读不到 / 字段不对 ⇒ **当作没有**，不是抛错，也不是给一个空值
+//     （一个显示成空的校验值看起来像"校验过了"）；
+//   · `releaseId` 不能靠它往目录外读。
+
+describe('读发布清单', () => {
+  const SHA = 'b8be07da8fcb0dc6dff3561328ce8385a9193256b8d42ef883d60dce7b0ffee3'
+
+  function withManifest(t, body) {
+    const root = mkdtempSync(join(tmpdir(), 'legion-manifest-'))
+    t.after(() => rmSync(root, { recursive: true, force: true }))
+    mkdirSync(join(root, 'releases', 'r-1'), { recursive: true })
+    writeFileSync(join(root, 'releases', 'r-1', 'manifest.json'), typeof body === 'string' ? body : JSON.stringify(body))
+    return root
+  }
+
+  test('读到清单：取出 sha256 与更新条目', (t) => {
+    const root = withManifest(t, {
+      releaseId: 'r-1', productVersion: '0.1.0',
+      artifacts: { installer: { path: 'Legion-Setup-win-x64.exe', sizeBytes: 204641180, sha256: SHA } },
+      changes: ['把**正文**送到电脑端', '修了鉴权'],
+    })
+    const m = readReleaseManifest(root, 'r-1')
+    assert.equal(m.productVersion, '0.1.0')
+    assert.equal(manifestSha256(m), SHA)
+    assert.deepEqual(manifestChanges(m), ['把**正文**送到电脑端', '修了鉴权'])
+  })
+
+  test('★ 缺文件 / 坏 JSON / 非法 releaseId ⇒ null，不抛', (t) => {
+    const root = withManifest(t, '{ 这不是 JSON')
+    assert.equal(readReleaseManifest(root, 'r-1'), null, '坏 JSON')
+    assert.equal(readReleaseManifest(root, 'r-不存在'), null, '没有这份发布')
+    assert.equal(readReleaseManifest(root, ''), null, '空 id')
+    assert.equal(readReleaseManifest('', 'r-1'), null, '空 root')
+    // 不能靠 releaseId 往目录外读。
+    assert.equal(readReleaseManifest(root, '../../etc'), null)
+    assert.equal(readReleaseManifest(root, 'a/b'), null)
+    assert.equal(readReleaseManifest(root, 'a\\b'), null)
+  })
+
+  test('★ sha256 只认 64 位十六进制；缺失/畸形一律"没有"', () => {
+    assert.equal(manifestSha256({}), '')
+    assert.equal(manifestSha256(null), '')
+    assert.equal(manifestSha256({ artifacts: { installer: { sha256: 'abc' } } }), '')
+    assert.equal(manifestSha256({ artifacts: { installer: { sha256: SHA.toUpperCase() } } }), SHA, '大写要归一成小写')
+    assert.equal(manifestSha256({ artifacts: {} }), '')
+  })
+
+  test('更新条目只留非空字符串', () => {
+    assert.deepEqual(manifestChanges({ changes: ['a', '', '   ', 42, null, 'b'] }), ['a', 'b'])
+    assert.deepEqual(manifestChanges({ changes: '不是数组' }), [])
+    assert.deepEqual(manifestChanges({}), [])
+    assert.deepEqual(manifestChanges(null), [])
   })
 })

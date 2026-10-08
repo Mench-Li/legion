@@ -227,5 +227,22 @@
   </div>
 </footer>
 
+<script>
+// 复制 sha256。**渐进增强**：脚本不跑时那串值仍然是可选中的纯文本，页面不依赖它 ——
+// 一个"复制不了就等于没有校验值"的设计，比不显示校验值更坏。
+document.addEventListener('click', function (e) {
+  var b = e.target.closest && e.target.closest('.sha-copy')
+  if (!b) return
+  var text = b.getAttribute('data-copy') || ''
+  var done = b.getAttribute('data-copied') || 'OK'
+  if (!text || !navigator.clipboard) return
+  var prev = b.textContent
+  navigator.clipboard.writeText(text).then(function () {
+    b.setAttribute('data-done', '1')
+    b.textContent = done
+    setTimeout(function () { b.removeAttribute('data-done'); b.textContent = prev }, 1600)
+  }).catch(function () {})
+})
+</script>
 </body>
 </html>

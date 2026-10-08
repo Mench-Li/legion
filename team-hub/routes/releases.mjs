@@ -38,7 +38,7 @@
 // 一个"200 但是空的"发布目录，与一个"还没有发布"在界面上长得一样，
 // 而前者会让排障的人去查缓存。
 // ============================================================================
-import { createReadStream, existsSync, readdirSync, statSync } from 'node:fs'
+import { createReadStream, existsSync, readFileSync, readdirSync, statSync } from 'node:fs'
 import { extname, join, normalize, resolve, sep } from 'node:path'
 
 /** 允许发出的 MIME。**白名单**：不在表里的一律 404。 */
@@ -86,6 +86,48 @@ export function latestInstaller(root, { installerName = 'Legion-Setup-win-x64.ex
   // 它回答的正是"最新一份是哪个"。
   candidates.sort((a, b) => b.mtimeMs - a.mtimeMs)
   return candidates[0]
+}
+
+/**
+ * 读一份发布的清单（`releases/<releaseId>/manifest.json`）。
+ *
+ * 官网的下载区拿它来显示 sha256 与「本次更新」。**读不到就回 null**，不抛、不猜 ——
+ * 清单是发布端可选写的，没有它的发布照样能下载，页面只是少显示两行，
+ * 而不是显示一个空的校验值（一个空的 sha256 比没有 sha256 更坏：它看起来像"校验过了"）。
+ *
+ * 期望的形状（本仓库发布端写的就是这个）：
+ *
+ *   { releaseId, productVersion, channel, platform,
+ *     artifacts: { installer: { path, sizeBytes, sha256 } },
+ *     note, changes: [ "…" ] }
+ *
+ * 但**只按存在的字段取用**：字段缺失/类型不对时当作没有，不当成错误。
+ * 这里刻意不缓存——官网是最冷的页面，而清单只有 1KB 上下；
+ * 为它加一层缓存，换来的状态比省下的 IO 贵。
+ */
+export function readReleaseManifest(root, releaseId) {
+  if (typeof root !== 'string' || root.length === 0) return null
+  if (typeof releaseId !== 'string' || releaseId.length === 0) return null
+  // `releaseId` 来自 `readdirSync`，正常不会是路径片段；仍然显式拒一次，
+  // 免得将来有人把别的来源接进来时，这里变成一条能往目录外读的缝。
+  if (releaseId.includes('/') || releaseId.includes('\\') || releaseId.includes('..')) return null
+  try {
+    const raw = readFileSync(join(root, 'releases', releaseId, 'manifest.json'), 'utf8')
+    const parsed = JSON.parse(raw)
+    return parsed !== null && typeof parsed === 'object' ? parsed : null
+  } catch { return null }
+}
+
+/** 清单里的 sha256：只接受 64 位十六进制，其余（含缺失）一律视为没有。 */
+export function manifestSha256(manifest) {
+  const v = manifest?.artifacts?.installer?.sha256
+  return typeof v === 'string' && /^[0-9a-f]{64}$/i.test(v) ? v.toLowerCase() : ''
+}
+
+/** 清单里的更新条目：只留非空字符串。 */
+export function manifestChanges(manifest) {
+  const v = manifest?.changes
+  return Array.isArray(v) ? v.filter((s) => typeof s === 'string' && s.trim().length > 0) : []
 }
 
 /**

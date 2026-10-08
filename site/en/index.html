@@ -230,5 +230,23 @@
   </div>
 </footer>
 
+<script>
+// Copy the sha256. **Progressive enhancement**: without this script the value is still
+// plain selectable text, so the page does not depend on it. A design where "cannot copy"
+// means "no checksum" would be worse than showing no checksum at all.
+document.addEventListener('click', function (e) {
+  var b = e.target.closest && e.target.closest('.sha-copy')
+  if (!b) return
+  var text = b.getAttribute('data-copy') || ''
+  var done = b.getAttribute('data-copied') || 'OK'
+  if (!text || !navigator.clipboard) return
+  var prev = b.textContent
+  navigator.clipboard.writeText(text).then(function () {
+    b.setAttribute('data-done', '1')
+    b.textContent = done
+    setTimeout(function () { b.removeAttribute('data-done'); b.textContent = prev }, 1600)
+  }).catch(function () {})
+})
+</script>
 </body>
 </html>

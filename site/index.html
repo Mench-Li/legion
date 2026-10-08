@@ -1,249 +1,276 @@
 <!doctype html>
 <html lang="zh-CN">
 <head>
-<meta charset="utf-8" />
-<meta name="viewport" content="width=device-width, initial-scale=1" />
-<meta name="color-scheme" content="dark light" />
-<title>Legion —— AI Office 军团作战平台</title>
-<meta name="description" content="Legion 是一套本地优先的多智能体协作与交付平台：你以将军身份发布目标，编队把目标拆成阶段任务链执行，过程与证据沉淀回任务。代码和凭证留在你自己的机器上。" />
-<meta name="theme-color" content="#06080d" media="(prefers-color-scheme: dark)" />
-<meta name="theme-color" content="#fbfcfe" media="(prefers-color-scheme: light)" />
-<link rel="icon" href="/site/assets/favicon.png" sizes="32x32" />
-<link rel="icon" href="/site/assets/legion-icon.png" sizes="512x512" />
-<link rel="apple-touch-icon" href="/site/assets/legion-icon-180.png" />
-<link rel="canonical" href="/" />
-<link rel="alternate" hreflang="zh-CN" href="/" />
-<link rel="alternate" hreflang="en" href="/en" />
-<link rel="alternate" hreflang="x-default" href="/" />
-<link rel="stylesheet" href="/site/assets/site.css" />
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Legion — 从目标，到交付</title>
+<meta name="description" content="Legion 是一套本地优先的多智能体协作与交付平台：发布目标，组织分工，让执行有序推进。在同一个工作台里掌握进度、审查结果、完成验收。">
+<link rel="icon" href="/site/assets/favicon.png" sizes="32x32">
+<link rel="icon" href="/site/assets/legion-icon.png" sizes="512x512">
+<link rel="apple-touch-icon" href="/site/assets/legion-icon-180.png">
+<link rel="canonical" href="/">
+<link rel="alternate" hreflang="zh-CN" href="/">
+<link rel="alternate" hreflang="en" href="/en">
+<link rel="alternate" hreflang="x-default" href="/">
+<link rel="stylesheet" href="/site/assets/site.css">
+<script>
+// 主题在**首帧之前**定下来，否则深色用户会看到一闪的白。
+// 默认浅色（设计稿的主题就是浅色），只有明确选过深色才用深色。
+(function () {
+  try {
+    if (localStorage.getItem('legion-theme') === 'dark') document.documentElement.dataset.theme = 'dark'
+  } catch (e) { /* 隐私模式下 localStorage 会抛，忽略即可 */ }
+})()
+</script>
 </head>
 <body>
+<div class="wrap">
 
 <header class="nav">
-  <div class="wrap nav-inner">
-    <a class="brand" href="/">
-      <img src="/site/assets/legion-icon-64.png" alt="" width="28" height="28" />
-      <span>Legion</span>
-    </a>
-    <nav class="nav-links">
-      <a href="#features">能力</a>
-      <a href="#ui">界面</a>
-      <a href="#download">下载</a>
-      <a href="#start">开始</a>
-    </nav>
-    <div class="nav-right">
-      <span class="switch">
-        <a href="/" aria-current="page">中文</a>
-        <a href="/en" hreflang="en" lang="en">EN</a>
-      </span>
-      <a class="btn btn-primary btn-sm" href="#download">下载</a>
-    </div>
+  <a class="brand" href="#home" aria-label="Legion 首页">
+    <svg class="mark" viewBox="0 0 512 512" aria-hidden="true"><rect x="28" y="28" width="456" height="456" rx="100" fill="#0d1220"/><g stroke="#e6e9f0" stroke-width="15" stroke-linecap="round" fill="none"><path d="M256 234Q268 186 256 118M322 296Q356 304 374 326M190 296Q156 304 138 326"/></g><path d="M256 198 306 227 306 285 256 314 206 285 206 227Z" fill="#93c5fd"/><g fill="#e6e9f0"><circle cx="256" cy="118" r="21"/><circle cx="374" cy="326" r="21"/><circle cx="138" cy="326" r="21"/></g></svg>Legion
+  </a>
+  <nav class="nav-links" aria-label="主导航">
+    <a href="#capabilities">产品能力</a>
+    <a href="#workflow">Agent 沟通</a>
+    <a href="#delivery">交付与验收</a>
+  </nav>
+  <div class="nav-end">
+    <span class="lang"><a href="/" aria-current="page">中</a><a href="/en" hreflang="en" lang="en">EN</a></span>
+    <button class="theme" type="button" id="theme-toggle" aria-label="切换为深色设计" aria-pressed="false">◐</button>
+    <a class="btn" href="#deploy">了解部署 <span class="arrow">↗</span></a>
   </div>
 </header>
 
 <main>
 
-  <!-- ── Hero ─────────────────────────────────────────────────────────────── -->
-  <section class="hero" id="ui">
-    <div class="wrap hero-grid">
-      <div>
-        <span class="eyebrow">公开预览</span>
-        <h1>让一支 <span class="grad">Agent 编队</span>替你交付</h1>
-        <p class="lede">
-          你以<b>将军</b>身份发布目标，而不是逐个派任务：目标自动拆成阶段任务链，
-          交给这个空间专属的<b>编队</b>执行，过程、补丁、测试证据与验收记录统一沉淀回任务。
-          而代码、终端与凭证，<b>始终留在你自己的机器上</b>。
-        </p>
+<!-- ── Hero ─────────────────────────────────────────────────────────────── -->
+<section class="hero" id="home">
+  <div class="eyebrow"><i class="dot"></i> LOCAL-FIRST · MULTI-AGENT WORKSPACE</div>
+  <h1>让 Agent 组成<br><span>一支能交付的团队。</span></h1>
+  <p class="subtitle">发布目标，组织分工，让执行有序推进。<br>在同一个工作台里，掌握进度、审查结果、完成验收。</p>
 
-        <!-- legion:cta -->
+  <!-- legion:cta -->
 
-        <!-- legion:hub-line -->
-      </div>
+  <p class="hero-note">本地优先 <span>/</span> 角色协作 <span>/</span> 交付可追溯</p>
 
-      <div class="shots-stack">
-        <figure class="shot">
-          <!-- 界面示意：示例数据，不含任何真实项目内容 -->
-          <div class="mock" role="img" aria-label="军团指挥台界面示意（示例数据）">
-            <div class="mock-bar"><i></i><i></i><i></i></div>
-            <div class="mock-body">
-              <div class="mock-rail"><i></i><i class="on"></i><i></i><i></i><i></i></div>
-              <div class="mock-side">
-                <div class="mock-space">示例空间</div>
-                <div class="mock-search">搜索岗位或空间</div>
-                <div class="mock-agent on"><span class="av">编</span><span><span class="nm">编码工程师</span><br /><span class="st">空闲 · 1 个活动任务</span></span></div>
-                <div class="mock-agent"><span class="av">需</span><span><span class="nm">需求分析师</span><br /><span class="st">空闲</span></span></div>
-                <div class="mock-agent"><span class="av">方</span><span><span class="nm">方案研究员</span><br /><span class="st">空闲</span></span></div>
-                <div class="mock-agent"><span class="av">测</span><span><span class="nm">测试执行员</span><br /><span class="st">空闲</span></span></div>
-              </div>
-              <div class="mock-main">
-                <div class="mock-head"><div class="nm">编码工程师</div><div class="st">示例空间 · coder · 空闲 · 已完成 21/22</div></div>
-                <div class="mock-tabs"><span class="on">对话</span><span>任务</span></div>
-                <div class="mock-card">
-                  <div class="mock-card-h"><span>仓库任务摘要</span><em class="mock-pill">空闲</em></div>
-                  <div class="mock-count">1 个活动任务 · 21 个已完成</div>
-                  <div class="mock-row"><span>T-001 ·【示例】占位任务标题，用来看板形态</span><em>待认领</em></div>
-                  <div class="mock-row"><span>T-002 ·【示例】任务详情里有改动与测试证据</span><em>已完成</em></div>
-                </div>
-                <div class="mock-input"><span>发消息给 编码工程师…</span><em>发送</em></div>
-              </div>
-            </div>
-          </div>
-          <figcaption class="ill">军团指挥台 · 界面示意（示例数据，非真实运行截图）</figcaption>
-        </figure>
-
-        <div class="phone-wrap">
-          <figure class="shot">
-            <div class="mock-phone" role="img" aria-label="手机端界面示意（示例数据）">
-              <div class="scr">
-                <div>
-                  <div class="nm">编码工程师</div>
-                  <div class="st">示例空间 · 空闲 · 已完成 21/22</div>
-                </div>
-                <div class="card">
-                  <div class="mock-card-h"><span>任务摘要</span><em class="mock-pill">空闲</em></div>
-                  <div class="mock-count">1 个活动任务 · 21 个已完成</div>
-                  <div class="row"><span>T-001 ·【示例】占位标题</span><em>待认领</em></div>
-                  <div class="row"><span>T-002 ·【示例】改动与证据</span><em>已完成</em></div>
-                </div>
-                <div class="mock-input"><span>发消息…</span><em>发送</em></div>
-              </div>
-            </div>
-            <figcaption class="ill">手机端 · 界面示意</figcaption>
-          </figure>
-        </div>
-      </div>
+  <div class="product real-product">
+    <div class="windowbar">
+      <div class="window-left"><i></i><i></i><i></i><span>Legion · 本地工作台</span></div>
+      <span class="mono">YOUR GOALS. YOUR AGENTS. YOUR WORKSPACE.</span>
+      <span class="window-right">实际产品截图</span>
     </div>
-  </section>
-
-  <!-- ── 能力 ─────────────────────────────────────────────────────────────── -->
-  <section class="band" id="features">
-    <div class="wrap">
-      <p class="slabel">01 — 能力</p>
-      <h2>你发布目标，不是派任务</h2>
-      <p class="sub">
-        大多数工具要你写一条条指令。Legion 要你说清"要什么"，然后由编队把它拆开、分工、执行、
-        验证，并把每一步的凭据留在任务上——你只负责验收。
-      </p>
-      <div class="cards">
-        <div class="card">
-          <span class="idx">01</span>
-          <span class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><circle cx="12" cy="12" r="8.2" /><circle cx="12" cy="12" r="3.1" /><path d="M12 1.8v3M12 19.2v3M1.8 12h3M19.2 12h3" /></svg></span>
-          <h3>目标自动拆成任务链</h3>
-          <p>发布一个目标，它被拆成阶段任务，按依赖依次流转；每次流转都由状态机管着，可追溯、可暂停、可取消。</p>
-        </div>
-        <div class="card">
-          <span class="idx">02</span>
-          <span class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="9" cy="7.8" r="3.2" /><path d="M2.8 19.4c0-3.1 2.8-4.8 6.2-4.8s6.2 1.7 6.2 4.8" /><path d="M16.4 5.1a2.9 2.9 0 0 1 0 5.6" /><path d="M18.4 14.9c2 .5 3.3 1.8 3.3 3.6" /></svg></span>
-          <h3>编队各司其职</h3>
-          <p>每个空间有自己的岗位编队。软件流水线默认八个岗位，从需求澄清一路走到部署与 CI/CD。</p>
-        </div>
-        <div class="card">
-          <span class="idx">03</span>
-          <span class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2.6 20 6v6c0 4.6-3.2 8.1-8 9.4C7.2 20.1 4 16.6 4 12V6z" /><path d="M8.8 12.2l2.3 2.3 4.3-4.6" /></svg></span>
-          <h3>代码留在你自己的机器上</h3>
-          <p>本地优先：仓库、终端、构建工具与模型凭证都在你的电脑，Hub 只做身份、路由与记录。</p>
-        </div>
-        <div class="card">
-          <span class="idx">04</span>
-          <span class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2.8H7.2A2.2 2.2 0 0 0 5 5v14a2.2 2.2 0 0 0 2.2 2.2h9.6A2.2 2.2 0 0 0 19 19V8z" /><path d="M14 2.8V8h5" /><path d="M8.8 13h6.4M8.8 16.8h4.2" /></svg></span>
-          <h3>过程与证据沉淀回任务</h3>
-          <p>补丁、diff、测试输出、产物与验收记录都挂在同一条任务上，验收不离开浏览器。</p>
-        </div>
-      </div>
-
-      <div class="roster">
-        <span>需求分析师</span><span>方案研究员</span><span>任务拆解师</span><span>测试设计师</span>
-        <span>编码工程师</span><span>代码审查员</span><span>测试执行员</span><span>部署运维员</span>
-      </div>
-      <p class="hint">软件流水线的默认编队。编队是一份可打包、可移植的工件，你也可以定义自己的岗位与阶段。</p>
+    <div class="shot-tabs" role="group" aria-label="选择产品截图">
+      <button type="button" data-shot="goals" aria-pressed="true">目标与任务进展</button>
+      <button type="button" data-shot="chat" aria-pressed="false">Agent 沟通交流</button>
+      <button type="button" data-shot="tasks" aria-pressed="false">任务中心</button>
+      <span class="shot-origin">本地环境实拍 <i class="dot"></i></span>
     </div>
-  </section>
-
-  <!-- ── 架构 ─────────────────────────────────────────────────────────────── -->
-  <section class="band" id="arch">
-    <div class="wrap">
-      <p class="slabel">02 — 架构</p>
-      <h2>三层，各安其位</h2>
-      <p class="sub">
-        Hub 不必跑代码、不必跑大模型；你的电脑从内网主动连出来，不需要在路由器上开任何入站端口。
-      </p>
-      <div class="arch">
-        <div class="arch-box">
-          <div class="tag">LAYER <b>01</b> · 手机</div>
-          <h4>查看与指挥</h4>
-          <p>看谁在线、谁在忙、谁卡住；和 Agent 对话、发布目标、审批高风险动作。可安装到主屏。</p>
-        </div>
-        <div class="arch-box mid">
-          <div class="tag">LAYER <b>02</b> · HUB</div>
-          <h4>随时在线的中枢</h4>
-          <p>身份、任务路由、对话与进展事件、在线状态与通知。是任务和协作记录的权威来源。</p>
-        </div>
-        <div class="arch-box">
-          <div class="tag">LAYER <b>03</b> · 你的电脑</div>
-          <h4>真正干活的地方</h4>
-          <p>仓库、终端、构建与测试、本地模型都在这儿。电脑离线时任务排队，不会替它读你的工作区。</p>
-        </div>
-      </div>
+    <button class="shot-open hero-shot" type="button" aria-label="放大查看目标与任务进展截图">
+      <img id="hero-screenshot" src="/site/assets/shots/goal-detail.png" width="2160" height="734" alt="本地 Legion 目标详情：一个目标拆成八个阶段任务，分别对应需求、方案、拆解、测试设计、编码、审查、测试与部署角色，8/8 已完成。">
+      <span class="zoom-hint">放大查看 ↗</span>
+    </button>
+    <div class="shot-bottom">
+      <span id="shot-description">一个目标，八个阶段。每一步都有任务与负责岗位。</span>
+      <span class="mono">CAPTURED FROM LOCAL WORKSPACE</span>
     </div>
-  </section>
+  </div>
+  <p class="mock-caption" id="shot-caption">真实产品截图 · 目标详情局部截取 · 八个阶段任务已完成</p>
 
-  <!-- ── 下载 ─────────────────────────────────────────────────────────────── -->
-  <section class="band" id="download">
-    <div class="wrap">
-      <p class="slabel">03 — 下载</p>
-      <h2>下载电脑版</h2>
-      <p class="sub">桌面端把 Hub、工作台与执行节点装成一体，装完即可在手机上连上它。</p>
-      <div class="dl">
-        <!-- legion:download -->
-      </div>
-    </div>
-  </section>
+  <div class="promise"><span><i>✓</i>目标驱动执行</span><span><i>✓</i>关键节点由你决定</span><span><i>✓</i>过程与结果留有记录</span></div>
+</section>
 
-  <!-- ── 开始 ─────────────────────────────────────────────────────────────── -->
-  <section class="band" id="start">
-    <div class="wrap">
-      <p class="slabel">04 — 开始</p>
-      <h2>三步开始</h2>
-      <p class="sub">从下载到第一支编队跑起来。</p>
-      <div class="steps">
-        <div class="step">
-          <span class="n">STEP 01</span>
-          <h3>装桌面版</h3>
-          <p>下载并安装，桌面端会拉起本地的 Hub 与工作台。首次启动会引导你建立空间。</p>
-        </div>
-        <div class="step">
-          <span class="n">STEP 02</span>
-          <h3>手机连上它</h3>
-          <p>在手机上打开 <code>/mobile/</code>，装上主屏；电脑版与手机端共用同一套账号。</p>
-        </div>
-        <div class="step">
-          <span class="n">STEP 03</span>
-          <h3>发布第一个目标</h3>
-          <p>在指挥台写清你要什么。编队接手后，进展与证据会回到任务里，你在上面验收。</p>
-        </div>
-      </div>
+<!-- ── 能力 ─────────────────────────────────────────────────────────────── -->
+<section id="capabilities" class="section">
+  <div class="section-head">
+    <div>
+      <div class="eyebrow">01 / BUILT FOR TEAMWORK</div>
+      <h2>把协作组织起来，<br>把交付落实下去。</h2>
     </div>
-  </section>
+    <p>从一个目标开始，连接分工、执行与验收。<br>让每个 Agent 清楚职责，让你看得清全局。</p>
+  </div>
+  <div class="features">
+    <article class="feature">
+      <div class="index">01 / ORGANIZE</div>
+      <h3>按目标，组织你的团队</h3>
+      <p>为工作空间绑定项目与角色编队。将目标拆成阶段任务，让岗位与职责对应起来。</p>
+      <div class="feature-foot">工作空间 → 编队 → 目标</div>
+    </article>
+    <article class="feature">
+      <div class="index">02 / COORDINATE</div>
+      <h3>按依赖，让工作接力</h3>
+      <p>前置任务完成后，后续角色接手。需要你决策时停下，也支持暂停、转派和打回重做。</p>
+      <div class="feature-foot">任务依赖 → 阶段交接 → 人工闸门</div>
+    </article>
+    <article class="feature">
+      <div class="index">03 / VERIFY</div>
+      <h3>看证据，再确认交付</h3>
+      <p>将文件改动、测试结果和交付产物关联到任务。打开任务，就能看到结果及其来由。</p>
+      <div class="feature-foot">实现补丁 → 测试报告 → 验收记录</div>
+    </article>
+  </div>
+</section>
+
+<!-- ── Agent 沟通 ───────────────────────────────────────────────────────── -->
+<section id="workflow" class="section live-section">
+  <div class="section-head">
+    <div>
+      <div class="eyebrow">02 / TALK TO YOUR TEAM</div>
+      <h2>找到对应的 Agent，<br>直接沟通，继续协作。</h2>
+    </div>
+    <p>按工作空间与岗位找到协作伙伴。<br>对话、任务记录和补充要求在同一处衔接。</p>
+  </div>
+  <div class="live-shot-frame">
+    <div class="windowbar">
+      <div class="window-left"><i></i><i></i><i></i><span>Agent · 编码工程师</span></div>
+      <span class="mono">CONVERSATION / TASK CONTEXT</span>
+      <span class="window-right">实际产品截图</span>
+    </div>
+    <button class="shot-open" type="button" aria-label="放大查看 Agent 沟通交流截图">
+      <img src="/site/assets/shots/agent-conversation.png" width="2880" height="1800" loading="lazy" alt="本地运行的 Legion Agent 对话页：左侧按岗位列出团队，中间是用户消息与编码工程师的回复及任务状态消息，下方为消息输入区。">
+      <span class="zoom-hint">放大查看 ↗</span>
+    </button>
+  </div>
+  <div class="shot-points">
+    <span><b>01</b> 按空间与岗位找到 Agent</span>
+    <span><b>02</b> 查看历史交流和任务消息</span>
+    <span><b>03</b> 询问、追加要求或新建任务</span>
+  </div>
+  <p class="mock-caption">来自本地运行环境的已有对话 · 历史消息与界面状态保留原样 · 截图不代表 Agent 当前正在执行</p>
+</section>
+
+<!-- ── 交付与验收 ───────────────────────────────────────────────────────── -->
+<section class="artifacts" id="delivery">
+  <div>
+    <div class="eyebrow">03 / CONTEXT THAT COMPOUNDS</div>
+    <h2>每次交付，<br>为下一次留下积累。</h2>
+    <p>阶段文档保留过程，验收记录留下依据。<br>规范、技能与经验按空间管理，为后续任务提供上下文。</p>
+  </div>
+  <div class="file-list">
+    <div class="file"><span class="file-ext">MD</span><span class="file-name">需求与方案</span><span class="small">目标级文档</span></div>
+    <div class="file"><span class="file-ext">DIFF</span><span class="file-name">实现补丁与测试结果</span><span class="small">任务级证据</span></div>
+    <div class="file"><span class="file-ext">LOG</span><span class="file-name">验收记录与经验</span><span class="small">可追溯积累</span></div>
+    <p class="file-tail">示例产物类型 · 以具体任务的实际交付为准</p>
+  </div>
+</section>
+
+<!-- ── 深色 CTA ─────────────────────────────────────────────────────────── -->
+<section class="bottom">
+  <div>
+    <div class="eyebrow">LEGION / YOUR TEAM, YOUR WORKSPACE</div>
+    <h2>从一个目标，开始团队协作。</h2>
+    <p>工作台与项目数据由你管理；使用远程模型时，相关上下文仍会发送给模型服务。</p>
+  </div>
+  <a class="btn" href="#deploy">了解如何开始 <span class="arrow">↗</span></a>
+</section>
+
+<!-- ── 部署 / 下载 ──────────────────────────────────────────────────────── -->
+<section id="deploy" class="deploy">
+  <h2>选择适合你的开始方式。</h2>
+  <p class="deploy-intro">当前以本机或局域网自托管为基础。</p>
+  <div class="deploy-grid">
+    <article class="deploy-item">
+      <h3>本地 Web 工作台 <span class="label">自托管入口</span></h3>
+      <p>连接项目与工作空间，在浏览器中管理目标、任务和交付。运行需要按部署文档准备环境，并确认执行服务与模型配置。</p>
+      <!-- legion:hub-line -->
+    </article>
+    <article class="deploy-item">
+      <h3>Windows 桌面端 <span class="label human">内部验证阶段</span></h3>
+      <!-- legion:download -->
+    </article>
+  </div>
+</section>
 
 </main>
 
-<footer>
-  <div class="wrap foot-inner">
-    <span class="foot-brand">
-      <img src="/site/assets/legion-icon-64.png" alt="" width="20" height="20" />
-      Legion · AI Office 军团作战平台
-    </span>
-    <span class="foot-links">
-      <a href="/mobile/">手机端</a>
-      <a href="/api/identity/status">服务状态</a>
-    </span>
-    <span class="foot-copy">© 2026 Legion</span>
+<footer class="footer">
+  <a class="brand" href="#home">
+    <svg class="mark" viewBox="0 0 512 512" aria-hidden="true"><rect x="28" y="28" width="456" height="456" rx="100" fill="#0d1220"/><g stroke="#e6e9f0" stroke-width="15" stroke-linecap="round" fill="none"><path d="M256 234Q268 186 256 118M322 296Q356 304 374 326M190 296Q156 304 138 326"/></g><path d="M256 198 306 227 306 285 256 314 206 285 206 227Z" fill="#93c5fd"/><g fill="#e6e9f0"><circle cx="256" cy="118" r="21"/><circle cx="374" cy="326" r="21"/><circle cx="138" cy="326" r="21"/></g></svg>Legion
+  </a>
+  <div class="footer-links">
+    <a href="#capabilities">产品能力</a>
+    <a href="#workflow">协作流程</a>
+    <a href="#deploy">部署方式</a>
   </div>
+  <span>© 2026 Legion</span>
 </footer>
 
+</div>
+
+<dialog id="shot-lightbox" aria-label="产品截图放大预览">
+  <div class="lightbox-header">
+    <span>Legion · 实际运行界面</span>
+    <button type="button" id="lightbox-close" autofocus>关闭 ×</button>
+  </div>
+  <img id="lightbox-image" alt="产品截图">
+  <p id="lightbox-caption"></p>
+</dialog>
+
 <script>
-// 复制 sha256。**渐进增强**：脚本不跑时那串值仍然是可选中的纯文本，页面不依赖它 ——
-// 一个"复制不了就等于没有校验值"的设计，比不显示校验值更坏。
+// 主题切换。默认浅色（设计稿的主题）；选过之后记进 localStorage，
+// 由 head 里那段在首帧前应用，所以刷新不会闪。
+(function () {
+  var b = document.getElementById('theme-toggle')
+  b.addEventListener('click', function () {
+    var dark = document.documentElement.dataset.theme !== 'dark'
+    document.documentElement.dataset.theme = dark ? 'dark' : 'light'
+    b.setAttribute('aria-pressed', String(dark))
+    b.setAttribute('aria-label', dark ? '切换为浅色设计' : '切换为深色设计')
+    try { localStorage.setItem('legion-theme', dark ? 'dark' : 'light') } catch (e) {}
+  })
+  if (document.documentElement.dataset.theme === 'dark') {
+    b.setAttribute('aria-pressed', 'true'); b.setAttribute('aria-label', '切换为浅色设计')
+  }
+})()
+
+// 三张截图的切换与放大。图是**同一个本地环境**的三处界面，切换只换 src 与说明文字。
+var shots = {
+  goals: {
+    src: '/site/assets/shots/goal-detail.png', w: 2160, h: 734,
+    alt: '本地 Legion 目标详情：一个目标拆成八个阶段任务，分别对应需求、方案、拆解、测试设计、编码、审查、测试与部署角色，8/8 已完成。',
+    description: '一个目标，八个阶段。每一步都有任务与负责岗位。',
+    caption: '真实产品截图 · 目标详情局部截取 · 八个阶段任务已完成'
+  },
+  chat: {
+    src: '/site/assets/shots/agent-conversation.png', w: 2880, h: 1800,
+    alt: '本地 Legion Agent 对话页：左侧按岗位列出团队，中间是用户消息与编码工程师的回复及任务状态消息，下方为消息输入区。',
+    description: '按岗位找到 Agent，让沟通带着项目与任务上下文。',
+    caption: '真实产品截图 · 编码工程师对话 · 保留已有历史消息与原始界面状态'
+  },
+  tasks: {
+    src: '/site/assets/shots/tasks.png', w: 2880, h: 1800,
+    alt: '本地 Legion 任务中心：按状态展示任务泳道、岗位筛选和任务卡片。',
+    description: '任务按状态分组，支持按岗位和执行者筛选。',
+    caption: '真实产品截图 · 任务中心 · 保留实际任务数量与界面状态'
+  }
+}
+var tabButtons = document.querySelectorAll('[data-shot]')
+Array.prototype.forEach.call(tabButtons, function (button) {
+  button.addEventListener('click', function () {
+    var shot = shots[button.dataset.shot]
+    Array.prototype.forEach.call(tabButtons, function (b) { b.setAttribute('aria-pressed', String(b === button)) })
+    var img = document.getElementById('hero-screenshot')
+    img.src = shot.src; img.alt = shot.alt; img.width = shot.w; img.height = shot.h
+    document.querySelector('.hero-shot').setAttribute('aria-label', '放大查看截图')
+    document.getElementById('shot-description').textContent = shot.description
+    document.getElementById('shot-caption').textContent = shot.caption
+  })
+})
+
+var lightbox = document.getElementById('shot-lightbox')
+var lightboxImage = document.getElementById('lightbox-image')
+Array.prototype.forEach.call(document.querySelectorAll('.shot-open'), function (button) {
+  button.addEventListener('click', function () {
+    var image = button.querySelector('img')
+    lightboxImage.src = image.src; lightboxImage.alt = image.alt
+    document.getElementById('lightbox-caption').textContent = image.alt
+    lightbox.showModal()
+  })
+})
+document.getElementById('lightbox-close').addEventListener('click', function () { lightbox.close() })
+lightbox.addEventListener('click', function (e) { if (e.target === lightbox) lightbox.close() })
+
+// 复制 sha256。**渐进增强**：脚本不跑时那串值仍是可选中的纯文本。
 document.addEventListener('click', function (e) {
   var b = e.target.closest && e.target.closest('.sha-copy')
   if (!b) return
@@ -252,8 +279,7 @@ document.addEventListener('click', function (e) {
   if (!text || !navigator.clipboard) return
   var prev = b.textContent
   navigator.clipboard.writeText(text).then(function () {
-    b.setAttribute('data-done', '1')
-    b.textContent = done
+    b.setAttribute('data-done', '1'); b.textContent = done
     setTimeout(function () { b.removeAttribute('data-done'); b.textContent = prev }, 1600)
   }).catch(function () {})
 })

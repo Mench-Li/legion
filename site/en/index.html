@@ -1,253 +1,277 @@
 <!doctype html>
 <html lang="en">
 <head>
-<meta charset="utf-8" />
-<meta name="viewport" content="width=device-width, initial-scale=1" />
-<meta name="color-scheme" content="dark light" />
-<title>Legion — An AI Office for multi-agent delivery</title>
-<meta name="description" content="Legion is a local-first multi-agent collaboration and delivery platform. You issue goals as the general; a roster turns each goal into a staged task chain, and the process and its evidence settle back onto the task. Code and credentials stay on your own machine." />
-<meta name="theme-color" content="#06080d" media="(prefers-color-scheme: dark)" />
-<meta name="theme-color" content="#fbfcfe" media="(prefers-color-scheme: light)" />
-<link rel="icon" href="/site/assets/favicon.png" sizes="32x32" />
-<link rel="icon" href="/site/assets/legion-icon.png" sizes="512x512" />
-<link rel="apple-touch-icon" href="/site/assets/legion-icon-180.png" />
-<link rel="canonical" href="/en" />
-<link rel="alternate" hreflang="zh-CN" href="/" />
-<link rel="alternate" hreflang="en" href="/en" />
-<link rel="alternate" hreflang="x-default" href="/" />
-<link rel="stylesheet" href="/site/assets/site.css" />
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Legion — From goal to delivery</title>
+<meta name="description" content="Legion is a local-first multi-agent collaboration and delivery platform. Publish a goal, organise the work, and keep execution moving — progress, review and acceptance in one workspace.">
+<link rel="icon" href="/site/assets/favicon.png" sizes="32x32">
+<link rel="icon" href="/site/assets/legion-icon.png" sizes="512x512">
+<link rel="apple-touch-icon" href="/site/assets/legion-icon-180.png">
+<link rel="canonical" href="/en">
+<link rel="alternate" hreflang="zh-CN" href="/">
+<link rel="alternate" hreflang="en" href="/en">
+<link rel="alternate" hreflang="x-default" href="/">
+<link rel="stylesheet" href="/site/assets/site.css">
+<script>
+// Settle the theme **before first paint**, otherwise dark-mode users see a white flash.
+// Light is the default (it is what the design specifies); dark only if explicitly chosen.
+(function () {
+  try {
+    if (localStorage.getItem('legion-theme') === 'dark') document.documentElement.dataset.theme = 'dark'
+  } catch (e) { /* localStorage throws in private mode; ignore */ }
+})()
+</script>
 </head>
 <body>
+<div class="wrap">
 
 <header class="nav">
-  <div class="wrap nav-inner">
-    <a class="brand" href="/en">
-      <img src="/site/assets/legion-icon-64.png" alt="" width="28" height="28" />
-      <span>Legion</span>
-    </a>
-    <nav class="nav-links">
-      <a href="#features">Capabilities</a>
-      <a href="#ui">Interface</a>
-      <a href="#download">Download</a>
-      <a href="#start">Get started</a>
-    </nav>
-    <div class="nav-right">
-      <span class="switch">
-        <a href="/" hreflang="zh-CN" lang="zh-CN">中文</a>
-        <a href="/en" aria-current="page">EN</a>
-      </span>
-      <a class="btn btn-primary btn-sm" href="#download">Download</a>
-    </div>
+  <a class="brand" href="#home" aria-label="Legion home">
+    <svg class="mark" viewBox="0 0 512 512" aria-hidden="true"><rect x="28" y="28" width="456" height="456" rx="100" fill="#0d1220"/><g stroke="#e6e9f0" stroke-width="15" stroke-linecap="round" fill="none"><path d="M256 234Q268 186 256 118M322 296Q356 304 374 326M190 296Q156 304 138 326"/></g><path d="M256 198 306 227 306 285 256 314 206 285 206 227Z" fill="#93c5fd"/><g fill="#e6e9f0"><circle cx="256" cy="118" r="21"/><circle cx="374" cy="326" r="21"/><circle cx="138" cy="326" r="21"/></g></svg>Legion
+  </a>
+  <nav class="nav-links" aria-label="Main navigation">
+    <a href="#capabilities">Capabilities</a>
+    <a href="#workflow">Talking to agents</a>
+    <a href="#delivery">Delivery &amp; acceptance</a>
+  </nav>
+  <div class="nav-end">
+    <span class="lang"><a href="/" hreflang="zh-CN" lang="zh-CN">中</a><a href="/en" aria-current="page">EN</a></span>
+    <button class="theme" type="button" id="theme-toggle" aria-label="Switch to dark theme" aria-pressed="false">◐</button>
+    <a class="btn" href="#deploy">Get started <span class="arrow">↗</span></a>
   </div>
 </header>
 
 <main>
 
-  <!-- ── Hero ─────────────────────────────────────────────────────────────── -->
-  <section class="hero" id="ui">
-    <div class="wrap hero-grid">
-      <div>
-        <span class="eyebrow">Public preview</span>
-        <h1>Put a <span class="grad">roster of agents</span> on delivery</h1>
-        <p class="lede">
-          Most tools ask you to write instruction after instruction. In Legion you act as the
-          <b>general</b>: you state the goal, the roster breaks it into a staged task chain and works
-          through it — while the diffs, test evidence and acceptance records settle back onto the task.
-          Your code, terminal and credentials <b>never leave your own machine</b>.
-        </p>
+<!-- ── Hero ─────────────────────────────────────────────────────────────── -->
+<section class="hero" id="home">
+  <div class="eyebrow"><i class="dot"></i> LOCAL-FIRST · MULTI-AGENT WORKSPACE</div>
+  <h1>Put your agents into<br><span>a team that ships.</span></h1>
+  <p class="subtitle">Publish the goal, organise the work, keep execution moving.<br>Track progress, review results and accept delivery in one workspace.</p>
 
-        <!-- legion:cta -->
+  <!-- legion:cta -->
 
-        <!-- legion:hub-line -->
-      </div>
+  <p class="hero-note">Local-first <span>/</span> Role-based teamwork <span>/</span> Traceable delivery</p>
 
-      <div class="shots-stack">
-        <figure class="shot">
-          <!-- Illustrative UI: sample data only, no real project content -->
-          <div class="mock" role="img" aria-label="Illustration of the command console (sample data)">
-            <div class="mock-bar"><i></i><i></i><i></i></div>
-            <div class="mock-body">
-              <div class="mock-rail"><i></i><i class="on"></i><i></i><i></i><i></i></div>
-              <div class="mock-side">
-                <div class="mock-space">Sample space</div>
-                <div class="mock-search">Search roles or spaces</div>
-                <div class="mock-agent on"><span class="av">C</span><span><span class="nm">Coder</span><br /><span class="st">Idle · 1 active task</span></span></div>
-                <div class="mock-agent"><span class="av">R</span><span><span class="nm">Requirements analyst</span><br /><span class="st">Idle</span></span></div>
-                <div class="mock-agent"><span class="av">S</span><span><span class="nm">Solution researcher</span><br /><span class="st">Idle</span></span></div>
-                <div class="mock-agent"><span class="av">T</span><span><span class="nm">Test runner</span><br /><span class="st">Idle</span></span></div>
-              </div>
-              <div class="mock-main">
-                <div class="mock-head"><div class="nm">Coder</div><div class="st">Sample space · coder · idle · 21/22 done</div></div>
-                <div class="mock-tabs"><span class="on">Chat</span><span>Tasks</span></div>
-                <div class="mock-card">
-                  <div class="mock-card-h"><span>Task summary</span><em class="mock-pill">Idle</em></div>
-                  <div class="mock-count">1 active task · 21 completed</div>
-                  <div class="mock-row"><span>T-001 · [sample] placeholder task title</span><em>To claim</em></div>
-                  <div class="mock-row"><span>T-002 · [sample] diffs and test evidence</span><em>Done</em></div>
-                </div>
-                <div class="mock-input"><span>Message Coder…</span><em>Send</em></div>
-              </div>
-            </div>
-          </div>
-          <figcaption class="ill">Command console · illustration with sample data, not a live screenshot</figcaption>
-        </figure>
-
-        <div class="phone-wrap">
-          <figure class="shot">
-            <div class="mock-phone" role="img" aria-label="Illustration of the mobile app (sample data)">
-              <div class="scr">
-                <div>
-                  <div class="nm">Coder</div>
-                  <div class="st">Sample space · idle · 21/22 done</div>
-                </div>
-                <div class="card">
-                  <div class="mock-card-h"><span>Task summary</span><em class="mock-pill">Idle</em></div>
-                  <div class="mock-count">1 active task · 21 completed</div>
-                  <div class="row"><span>T-001 · [sample] placeholder</span><em>To claim</em></div>
-                  <div class="row"><span>T-002 · [sample] evidence</span><em>Done</em></div>
-                </div>
-                <div class="mock-input"><span>Message…</span><em>Send</em></div>
-              </div>
-            </div>
-            <figcaption class="ill">Mobile app · illustration</figcaption>
-          </figure>
-        </div>
-      </div>
+  <div class="product real-product">
+    <div class="windowbar">
+      <div class="window-left"><i></i><i></i><i></i><span>Legion · local workbench</span></div>
+      <span class="mono">YOUR GOALS. YOUR AGENTS. YOUR WORKSPACE.</span>
+      <span class="window-right">Real product screenshot</span>
     </div>
-  </section>
-
-  <!-- ── Capabilities ─────────────────────────────────────────────────────── -->
-  <section class="band" id="features">
-    <div class="wrap">
-      <p class="slabel">01 — Capabilities</p>
-      <h2>You issue goals, not chores</h2>
-      <p class="sub">
-        Most tools ask you to write instruction after instruction. Legion asks what you want done.
-        The roster splits it, assigns it, executes and verifies it — and leaves the evidence on the
-        task. You just accept the result.
-      </p>
-      <div class="cards">
-        <div class="card">
-          <span class="idx">01</span>
-          <span class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><circle cx="12" cy="12" r="8.2" /><circle cx="12" cy="12" r="3.1" /><path d="M12 1.8v3M12 19.2v3M1.8 12h3M19.2 12h3" /></svg></span>
-          <h3>A goal becomes a task chain</h3>
-          <p>Publish one goal; it is split into staged tasks that flow by dependency. Every transition runs through a state machine — traceable, pausable, cancellable.</p>
-        </div>
-        <div class="card">
-          <span class="idx">02</span>
-          <span class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="9" cy="7.8" r="3.2" /><path d="M2.8 19.4c0-3.1 2.8-4.8 6.2-4.8s6.2 1.7 6.2 4.8" /><path d="M16.4 5.1a2.9 2.9 0 0 1 0 5.6" /><path d="M18.4 14.9c2 .5 3.3 1.8 3.3 3.6" /></svg></span>
-          <h3>A roster, each with one job</h3>
-          <p>Every space has its own roster. The software pipeline ships with eight roles, from requirements clarification all the way to deploy and CI/CD.</p>
-        </div>
-        <div class="card">
-          <span class="idx">03</span>
-          <span class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2.6 20 6v6c0 4.6-3.2 8.1-8 9.4C7.2 20.1 4 16.6 4 12V6z" /><path d="M8.8 12.2l2.3 2.3 4.3-4.6" /></svg></span>
-          <h3>Code stays on your machine</h3>
-          <p>Local-first: repos, terminal, build tools and model credentials live on your computer. The Hub only handles identity, routing and records.</p>
-        </div>
-        <div class="card">
-          <span class="idx">04</span>
-          <span class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2.8H7.2A2.2 2.2 0 0 0 5 5v14a2.2 2.2 0 0 0 2.2 2.2h9.6A2.2 2.2 0 0 0 19 19V8z" /><path d="M14 2.8V8h5" /><path d="M8.8 13h6.4M8.8 16.8h4.2" /></svg></span>
-          <h3>Evidence settles onto the task</h3>
-          <p>Patches, diffs, test output, artifacts and acceptance records all hang off the same task. Acceptance never leaves the browser.</p>
-        </div>
-      </div>
-
-      <div class="roster">
-        <span>Requirements analyst</span><span>Solution researcher</span><span>Task breaker</span><span>Test designer</span>
-        <span>Coder</span><span>Reviewer</span><span>Test runner</span><span>DevOps</span>
-      </div>
-      <p class="hint">The default roster of the software pipeline. A roster is a portable, versioned artifact — you can define your own roles and stages.</p>
+    <div class="shot-tabs" role="group" aria-label="Choose a product screenshot">
+      <button type="button" data-shot="goals" aria-pressed="true">Goals &amp; task progress</button>
+      <button type="button" data-shot="chat" aria-pressed="false">Agent conversations</button>
+      <button type="button" data-shot="tasks" aria-pressed="false">Task centre</button>
+      <span class="shot-origin">Captured locally <i class="dot"></i></span>
     </div>
-  </section>
-
-  <!-- ── Architecture ─────────────────────────────────────────────────────── -->
-  <section class="band" id="arch">
-    <div class="wrap">
-      <p class="slabel">02 — Architecture</p>
-      <h2>Three layers, each doing its part</h2>
-      <p class="sub">
-        The Hub runs neither your code nor a large model. Your computer dials out from inside the
-        network, so no inbound port has to be opened on the router.
-      </p>
-      <div class="arch">
-        <div class="arch-box">
-          <div class="tag">LAYER <b>01</b> · PHONE</div>
-          <h4>See and direct</h4>
-          <p>Who is online, who is busy, who is stuck. Talk to agents, publish goals, approve risky actions. Installable to your home screen.</p>
-        </div>
-        <div class="arch-box mid">
-          <div class="tag">LAYER <b>02</b> · HUB</div>
-          <h4>Always-on central point</h4>
-          <p>Identity, task routing, conversations and progress events, presence and notifications. The authority for tasks and collaboration records.</p>
-        </div>
-        <div class="arch-box">
-          <div class="tag">LAYER <b>03</b> · YOUR COMPUTER</div>
-          <h4>Where the work happens</h4>
-          <p>Repos, terminal, builds and tests, local models. When it is offline, tasks queue — the Hub will not read your workspace for it.</p>
-        </div>
-      </div>
+    <button class="shot-open hero-shot" type="button" aria-label="Enlarge the goals and task progress screenshot">
+      <img id="hero-screenshot" src="/site/assets/shots/goal-detail.png" width="2160" height="734" alt="Local Legion goal detail: one goal split into eight staged tasks for requirements, research, breakdown, test design, coding, review, testing and deployment, all 8/8 complete.">
+      <span class="zoom-hint">Enlarge ↗</span>
+    </button>
+    <div class="shot-bottom">
+      <span id="shot-description">One goal, eight stages. Every step has a task and an owning role.</span>
+      <span class="mono">CAPTURED FROM LOCAL WORKSPACE</span>
     </div>
-  </section>
+  </div>
+  <p class="mock-caption" id="shot-caption">Real product screenshot · goal detail, partial crop · eight staged tasks complete</p>
 
-  <!-- ── Download ─────────────────────────────────────────────────────────── -->
-  <section class="band" id="download">
-    <div class="wrap">
-      <p class="slabel">03 — Download</p>
-      <h2>Download for Windows</h2>
-      <p class="sub">The desktop app bundles the Hub, the workbench and the execution node — install it, then connect from your phone.</p>
-      <div class="dl">
-        <!-- legion:download -->
-      </div>
-    </div>
-  </section>
+  <div class="promise"><span><i>✓</i>Goal-driven execution</span><span><i>✓</i>You decide the key moments</span><span><i>✓</i>Process and results on record</span></div>
+</section>
 
-  <!-- ── Get started ──────────────────────────────────────────────────────── -->
-  <section class="band" id="start">
-    <div class="wrap">
-      <p class="slabel">04 — Get started</p>
-      <h2>Three steps</h2>
-      <p class="sub">From download to your first roster running.</p>
-      <div class="steps">
-        <div class="step">
-          <span class="n">STEP 01</span>
-          <h3>Install the desktop app</h3>
-          <p>Download and install; it starts the local Hub and workbench. The first launch walks you through creating a space.</p>
-        </div>
-        <div class="step">
-          <span class="n">STEP 02</span>
-          <h3>Connect your phone</h3>
-          <p>Open <code>/mobile/</code> on your phone and install it to the home screen. Desktop and mobile share one account.</p>
-        </div>
-        <div class="step">
-          <span class="n">STEP 03</span>
-          <h3>Publish your first goal</h3>
-          <p>Write what you want done in the console. The roster takes over; progress and evidence come back onto the task for you to accept.</p>
-        </div>
-      </div>
+<!-- ── Capabilities ─────────────────────────────────────────────────────── -->
+<section id="capabilities" class="section">
+  <div class="section-head">
+    <div>
+      <div class="eyebrow">01 / BUILT FOR TEAMWORK</div>
+      <h2>Organise the collaboration,<br>land the delivery.</h2>
     </div>
-  </section>
+    <p>Start from a single goal and connect the division of labour, the execution and the acceptance.<br>Every agent knows its job; you can see the whole board.</p>
+  </div>
+  <div class="features">
+    <article class="feature">
+      <div class="index">01 / ORGANIZE</div>
+      <h3>Organise the team around a goal</h3>
+      <p>Bind projects and a role roster to a workspace. Split the goal into staged tasks so each one maps to a role and its responsibilities.</p>
+      <div class="feature-foot">WORKSPACE → ROSTER → GOAL</div>
+    </article>
+    <article class="feature">
+      <div class="index">02 / COORDINATE</div>
+      <h3>Let the work hand off by dependency</h3>
+      <p>When a preceding task completes, the next role takes over. It stops when your decision is needed, and supports pause, reassignment and rework.</p>
+      <div class="feature-foot">DEPENDENCY → HANDOFF → HUMAN GATE</div>
+    </article>
+    <article class="feature">
+      <div class="index">03 / VERIFY</div>
+      <h3>Look at the evidence, then accept</h3>
+      <p>File changes, test results and delivery artifacts are attached to the task. Open it and you can see the result and where it came from.</p>
+      <div class="feature-foot">PATCH → TEST REPORT → ACCEPTANCE</div>
+    </article>
+  </div>
+</section>
+
+<!-- ── Talking to agents ────────────────────────────────────────────────── -->
+<section id="workflow" class="section live-section">
+  <div class="section-head">
+    <div>
+      <div class="eyebrow">02 / TALK TO YOUR TEAM</div>
+      <h2>Find the right agent<br>and keep working with them.</h2>
+    </div>
+    <p>Find your collaborators by workspace and role.<br>Conversation, task records and follow-up requests meet in one place.</p>
+  </div>
+  <div class="live-shot-frame">
+    <div class="windowbar">
+      <div class="window-left"><i></i><i></i><i></i><span>Agent · Coder</span></div>
+      <span class="mono">CONVERSATION / TASK CONTEXT</span>
+      <span class="window-right">Real product screenshot</span>
+    </div>
+    <button class="shot-open" type="button" aria-label="Enlarge the agent conversation screenshot">
+      <img src="/site/assets/shots/agent-conversation.png" width="2880" height="1800" loading="lazy" alt="A locally running Legion agent conversation page: the team listed by role on the left, user messages and the coder's replies plus task-status messages in the middle, and a message composer below.">
+      <span class="zoom-hint">Enlarge ↗</span>
+    </button>
+  </div>
+  <div class="shot-points">
+    <span><b>01</b> Find an agent by space and role</span>
+    <span><b>02</b> Read past exchanges and task messages</span>
+    <span><b>03</b> Ask, add requirements, or open a task</span>
+  </div>
+  <p class="mock-caption">An existing conversation from a local environment · historical messages and UI state kept as-is · the screenshot does not mean the agent is currently executing</p>
+</section>
+
+<!-- ── Delivery &amp; acceptance ───────────────────────────────────────────── -->
+<section class="artifacts" id="delivery">
+  <div>
+    <div class="eyebrow">03 / CONTEXT THAT COMPOUNDS</div>
+    <h2>Every delivery leaves<br>something for the next one.</h2>
+    <p>Stage documents keep the process; acceptance records keep the basis.<br>Rules, skills and experience are managed per workspace and feed later tasks.</p>
+  </div>
+  <div class="file-list">
+    <div class="file"><span class="file-ext">MD</span><span class="file-name">Requirements and approach</span><span class="small">Goal-level documents</span></div>
+    <div class="file"><span class="file-ext">DIFF</span><span class="file-name">Patch and test results</span><span class="small">Task-level evidence</span></div>
+    <div class="file"><span class="file-ext">LOG</span><span class="file-name">Acceptance records</span><span class="small">Traceable accumulation</span></div>
+    <p class="file-tail">Example artifact types · what a given task actually delivers may differ</p>
+  </div>
+</section>
+
+<!-- ── Dark CTA ─────────────────────────────────────────────────────────── -->
+<section class="bottom">
+  <div>
+    <div class="eyebrow">LEGION / YOUR TEAM, YOUR WORKSPACE</div>
+    <h2>Start the teamwork from one goal.</h2>
+    <p>The workbench and project data are yours to manage; when you use a remote model, the relevant context is still sent to that model service.</p>
+  </div>
+  <a class="btn" href="#deploy">See how to start <span class="arrow">↗</span></a>
+</section>
+
+<!-- ── Deploy / download ────────────────────────────────────────────────── -->
+<section id="deploy" class="deploy">
+  <h2>Choose how you want to start.</h2>
+  <p class="deploy-intro">Currently based on self-hosting on your own machine or local network.</p>
+  <div class="deploy-grid">
+    <article class="deploy-item">
+      <h3>Local web workbench <span class="label">Self-hosted entry</span></h3>
+      <p>Connect projects and workspaces, and manage goals, tasks and delivery in the browser. Running it needs an environment prepared per the deployment docs, with the execution service and model configuration in place.</p>
+      <!-- legion:hub-line -->
+    </article>
+    <article class="deploy-item">
+      <h3>Windows desktop app <span class="label human">Internal validation</span></h3>
+      <!-- legion:download -->
+    </article>
+  </div>
+</section>
 
 </main>
 
-<footer>
-  <div class="wrap foot-inner">
-    <span class="foot-brand">
-      <img src="/site/assets/legion-icon-64.png" alt="" width="20" height="20" />
-      Legion · an AI Office for multi-agent delivery
-    </span>
-    <span class="foot-links">
-      <a href="/mobile/">Mobile app</a>
-      <a href="/api/identity/status">Service status</a>
-    </span>
-    <span class="foot-copy">© 2026 Legion</span>
+<footer class="footer">
+  <a class="brand" href="#home">
+    <svg class="mark" viewBox="0 0 512 512" aria-hidden="true"><rect x="28" y="28" width="456" height="456" rx="100" fill="#0d1220"/><g stroke="#e6e9f0" stroke-width="15" stroke-linecap="round" fill="none"><path d="M256 234Q268 186 256 118M322 296Q356 304 374 326M190 296Q156 304 138 326"/></g><path d="M256 198 306 227 306 285 256 314 206 285 206 227Z" fill="#93c5fd"/><g fill="#e6e9f0"><circle cx="256" cy="118" r="21"/><circle cx="374" cy="326" r="21"/><circle cx="138" cy="326" r="21"/></g></svg>Legion
+  </a>
+  <div class="footer-links">
+    <a href="#capabilities">Capabilities</a>
+    <a href="#workflow">Collaboration</a>
+    <a href="#deploy">Deployment</a>
   </div>
+  <span>© 2026 Legion</span>
 </footer>
 
+</div>
+
+<dialog id="shot-lightbox" aria-label="Enlarged product screenshot">
+  <div class="lightbox-header">
+    <span>Legion · actual running interface</span>
+    <button type="button" id="lightbox-close" autofocus>Close ×</button>
+  </div>
+  <img id="lightbox-image" alt="Product screenshot">
+  <p id="lightbox-caption"></p>
+</dialog>
+
 <script>
-// Copy the sha256. **Progressive enhancement**: without this script the value is still
-// plain selectable text, so the page does not depend on it. A design where "cannot copy"
-// means "no checksum" would be worse than showing no checksum at all.
+// Theme toggle. Light by default (what the design specifies); the choice is remembered
+// in localStorage and applied by the head script before first paint, so there is no flash.
+(function () {
+  var b = document.getElementById('theme-toggle')
+  b.addEventListener('click', function () {
+    var dark = document.documentElement.dataset.theme !== 'dark'
+    document.documentElement.dataset.theme = dark ? 'dark' : 'light'
+    b.setAttribute('aria-pressed', String(dark))
+    b.setAttribute('aria-label', dark ? 'Switch to light theme' : 'Switch to dark theme')
+    try { localStorage.setItem('legion-theme', dark ? 'dark' : 'light') } catch (e) {}
+  })
+  if (document.documentElement.dataset.theme === 'dark') {
+    b.setAttribute('aria-pressed', 'true'); b.setAttribute('aria-label', 'Switch to light theme')
+  }
+})()
+
+// The three screenshots are three views of the **same local environment**; switching
+// only swaps src and the caption.
+var shots = {
+  goals: {
+    src: '/site/assets/shots/goal-detail.png', w: 2160, h: 734,
+    alt: 'Local Legion goal detail: one goal split into eight staged tasks for requirements, research, breakdown, test design, coding, review, testing and deployment, all 8/8 complete.',
+    description: 'One goal, eight stages. Every step has a task and an owning role.',
+    caption: 'Real product screenshot · goal detail, partial crop · eight staged tasks complete'
+  },
+  chat: {
+    src: '/site/assets/shots/agent-conversation.png', w: 2880, h: 1800,
+    alt: 'A locally running Legion agent conversation page: the team listed by role on the left, user messages and the coder’s replies plus task-status messages in the middle, and a message composer below.',
+    description: 'Find an agent by role, and let the conversation carry project and task context.',
+    caption: 'Real product screenshot · coder conversation · existing messages and UI state kept as-is'
+  },
+  tasks: {
+    src: '/site/assets/shots/tasks.png', w: 2880, h: 1800,
+    alt: 'Local Legion task centre: task lanes by status, role filters and task cards.',
+    description: 'Tasks grouped by status, filterable by role and executor.',
+    caption: 'Real product screenshot · task centre · actual task counts and UI state kept as-is'
+  }
+}
+var tabButtons = document.querySelectorAll('[data-shot]')
+Array.prototype.forEach.call(tabButtons, function (button) {
+  button.addEventListener('click', function () {
+    var shot = shots[button.dataset.shot]
+    Array.prototype.forEach.call(tabButtons, function (b) { b.setAttribute('aria-pressed', String(b === button)) })
+    var img = document.getElementById('hero-screenshot')
+    img.src = shot.src; img.alt = shot.alt; img.width = shot.w; img.height = shot.h
+    document.querySelector('.hero-shot').setAttribute('aria-label', 'Enlarge screenshot')
+    document.getElementById('shot-description').textContent = shot.description
+    document.getElementById('shot-caption').textContent = shot.caption
+  })
+})
+
+var lightbox = document.getElementById('shot-lightbox')
+var lightboxImage = document.getElementById('lightbox-image')
+Array.prototype.forEach.call(document.querySelectorAll('.shot-open'), function (button) {
+  button.addEventListener('click', function () {
+    var image = button.querySelector('img')
+    lightboxImage.src = image.src; lightboxImage.alt = image.alt
+    document.getElementById('lightbox-caption').textContent = image.alt
+    lightbox.showModal()
+  })
+})
+document.getElementById('lightbox-close').addEventListener('click', function () { lightbox.close() })
+lightbox.addEventListener('click', function (e) { if (e.target === lightbox) lightbox.close() })
+
+// Copy the sha256. **Progressive enhancement**: without this the value is still plain selectable text.
 document.addEventListener('click', function (e) {
   var b = e.target.closest && e.target.closest('.sha-copy')
   if (!b) return
@@ -256,8 +280,7 @@ document.addEventListener('click', function (e) {
   if (!text || !navigator.clipboard) return
   var prev = b.textContent
   navigator.clipboard.writeText(text).then(function () {
-    b.setAttribute('data-done', '1')
-    b.textContent = done
+    b.setAttribute('data-done', '1'); b.textContent = done
     setTimeout(function () { b.removeAttribute('data-done'); b.textContent = prev }, 1600)
   }).catch(function () {})
 })

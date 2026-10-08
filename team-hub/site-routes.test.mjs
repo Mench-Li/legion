@@ -298,9 +298,15 @@ describe('官网：下载区诚实地缺席', () => {
   test('纯函数：没发布的语言各自诚实', () => {
     const zh = renderLiveBlocks({ lang: 'zh', downloadUrl: '' })
     const en = renderLiveBlocks({ lang: 'en', downloadUrl: '' })
-    assert.match(zh.cta, /尚未发布/)
-    assert.match(en.cta, /not yet published/i)
-    assert.doesNotMatch(zh.cta, /href=/, '诚实的话不能是一个链接')
+    // 诚实的话在**部署卡片**里（hero 退回设计稿原本的那一对动作，不给死按钮）。
+    assert.match(zh.download, /还没上传到这台 Hub/)
+    assert.match(en.download, /No desktop installer has been uploaded/)
+    assert.doesNotMatch(zh.download, /href="\/legion\/releases\//, '没发布就没有任何发布链接')
+    assert.doesNotMatch(zh.download, /<a class="btn primary"/, '没发布就不该有可点的下载按钮')
+    // hero 的两个动作退回稿子原本的那一对，且都指向站内锚点。
+    assert.match(zh.cta, /查看协作界面/)
+    assert.match(en.cta, /See the interface/)
+    assert.doesNotMatch(zh.cta, /href="\/legion\//)
   })
 
   test('纯函数：注入用 split/join，替换串里的 `$&` 不会被当成替换模式吃掉', () => {
@@ -422,7 +428,7 @@ describe('官网：真实模板不漂移', () => {
     const zh = ids(read('index.html'))
     const en = ids(read(join('en', 'index.html')))
     assert.equal(zh, en, '中英两页的 id 集合必须一致')
-    assert.ok(zh.includes('"download"'), '下载锚点必须在')
+    assert.ok(zh.includes('"deploy"'), '部署/下载锚点必须在')
   })
 
   test('★ 真实模板里不含任何真实项目数据（门口那条纪律）', () => {

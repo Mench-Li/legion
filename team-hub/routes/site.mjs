@@ -115,11 +115,14 @@ const COPY = Object.freeze({
   zh: {
     lang: 'zh-CN',
     cta: '下载电脑版',
-    ctaNote: 'Windows x64',
-    ctaWarn: '安装包未做代码签名，Windows 会拦一下 —— 怎么处理见下方「下载」。',
+    ctaSecond: '查看协作界面',
+    explore: '探索 Legion',
+    // 首屏只放**一句**。完整的三条处理方式在下方「Windows 桌面端」卡片里 ——
+    // 设计稿的首屏节奏是「两个动作 + 一行小字」，塞进一整段会把节奏压垮。
+    ctaWarnShort: '安装包未做代码签名，Windows 会拦一下，处理方式见下方。',
+    deployWin: '桌面与 Web 共享后台和数据。当前为内部验证阶段：安装包未做代码签名，Windows 会拦一下 —— 那是预期的，不是包坏了。',
+    deployWinEmpty: '桌面端安装包还没上传到这台 Hub；先向管理员索取。',
     notYet: '电脑版尚未发布',
-    notYetHint: '安装包还没上传到这台 Hub；先向管理员索取。',
-    downloadTitle: '下载电脑版',
     updates: '本次更新',
     updatesZhOnly: '发布端只写了中文说明，原文照录。',
     sha: '安装包 sha256',
@@ -127,29 +130,28 @@ const COPY = Object.freeze({
     copy: '复制',
     copied: '已复制',
     mobile: '打开手机端',
-    mobileHint: '看板与对话；可安装到主屏',
-    regOpen: '这台 Hub 开放注册。打开手机端即可注册。',
-    regInvite: '这台 Hub 开放注册（需要邀请码）。打开手机端即可注册。',
-    regClosed: '这台 Hub 未开放自助注册；请向管理员索取邀请码。',
-    regShared: '注册与登录都在手机端页面上；电脑版与手机端共用同一套账号。',
+    regOpen: '这台 Hub 开放注册，打开手机端即可注册。',
+    regInvite: '这台 Hub 开放注册（需要邀请码），打开手机端即可注册。',
+    regClosed: '这台 Hub 未开放自助注册，请向管理员索取邀请码。',
     // ★ 未签名构建专有的说明。换签名构建时**这段必须跟着改**，否则它会变成
     //   "照它说的做、然后发现对不上"，而那种文案教会人忽略这一块。
     unsigned:
-      '<p class="notice"><b>尚未做代码签名</b>（那要一张证书），所以 Windows 会拦一下 —— 那是预期的，不是包坏了：<br />' +
+      '<p class="dl-note"><b>尚未做代码签名</b>（那要一张证书）。所以：<br />' +
       '① 浏览器下载时若提示「不常见」，点<b>保留</b>；<br />' +
       '② 双击运行时出现「未知发布者」，点<b>更多信息 → 仍要运行</b>。<br />' +
-      '⚠️ 例外：若系统开着 <b>Smart App Control</b>（Windows 11 全新安装默认开），它会' +
-      '<b>直接阻止且不给「仍要运行」</b>。关掉它可以装，但关掉之后要重装系统才能再打开 —— ' +
+      '<span class="warn">⚠ 例外</span>：若系统开着 <b>Smart App Control</b>（Windows 11 全新安装默认开），' +
+      '它会<b>直接阻止且不给「仍要运行」</b>。关掉它可以装，但关掉之后要重装系统才能再打开 —— ' +
       '这台机器请改用别的机器下载。</p>',
   },
   en: {
     lang: 'en',
     cta: 'Download for Windows',
-    ctaNote: 'Windows x64',
-    ctaWarn: 'The installer is not code-signed, so Windows will push back — see the note under Download below.',
+    ctaSecond: 'See the interface',
+    explore: 'Explore Legion',
+    ctaWarnShort: 'The installer is not code-signed, so Windows will push back — details below.',
+    deployWin: 'Desktop and web share one backend and one set of data. It is at internal-validation stage: the installer is not code-signed, so Windows will push back — that is expected, not a broken download.',
+    deployWinEmpty: 'No desktop installer has been uploaded to this Hub yet; ask the administrator.',
     notYet: 'Desktop build not yet published',
-    notYetHint: 'No installer has been uploaded to this Hub yet; ask the administrator.',
-    downloadTitle: 'Download for Windows',
     updates: "What's new",
     updatesZhOnly: 'The publisher only wrote release notes in Chinese; shown verbatim.',
     sha: 'Installer sha256',
@@ -157,17 +159,14 @@ const COPY = Object.freeze({
     copy: 'Copy',
     copied: 'Copied',
     mobile: 'Open the mobile app',
-    mobileHint: 'Board and conversations; installable to your home screen',
-    regOpen: 'This Hub is open for sign-up. Open the mobile app to register.',
-    regInvite: 'This Hub is open for sign-up (invite code required). Open the mobile app to register.',
+    regOpen: 'This Hub is open for sign-up — open the mobile app to register.',
+    regInvite: 'This Hub is open for sign-up (invite code required) — open the mobile app to register.',
     regClosed: 'This Hub does not allow self sign-up; ask the administrator for an invite code.',
-    regShared: 'Sign-up and sign-in both happen in the mobile app; desktop and mobile share one account.',
     unsigned:
-      '<p class="notice">The installer is <b>not code-signed</b> (that needs a certificate), so Windows will ' +
-      'push back — that is expected, the download is not broken:<br />' +
+      '<p class="dl-note">The installer is <b>not code-signed</b> (that needs a certificate). So:<br />' +
       '① If the browser says the file is “uncommon”, choose <b>Keep</b>;<br />' +
       '② When you run it, Windows shows “Unknown publisher” — choose <b>More info → Run anyway</b>.<br />' +
-      '⚠️ Exception: if <b>Smart App Control</b> is on (on by default in a fresh Windows 11 install) it will ' +
+      '<span class="warn">⚠ Exception</span>: if <b>Smart App Control</b> is on (on by default in a fresh Windows 11 install) it will ' +
       '<b>block the installer outright with no “Run anyway”</b>. Turning it off lets you install, but you must ' +
       'reinstall Windows to turn it back on — use another machine instead.</p>',
   },
@@ -196,22 +195,21 @@ export function renderLiveBlocks({
   const has = String(downloadUrl).trim().length > 0
   const href = has ? esc(downloadUrl) : ''
 
-  // ① 主按钮 / 诚实的话。没发布就给一句实话，**不给点开 404 的假链接**。
+  // ① Hero 的两个动作。设计稿写的是"首屏只设两个动作"；这里第一个动作在有发布时
+  //    就是下载（我们确实有发布），没有发布时退回稿子原本的那一对，
+  //    而不是给一个点开 404 的按钮。
   const cta = has
-    ? `<a class="btn btn-primary" href="${href}">${c.cta}</a>`
-    : `<span class="btn btn-disabled" aria-disabled="true">${c.notYet}</span>`
+    ? `<div class="actions">
+        <a href="${href}" class="btn primary">${c.cta} <span>↓</span></a>
+        <a href="#workflow" class="btn">${c.ctaSecond} <span>↓</span></a>
+      </div>
+      <p class="hero-warn"><span class="warn">⚠</span> ${c.ctaWarnShort}</p>`
+    : `<div class="actions">
+        <a href="#workflow" class="btn primary">${c.ctaSecond} <span>↓</span></a>
+        <a href="#capabilities" class="btn">${c.explore} <span>↗</span></a>
+      </div>`
 
-  // 元信息行：有哪几项就写哪几项，一项都没有就不出现这一行。
-  const metaBits = [c.ctaNote, version ? `v${esc(version)}` : '', esc(size), esc(date)].filter((s) => s.length > 0)
-  const meta = metaBits.length > 0 ? `<p class="meta">${metaBits.join(' · ')}</p>` : ''
-
-  // Hero 版：按钮 + 元信息 + **一句**短提醒（完整说明在下面「下载」里）。
-  // 提醒放在按钮**后面但仍在同一屏**，是为了让用户点之前就看见 —— 详见 portal.mjs 的注释。
-  const ctaHero = `${cta}
-    ${meta}
-    ${has ? `<p class="hint">${c.ctaWarn}</p>` : ''}`
-
-  // ② 下载区整块。
+  // ② 下载块（部署区里那张 Windows 卡片的内容）。
   //
   // ★ 这里**曾经**有一行「全部历史版本 → /legion/」。实测（2026-10-08 上线后）
   //   `/legion/` 是 **404**：发布目录那一族只发**文件**，从不列目录
@@ -231,7 +229,7 @@ export function renderLiveBlocks({
         <code class="sha-value">${sha}</code>
         <button type="button" class="sha-copy" data-copy="${sha}" data-copied="${c.copied}">${c.copy}</button>
       </div>
-      <p class="hint">${c.shaHint}</p>`
+      <p class="small">${c.shaHint}</p>`
     : ''
 
   // 更新条目：英文页优先读 `changesEn`，没有就退回 `changes` 并**标明是发布端原文**。
@@ -242,34 +240,40 @@ export function renderLiveBlocks({
   const borrowed = lang === 'en' && enList.length === 0 && zhList.length > 0
   const updatesBlock = list.length > 0
     ? `<div class="updates">
-        <h3>${c.updates}</h3>
-        ${borrowed ? `<p class="hint">${c.updatesZhOnly}</p>` : ''}
+        <h4>${c.updates}</h4>
+        ${borrowed ? `<p class="borrowed">${c.updatesZhOnly}</p>` : ''}
         <ul>${list.map((s) => `<li>${inlineBold(s)}</li>`).join('')}</ul>
       </div>`
     : ''
 
+  // 元信息：有哪几项就写哪几项，一项都没有就不出现这一行。等宽，与稿子的标签同一路。
+  const metaBits = ['Windows x64', version ? `v${esc(version)}` : '', esc(size), esc(date)].filter((s) => s.length > 0)
+  const meta = metaBits.length > 0
+    ? `<p class="dl-meta">${metaBits.map((bit) => `<span>${bit}</span>`).join('<span class="sep">·</span>')}</p>`
+    : ''
+
   const download = has
-    ? `<div class="dl-row">${cta}</div>
+    ? `<p>${c.deployWin}</p>
+       <div class="dl-actions">
+         <a class="btn primary" href="${href}">${c.cta}</a>
+         <a class="btn" href="#workflow">${c.ctaSecond}</a>
+       </div>
        ${meta}
        ${c.unsigned}
        ${shaBlock}
        ${updatesBlock}`
-    : `<div class="dl-row">${cta}</div>
-       <p class="hint">${c.notYetHint}</p>`
+    : `<p>${c.deployWinEmpty}</p>
+       <div class="dl-actions"><span class="btn" aria-disabled="true">${c.notYet}</span></div>`
 
   // ③ 这台 Hub 自己的入口与注册状态。门口页原来承担的"这是什么、该去哪儿"，
   //    现在由官网承担——所以这一段不能丢。
   const reg = registration === 'open' ? c.regOpen
     : registration === 'invite' ? c.regInvite
       : c.regClosed
-  const hub = `<p class="hub-entry">
-    <a class="btn btn-ghost" href="${esc(mobilePath)}">${c.mobile}</a>
-  </p>
-  <p class="hint">${c.mobileHint}</p>
-  <p class="hint">${reg}</p>
-  <p class="hint">${c.regShared}</p>`
+  const hub = `<p>${reg}</p>
+    <a href="${esc(mobilePath)}">${c.mobile} <span class="arrow">↗</span></a>`
 
-  return { cta: ctaHero, download, hub }
+  return { cta, download, hub }
 }
 
 /**

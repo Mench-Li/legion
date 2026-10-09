@@ -663,6 +663,12 @@ async function stageTest() {
         // 客户端有签名清单兜底，所以坏镜像不会变成坏安装；但它会变成一次
         // 100% 失败率的下载，而那时用户已经等了十分钟。
         'scripts/update/verify-mirrors.test.mjs',
+        // T-196：SigV4 上传器。仓库一直没有上传工具（设计 §9 把上传留给调用方），
+        // 而"多线路下载"必须有上传这一步，否则线路表里填不出地址。
+        // 用 `node:crypto` 做签名、不装任何 CLI——判据里放了 AWS SigV4 的
+        // **已知向量**，因为签名错了只会表现为服务端的 SignatureDoesNotMatch，
+        // 那和"凭据不对""桶不存在"在使用时分不出来。
+        'scripts/update/oss-put.test.mjs',
       ],
       cwd: ROOT,
     },

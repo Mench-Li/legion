@@ -18,7 +18,7 @@ import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..')
-const TEST = 'team-hub/download-lines.test.mjs'
+const DEFAULT_TEST = 'team-hub/download-lines.test.mjs'
 
 const PROBES = [
   {
@@ -65,6 +65,31 @@ const PROBES = [
     find: `  const othersRow = has && otherLines.length > 0`,
     replace: `  const othersRow = false && has && otherLines.length > 0`,
   },
+  // ── 上传器（SigV4）────────────────────────────────────────────────────────
+  {
+    id: 'O1',
+    test: 'scripts/update/oss-put.test.mjs',
+    desc: '签名密钥派生链写错（已知向量必须红）',
+    file: 'scripts/update/oss-put.mjs',
+    find: `  const kService = hmac(kRegion, service)`,
+    replace: `  const kService = hmac(kRegion, 'not-the-service')`,
+  },
+  {
+    id: 'O2',
+    test: 'scripts/update/oss-put.test.mjs',
+    desc: 'URI 编码退回 Buffer.map（空格会被编成 0，非 ASCII 会被编成 000）',
+    file: 'scripts/update/oss-put.mjs',
+    find: `    return Array.from(Buffer.from(ch, 'utf8'), (b) => \`%\${b.toString(16).toUpperCase().padStart(2, '0')}\`).join('')`,
+    replace: `    return Buffer.from(ch, 'utf8').map((b) => \`%\${b.toString(16).toUpperCase().padStart(2, '0')}\`).join('')`,
+  },
+  {
+    id: 'O3',
+    test: 'scripts/update/oss-put.test.mjs',
+    desc: '时刻取两次（头与签名跨秒不一致 → 偶发 SignatureDoesNotMatch）',
+    file: 'scripts/update/oss-put.mjs',
+    find: `    region, accessKey, secretKey, date: now,`,
+    replace: `    region, accessKey, secretKey, date: new Date(),`,
+  },
 ]
 
 function patchText(original, find, replace) {
@@ -103,7 +128,7 @@ for (const p of PROBES) {
   try {
     writeFileSync(abs, patched)
     row.applied = readFileSync(abs, 'utf8') !== original
-    const r = spawnSync(process.execPath, ['--test', TEST], { cwd: ROOT, encoding: 'utf8', timeout: 240_000 })
+    const r = spawnSync(process.execPath, ['--test', p.test ?? DEFAULT_TEST], { cwd: ROOT, encoding: 'utf8', timeout: 240_000 })
     const o = readOutcome(`${r.stdout ?? ''}${r.stderr ?? ''}`)
     row.crashed = o.crashed
     row.red = o.failCount !== null && o.failCount > 0

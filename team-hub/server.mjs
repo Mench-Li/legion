@@ -106,6 +106,7 @@ import { resolveRepoIdentity } from '../packages/shared/src/repo-identity.mjs'
 import { runGit as runDeliveryGit } from './git-plumbing.mjs'
 import { judgeFileDomain, ignoredFileDomainEntries } from './file-domain-guard.mjs'
 import { MODEL_ERRORS, ModelError, createModelStore, ensureModelSchema } from './model-store.mjs'
+import { createProviderStore } from './provider-store.mjs'
 import {
   BINDING_STORE_ERRORS, BindingStoreError, createBindingStore, ensureBindingSchema,
 } from './binding-store.mjs'
@@ -285,6 +286,7 @@ import { createPriceTablesRoutes } from './routes/price-tables.mjs'
 import { createConfigBundleRoutes } from './routes/config-bundle.mjs'
 import { createContextSnapshotsRoutes } from './routes/context-snapshots.mjs'
 import { createModelProfilesRoutes } from './routes/model-profiles.mjs'
+import { createModelProvidersRoutes } from './routes/model-providers.mjs'
 import { createToolCallsRoutes } from './routes/tool-calls.mjs'
 import { createRolePacksRoutes } from './routes/role-packs.mjs'
 import { createChannelRoutes } from './routes/channels.mjs'
@@ -1047,6 +1049,18 @@ function contextStore() {
 }
 
 const modelStore = createModelStore({
+  db,
+  clock: () => Date.now(),
+  writeAudit: ({ action, id, detail, actor }) => audit(actor, '*', action, id, detail),
+})
+
+/**
+ * 模型**供应商目录**（DECISION-legion-owns-model-config 的 P1）。
+ *
+ * 与 `modelStore` 分成两个仓储而不是合并：粒度不同（供应商是实体、档案是成员），
+ * 合并会让"同组各行的 api/baseURL 必须一致"这条约束无处安放。
+ */
+const providerStore = createProviderStore({
   db,
   clock: () => Date.now(),
   writeAudit: ({ action, id, detail, actor }) => audit(actor, '*', action, id, detail),
@@ -6958,6 +6972,7 @@ const router = createRouter([
     handleRun, modelStore, probeService,
     MODEL_ERRORS,
   }),
+  createModelProvidersRoutes({ json, handleRun, providerStore }),
   createUsageRoutes({
     json,
     authorized, usageRollup, optionalIntParam,

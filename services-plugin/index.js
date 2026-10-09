@@ -95,6 +95,148 @@ export function buildWorkbenchEnv({ baseEnv = {}, hubUpstream = '', teamHubToken
 //   物化走进程内的 `ctx.settings.mutate` / `ctx.credentials.set`（无 HTTP、无 cookie、无登录）。
 //   拆除的是方向，不是"还差一层"。
 
+/**
+ * 从**宿主进程内**读出一份"DSH 现在活着的供应商目录"快照（P1 的只读那一半）。
+ *
+ * 为什么在插件里做：这个进程就是宿主，`ctx.llm` / `ctx.settings` / `ctx.credentials`
+ * 都是**进程内直连**——不需要 HTTP、不需要会话 cookie、不需要登录
+ * （那三样正是 BUG-014 前两版绕不出去的东西，见 DECISION 文档）。
+ *
+ * ★ 只读、且只取**目录类**事实：供应商 id、显示名、协议、地址、**引用名**（`apiKeyEnv`）、
+ *   型号清单、以及"这个引用配没配"。**永不读值**——`credentials.describe()` 返回的是
+ *   `{configured}`，不是密钥本身。
+ *
+ * 组装规则（两条都不能少）：
+ *   · "活着"以 `llm.listProviders()` 为准（引擎真正认得的供应商）；
+ *   · 细节（api/baseURL/apiKeyEnv）从 `settings.describe` 的**已声明**配置里取，
+ *     取不到就留 null —— 一个"活着但没声明"的供应商仍然要收进来，
+ *     因为"引擎认得它"才是要紧的事实。
+ *
+ * 三个服务一律**软取**（`ctx.get`）：缺席时函数返回空数组并说明原因，而不是抛错。
+ * 让"宿主没暴露这个服务"变成"整个插件 pending、team-hub 与指挥台都不启动"，
+ * 是这条链上最容易犯、后果最大的一种错（见文件头 `inject` 那段）。
+ *
+ * @returns `{ providers, reason }` —— `reason` 非空即"这次读不出快照"，调用方据此决定要不要记一笔。
+ */
+export async function readDshProviderSnapshot(ctx) {
+  const llm = ctx?.get?.('llm') ?? null
+  if (!llm || typeof llm.listProviders !== 'function') return { providers: [], reason: '宿主没有 llm 服务' }
+  const settings = ctx?.get?.('settings') ?? null
+  const credentials = ctx?.get?.('credentials') ?? null
+
+  let namespaces = []
+  if (settings && typeof settings.describe === 'function') {
+    try { namespaces = settings.describe({ redactSecrets: true }) ?? [] } catch { namespaces = [] }
+  }
+  let declared = []
+  if (typeof llm.listConfigurableProviders === 'function') {
+    try { declared = llm.listConfigurableProviders() ?? [] } catch { declared = [] }
+  }
+
+  /** 按 `settingsPath` 逐级下钻，取到这条供应商在配置里的那一节。 */
+  const declaredProfile = (providerId) => {
+    const entry = declared.find((d) => d?.provider === providerId)
+    if (!entry) return {}
+    let node = namespaces.find((n) => n?.ns === entry.settingsNs)?.value
+    for (const key of entry.settingsPath ?? []) {
+      node = node !== null && typeof node === 'object' ? node[key] : undefined
+    }
+    return node !== null && typeof node === 'object' ? node : {}
+  }
+
+  const providers = []
+  for (const p of llm.listProviders()) {
+    if (!p || typeof p.id !== 'string') continue
+    const profile = declaredProfile(p.id)
+    let models = []
+    try { models = (await llm.listModels(p.id)) ?? [] } catch { models = [] }
+    const apiKeyEnv = typeof profile.apiKeyEnv === 'string' && profile.apiKeyEnv !== '' ? profile.apiKeyEnv : null
+    let credentialConfigured = false
+    if (apiKeyEnv !== null && credentials && typeof credentials.describe === 'function') {
+      try { credentialConfigured = (await credentials.describe(apiKeyEnv))?.configured === true } catch { credentialConfigured = false }
+    }
+    providers.push({
+      id: p.id,
+      displayName: typeof profile.displayName === 'string' && profile.displayName !== '' ? profile.displayName : (p.name ?? p.id),
+      api: typeof profile.api === 'string' && profile.api !== '' ? profile.api : null,
+      baseURL: typeof profile.baseURL === 'string' && profile.baseURL !== '' ? profile.baseURL : null,
+      secretRef: apiKeyEnv,
+      credentialConfigured,
+      models: models.map((m) => ({
+        id: m?.id,
+        ...(typeof m?.name === 'string' && m.name !== '' ? { name: m.name } : {}),
+        ...(Array.isArray(m?.inputModalities) && m.inputModalities.length > 0 ? { input: [...m.inputModalities] } : {}),
+      })).filter((m) => typeof m.id === 'string' && m.id !== ''),
+    })
+  }
+  return { providers, reason: providers.length === 0 ? '宿主当前没有任何可用供应商' : '' }
+}
+
+/**
+ * 引导导入：**只在 Legion 的目录为空时**把 DSH 的现状收进来一次。
+ *
+ * ★ 为什么必须"只在空的时候"（这是 DECISION §3 那条方向纪律的执行点）：
+ *   方向是单向的 Legion → DSH。如果每次启动都拿 DSH 的现状覆盖 Legion，
+ *   那么"有人手改了 DSH 文件"就会静默变成"Legion 也跟着改了"——
+ *   那时 Legion 不再是真相，而**没有任何读数会说话**。
+ *   DSH → Legion 这条路只允许出现在两个地方：**一次性导入**（本函数）与**影子对账**（P2）。
+ *
+ * 幂等由服务端保证（`POST /api/model-providers/import` 的 `unchanged` 计数）；
+ * 本函数再挡一层"非空就不导"，两道合起来才让"手改 DSH 不会改写 Legion"成立。
+ *
+ * 失败一律**只记日志、不抛**：它是一项增强，不该有能力把宿主的启动拖坏。
+ */
+export async function maybeBootstrapProviderImport({ ctx, hubUpstream, teamHubToken, fetchImpl = fetch, log = () => {}, retries = 10, delayMs = 1500 } = {}) {
+  const suffix = (teamHubToken ? '?token=' + encodeURIComponent(teamHubToken) : '')
+  const call = async (method, path, body) => {
+    const res = await fetchImpl(`${hubUpstream}${path}${suffix}`, {
+      method,
+      headers: { 'content-type': 'application/json', ...(teamHubToken ? { authorization: `Bearer ${teamHubToken}` } : {}) },
+      ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+    })
+    const text = await res.text()
+    let json = null
+    try { json = JSON.parse(text) } catch { /* 非 JSON：下面按状态码报 */ }
+    return { status: res.status, json }
+  }
+
+  let empty = null
+  for (let i = 0; i < Math.max(1, retries); i += 1) {
+    try {
+      const r = await call('GET', '/api/model-providers')
+      if (r.status === 200 && r.json) { empty = r.json.empty === true; break }
+    } catch { /* team-hub 还没起来：退避再试 */ }
+    await new Promise((resolve) => setTimeout(resolve, delayMs))
+  }
+  if (empty === null) {
+    log('供应商引导导入：读不到中枢的 /api/model-providers（一直没起来或响应异常）→ 本次跳过；不影响服务启动')
+    return { skipped: 'hub-unreachable' }
+  }
+  if (empty === false) {
+    // ★ 这一行是"方向纪律"的可见读数：非空就**不导**，因为那意味着 Legion 已经是真相。
+    log('供应商引导导入：Legion 目录**已非空** → 不导入（方向是 Legion → DSH；DSH 侧被手改不会改写 Legion）')
+    return { skipped: 'not-empty' }
+  }
+
+  const { providers, reason } = await readDshProviderSnapshot(ctx)
+  if (providers.length === 0) {
+    log(`供应商引导导入：读不出 DSH 的供应商目录（${reason || '原因未知'}）→ 本次跳过`)
+    return { skipped: 'no-snapshot', reason }
+  }
+  try {
+    const r = await call('POST', '/api/model-providers/import', { actor: 'legion-services', source: 'dsh-import', providers })
+    if (r.status !== 200) {
+      log(`供应商引导导入：中枢拒绝（HTTP ${r.status}）→ ${JSON.stringify(r.json).slice(0, 200)}`)
+      return { skipped: 'rejected', status: r.status }
+    }
+    log(`供应商引导导入：新增 ${r.json.created} / 更新 ${r.json.updated} / 未变 ${r.json.unchanged}（来自 DSH 现状；${providers.length} 个供应商）`)
+    return { created: r.json.created, updated: r.json.updated, unchanged: r.json.unchanged }
+  } catch (e) {
+    log(`供应商引导导入失败：${e instanceof Error ? e.message : String(e)}（不影响服务启动）`)
+    return { skipped: 'failed' }
+  }
+}
+
 export function apply(ctx, rawConfig = {}) {
   const cfg = rawConfig && typeof rawConfig === 'object' ? rawConfig : {}
   const cfgDir = typeof cfg.legionDir === 'string' && cfg.legionDir.trim() ? cfg.legionDir.trim() : ''
@@ -249,6 +391,16 @@ export function apply(ctx, rawConfig = {}) {
         await startService(svc)
         await new Promise(r => setTimeout(r, 150))
       }
+      if (disposed) return
+      // ★ P1 的引导导入：**只在 Legion 的供应商目录为空时**做一次（DECISION §3 的方向纪律）。
+      //   放在服务起来之后，是因为它要经中枢自己的 API 写（不是直写 team.db）——
+      //   这样"谁导的"进审计、"未知字段拒绝"这些守卫对导入同样生效。
+      const imported = await maybeBootstrapProviderImport({
+        ctx, hubUpstream, teamHubToken, log,
+        retries: num(cfg.providerImportRetries, 10),
+        delayMs: num(cfg.providerImportDelayMs, 1500),
+      })
+      if (imported.skipped === undefined) log('供应商目录已由 DSH 现状建立（P1）；此后 Legion 是唯一真相')
     })()
   }, num(cfg.bootDelayMs, 1500))
 

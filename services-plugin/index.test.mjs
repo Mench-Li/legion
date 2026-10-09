@@ -12,8 +12,13 @@
 // ============================================================================
 import test from 'node:test'
 import assert from 'node:assert/strict'
+import { readFileSync } from 'node:fs'
+import { dirname, join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 
 import { buildWorkbenchEnv, deriveDshModelsBaseUrl, deriveDshModelsLoginUrl } from './index.js'
+
+const SRC = readFileSync(join(dirname(fileURLToPath(import.meta.url)), 'index.js'), 'utf8')
 
 test('★ 宿主端口就是本次启动的那个：Desktop 实测 19387，不是 3080', () => {
   assert.equal(deriveDshModelsBaseUrl({ webServerPort: 19387 }), 'http://127.0.0.1:19387')
@@ -126,4 +131,20 @@ test('★ 注入项之间互不影响：给了登录 URL 不会挤掉宿主地�
   })
   assert.equal(both.DSH_MODELS_BASE_URL, 'http://127.0.0.1:19387')
   assert.equal(both.DSH_MODELS_LOGIN_URL, 'http://127.0.0.1:19387/?token=T')
+})
+
+// ── ★ 一条**反向**护栏：`connection` 绝不许进硬依赖 ──────────────────────────────
+// 我自己在写这一版时把它写进了 `inject`，那是个会**停服**的错误：
+// Cordis 的 `inject` 是硬依赖，名字在而组合里没有 ⇒ 整个插件 pending ⇒
+// **team-hub 与指挥台都不会启动**。而它换来的只是"登录 URL 能不能铸出来"。
+// DSH 自己的 `web-app` 就是这么分的：`inject = ['webServer']`（硬）+ 软取 connection。
+test('★ connection 不许进 inject（硬依赖会让整个插件 pending ⇒ 两个服务都起不来）', () => {
+  const injectLine = /export const inject = (\[[^\]]*\])/.exec(SRC)?.[1] ?? ''
+  assert.ok(injectLine.length > 0, '找不到 inject 声明')
+  assert.equal(injectLine.includes("'connection'"), false,
+    'connection 是可选增强：写进 inject 会让"宿主没这个服务"变成"team-hub 与指挥台都不启动"')
+  assert.equal(injectLine.includes("'webServer'"), true, 'webServer 是硬依赖（宿主端口来自它）')
+  // 软取的写法必须留着：否则拿不到 connection 时连"未注入"都说不出来
+  assert.match(SRC, /ctx\?\.get\?\.\('connection'\)/,
+    'connection 必须用 ctx.get(...) 软取 —— 这条路径正是"拿不到也不影响服务启动"的实现')
 })

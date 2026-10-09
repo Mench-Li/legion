@@ -155,10 +155,22 @@ DSH 自己的桌面壳就是这么给窗口登录的（`apps/desktop-host/src/in
 
 | 改动 | 内容 |
 | --- | --- |
-| `services-plugin/index.js` | `inject` 增补 `'connection'`；新增纯函数 `deriveDshModelsLoginUrl()`；`buildWorkbenchEnv` 增 `DSH_MODELS_LOGIN_URL`（空 ⇒ 不注入） |
+| `services-plugin/index.js` | 新增纯函数 `deriveDshModelsLoginUrl()`；`buildWorkbenchEnv` 增 `DSH_MODELS_LOGIN_URL`（空 ⇒ 不注入）；用 `ctx.get('connection')` **软取** |
 | `workbench/scripts/config-schema.mjs` | 新增 `modelsLoginUrl`（`sensitive: true`） |
 | `workbench/scripts/serve.mjs` | 新增 `GET /api/dsh-models/connect`：本机 + 同源 + `requireWriteToken` ⇒ **302** 到登录 URL，带 `no-store` / `no-referrer` |
 | `workbench/src/components/DshProvidersPanel.tsx` | 401 时渲染「连接 DSH 服务（本机浏览器登录一次）」按钮 ⇒ `window.open('/api/dsh-models/connect')` |
+
+**★ 我自己在这一版里犯的一个会停服的错（已改，并加了反向护栏）**：
+第一版我把 `connection` 写进了 `export const inject = ['webServer', 'connection']`。那是错的 ——
+Cordis 的 `inject` 是**硬依赖**，名字在而组合里没有这个服务，**整个插件会停在 pending**，
+于是 `team-hub` 与**指挥台都不会启动**；而它换来的只是"登录 URL 能不能铸出来"。
+
+> 一个"锦上添花"的能力，绝不能带"少一个服务就什么都不起"的失败模式。
+> 它的失败方向必须是**少一个能力**，而不是**少两个服务**。
+
+DSH 自己的 `web-app` 就是这么分的：`export const inject = ['webServer']`（硬）
++ `ctx.inject(['connection'], …)`（软）。本插件改为 `ctx.get('connection')` 软取，
+并新增反向护栏用例钉住"connection 不许进 inject"（变异 M6 实测变红）。
 
 **三条刻意的设计约束**（各有用例守着）：
 

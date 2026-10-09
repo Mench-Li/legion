@@ -25,10 +25,15 @@ import { fileURLToPath } from 'node:url'
 export const name = '@dsh-external/dsh-legion-services'
 
 // Desktop/web 的宿主地址来自 webServer；Cordis 要求先声明服务依赖。
-// `connection` 是 BUG-014 第二层修法的来源：只有它能铸出那条带 `?token=` 的**操作员登录 URL**
-// （DSH 桌面壳给窗口登录用的就是它）。少声明它，`ctx.connection` 在这里恒为 undefined，
-// 症状是"登录按钮永远说宿主没注入地址" —— 又一个静默的不生效。
-export const inject = ['webServer', 'connection']
+//
+// ★ `connection` **故意不写在这里**（BUG-014 第二层）。它只是可选的**增强**：
+//   拿来铸那条操作员登录 URL。而 Cordis 的 `inject` 是**硬依赖** —— 名字写进来而组合里没有它，
+//   整个插件会停在 pending，于是 **team-hub 与指挥台都不会启动**。
+//   一个"锦上添花"的能力绝不能带"少一个服务就什么都不起"的失败模式。
+//   DSH 自己的 `web-app` 就是这么分的：`export const inject = ['webServer']`（硬）
+//   + `ctx.inject(['connection'], …)`（软）。这里用 `ctx.get('connection')` 走同一条路：
+//   拿不到 ⇒ 返回空 ⇒ 日志说"未注入"，服务照常起。
+export const inject = ['webServer']
 
 const SELF_DIR = dirname(fileURLToPath(import.meta.url))
 const DEFAULT_LEGION_DIR = 'D:/project/DSH/legion'
@@ -148,9 +153,12 @@ export function apply(ctx, rawConfig = {}) {
   const resolveDshModelsBaseUrl = () => deriveDshModelsBaseUrl({
     configured: cfgDshModelsBaseUrl, webServerPort: ctx?.webServer?.port, env: baseEnv,
   })
-  /** ★ 同上：登录 URL 每次 spawn 现取（令牌可能是新的一轮进程令牌，固化就等于发一个过期的）。 */
+  /** ★ 同上：登录 URL 每次 spawn 现取（令牌可能是新的一轮进程令牌，固化就等于发一个过期的）。
+   *  `ctx.get(...)` 而不是 `ctx.connection`：**软取**，服务缺席时返回 undefined 而不是把插件拖成 pending
+   *  （理由见文件头 `inject` 那段：这个能力是锦上添花，不该有"少一个服务就什么都不起"的失败模式）。 */
   const resolveDshModelsLoginUrl = () => deriveDshModelsLoginUrl({
-    connection: ctx?.connection ?? null, webServerPort: ctx?.webServer?.port,
+    connection: ctx?.get?.('connection') ?? ctx?.connection ?? null,
+    webServerPort: ctx?.webServer?.port,
   })
 
   const services = [

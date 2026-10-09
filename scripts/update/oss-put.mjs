@@ -219,6 +219,43 @@ export function describeS3Error(text) {
   return `${code ?? '?'}: ${message ?? ''}`
 }
 
+/**
+ * 判定一次探测的结果 —— **纯函数**，所以三条分支都有判据。
+ *
+ * 这三条分支是第一次真实接入时逐一踩过的：
+ *   · 桶不存在（`NoSuchBucket`）—— **好消息**：签名口径对，只是还没建桶；
+ *   · `AccountProblem`（未开通 OSS 服务）—— **账号级**问题，与签名/桶无关；
+ *   · `SignatureDoesNotMatch` —— 口径不同，**必须停下来改用厂商 CLI**，不许猜。
+ *
+ *   > 把这三条写成一次性的打印，与把它们写成可测的判定，
+ *   > 差别在**下一次**接入时：前者只能靠人记得"403 可能是账号没开通"。
+ *
+ * @returns {{ok: boolean, message: string, hint: string|null}}
+ */
+export function judgeProbe({ status, text = '' }) {
+  const why = describeS3Error(text)
+  if (status >= 200 && status < 300) {
+    return { ok: true, message: `凭据与签名口径可用，且桶存在（HTTP ${status}）`, hint: null }
+  }
+  if (status === 404 || /NoSuchBucket/i.test(text)) {
+    return { ok: true, message: `签名口径可用，但桶不存在（HTTP ${status}，${why}）`, hint: null }
+  }
+  if (/SignatureDoesNotMatch/i.test(text)) {
+    return {
+      ok: false, message: `HTTP ${status}：${why}`,
+      hint: '签名口径与服务端不一致。**不要在这里猜**：改用厂商 CLI（ossutil）上传。',
+    }
+  }
+  if (/AccountProblem/i.test(text)) {
+    return {
+      ok: false, message: `HTTP ${status}：${why}`,
+      hint: '这是**账号级**问题（多为未开通 OSS 服务），不是签名或桶的问题：'
+        + '请先在控制台开通对象存储，再重试。',
+    }
+  }
+  return { ok: false, message: `HTTP ${status}：${why}`, hint: null }
+}
+
 function parseArgs(argv) {
   const args = new Map()
   for (let i = 0; i < argv.length; i += 1) {
@@ -312,21 +349,40 @@ if (isMain) {
   const common = { endpoint, bucket, region, accessKey, secretKey }
 
   if (args.get('probe') === 'true') {
-    // 对桶发 HEAD：不发数据，只验"这套签名口径服务端认不认"。
-    const r = await ossRequest({ ...common, method: 'HEAD', timeoutMs: 20_000 })
-    if (r.ok) {
-      process.stdout.write(`✔ 凭据与签名口径可用（HEAD ${r.url} → ${r.status}）\n`)
+    // ★ 用 **GET** 而不是 HEAD 探测。
+    //
+    //   第一版用的是 HEAD —— 而 **HEAD 按定义没有响应体**，于是所有错误都只能
+    //   报成「HTTP 403：(空响应)」。第一次真实接入时正好撞上：
+    //   JD Cloud 对"不存在的桶"的 HEAD 返回 403 且无正文，而 GET 返回
+    //   404 + `<Code>NoSuchBucket</Code>`。更要紧的是**账户级**错误：
+    //   未开通 OSS 服务时 GET 给出
+    //   `AccountProblem: User does not open OSS storage service…`，
+    //   而 HEAD 只会说 403 空响应。
+    //
+    //   > 一个"出错时只能报状态码"的探针，
+    //   > 与一个"能把服务端原话带回来"的探针，在第一次接入时差的是**整轮排障**——
+    //   > 前者会让人去查签名，而真正的原因是账号没开通服务。
+    const r = await ossRequest({ ...common, method: 'GET', timeoutMs: 20_000 })
+    const verdict = judgeProbe({ status: r.status, text: r.text })
+    const line = `${verdict.ok ? '✔' : '✖'} ${verdict.message}（GET ${r.url}）\n`
+    if (verdict.ok) process.stdout.write(line)
+    else process.stderr.write(line)
+    if (verdict.hint !== null) process.stderr.write(`  ${verdict.hint}\n`)
+    process.exit(verdict.ok ? 0 : 1)
+  }
+
+  if (args.get('create-bucket') === 'true') {
+    // S3 的 CreateBucket = `PUT /<bucket>`。建完**立刻回读**一次：
+    // 只信 PUT 的返回码，会让"建了但不可见"与"建好了"看起来一样。
+    const created = await ossRequest({ ...common, method: 'PUT', timeoutMs: 30_000 })
+    process.stdout.write(`PUT /${bucket} → HTTP ${created.status}`
+      + `${created.ok ? '' : `：${describeS3Error(created.text)}`}\n`)
+    const check = await ossRequest({ ...common, method: 'GET', timeoutMs: 20_000 })
+    if (check.ok) {
+      process.stdout.write(`✔ 桶已就绪（回读 GET → ${check.status}）\n`)
       process.exit(0)
     }
-    // 404 = 签名过了但桶不存在（这是**好消息**：口径对，只是桶还没建）。
-    const why = describeS3Error(r.text)
-    if (r.status === 404 || /NoSuchBucket/i.test(r.text)) {
-      process.stdout.write(`✔ 签名口径可用，但桶不存在（HTTP ${r.status}，${why}）\n`)
-      process.exit(0)
-    }
-    process.stderr.write(`✖ HEAD ${r.url} → HTTP ${r.status}：${why}\n`
-      + '  若为 SignatureDoesNotMatch，说明本工具的签名口径与服务端不同，'
-      + '  请改用厂商 CLI（ossutil），不要在这里猜。\n')
+    process.stderr.write(`✖ 回读失败（HTTP ${check.status}）：${describeS3Error(check.text)}\n`)
     process.exit(1)
   }
 

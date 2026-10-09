@@ -20,7 +20,7 @@ import { fileURLToPath } from 'node:url'
 
 import {
   FIXED_VECTOR, OSS_PUT_CHECKED, UNSIGNED_PAYLOAD, amzDates, buildUrl,
-  describeS3Error, ossRequest, selfCheckOssPut, signRequest, uriEncode,
+  describeS3Error, judgeProbe, ossRequest, selfCheckOssPut, signRequest, uriEncode,
 } from './oss-put.mjs'
 
 const ROOT = resolve(fileURLToPath(new URL('../../', import.meta.url)))
@@ -183,5 +183,51 @@ describe('SigV4 上传器', () => {
     const d = amzDates(new Date(Date.UTC(2026, 9, 9, 12, 0, 0)))
     assert.equal(d.amzDate, '20261009T120000Z')
     assert.equal(d.dateStamp, '20261009')
+  })
+
+  // ── 探测判定：三条分支都是第一次真实接入时踩过的 ──────────────────────────
+  //
+  // ★ 这几条来自**真实排障**：第一次接入时探针用的是 HEAD，而 HEAD 没有响应体，
+  //   于是未开通 OSS 服务的账户级错误只能报成「HTTP 403：(空响应)」——
+  //   那会让人去查签名，而真正的原因是账号没开通服务。
+  //   现在判定是纯函数，三条分支各有判据。
+
+  test('⑬ 桶不存在 = 好消息（签名口径是对的，只是还没建桶）', () => {
+    const v = judgeProbe({
+      status: 404,
+      text: '<Error><Code>NoSuchBucket</Code><Message>The specified bucket does not exist.</Message></Error>',
+    })
+    assert.equal(v.ok, true, 'NoSuchBucket 不该被判成失败：它证明签名已经过了')
+    assert.match(v.message, /NoSuchBucket/)
+    assert.equal(v.hint, null)
+  })
+
+  test('⑭ AccountProblem = 账号级问题，提示去开通服务（不是签名问题）', () => {
+    const v = judgeProbe({
+      status: 403,
+      text: '<Error><Code>AccountProblem</Code><Message>User does not open OSS storage service on OSS console</Message></Error>',
+    })
+    assert.equal(v.ok, false)
+    assert.match(v.hint ?? '', /开通/, '必须指向"去开通服务"，否则人会去查签名')
+    assert.match(v.hint ?? '', /账号级/)
+    assert.doesNotMatch(v.hint ?? '', /ossutil/, '账号没开通服务时不该建议改用 CLI')
+  })
+
+  test('⑮ SignatureDoesNotMatch = 口径不一致，明确要求改用厂商 CLI', () => {
+    const v = judgeProbe({
+      status: 403,
+      text: '<Error><Code>SignatureDoesNotMatch</Code><Message>The request signature we calculated does not match</Message></Error>',
+    })
+    assert.equal(v.ok, false)
+    assert.match(v.hint ?? '', /ossutil/, '口径不一致时必须让人改用厂商 CLI，而不是在这里猜')
+  })
+
+  test('⑯ 200 与 204 都算通过；其它未知错误不编提示', () => {
+    assert.equal(judgeProbe({ status: 200, text: '<ListBucketResult/>' }).ok, true)
+    assert.equal(judgeProbe({ status: 204, text: '' }).ok, true)
+    const unknown = judgeProbe({ status: 500, text: '<Error><Code>InternalError</Code><Message>oops</Message></Error>' })
+    assert.equal(unknown.ok, false)
+    assert.equal(unknown.hint, null, '认不出的错误不该编一条提示——那会把人引到错的方向')
+    assert.match(unknown.message, /InternalError/)
   })
 })

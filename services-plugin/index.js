@@ -21,6 +21,10 @@ import { connect } from 'node:net'
 import { appendFileSync, existsSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
+// P2：影子对账。单独成文件是为了让"只读"这件事**在一个文件里可以被扫**——
+// `shadow-materialize.mjs` 里一次都不出现 mutate/set/unset（有用例钉住）。
+import { runShadowMaterialization } from './shadow-materialize.mjs'
+import { readDshProviderSnapshot } from './dsh-snapshot.mjs'
 
 export const name = '@dsh-external/dsh-legion-services'
 
@@ -94,83 +98,12 @@ export function buildWorkbenchEnv({ baseEnv = {}, hubUpstream = '', teamHubToken
 //   正确方向见 docs/DECISION-legion-owns-model-config.md：**Legion 拥有配置，DSH 的配置由它派生**，
 //   物化走进程内的 `ctx.settings.mutate` / `ctx.credentials.set`（无 HTTP、无 cookie、无登录）。
 //   拆除的是方向，不是"还差一层"。
-
-/**
- * 从**宿主进程内**读出一份"DSH 现在活着的供应商目录"快照（P1 的只读那一半）。
- *
- * 为什么在插件里做：这个进程就是宿主，`ctx.llm` / `ctx.settings` / `ctx.credentials`
- * 都是**进程内直连**——不需要 HTTP、不需要会话 cookie、不需要登录
- * （那三样正是 BUG-014 前两版绕不出去的东西，见 DECISION 文档）。
- *
- * ★ 只读、且只取**目录类**事实：供应商 id、显示名、协议、地址、**引用名**（`apiKeyEnv`）、
- *   型号清单、以及"这个引用配没配"。**永不读值**——`credentials.describe()` 返回的是
- *   `{configured}`，不是密钥本身。
- *
- * 组装规则（两条都不能少）：
- *   · "活着"以 `llm.listProviders()` 为准（引擎真正认得的供应商）；
- *   · 细节（api/baseURL/apiKeyEnv）从 `settings.describe` 的**已声明**配置里取，
- *     取不到就留 null —— 一个"活着但没声明"的供应商仍然要收进来，
- *     因为"引擎认得它"才是要紧的事实。
- *
- * 三个服务一律**软取**（`ctx.get`）：缺席时函数返回空数组并说明原因，而不是抛错。
- * 让"宿主没暴露这个服务"变成"整个插件 pending、team-hub 与指挥台都不启动"，
- * 是这条链上最容易犯、后果最大的一种错（见文件头 `inject` 那段）。
- *
- * @returns `{ providers, reason }` —— `reason` 非空即"这次读不出快照"，调用方据此决定要不要记一笔。
- */
-export async function readDshProviderSnapshot(ctx) {
-  const llm = ctx?.get?.('llm') ?? null
-  if (!llm || typeof llm.listProviders !== 'function') return { providers: [], reason: '宿主没有 llm 服务' }
-  const settings = ctx?.get?.('settings') ?? null
-  const credentials = ctx?.get?.('credentials') ?? null
-
-  let namespaces = []
-  if (settings && typeof settings.describe === 'function') {
-    try { namespaces = settings.describe({ redactSecrets: true }) ?? [] } catch { namespaces = [] }
-  }
-  let declared = []
-  if (typeof llm.listConfigurableProviders === 'function') {
-    try { declared = llm.listConfigurableProviders() ?? [] } catch { declared = [] }
-  }
-
-  /** 按 `settingsPath` 逐级下钻，取到这条供应商在配置里的那一节。 */
-  const declaredProfile = (providerId) => {
-    const entry = declared.find((d) => d?.provider === providerId)
-    if (!entry) return {}
-    let node = namespaces.find((n) => n?.ns === entry.settingsNs)?.value
-    for (const key of entry.settingsPath ?? []) {
-      node = node !== null && typeof node === 'object' ? node[key] : undefined
-    }
-    return node !== null && typeof node === 'object' ? node : {}
-  }
-
-  const providers = []
-  for (const p of llm.listProviders()) {
-    if (!p || typeof p.id !== 'string') continue
-    const profile = declaredProfile(p.id)
-    let models = []
-    try { models = (await llm.listModels(p.id)) ?? [] } catch { models = [] }
-    const apiKeyEnv = typeof profile.apiKeyEnv === 'string' && profile.apiKeyEnv !== '' ? profile.apiKeyEnv : null
-    let credentialConfigured = false
-    if (apiKeyEnv !== null && credentials && typeof credentials.describe === 'function') {
-      try { credentialConfigured = (await credentials.describe(apiKeyEnv))?.configured === true } catch { credentialConfigured = false }
-    }
-    providers.push({
-      id: p.id,
-      displayName: typeof profile.displayName === 'string' && profile.displayName !== '' ? profile.displayName : (p.name ?? p.id),
-      api: typeof profile.api === 'string' && profile.api !== '' ? profile.api : null,
-      baseURL: typeof profile.baseURL === 'string' && profile.baseURL !== '' ? profile.baseURL : null,
-      secretRef: apiKeyEnv,
-      credentialConfigured,
-      models: models.map((m) => ({
-        id: m?.id,
-        ...(typeof m?.name === 'string' && m.name !== '' ? { name: m.name } : {}),
-        ...(Array.isArray(m?.inputModalities) && m.inputModalities.length > 0 ? { input: [...m.inputModalities] } : {}),
-      })).filter((m) => typeof m.id === 'string' && m.id !== ''),
-    })
-  }
-  return { providers, reason: providers.length === 0 ? '宿主当前没有任何可用供应商' : '' }
-}
+//
+// ★ P1 的只读那一半（`readDshProviderSnapshot`）原本住在本文件里，已经搬到
+//   `./dsh-snapshot.mjs`：P2 的对账也要用它，留在本文件里会让
+//   `index.js ↔ shadow-materialize.mjs` 成为**循环导入**（今天能跑，但失败方式取决于谁先被加载）。
+//   这里 re-export，保持 P1 的用例与既有导入路径不变。
+export { readDshProviderSnapshot } from './dsh-snapshot.mjs'
 
 /**
  * 引导导入：**只在 Legion 的目录为空时**把 DSH 的现状收进来一次。
@@ -218,10 +151,16 @@ export async function maybeBootstrapProviderImport({ ctx, hubUpstream, teamHubTo
     return { skipped: 'not-empty' }
   }
 
-  const { providers, reason } = await readDshProviderSnapshot(ctx)
-  if (providers.length === 0) {
+  const { providers, readOk, reason } = await readDshProviderSnapshot(ctx)
+  if (!readOk) {
     log(`供应商引导导入：读不出 DSH 的供应商目录（${reason || '原因未知'}）→ 本次跳过`)
     return { skipped: 'no-snapshot', reason }
+  }
+  if (providers.length === 0) {
+    // ★ 与上面那条**不是一回事**：这是"读到了、就是空的"。
+    //   混起来会让日志里出现一句"读不出"，而实际是"DSH 里确实一个供应商都没有"。
+    log('供应商引导导入：DSH 当前没有任何供应商 → 本次跳过（这是"读到了、就是空"，不是读失败）')
+    return { skipped: 'no-providers' }
   }
   try {
     const r = await call('POST', '/api/model-providers/import', { actor: 'legion-services', source: 'dsh-import', providers })
@@ -401,6 +340,18 @@ export function apply(ctx, rawConfig = {}) {
         delayMs: num(cfg.providerImportDelayMs, 1500),
       })
       if (imported.skipped === undefined) log('供应商目录已由 DSH 现状建立（P1）；此后 Legion 是唯一真相')
+
+      // ★ P2 的影子对账：算出"接管后要写什么"并**只记一行读数**（一个字节都不写）。
+      //   它紧跟在 P1 的导入之后，所以首次启动的读数应当是 clean ——
+      //   而如果**不** clean，"接管会删掉"的那几个 id 会出现在同一行里（那正是这一段的目的）。
+      if (disposed) return
+      const shadow = await runShadowMaterialization({ ctx, hubUpstream, teamHubToken, log })
+      if (shadow.ok && shadow.plan !== null) {
+        // 把"连续为空"这件事记成显式读数：P3 的放行条件就是它。
+        log(shadow.plan.clean
+          ? '供应商影子对账：本轮**无差异**（P3 的放行条件是**连续多轮**都无差异；本插件目前只在启动时对账一次）'
+          : '供应商影子对账：**本轮有差异** → 暂不放行 P3（先把「删除/修改」那几条看明白）')
+      }
     })()
   }, num(cfg.bootDelayMs, 1500))
 

@@ -1900,6 +1900,13 @@ async function stageTest() {
     //   第二半（写入）：供应商目录的仓储与两条路由 —— 幂等（第二次写 0 行）/ 不删除 /
     //   未知字段拒绝（密钥纪律）/ secretRef 只收引用名 / 型号白名单要报出丢掉的字段名 / 墓碑复活。
     { label: 'model-providers（P1：供应商目录 —— 幂等导入、不删除、拒未知字段）', files: ['team-hub/model-providers-routes.test.mjs'], cwd: ROOT },
+    // ── P2（DECISION-legion-owns-model-config）：**影子物化 —— 只报告，不写** ──
+    //   守三件在别处会被读成"没事"的事：
+    //   ① 它真的一个字节都没写（夹具把 mutate/set/unset 换成"一调用就记名+抛"的探针）；
+    //   ② "接管会删掉"的那几个 id 必须被点名（DSH 有而 Legion 没有的会被 unset）；
+    //   ③ 读不到 DSH 现状时**不许说 clean** —— 两侧都空会让 diff 干净，
+    //      于是"读失败"会伪装成"完全一致"（本仓反复出现的那一族错）。
+    { label: 'shadow-materialize（P2：影子对账只读不写，且"要删的"必须点名）', files: ['services-plugin/shadow-materialize.test.mjs'], cwd: ROOT },
     { label: 'hub-event-stream（F-01 scope/游标/信封）', files: ['workbench/scripts/hub-event-stream.test.mjs'], cwd: ROOT, nodeArgs: ['--experimental-strip-types'] },
     // ── 并行任务文件冲突治理（G-mujfc9vi-1 S1–S8）──
     // 每个测试文件都必须显式登记：未登记 = 不存在的断言（本文件 4568 行的完备性检查会拦）。

@@ -113,6 +113,7 @@ test('③ 活着但没声明的供应商也要收进来（"引擎认得它"才�
 test('④ 服务缺席或抛错 ⇒ 返回空 + 原因，**绝不抛**（软取）', async () => {
   const none = await readDshProviderSnapshot({ get: () => null })
   assert.deepEqual(none.providers, [])
+  assert.equal(none.readOk, false, '读不出来必须显式标成 readOk=false')
   assert.match(none.reason, /llm/)
   // 只有 llm、没有 settings/credentials：仍然要能读出"活着的"那部分
   const llmOnly = { get: (k) => (k === 'llm' ? fakeCtx().get('llm') : null) }
@@ -124,11 +125,13 @@ test('④ 服务缺席或抛错 ⇒ 返回空 + 原因，**绝不抛**（软取�
   const throwing = await readDshProviderSnapshot(fakeCtx({ describeThrows: true }))
   assert.equal(throwing.providers.length, 2)
   assert.equal(throwing.providers[0].displayName, 'FJD', '拿不到声明就回落到 provider 自己的 name')
-  // 完全没有可用供应商 ⇒ reason 要有话说（调用方据此记一笔）
+  // ★ 完全没有可用供应商 ≠ 读失败：`readOk` 必须仍是 true
+  //   （混起来会让 P2 的影子对账把"DSH 是空的"读成"读不出来"，或反过来 —
+  //    两个方向的混淆都会得到一个**看起来正常**的错结论）
   const empty = { get: (k) => (k === 'llm' ? { listProviders: () => [], listModels: async () => [] } : null) }
   const noneAlive = await readDshProviderSnapshot(empty)
   assert.deepEqual(noneAlive.providers, [])
-  assert.match(noneAlive.reason, /没有任何可用供应商/)
+  assert.equal(noneAlive.readOk, true, '"宿主说它没有供应商"是**读到了**，不是读失败')
 })
 
 /** 一个只记请求的假 fetch；按剧本作答。 */

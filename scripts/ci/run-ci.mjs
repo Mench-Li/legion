@@ -1907,6 +1907,15 @@ async function stageTest() {
     //   ③ 读不到 DSH 现状时**不许说 clean** —— 两侧都空会让 diff 干净，
     //      于是"读失败"会伪装成"完全一致"（本仓反复出现的那一族错）。
     { label: 'shadow-materialize（P2：影子对账只读不写，且"要删的"必须点名）', files: ['services-plugin/shadow-materialize.test.mjs'], cwd: ROOT },
+    // ── P3（DECISION-legion-owns-model-config）：**接管写入 —— 门、写、回读、回滚** ──
+    //   守：门默认关（不传 enabled 也不许写）/ 只改受管叶子（不覆盖整块 provider 节点，
+    //   别人放的未知字段不许被抹掉）/ **写后由真读者回读重新出计划**才算数 /
+    //   证不出来就回滚（回滚本身也被回读确认）/ 删除是**第二道门**（默认只报告不执行）/
+    //   "无需写入"不许被报成写过 / 取不到凭证值时绝不写空串（那会毁掉一把正在用的真钥匙）。
+    { label: 'materializer（P3：接管写入 —— 门/回读验收/回滚/叶子级改写）', files: ['services-plugin/materializer.test.mjs'], cwd: ROOT },
+    //   值那一半：从 Legion 自己的受保护库按引用名取（宿主进程内，不经 HTTP —— 不新增明文传输面）。
+    //   守：`requireProtected: true` 真的传下去 / 取不到一律 null（绝不空串）/ 抛错兜住且同一失败只报一次。
+    { label: 'legion-secrets（P3：从 Legion 的 DPAPI 库按引用名取值，取不到就不写）', files: ['services-plugin/legion-secrets.test.mjs'], cwd: ROOT },
     { label: 'hub-event-stream（F-01 scope/游标/信封）', files: ['workbench/scripts/hub-event-stream.test.mjs'], cwd: ROOT, nodeArgs: ['--experimental-strip-types'] },
     // ── 并行任务文件冲突治理（G-mujfc9vi-1 S1–S8）──
     // 每个测试文件都必须显式登记：未登记 = 不存在的断言（本文件 4568 行的完备性检查会拦）。

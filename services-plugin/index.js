@@ -25,6 +25,9 @@ import { fileURLToPath } from 'node:url'
 // `shadow-materialize.mjs` 里一次都不出现 mutate/set/unset（有用例钉住）。
 import { runShadowMaterialization } from './shadow-materialize.mjs'
 import { readDshProviderSnapshot } from './dsh-snapshot.mjs'
+// P3：接管写入 + 从 Legion 的受保护库取值。
+import { runMaterialization } from './materializer.mjs'
+import { createLegionSecretReader } from './legion-secrets.mjs'
 
 export const name = '@dsh-external/dsh-legion-services'
 
@@ -189,6 +192,18 @@ export function apply(ctx, rawConfig = {}) {
   const baseEnv = { ...process.env, ELECTRON_RUN_AS_NODE: '1' }
 
   const num = (v, d) => { const n = Number(v); return Number.isFinite(n) && n > 0 ? n : d }
+  /** 布尔配置：只有**显式写下的真值**才算开。
+   *  ★ P3 的接管门就用它 —— 默认关。字符串 '1'/'true'/'yes' 也算（patch config 里常见）。
+   *    绝不接受"没写就是开"：那是这条链上唯一不可逆的一段。 */
+  const flag = (v, d = false) => {
+    if (v === undefined || v === null || v === '') return d
+    if (typeof v === 'boolean') return v
+    if (typeof v === 'number') return v !== 0
+    const s = String(v).trim().toLowerCase()
+    if (['1', 'true', 'yes', 'on'].includes(s)) return true
+    if (['0', 'false', 'no', 'off'].includes(s)) return false
+    return d
+  }
 
   const teamHubPort = num(cfg.teamHubPort, 8787)
   const teamHubHost = typeof cfg.teamHubHost === 'string' && cfg.teamHubHost.trim()
@@ -198,6 +213,13 @@ export function apply(ctx, rawConfig = {}) {
     ? cfg.teamHubToken
     : (typeof baseEnv.TEAM_HUB_TOKEN === 'string' ? baseEnv.TEAM_HUB_TOKEN : '')
   const workbenchPort = num(cfg.workbenchPort, 5173)
+  // ★ P3 的两道门，都**默认关**（见下方写入处的说明）。
+  //   `applyModelConfig`：接管供应商配置（settings.mutate）。
+  //   `applyModelConfigDeletes`：连**删除**也接管（unset 掉 Legion 里没有的供应商）。
+  //   删除单独一道门，是因为它是不可逆的那一半：整块 unset 的逆操作只能还原
+  //   "读者看得见的叶子"（见 materialize-ops.mjs 文件头）。
+  const applyModelConfig = flag(cfg.applyModelConfig ?? baseEnv.LEGION_APPLY_MODEL_CONFIG, false)
+  const applyModelConfigDeletes = flag(cfg.applyModelConfigDeletes ?? baseEnv.LEGION_APPLY_MODEL_CONFIG_DELETES, false)
   const hubUpstream = typeof cfg.hubUpstream === 'string' && cfg.hubUpstream.trim()
     ? cfg.hubUpstream.trim()
     : (typeof baseEnv.DSH_HUB_UPSTREAM === 'string' && baseEnv.DSH_HUB_UPSTREAM ? baseEnv.DSH_HUB_UPSTREAM : 'http://127.0.0.1:8787')
@@ -243,6 +265,10 @@ export function apply(ctx, rawConfig = {}) {
     try { appendFileSync(logFile, s) } catch { /* 日志文件不可写不影响服务 */ }
     try { process.stdout.write(s) } catch { /* ignore */ }
   }
+
+  // P3 的取值器：从 Legion 自己的受保护库按引用名取（宿主进程内，不经 HTTP）。
+  // 建一次、复用：它内部对"密钥库打不开"只报一次，避免每取一把钥匙刷一行。
+  const readLegionSecret = createLegionSecretReader({ env: baseEnv, log })
 
   if (!legionDir) {
     log('✗ 未找到 legion 仓库根（config.legionDir 无效且插件不在源码目录、默认目录不存在）→ 本次不托管任何服务')
@@ -352,6 +378,18 @@ export function apply(ctx, rawConfig = {}) {
           ? '供应商影子对账：本轮**无差异**（P3 的放行条件是**连续多轮**都无差异；本插件目前只在启动时对账一次）'
           : '供应商影子对账：**本轮有差异** → 暂不放行 P3（先把「删除/修改」那几条看明白）')
       }
+
+      // ★ P3 的接管写入。**默认关**：它是这条链上唯一不可逆的一段（会 unset 掉 DSH 里
+      //   Legion 没有的供应商），所以"能写"与"在写"之间隔着一个显式开关，而不是"代码写完就生效"。
+      //   门关着时 `runMaterialization` 一个字节都不写，只记一行"未启用"——
+      //   那一行是必要的：否则日志里"没有物化记录"会被读成"物化没接上"，而两者处置完全不同。
+      if (disposed) return
+      await runMaterialization({
+        ctx, hubUpstream, teamHubToken, log,
+        enabled: applyModelConfig,
+        allowDeletes: applyModelConfigDeletes,
+        secretReader: readLegionSecret,
+      })
     })()
   }, num(cfg.bootDelayMs, 1500))
 

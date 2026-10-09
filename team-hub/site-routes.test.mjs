@@ -527,6 +527,51 @@ describe('官网：真实模板不漂移', () => {
     }
   })
 
+  test('★ 数字人一节：四个状态、两页都有，且四色与 `Employee3D.tsx` 对得上', () => {
+    // 这一节的**主张**是"状态一眼可见"，所以：
+    //   ① 四个状态一个都不能少（少一个就不是体系了）；
+    //   ② 四个色值必须与工作台 3D 场景的实现一致 —— 它们是与产品界面一一对应的
+    //      标识，抄错了就与实物对不上（`workbench/src/components/Employee3D.tsx` 的 STATUS）。
+    const css = readFileSync(fileURLToPath(new URL('../site/assets/site.css', import.meta.url)), 'utf8')
+    for (const key of ['idle', 'busy', 'review', 'blocked']) {
+      assert.match(css, new RegExp(`\\.s-${key}\\s*\\{`), `CSS 里缺 .s-${key}`)
+    }
+    // 深色主题下必须回到实现里的原值（浅色另取可读的同色相值）。
+    for (const [key, hex] of [['busy', '#40ffa0'], ['review', '#ffd54a'], ['blocked', '#ff5c5c'], ['idle', '#5b8cff']]) {
+      assert.match(css, new RegExp(`html\\[data-theme=dark\\] \\.s-${key} \\{ --state-color: ${hex}\\b`), `深色下 .s-${key} 应为 ${hex}`)
+    }
+    for (const p of ['index.html', join('en', 'index.html')]) {
+      const html = read(p)
+      assert.match(html, /id="crew"/, `${p} 缺数字人一节`)
+      assert.equal((html.match(/class="state s-/g) || []).length, 4, `${p} 应有四个状态卡`)
+      assert.match(html, /2D 简化示意|simplified 2D rendering/, `${p} 必须写明是示意的、不是场景截图`)
+    }
+  })
+
+  test('★ 同一张截图不许出现在两处（重复会造成审美疲劳）', () => {
+    // 2026-10-09 业主报"任务中心和 Agent 沟通的图变成一样的了，且同一张用了两次"。
+    // 每张图只该有一个家：首屏轮两张（目标详情 / 任务中心），Agent 对话归 02 段落。
+    const html = read('index.html')
+    const refs = html.match(/\/site\/assets\/shots\/[a-z-]+\.png/g) ?? []
+    const counts = refs.reduce((m, r) => { m[r] = (m[r] || 0) + 1; return m }, {})
+    // hero 的 `img src` + shots 映射里的 `src:` = 同一张图两处出现是**预期**的
+    //（一处是初始渲染，一处是切换用的配置）。真正要禁的是"两张不同的图指向同一文件"
+    // 或者"同一张图被两个**展示位**引用"。
+    const heroTabSrcs = [...html.matchAll(/data-shot="(\w+)"/g)].map((m) => m[1])
+    assert.equal(heroTabSrcs.length, 2, '首屏只该有两个标签页（Agent 对话不再重复出现在这里）')
+    assert.ok(!heroTabSrcs.includes('chat'), 'Agent 对话不该作为首屏标签（它归 02 段落）')
+    assert.equal(counts['/site/assets/shots/agent-conversation.png'], 1, 'Agent 对话图只该在 02 段落出现一次')
+  })
+
+  test('★ 演示页叫「产品演示」，不叫「在线试用」', () => {
+    // 业主指出：它既然是静态样本，就不该叫"在线试用"——那个名字承诺了一件它不做的事。
+    const html = read(join('demo', 'index.html'))
+    assert.match(html, /<title>Legion — 产品演示<\/title>/)
+    assert.match(html, />产品演示</)
+    assert.doesNotMatch(html, /在线试用/)
+    assert.match(html, /PRODUCT DEMO/)
+  })
+
   test('★ 产品窗口与文字左右对齐（不许突破文字列）', () => {
     // 业主否掉了"让产品窗口满宽多吃宽度"的做法：产品窗口必须和文字左右对齐、留白相同。
     // 这条守的是**布局边界**，不是审美 —— 一旦有人再加一次满宽 hack，就红。

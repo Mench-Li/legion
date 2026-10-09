@@ -33,8 +33,9 @@
   <nav class="nav-links" aria-label="主导航">
     <a href="#capabilities">产品能力</a>
     <a href="#workflow">Agent 沟通</a>
+    <a href="#crew">数字人</a>
     <a href="#delivery">交付与验收</a>
-    <a href="/demo">在线试用</a>
+    <a href="/demo">产品演示</a>
   </nav>
   <div class="nav-end">
     <span class="lang"><a href="/" aria-current="page">中</a><a href="/en" hreflang="en" lang="en">EN</a></span>
@@ -63,7 +64,6 @@
     </div>
     <div class="shot-tabs" role="group" aria-label="选择产品截图">
       <button type="button" data-shot="goals" aria-pressed="true">目标与任务进展</button>
-      <button type="button" data-shot="chat" aria-pressed="false">Agent 沟通交流</button>
       <button type="button" data-shot="tasks" aria-pressed="false">任务中心</button>
       <span class="shot-origin">本地环境实拍 <i class="dot"></i></span>
     </div>
@@ -141,9 +141,73 @@
 </section>
 
 <!-- ── 交付与验收 ───────────────────────────────────────────────────────── -->
+<!-- ── 数字人 ───────────────────────────────────────────────────────────── -->
+<section id="crew" class="section">
+  <div class="section-head">
+    <div>
+      <div class="eyebrow">03 / THE CREW, MADE VISIBLE</div>
+      <h2>每个岗位是一个数字人，<br>状态一眼可见。</h2>
+    </div>
+    <p>3D 场景里，编队成员各有自己的位置与姿态。<br>谁在忙、谁等你验收、谁卡住了，不用点开就知道。</p>
+  </div>
+
+  <div class="states">
+    <div class="state s-idle">
+      <!-- 待命：双臂垂在身侧外张，双脚并立 -->
+      <svg viewBox="0 0 52 70" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">
+        <circle cx="26" cy="10" r="6.5" />
+        <path d="M26 17 V42" />
+        <path d="M26 24 L14 40" /><path d="M26 24 L38 40" />
+        <path d="M26 42 L20 60" /><path d="M26 42 L32 60" />
+      </svg>
+      <span class="lbl"><i></i>待命</span>
+      <span class="key">idle</span>
+      <p>没有在手任务。双臂垂在身侧，缓慢呼吸。</p>
+    </div>
+    <div class="state s-busy">
+      <!-- 进行中：双手抬到身前干活（前臂折起），与前一张明显不同 -->
+      <svg viewBox="0 0 52 70" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">
+        <circle cx="26" cy="10" r="6.5" />
+        <path d="M26 17 V42" />
+        <path d="M26 24 L15 31 L21 40" /><path d="M26 24 L37 31 L31 40" />
+        <path d="M26 42 L20 60" /><path d="M26 42 L32 60" />
+      </svg>
+      <span class="lbl"><i></i>进行中</span>
+      <span class="key">busy</span>
+      <p>正在干活。双手抬到身前 —— 而且<strong>接手时会先走过去上班</strong>。</p>
+    </div>
+    <div class="state s-review">
+      <!-- 待验收：双手在身前托着一份东西（多出一条横线），姿态是"停住等你" -->
+      <svg viewBox="0 0 52 70" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">
+        <circle cx="26" cy="10" r="6.5" />
+        <path d="M26 17 V42" />
+        <path d="M26 26 L16 34" /><path d="M26 26 L36 34" />
+        <path d="M16 34 H36" />
+        <path d="M26 42 L20 60" /><path d="M26 42 L32 60" />
+      </svg>
+      <span class="lbl"><i></i>待验收</span>
+      <span class="key">review</span>
+      <p>活干完了，托着结果等你拍板。它不会自己往下走。</p>
+    </div>
+    <div class="state s-blocked">
+      <!-- 受阻：右臂高举（照抄 Employee3D 的 -0.45 弧度），唯一"举手"的姿态 -->
+      <svg viewBox="0 0 52 70" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">
+        <circle cx="26" cy="10" r="6.5" />
+        <path d="M26 17 V42" />
+        <path d="M26 24 L15 38" /><path d="M26 24 L37 8" />
+        <path d="M26 42 L20 60" /><path d="M26 42 L32 60" />
+      </svg>
+      <span class="lbl"><i></i>受阻</span>
+      <span class="key">blocked</span>
+      <p>卡住了，<strong>右臂举起</strong>。这是唯一需要你介入的状态。</p>
+    </div>
+  </div>
+  <p class="mock-caption">状态色与姿态取自工作台 3D 场景的实现 · 图为 2D 简化示意，非场景截图</p>
+</section>
+
 <section class="artifacts" id="delivery">
   <div>
-    <div class="eyebrow">03 / CONTEXT THAT COMPOUNDS</div>
+    <div class="eyebrow">04 / CONTEXT THAT COMPOUNDS</div>
     <h2>每次交付，<br>为下一次留下积累。</h2>
     <p>阶段文档保留过程，验收记录留下依据。<br>规范、技能与经验按空间管理，为后续任务提供上下文。</p>
   </div>
@@ -225,19 +289,14 @@
   }
 })()
 
-// 三张截图的切换与放大。图是**同一个本地环境**的三处界面，切换只换 src 与说明文字。
+// 首屏两张截图的切换与放大（目标详情 / 任务中心）。第三张（Agent 对话）归在 02 段落，
+// **不在这里重复** —— 同一张图出现在两处会造成审美疲劳，每张图只该有一个家。
 var shots = {
   goals: {
     src: '/site/assets/shots/goal-detail.png', w: 2160, h: 734,
     alt: '本地 Legion 目标详情：一个目标拆成八个阶段任务，分别对应需求、方案、拆解、测试设计、编码、审查、测试与部署角色，8/8 已完成。',
     description: '一个目标，八个阶段。每一步都有任务与负责岗位。',
     caption: '真实产品截图 · 目标详情局部截取 · 八个阶段任务已完成'
-  },
-  chat: {
-    src: '/site/assets/shots/agent-conversation.png', w: 2880, h: 1800,
-    alt: '本地 Legion Agent 对话页：左侧按岗位列出团队，中间是用户消息与编码工程师的回复及任务状态消息，下方为消息输入区。',
-    description: '按岗位找到 Agent，让沟通带着项目与任务上下文。',
-    caption: '真实产品截图 · 编码工程师对话 · 保留已有历史消息与原始界面状态'
   },
   tasks: {
     src: '/site/assets/shots/tasks.png', w: 2880, h: 1800,

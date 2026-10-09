@@ -118,7 +118,7 @@ const COPY = Object.freeze({
     regOpen: '这台 Hub 开放注册，打开手机端即可注册。',
     regInvite: '这台 Hub 开放注册（需要邀请码），打开手机端即可注册。',
     regClosed: '这台 Hub 未开放自助注册，请向管理员索取邀请码。',
-    trial: '在线试用（只读演示）',
+    trial: '产品演示（静态样本）',
     trialNote: '一个目标拆出的八个阶段任务，可点开看描述、验收标准与证据。示例数据，不连实例。',
     // ★ 未签名构建专有的说明。换签名构建时**这段必须跟着改**，否则它会变成
     //   "照它说的做、然后发现对不上"，而那种文案教会人忽略这一块。
@@ -147,7 +147,7 @@ const COPY = Object.freeze({
     regOpen: 'This Hub is open for sign-up — open the mobile app to register.',
     regInvite: 'This Hub is open for sign-up (invite code required) — open the mobile app to register.',
     regClosed: 'This Hub does not allow self sign-up; ask the administrator for an invite code.',
-    trial: 'Online trial (read-only demo)',
+    trial: 'Product demo (static sample)',
     trialNote: 'One goal split into eight staged tasks — open any of them to see its description, acceptance criteria and evidence. Sample data; not connected to an instance.',
     unsigned:
       '<p class="dl-note">The installer is <b>not code-signed</b> (that needs a certificate). So:<br />' +

@@ -478,3 +478,106 @@ html[data-theme=dark] .hero:before { opacity: .6; }
   font-size: 12.5px; color: var(--ink);
 }
 .demo-legend { font-size: 11px; color: var(--muted); }
+
+/* ══════════════════════════════════════════════════════════════════════════
+   点-流相连的底纹（星链 / 星座）
+
+   借鉴 towow.ai 与 anet.sh 的做法：底色上浮着一层"点 + 相连的线"的网络纹样。
+   它与"一支 Agent 编队互相连着"同构 —— 所以不是装饰，是**隐喻**。
+
+   做法：一张**不规则**的 SVG 瓦片平铺（点位置刻意不规整，免得一眼看出重复），
+   配一次极慢的位移。浅色下压到几乎看不见（设计稿的调子是安静的），
+   深色与深色 CTA 段里才明显起来 —— 星链在暗底上才读得出来。
+
+   `prefers-reduced-motion` 下**不动**：会动的背景对前庭敏感的人是实打实的难受，
+   而这条纹样静止时同样是完整的。
+   ══════════════════════════════════════════════════════════════════════════ */
+
+:root {
+  /* 瓦片 260×260：11 个点 + 6 条线，位置刻意不规则。
+     `%23` 是 `#`（URL 里必须编码），其余字符在 data URI 里可直接出现。 */
+  --net: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='260' height='260' viewBox='0 0 260 260'%3E%3Cg stroke='%238b95a8' stroke-width='0.7' fill='none' opacity='0.5'%3E%3Cpath d='M22 44 L96 18 L178 62 L242 132'/%3E%3Cpath d='M96 18 L132 96 L74 168'/%3E%3Cpath d='M178 62 L132 96 L206 210'/%3E%3Cpath d='M74 168 L22 236 L128 244'/%3E%3Cpath d='M242 132 L206 210 L128 244'/%3E%3Cpath d='M196 26 L228 44'/%3E%3C/g%3E%3Cg fill='%238b95a8' opacity='0.75'%3E%3Ccircle cx='22' cy='44' r='1.9'/%3E%3Ccircle cx='96' cy='18' r='2.6'/%3E%3Ccircle cx='178' cy='62' r='1.7'/%3E%3Ccircle cx='242' cy='132' r='2.3'/%3E%3Ccircle cx='132' cy='96' r='2.9'/%3E%3Ccircle cx='74' cy='168' r='1.8'/%3E%3Ccircle cx='206' cy='210' r='2.2'/%3E%3Ccircle cx='22' cy='236' r='1.6'/%3E%3Ccircle cx='128' cy='244' r='2.4'/%3E%3Ccircle cx='196' cy='26' r='1.5'/%3E%3Ccircle cx='228' cy='44' r='1.7'/%3E%3C/g%3E%3C/svg%3E");
+}
+
+html[data-theme=dark] {
+  --net: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='260' height='260' viewBox='0 0 260 260'%3E%3Cg stroke='%2374c9bd' stroke-width='0.7' fill='none' opacity='0.42'%3E%3Cpath d='M22 44 L96 18 L178 62 L242 132'/%3E%3Cpath d='M96 18 L132 96 L74 168'/%3E%3Cpath d='M178 62 L132 96 L206 210'/%3E%3Cpath d='M74 168 L22 236 L128 244'/%3E%3Cpath d='M242 132 L206 210 L128 244'/%3E%3Cpath d='M196 26 L228 44'/%3E%3C/g%3E%3Cg fill='%239ad9cd' opacity='0.8'%3E%3Ccircle cx='22' cy='44' r='1.9'/%3E%3Ccircle cx='96' cy='18' r='2.6'/%3E%3Ccircle cx='178' cy='62' r='1.7'/%3E%3Ccircle cx='242' cy='132' r='2.3'/%3E%3Ccircle cx='132' cy='96' r='2.9'/%3E%3Ccircle cx='74' cy='168' r='1.8'/%3E%3Ccircle cx='206' cy='210' r='2.2'/%3E%3Ccircle cx='22' cy='236' r='1.6'/%3E%3Ccircle cx='128' cy='244' r='2.4'/%3E%3Ccircle cx='196' cy='26' r='1.5'/%3E%3Ccircle cx='228' cy='44' r='1.7'/%3E%3C/g%3E%3C/svg%3E");
+}
+
+/* 首屏：铺一层，向下淡出。浅色下 opacity 很低 —— 只是"空气里有点东西"。 */
+.hero:after {
+  content: ''; position: absolute; inset: -60px 0 -160px; z-index: -1; pointer-events: none;
+  background-image: var(--net); background-size: 260px 260px;
+  -webkit-mask-image: radial-gradient(ellipse 80% 62% at 50% 22%, #000 0%, transparent 78%);
+  mask-image: radial-gradient(ellipse 80% 62% at 50% 22%, #000 0%, transparent 78%);
+  opacity: .28;
+  animation: net-drift 90s linear infinite;
+}
+html[data-theme=dark] .hero:after { opacity: .72; }
+
+@keyframes net-drift {
+  from { background-position: 0 0; }
+  to { background-position: 260px 130px; }
+}
+
+/* 深色 CTA 段：星链在这里最明显 —— 暗底上点与线才读得出来。 */
+.bottom { isolation: isolate; }
+.bottom:before {
+  content: ''; position: absolute; inset: 0; z-index: 0; pointer-events: none;
+  background-image: var(--net); background-size: 260px 260px;
+  -webkit-mask-image: radial-gradient(ellipse 92% 120% at 78% 30%, #000 0%, transparent 72%);
+  mask-image: radial-gradient(ellipse 92% 120% at 78% 30%, #000 0%, transparent 72%);
+  opacity: .5;
+  animation: net-drift 120s linear infinite reverse;
+}
+/* 纹样在最底层，文字与按钮在其上。 */
+.bottom > * { position: relative; z-index: 1; }
+
+@media (prefers-reduced-motion: reduce) {
+  .hero:after, .bottom:before { animation: none; }
+}
+
+/* ══════════════════════════════════════════════════════════════════════════
+   数字人：编队的可见状态
+
+   工作台的 3D 场景里，每个岗位是一个"数字人"，**四个状态各有自己的颜色与姿态**。
+   这一节的四个色值、四个标签、以及"受阻时举手"这件事，全部取自
+   `workbench/src/components/Employee3D.tsx` 的真实实现：
+
+       const STATUS = { idle:'#5b8cff', busy:'#40ffa0', review:'#ffd54a', blocked:'#ff5c5c' }
+       const LABEL  = { idle:'待命',   busy:'进行中',   review:'待验收',   blocked:'受阻' }
+
+   姿态也照抄：`idle` 手臂自然下垂、`busy` 手臂前后摆、`blocked` **右臂抬起**。
+   并且 `idle → busy` 的切换会先播一段 750ms 的**走路**动画（同上文件）。
+
+   图是 **2D 简化示意**，不是 3D 场景的截图 —— 所以图注里写明了。
+   ══════════════════════════════════════════════════════════════════════════ */
+
+.states { display: grid; grid-template-columns: repeat(4, 1fr); gap: 14px; margin-top: 8px; }
+@media (max-width: 860px) { .states { grid-template-columns: repeat(2, 1fr); } }
+@media (max-width: 460px) { .states { grid-template-columns: 1fr; } }
+
+.state {
+  border: 1px solid var(--line); border-radius: 9px; background: var(--surface);
+  padding: 20px 18px 18px; display: flex; flex-direction: column; align-items: flex-start; gap: 12px;
+}
+/* 形象本身按状态着色 —— 真实产品里数字人就是按状态上色的（`STATUS[mode]`），
+   只把颜色放在标签的小圆点上会让"状态一眼可见"变成一句空话：
+   四张图并排时，人形才是第一眼看到的东西。 */
+.state svg { width: 52px; height: 70px; display: block; color: var(--state-color); }
+.state .lbl { font-size: 14px; font-weight: 600; display: flex; align-items: center; gap: 8px; color: var(--ink); }
+.state .lbl i { width: 9px; height: 9px; border-radius: 50%; flex: none; background: var(--state-color); }
+.state p { font-size: 12.5px; color: var(--muted); margin: 0; }
+.state .key { font: 10px var(--mono); color: var(--muted); letter-spacing: .5px; }
+
+.state { --state-color: var(--muted); }
+.s-idle { --state-color: #5b8cff; }
+.s-busy { --state-color: #22c55e; }
+.s-review { --state-color: #e0a80c; }
+.s-blocked { --state-color: #e5484d; }
+
+/* 浅色底上，`#40ffa0` 这类荧光绿读不出来；所以浅色主题下用同色相但压暗一档的值，
+   深色主题下才用 `Employee3D.tsx` 里的原值。**色相不变**，改的只是明度。 */
+html[data-theme=dark] .s-busy { --state-color: #40ffa0; }
+html[data-theme=dark] .s-review { --state-color: #ffd54a; }
+html[data-theme=dark] .s-blocked { --state-color: #ff5c5c; }
+html[data-theme=dark] .s-idle { --state-color: #5b8cff; }

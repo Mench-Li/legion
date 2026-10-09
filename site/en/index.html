@@ -33,8 +33,9 @@
   <nav class="nav-links" aria-label="Main navigation">
     <a href="#capabilities">Capabilities</a>
     <a href="#workflow">Talking to agents</a>
+    <a href="#crew">The crew</a>
     <a href="#delivery">Delivery &amp; acceptance</a>
-    <a href="/demo">Trial</a>
+    <a href="/demo">Demo</a>
   </nav>
   <div class="nav-end">
     <span class="lang"><a href="/" hreflang="zh-CN" lang="zh-CN">中</a><a href="/en" aria-current="page">EN</a></span>
@@ -63,7 +64,6 @@
     </div>
     <div class="shot-tabs" role="group" aria-label="Choose a product screenshot">
       <button type="button" data-shot="goals" aria-pressed="true">Goals &amp; task progress</button>
-      <button type="button" data-shot="chat" aria-pressed="false">Agent conversations</button>
       <button type="button" data-shot="tasks" aria-pressed="false">Task centre</button>
       <span class="shot-origin">Captured locally <i class="dot"></i></span>
     </div>
@@ -141,9 +141,73 @@
 </section>
 
 <!-- ── Delivery &amp; acceptance ───────────────────────────────────────────── -->
+<!-- ── The crew ─────────────────────────────────────────────────────────── -->
+<section id="crew" class="section">
+  <div class="section-head">
+    <div>
+      <div class="eyebrow">03 / THE CREW, MADE VISIBLE</div>
+      <h2>Every role is a digital worker,<br>and its state is visible.</h2>
+    </div>
+    <p>In the 3D scene each crew member has a place and a posture.<br>Who is busy, who is waiting on you, who is stuck — no click needed.</p>
+  </div>
+
+  <div class="states">
+    <div class="state s-idle">
+      <!-- Idle: arms hanging at the sides, feet together -->
+      <svg viewBox="0 0 52 70" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">
+        <circle cx="26" cy="10" r="6.5" />
+        <path d="M26 17 V42" />
+        <path d="M26 24 L14 40" /><path d="M26 24 L38 40" />
+        <path d="M26 42 L20 60" /><path d="M26 42 L32 60" />
+      </svg>
+      <span class="lbl"><i></i>Idle</span>
+      <span class="key">idle</span>
+      <p>Nothing in hand. Arms down, slow breathing.</p>
+    </div>
+    <div class="state s-busy">
+      <!-- Working: hands up in front (forearms folded) -->
+      <svg viewBox="0 0 52 70" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">
+        <circle cx="26" cy="10" r="6.5" />
+        <path d="M26 17 V42" />
+        <path d="M26 24 L15 31 L21 40" /><path d="M26 24 L37 31 L31 40" />
+        <path d="M26 42 L20 60" /><path d="M26 42 L32 60" />
+      </svg>
+      <span class="lbl"><i></i>Working</span>
+      <span class="key">busy</span>
+      <p>On the job. Hands up in front — and it <strong>walks over before it starts</strong>.</p>
+    </div>
+    <div class="state s-review">
+      <!-- Awaiting: holding a result up in front of itself -->
+      <svg viewBox="0 0 52 70" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">
+        <circle cx="26" cy="10" r="6.5" />
+        <path d="M26 17 V42" />
+        <path d="M26 26 L16 34" /><path d="M26 26 L36 34" />
+        <path d="M16 34 H36" />
+        <path d="M26 42 L20 60" /><path d="M26 42 L32 60" />
+      </svg>
+      <span class="lbl"><i></i>Awaiting acceptance</span>
+      <span class="key">review</span>
+      <p>Done, holding the result, waiting on your call. It will not move on by itself.</p>
+    </div>
+    <div class="state s-blocked">
+      <!-- Blocked: right arm raised — the only "hand up" posture -->
+      <svg viewBox="0 0 52 70" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">
+        <circle cx="26" cy="10" r="6.5" />
+        <path d="M26 17 V42" />
+        <path d="M26 24 L15 38" /><path d="M26 24 L37 8" />
+        <path d="M26 42 L20 60" /><path d="M26 42 L32 60" />
+      </svg>
+      <span class="lbl"><i></i>Blocked</span>
+      <span class="key">blocked</span>
+      <p>Stuck, with its <strong>right arm raised</strong>. The one state that needs you.</p>
+    </div>
+  </div>
+  <p class="mock-caption">State colours and postures taken from the workbench 3D scene · figures are a simplified 2D rendering, not a scene screenshot</p>
+</section>
+
 <section class="artifacts" id="delivery">
   <div>
-    <div class="eyebrow">03 / CONTEXT THAT COMPOUNDS</div>
+    <div class="eyebrow">04 / CONTEXT THAT COMPOUNDS</div>
     <h2>Every delivery leaves<br>something for the next one.</h2>
     <p>Stage documents keep the process; acceptance records keep the basis.<br>Rules, skills and experience are managed per workspace and feed later tasks.</p>
   </div>
@@ -225,7 +289,9 @@
   }
 })()
 
-// The three screenshots are three views of the **same local environment**; switching
+// The hero cycles two screenshots (goal detail / task centre). The third one (agent
+// conversation) lives in the section 02 **only** — showing one image in two places causes
+// fatigue, so every screenshot gets exactly one home. switching
 // only swaps src and the caption.
 var shots = {
   goals: {
@@ -233,12 +299,6 @@ var shots = {
     alt: 'Local Legion goal detail: one goal split into eight staged tasks for requirements, research, breakdown, test design, coding, review, testing and deployment, all 8/8 complete.',
     description: 'One goal, eight stages. Every step has a task and an owning role.',
     caption: 'Real product screenshot · goal detail, partial crop · eight staged tasks complete'
-  },
-  chat: {
-    src: '/site/assets/shots/agent-conversation.png', w: 2880, h: 1800,
-    alt: 'A locally running Legion agent conversation page: the team listed by role on the left, user messages and the coder’s replies plus task-status messages in the middle, and a message composer below.',
-    description: 'Find an agent by role, and let the conversation carry project and task context.',
-    caption: 'Real product screenshot · coder conversation · existing messages and UI state kept as-is'
   },
   tasks: {
     src: '/site/assets/shots/tasks.png', w: 2880, h: 1800,

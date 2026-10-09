@@ -85,6 +85,11 @@ const SCHEMA_SOURCES = [
   'server',
   'runStore',
   'modelStore',
+  // P1（DECISION-legion-owns-model-config）：`model_providers`（供应商目录）建在
+  // `provider-store.mjs` 里。**与 modelStore 分开两张表**是刻意的：一个是供应商实体、
+  // 一个是它的成员（型号 + 岗位绑定），合并会让"同组各行的 api/baseURL 必须一致"无处安放。
+  // 不登记它就落在这一族门禁专门防的那个形状里：表在真实 schema 里多出来，而 `--check` 报"无漂移"。
+  'providerStore',
   'bindingStore',
   'budgetLedger',
   'contextStore',
@@ -212,6 +217,7 @@ const SCHEMA_SOURCES = [
 // 这些模块也一并纳入 sources 哈希：它们变了，基线里的表清单就可能过期。
 SOURCES.runStore = join(ROOT, 'team-hub', 'run-store.mjs')
 SOURCES.modelStore = join(ROOT, 'team-hub', 'model-store.mjs')
+SOURCES.providerStore = join(ROOT, 'team-hub', 'provider-store.mjs')
 SOURCES.bindingStore = join(ROOT, 'team-hub', 'binding-store.mjs')
 SOURCES.budgetLedger = join(ROOT, 'team-hub', 'budget-ledger.mjs')
 SOURCES.contextStore = join(ROOT, 'team-hub', 'context-store.mjs')
@@ -268,6 +274,10 @@ SOURCES.routesConnectors = join(ROOT, 'team-hub', 'routes', 'connectors.mjs')
 //   对它是透明的 —— 但这一点值得在这里写一句，因为下一个人遇到"路由在块里"
 //   时会先怀疑抽取器，而它其实没问题（`findOpaqueRouteGuards` 也不响）。
 SOURCES.routesModelProfiles = join(ROOT, 'team-hub', 'routes', 'model-profiles.mjs')
+// ★ P1（DECISION-legion-owns-model-config）：供应商目录族。两条路由都是**字面量路径**，
+//   抽取器直接认；登记它是为了让这两条对平台契约可见 —— 不登记就是一个
+//   "门禁一声不吭、而它的路由不存在"的形状（本文件上面刚记过同一个坑）。
+SOURCES.routesModelProviders = join(ROOT, 'team-hub', 'routes', 'model-providers.mjs')
 // ★ 切片 14（usage）是第一个**被内部子分隔符切成两段**的族：
 //   `// ── F-15 用量汇总 ──` 下面是 totals/rollup，又一个 `// ── F-15 告警与降级 ──`
 //   下面是 alert。抽取器对此同样是透明的（它按声明式条目逐条认，不看注释）。
@@ -360,6 +370,7 @@ export const ROUTE_FAMILY_SOURCES = Object.freeze([
   { module: 'routesToolCalls', family: 'tool-calls', factory: 'createToolCallsRoutes' },
   { module: 'routesConnectors', family: 'connectors', factory: 'createConnectorsRoutes' },
   { module: 'routesModelProfiles', family: 'model-profiles', factory: 'createModelProfilesRoutes' },
+  { module: 'routesModelProviders', family: 'model-providers', factory: 'createModelProvidersRoutes' },
   { module: 'routesUsage', family: 'usage', factory: 'createUsageRoutes' },
   { module: 'routesContextSnapshots', family: 'context-snapshots', factory: 'createContextSnapshotsRoutes' },
   { module: 'routesConfigBundle', family: 'config-bundle', factory: 'createConfigBundleRoutes' },

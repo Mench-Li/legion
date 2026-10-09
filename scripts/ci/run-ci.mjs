@@ -1891,6 +1891,15 @@ async function stageTest() {
     //   同一个 Bug #1 的**注入侧**：`DSH_MODELS_BASE_URL` 由 legion-services 按宿主端口派生。
     //   这一侧的失败形状更隐蔽——注入了错的地址，界面还是那句 `fetch failed`。
     { label: 'legion-services（服务托管插件：宿主地址派生自本次启动的宿主，取不到就**不注入**）', files: ['services-plugin/index.test.mjs'], cwd: ROOT },
+    // ── P1（docs/DECISION-legion-owns-model-config.md）：Legion 拥有模型配置、DSH 的由它派生 ──
+    //   第一半（只读）：从宿主**进程内**读出 DSH 活着的供应商目录 —— 无 HTTP、无 cookie、无登录。
+    //   守：永不读密钥值（只问 credentials.describe 的 {configured}）/ 活着但没声明的也要收 /
+    //   服务缺席是软取（返回空 + 原因，不抛）/ **只在 Legion 目录为空时**引导导入
+    //   （非空 ⇒ 一次写都不发：这是"DSH 被手改不会改写 Legion"那条方向纪律的执行点）。
+    { label: 'provider-import（P1：从 DSH 读供应商目录，且只在空目录时引导导入）', files: ['services-plugin/provider-import.test.mjs'], cwd: ROOT },
+    //   第二半（写入）：供应商目录的仓储与两条路由 —— 幂等（第二次写 0 行）/ 不删除 /
+    //   未知字段拒绝（密钥纪律）/ secretRef 只收引用名 / 型号白名单要报出丢掉的字段名 / 墓碑复活。
+    { label: 'model-providers（P1：供应商目录 —— 幂等导入、不删除、拒未知字段）', files: ['team-hub/model-providers-routes.test.mjs'], cwd: ROOT },
     { label: 'hub-event-stream（F-01 scope/游标/信封）', files: ['workbench/scripts/hub-event-stream.test.mjs'], cwd: ROOT, nodeArgs: ['--experimental-strip-types'] },
     // ── 并行任务文件冲突治理（G-mujfc9vi-1 S1–S8）──
     // 每个测试文件都必须显式登记：未登记 = 不存在的断言（本文件 4568 行的完备性检查会拦）。

@@ -58,7 +58,7 @@ DSH 的活配置：ctx.settings.mutate(llm-pi-ai) ＋ ctx.credentials.set()   �
 
 ## 5. 分四段实施（每段可独立验收；**危险动作放最后**）
 
-> **进度**：**P0 ✅**（`8b48a60c`）· **P1 ✅**（见 §10）· P2 / P3 / P4 待做。
+> **进度**：**P0 ✅**（`8b48a60c`）· **P1 ✅**（见 §10）· **P2 ✅**（见 §11）· P3 / P4 待做。
 
 ### P0 拆掉错的方向（小）
 - 删 `GET /api/dsh-models/connect`、面板的「连接 DSH 服务」按钮、`DSH_MODELS_LOGIN_URL`（legion-services / config-schema 两处）。
@@ -217,3 +217,116 @@ DSH 的活配置：ctx.settings.mutate(llm-pi-ai) ＋ ctx.credentials.set()   �
 | `team.db` 的 `model_providers` | 只出现引用名（如 `FJD_DS_API_KEY`），**没有任何密钥值** |
 
 **这一段是 P2 的输入**：P2 的影子对账要拿这份目录与 DSH 现状做 diff，先看见"接管会删掉什么"。
+
+## 11. P2 实施记录（2026-10-09）：影子物化 —— 只报告，不写
+
+### 11.1 新增了什么
+
+| 位置 | 内容 |
+| --- | --- |
+| `services-plugin/materialize-plan.mjs` | **纯函数**：`normalizeForCompare` / `planMaterialization` / `describeMaterializationPlan` / `changedFields`。没有 ctx、没有网络、没有时钟 |
+| `services-plugin/shadow-materialize.mjs` | 执行那一半：读 Legion 目录（经中枢 API）+ 读 DSH 快照 → 出计划 → 记一行。**只碰读方法** |
+| `services-plugin/dsh-snapshot.mjs` | 从 `index.js` **搬出来**的 `readDshProviderSnapshot`（理由见 11.4） |
+| 判据 | `services-plugin/shadow-materialize.test.mjs`（11 例） |
+| 接线 | `index.js` 在 P1 引导导入之后跑一次影子对账，并把"本轮有无差异"记成显式读数 |
+
+### 11.2 它守的三件事（每件都是"在别处会被读成没事"的那种）
+
+**① 它真的一个字节都没写。** 这一条的文字版谁都会写（"P2 只报告"），
+而**只有探针能让它可验**：夹具把 `settings.mutate` / `credentials.set` / `credentials.unset`
+换成"一被调用就记名 + 抛"的探针 ⇒ 任何一次误写立刻红。
+它的价值不只在这一段：**P3 落地时同样这套探针也会红**，除非那时**有意**把这条改成"允许写"——
+那时它是一次该被看见的改动，而不是一个静默的漂移。
+
+**② "接管会删掉"的那几条必须被点名。** 这是 P2 存在的唯一理由。
+`planMaterialization` 的 `delete` 集合、以及渲染行里的 `**接管会删掉**：<id…>` 都在守它。
+一条只报"新增/修改"的影子对账，与一条**看得见删除**的影子对账，在"我今天不想删任何东西"的日子里
+是同一个读数 —— 而那正是最危险的那种巧合。
+
+**③ 读不到 DSH 现状时不许说 `clean`。** 两侧都空会让 diff 干净，
+于是"读失败"会伪装成"完全一致" —— 而"完全一致"正是"接管后什么都不用改"这个结论的来源。
+这正是本仓反复出现的那一族错（BUG-009-a 的探测器、BUG-010 的假停摆、P1 的幂等读数）。
+
+### 11.3 ★ 实施中发现并修掉的一个**真缺陷**：`readOk`
+
+第一版我用一个字符串启发式判断读失败：
+
+```
+actualReadOk = !(snap.providers.length === 0 && snap.reason !== '')
+```
+
+它在"宿主没有 `llm` 服务"时正确，但在**"宿主读成功、就是零个供应商"**时也判成读失败 ——
+因为那两件事在返回形状上是**同一个空数组**。是我自己的用例 ⑨ 把它逼出来的
+（"宿主说没有供应商"与"读不出来"必须分得开）。
+
+修法是给读者加一个显式字段：
+
+```
+{ providers, readOk, reason }
+   no llm service  → { providers: [], readOk: false, reason: '宿主没有 llm 服务' }
+   llm 说零个供应商 → { providers: [], readOk: true,  reason: '宿主当前没有任何可用供应商' }
+```
+
+> 一个"用别的字段去**推断**读没读到"的判据，
+> 与一个"读者自己说读没读到"的判据，在两边都不为空的时候长得一模一样。
+
+连带修掉 P1 日志里的一处措辞：`readOk: true` 且零个供应商时不再说"读不出"，
+而是明说"这是**读到了、就是空**，不是读失败" —— 两个事实在日志里也得分得开。
+
+### 11.4 ★ 顺手拆掉的一个循环导入
+
+`readDshProviderSnapshot` 本来住在 `index.js` 里，而 P2 也要用它 ⇒
+`index.js ↔ shadow-materialize.mjs` 成了**循环导入**。那次能跑（ESM 活绑定 + 调用发生在两模块都求值完之后），
+但它属于"今天能跑、失败方式取决于谁先被加载"的结构。搬到 `dsh-snapshot.mjs` 后依赖图是单向的：
+
+```
+index.js → shadow-materialize.mjs → { dsh-snapshot.mjs, materialize-plan.mjs }
+index.js → dsh-snapshot.mjs        （并 re-export，保持 P1 的用例与导入路径不变）
+```
+
+> 一个"两个模块互相 import、但调用发生在求值之后"的循环，
+> 与一个"没有循环"的依赖图，在今天的运行结果上是同一个东西 ——
+> 只不过前者的失败方式取决于**谁先被加载**。
+
+### 11.5 判据、反向验证与全链活体读数
+
+| 套件 | 例数 | 结果 |
+| --- | --- | --- |
+| `services-plugin/shadow-materialize.test.mjs` | 11 | 全绿 |
+
+**反向验证 9/9 全部实测变红**：
+
+| 变异 | 结果 |
+| --- | --- |
+| M1 ★ 影子模式真的去写（加一次 `settings.mutate`） | 红 ⑦/⑧/⑨/⑪（探针记名） |
+| M2 ★ 用"数组空不空"判断读失败（丢掉 `readOk`） | 红 ⑨ |
+| M3 ★ 不报"要删的"（`remove` 恒为空） | 红 ④/⑤/⑧ |
+| M4 两侧字段不映射（`secretRef` 不认成 `apiKeyEnv`） | 红 ①/②/③/⑥ |
+| M5 型号比较对顺序敏感 | 红 ② |
+| M6 读数行里不点名要删的 id | 红 ④ |
+| M7 输入模态不排序（`[text,image]` ≠ `[image,text]`） | 红 ② |
+| M8 差异不指明字段（`update` 只留 id） | 红 ③ |
+| M9 缺凭证不报 | 红 ⑥ |
+
+**全链活体读数**（真实 `cordis.patch.yml` 的声明 → 临时库 → 真实 HTTP → 影子对账）：
+
+```
+1) P1 导入      → 200 { created: 2, updated: 0, unchanged: 0 }
+2) P2 对账      → 新增 0 / 修改 0 / 删除 0 / 未变 2（clean=true）
+                  写探针被碰过吗：没有（影子模式确实只读）
+3) 反向（DSH 侧多一个 ghost-ds）
+                → 新增 0 / 修改 0 / 删除 1 / 未变 2（clean=false）；**接管会删掉**：ghost-ds
+                  写探针被碰过吗：没有
+```
+
+第 2 步就是 P1 → P2 的**闭环读数**：P1 把 DSH 的现状收进来之后，P2 看到的差异是**零**。
+如果跳过 P1 直接接 P3，第 3 步那个形状（`ghost-ds` / 真实的 `svea-ds`）就会在第一次运行时**被删掉**。
+
+### 11.6 P3 的放行条件（现在还**不放行**）
+
+- 现在每次宿主启动只对账**一次**，所以"连续多轮无差异"这个条件**还没有被满足**——
+  跑一次 clean 只能证明"此刻一致"。要拿到"连续 N 轮"，需要 P4 的周期对账（如每 5 分钟一次），
+  或在几次真实重启后由日志人工确认。
+- 除"无差异"之外，P3 还需要**写入侧**的判据：写后用真读者回读逐字相等、否则回滚
+  （§5 P3）。那一段的代码与判据都还没写。
+- 因此当前状态是：**P3 未放行**，DSH 的活配置**一个字节都还没被 Legion 改过**。

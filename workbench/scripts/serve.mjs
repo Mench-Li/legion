@@ -2613,6 +2613,35 @@ function routeRequest(req, res) {
     const failure = checkDesktopRequest(req, CFG.values.token, { requireToken: pathname === '/api' || pathname.startsWith('/api/') || pathname === '/hub' || pathname.startsWith('/hub/') })
     if (failure) { sendJson(res, failure.status, { code: failure.code }); return }
   }
+  if (pathname === '/api/dsh-models/connect') {
+    // ★ BUG-014 第二层（凭证）：宿主 `/api/*` 只认它自己的浏览器会话，而桥接层转发的是
+    //   **浏览器自己的** cookie —— 普通浏览器里没有那条 cookie，于是无论地址多正确都 401。
+    //   这里把用户**顶层导航**到宿主那条带 `?token=` 的操作员登录 URL（legion-services 从
+    //   `ctx.connection.authenticatedUrl()` 铸出并注入 `DSH_MODELS_LOGIN_URL`）。
+    //   宿主会种下会话 cookie；cookie **按主机存放、不按端口隔离**，
+    //   所以同一个浏览器里的 `:5173` 与 `:19387` 从此共享它 ⇒ 面板的读写都通了。
+    //
+    //   为什么必须是**顶层导航**而不是 XHR：Set-Cookie 要落进浏览器 cookie jar，
+    //   而跨源 fetch 拿不到、也不该拿到这条响应。
+    if (!isLoopback(req)) { httpErr(res, 403, '模型配置仅限本机访问'); return }
+    if (req.method !== 'GET') { httpErr(res, 405, 'method not allowed'); return }
+    try {
+      // ★ 与「写供应商配置」同一道闸：这条路由**发出去的是一个操作员凭证**，
+      //   没有令牌时它等于把宿主操作员身份交给任何能访问 :5173 的本机进程。
+      //   （配置了 token 才拦得住；未配置时与其它写路径同一暴露面，见 docs/bugs/BUG-014 §7。）
+      requireWriteToken(req)
+      if (req.headers.origin && new URL(req.headers.origin).host !== req.headers.host) { httpErr(res, 403, '模型配置请求来源无效'); return }
+      const loginUrl = String(CFG.values.modelsLoginUrl ?? '')
+      if (!loginUrl) {
+        httpErr(res, 503, '宿主没有注入登录地址（DSH_MODELS_LOGIN_URL 为空）：请确认 legion-services 插件在本次宿主启动时拿到了 ctx.connection.authenticatedUrl —— 这是**凭证**缺，不是地址错，重试不会变好')
+        return
+      }
+      // no-store + no-referrer：不许这条带令牌的 URL 被缓存或随 Referer 泄漏到别处。
+      res.writeHead(302, { location: loginUrl, 'cache-control': 'no-store', 'referrer-policy': 'no-referrer' })
+      res.end()
+    } catch (e) { httpErr(res, e.status ?? (String(e.message).includes('token 无效') ? 401 : 400), e.message) }
+    return
+  }
   if (pathname === '/api/dsh-models') {
     if (!isLoopback(req)) { httpErr(res, 403, '模型配置仅限本机访问'); return }
     if (req.method !== 'POST') { httpErr(res, 405, 'method not allowed'); return }

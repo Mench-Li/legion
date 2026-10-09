@@ -24,6 +24,14 @@ export const SCHEMA = defineSchema({
     //   legion-services 插件用 `ctx.webServer.port` 派生并注入；空 = 独立跑 web profile 时
     //   回落 `http://127.0.0.1:3080`（见 workbench/scripts/dsh-models-bridge.mjs）。
     { key: 'modelsBaseUrl', env: 'DSH_MODELS_BASE_URL', type: 'string', default: '', doc: 'DSH 宿主地址（模型配置 Remote 的上游；空=回落 http://127.0.0.1:3080）' },
+    // ★ **派生值**，且**携带凭证**（BUG-014 第二层：桥接层 → 宿主的 401）。
+    //   宿主 `/api/*` 只认它自己的浏览器会话 cookie（按 authority 签名、30 天）；
+    //   指挥台转发的是**浏览器自己的** cookie，而普通浏览器里没有它 ⇒ 无论地址多正确都 401。
+    //   解药是让**用户的浏览器**登一次：legion-services 从 `ctx.connection.authenticatedUrl()`
+    //   铸出带 `?token=` 的操作员登录 URL 注入这里，指挥台的 `GET /api/dsh-models/connect`
+    //   把浏览器**顶层导航**过去，宿主随即种下 cookie（cookie 按主机存放、不按端口隔离）。
+    //   ⚠ 这条值本身就是一个凭证：它只经环境变量进进程内存，**不落盘、不进日志**。
+    { key: 'modelsLoginUrl', env: 'DSH_MODELS_LOGIN_URL', type: 'string', default: '', sensitive: true, doc: '宿主操作员一次性登录 URL（legion-services 注入；空=指挥台明说"宿主没注入登录地址"）' },
     { key: 'staticRoot', env: 'DSH_WORKBENCH_ROOT', type: 'path', default: '', doc: '静态产物根（空=workbench/dist 内置默认；P3-1 修补引入，供产物缺失场景测试）' },
     { key: 'spacesJson', env: 'DSH_WORKBENCH_SPACES_JSON', type: 'path', default: '', doc: '空间定义 JSON 路径（默认内置）' },
     // ── 文件中心（P2-7）──

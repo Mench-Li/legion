@@ -24,14 +24,30 @@ export function DshProvidersPanel(): React.JSX.Element {
   const [open, setOpen] = useState(false)
   const [removing, setRemoving] = useState<Provider | null>(null)
   const [form, setForm] = useState<Form>(empty)
+  // ★ BUG-014 第二层（凭证）：宿主 `/api/*` 只认它**自己的浏览器会话**，而这里转发的是
+  //   **浏览器自己的** cookie —— 普通浏览器里没有那条 cookie，于是地址再对也是 401。
+  //   解药是让**用户的浏览器登一次**：顶层导航到 `/api/dsh-models/connect`，
+  //   指挥台回一个 302 指向宿主那条带 `?token=` 的登录 URL，宿主随即种下会话 cookie
+  //   （cookie 按主机存放、不按端口隔离 ⇒ 同一个浏览器的 :5173 与 :19387 共享）。
+  //   必须是**顶层导航**：XHR 拿不到也不该拿到 Set-Cookie。
+  const [needsHostLogin, setNeedsHostLogin] = useState(false)
+  function connectHost(): void {
+    setNotice('已在新标签打开 DSH 登录…登录成功后回到本页点「刷新配置」。')
+    window.open('/api/dsh-models/connect', '_blank', 'noopener')
+  }
   async function load(): Promise<void> {
     setLoading(true); setError('')
     try {
       const [directory, current, models] = await Promise.all([
         dshModelsRpc<Provider[]>('llm/listConfigurableProviders'), dshModelsRpc<Settings>('settings/describe'), dshModelsRpc<DshModelCatalog>('session/modelCatalog'),
       ])
-      setProviders(directory); setSettings(current); setCatalog(models)
-    } catch (e) { setError(e instanceof Error ? e.message : String(e)) }
+      setProviders(directory); setSettings(current); setCatalog(models); setNeedsHostLogin(false)
+    } catch (e) {
+      const message = e instanceof Error ? e.message : String(e)
+      setError(message)
+      // 401 = 地址已对、**凭证**缺 ⇒ 给一条可行动的出路，而不是让人对着"未授权"猜。
+      setNeedsHostLogin(message.includes('未授权'))
+    }
     finally { setLoading(false) }
   }
   useEffect(() => { void load() }, [])
@@ -102,6 +118,11 @@ export function DshProvidersPanel(): React.JSX.Element {
     <div className="model-config-intro"><div><h2>模型</h2><p>填入模型供应商的 API 密钥即可使用其模型。配置适用于所有空间。</p></div><button className="btn" disabled={loading || busy} onClick={() => void load()}>刷新配置</button></div>
     {loading && <p>正在读取模型配置…</p>}
     {error && <div className="set-notice bad" role="alert">{error}</div>}
+    {!loading && needsHostLogin && <div className="set-notice warn" role="status">
+      <p>地址已经对了 —— 缺的是**宿主会话**：DSH 宿主只认它自己的浏览器登录，而本页转发的是这个浏览器的 cookie。</p>
+      <p>点下面这个按钮，浏览器会去 DSH 登一次（同一个浏览器里 <code>:5173</code> 与 <code>:19387</code> 共享这条会话，约 30 天有效），回来后点「刷新配置」即可。</p>
+      <button className="btn primary" disabled={busy} onClick={connectHost}>连接 DSH 服务（本机浏览器登录一次）</button>
+    </div>}
     {notice && <div className="set-notice ok" role="status">{notice}</div>}
     {!loading && !error && catalog && <p className="model-catalog-summary">已配置 {catalog.groups.length} 个供应商 · {catalog.groups.reduce((sum, g) => sum + g.models.length, 0)} 个模型 · 默认：{catalog.default.provider} / {catalog.default.model}</p>}
     <div className="provider-settings-list">

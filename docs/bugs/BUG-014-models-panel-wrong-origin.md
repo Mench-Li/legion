@@ -119,12 +119,94 @@ function modelsUnreachableError(e: unknown): Error {
 - **要重新构建 `workbench/dist` 并刷新页面**：被托管的 workbench 服务的是 `workbench/dist`
   （命令行 `…\legion\workbench\scripts\serve.mjs --port 5173`），源码改动必须重新构建才会进浏览器。
   实测构建前的 `dist` 比 `src/api.ts` 旧约 15 小时 —— 也就是说**线上跑的是一份旧包**。
-- **★ 本条的下一层（不在本条范围内，需要裁决）**：把地址修对之后，面板会得到
-  `401 模型服务连接未授权，请重新连接服务后刷新配置。` —— 因为桥接层转发的是**浏览器自己的
-  cookie**，而宿主 DSH 的会话 cookie 是按 authority（`127.0.0.1:19387`）签发的、只存在于
-  **DSH 桌面窗口**自己的 cookie 库里。在普通浏览器里打开指挥台时，那个 cookie 不存在。
-  这是 BUG-001 §6 就已经登记过的那条边界（"只注入地址而不解决'拿什么凭证跟宿主说话'，
-  会把失败从 `fetch failed` 挪成 `401`"）—— 本条把失败从 `Failed to fetch`（**地址错**）
-  推进到 `401`（**身份缺**），这一步是确定的；**再往前一步要单独设计并裁决**。
-  留一个可观测的判别法：修好之后，如果面板显示的是**中文的未授权文案**，说明地址已经对了、
-  只差凭证；如果仍是 `Failed to fetch`，说明还有第三个地址在错。
+- **★ 下一层（凭证）已在 §7 修掉**：把地址修对之后，面板拿到的是
+  `401 模型服务连接未授权，请重新连接服务后刷新配置。` —— 那是**凭证**缺，不是地址错。
+  这个"从 `Failed to fetch` 变成 401"的推进是**实测的**（将军 2026-10-09 报告 "bug-014未修复，现在报错变为：模型服务连接未授权"），
+  也是本条写下的判别法生效：**中文未授权文案 ⇒ 地址已对**。
+
+## 7. 第二层：凭证（设计 A —— 让用户的浏览器登一次）
+
+### 7.1 真因（读宿主源码，非推断）
+
+宿主 `:19387` 的 `/api/*` 只认**它自己的浏览器会话**：
+
+```ts
+// packages/client/connection/src/browser-auth.ts
+const COOKIE_PREFIX = 'dsh-auth-'
+function cookieName(authority) { return COOKIE_PREFIX + base64url(sha256(authority)) }  // authority = 127.0.0.1:19387
+// cookieMaxAgeDays 默认 30；值 = v1.<base64url(payload)>.<HMAC(secret)>，HttpOnly + SameSite=Strict
+```
+
+而桥接层转发的是**浏览器自己的** cookie（`forwardDshModels(body, { cookie: req.headers.cookie })`）。
+在普通浏览器里打开 `:5173` 时那条 cookie **不存在**（它只存在于 DSH 桌面窗口自己的 cookie 库）
+⇒ 无论地址多正确，三个读取永远是 401。
+
+> ★ 订正：§7 之前的版本里我把这条 cookie 的名字写成 `dsh_session_…` —— **那是我从记忆里写的**，
+> 代码里是 `dsh-auth-`。同一条纪律：**名字类结论要读那一行**。
+
+### 7.2 解药：宿主铸一条登录 URL，指挥台把浏览器送过去
+
+DSH 自己的桌面壳就是这么给窗口登录的（`apps/desktop-host/src/index.ts:103`
+`ctx.connection.authenticatedUrl(\`http://127.0.0.1:${port}\`)`）。这条 URL 带 `?token=<launchToken>`，
+浏览器**顶层导航**过去时 `authorizeIndex` 会 303 + `Set-Cookie`。
+
+**cookie 按主机存放、不按端口隔离** ⇒ 同一个浏览器里的 `:5173` 与 `:19387` 共享这条会话
+（`SameSite=Strict` 只在跨**站**时拦，`127.0.0.1` 的不同端口是同站）。
+
+| 改动 | 内容 |
+| --- | --- |
+| `services-plugin/index.js` | `inject` 增补 `'connection'`；新增纯函数 `deriveDshModelsLoginUrl()`；`buildWorkbenchEnv` 增 `DSH_MODELS_LOGIN_URL`（空 ⇒ 不注入） |
+| `workbench/scripts/config-schema.mjs` | 新增 `modelsLoginUrl`（`sensitive: true`） |
+| `workbench/scripts/serve.mjs` | 新增 `GET /api/dsh-models/connect`：本机 + 同源 + `requireWriteToken` ⇒ **302** 到登录 URL，带 `no-store` / `no-referrer` |
+| `workbench/src/components/DshProvidersPanel.tsx` | 401 时渲染「连接 DSH 服务（本机浏览器登录一次）」按钮 ⇒ `window.open('/api/dsh-models/connect')` |
+
+**三条刻意的设计约束**（各有用例守着）：
+
+1. **登录 URL 里必须真的带 token**，否则视为拿不到 —— 一个"看起来配了、其实没令牌"的地址，
+   与没配的地址，在界面上是同一种失败（又一条 BUG-001 形状）。
+2. **令牌绝不落盘、绝不进日志**：`.legion-services.log` 是明文长期留存的，
+   所以那条日志只说"已注入"，不打印 URL 本身。**一条把令牌写进日志的"方便排查"，就是把一次登录换成一份永久凭证。**
+3. **`connect` 必须过 `requireWriteToken`** —— 它发出去的是一个操作员凭证（见 §7.4）。
+
+### 7.3 判据（新增 11 + 6 例，全部已登记进 `run-ci`）
+
+| 套件 | 守什么 |
+| --- | --- |
+| `services-plugin/index.test.mjs`（11 例，新增 5） | 登录 URL 必须带 token；取不到/抛错 ⇒ 空；空 ⇒ **不注入**；与宿主地址注入互不挤占 |
+| `workbench/scripts/dsh-models-connect.test.mjs`（6 例，新） | 302 原样带令牌 / `no-store`+`no-referrer` / 没注入 ⇒ **503 且明说"是凭证缺不是地址错"** / 配了 token 就必须 Bearer / 非 GET 405 / 跨源 403 |
+| `workbench/scripts/dsh-models-base.test.mjs`（5 例，阶段一） | 地址必须同源 + 网络层文案 + `apiBase()` 默认值的**反向护栏** |
+
+**反向验证 5/5 全部实测变红**：
+
+| 变异 | 结果 |
+| --- | --- |
+| M1 `deriveDshModelsLoginUrl` 不再校验 token | services-plugin **有失败用例**（fail=1） |
+| M2 登录 URL 恒注入（空值也注入） | 同上（fail=1） |
+| M3 `connect` 拿不到地址时回 200 + 空 Location | **红③** |
+| M4 `connect` 去掉 `requireWriteToken` | **红④** |
+| M5 302 去掉 `no-store`/`no-referrer` | **红②** |
+
+### 7.4 ★ 我上一版说错的一句话，以及这一版补的闸
+
+我在给将军的选项表里写过 A 案"**无新增提权**" —— **那句话是错的**，必须订正：
+
+> `connect` 这条路由**本身**要把一个操作员登录 URL 交出去。因此**谁能访问 `:5173`，谁就能拿到它**：
+> 一个本机进程只要 `curl -i http://127.0.0.1:5173/api/dsh-models/connect` 就能拿到 302 的 Location，
+> 自己走一遍交换、拿到 30 天的宿主操作员会话。这与 B 案（桥接层自持 cookie）**是同一个暴露面** ——
+> A 案省掉的只是"指挥台进程里长期驻留一份凭证"，并没有省掉"本机可及就能取得凭证"这件事。
+
+**所以两案真正的安全边界都是 `:5173` 自己**，而它当前**没有令牌**
+（`.legion-services.log`：`[workbench] … token=(未设置)`）。已做的与建议做的：
+
+- **已做**：`connect` 过 `requireWriteToken`，与「写供应商配置」同一道闸 —— 配了令牌就拦得住（用例 ④ 钉住）。
+- **建议（未做，需你裁决）**：给托管路径的 workbench 配一个令牌。这已经不是 BUG-014 的范围
+  （它影响的是 `/api/dsh-models` **全部**写路径，包括改供应商配置与写密钥），
+  并且会牵动 Legion 自己的身份体系（指挥台要有办法把令牌交给浏览器）。
+  **在这件事定下来之前，A 案把"宿主操作员身份"的取得条件降低到了"能访问本机 5173"。**
+
+### 7.5 生效条件
+
+- **要重启一次宿主**：`services-plugin` 是宿主插件，`inject` 与登录 URL 派生都在宿主进程里跑。
+- 面板侧还要 **重建 `workbench/dist`**（已做；`serve.mjs` 每次请求读磁盘，不需要重启 workbench 进程）。
+- 操作：刷新页面 → 面板显示未授权提示与「连接 DSH 服务」按钮 → 点一下（新标签会落到 DSH 界面）
+  → 回到指挥台点「刷新配置」。会话约 30 天有效。

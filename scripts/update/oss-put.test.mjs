@@ -86,6 +86,22 @@ describe('SigV4 上传器', () => {
     assert.equal(buildUrl('https://e', 'b').url, 'https://e/b')
   })
 
+  test('⑤b 没有 bucket 时走无桶路径，**不许**拼出字面量 undefined', () => {
+    // ★ 这条来自真实的一次列桶尝试：`bucket === undefined` 被 `String(undefined)`
+    //   变成 `"undefined"`，请求打到 `/undefined/`，服务端如实回
+    //   `404 NoSuchBucket` + `<Resource>/undefined/</Resource>`。
+    //   它**看起来像一个正常的 404** —— 而真相是我们在问一个名叫 undefined 的桶。
+    for (const missing of [undefined, null, '', '   ']) {
+      const u = buildUrl('https://s3.cn-north-1.jdcloud-oss.com', missing)
+      assert.equal(u.canonicalUri, '/', `bucket=${JSON.stringify(missing)} 应走无桶路径`)
+      assert.equal(u.url, 'https://s3.cn-north-1.jdcloud-oss.com/')
+      assert.doesNotMatch(u.url, /undefined|null/, '不许把缺失参数拼成字面量')
+    }
+    // 但"给了 key 却没给 bucket"没有合法含义 → 拒绝，而不是猜。
+    assert.throws(() => buildUrl('https://e', '', 'releases/x'), TypeError)
+    assert.throws(() => buildUrl('https://e', undefined, 'k'), TypeError)
+  })
+
   test('⑥ describeS3Error：摘出 Code/Message，认不出时兜底', () => {
     assert.equal(describeS3Error('<Error><Code>NoSuchBucket</Code><Message>x</Message></Error>'), 'NoSuchBucket: x')
     assert.equal(describeS3Error(''), '(空响应)')

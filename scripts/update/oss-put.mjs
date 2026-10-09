@@ -148,10 +148,37 @@ export function signRequest({
   }
 }
 
-/** 拼出端点与路径式 URL。 */
-export function buildUrl(endpoint, bucket, key = '') {
+/**
+ * 拼出端点与路径式 URL。
+ *
+ * ★ 没有 bucket 时走**无桶路径**（`/`），而不是把 `undefined` 拼进去。
+ *
+ *   第一版直接 `uriEncode(bucket, false)`，于是 `bucket === undefined` 变成
+ *   字符串 `"undefined"`，请求打到 `/undefined/`。真实表现（一次列桶尝试）：
+ *
+ *     GET https://s3.cn-north-1.jdcloud-oss.com/undefined/ → 404 NoSuchBucket
+ *     ……<Resource>/undefined/</Resource>
+ *
+ *   它**看起来像一个正常的 404**，而真相是我们在请求一个名叫 `undefined` 的桶。
+ *
+ *   > 一个"参数缺失时拼出一个像样的路径"的函数，
+ *   > 与一个"参数缺失时如实拒绝"的函数，在日志里都是 404——
+ *   > 只不过前者会让人去查桶名，而桶名从一开始就没有。
+ *
+ *   无桶路径本身是合法的 S3 用法（`GET /` = 列出该账号的桶），所以这里支持它，
+ *   而不是一律拒绝。但**给了 key 却没给 bucket** 没有合法含义，必须拒绝。
+ */
+export function buildUrl(endpoint, bucket = '', key = '') {
   const base = endpoint.replace(/\/+$/, '')
-  const path = key === '' ? `/${uriEncode(bucket, false)}` : `/${uriEncode(bucket, false)}/${uriEncode(key, false)}`
+  const hasBucket = typeof bucket === 'string' && bucket.trim() !== ''
+  if (!hasBucket) {
+    if (typeof key === 'string' && key !== '') {
+      throw new TypeError('buildUrl：给了 key 却没给 bucket —— 没有合法的 URL 能表达它')
+    }
+    return { url: `${base}/`, canonicalUri: '/' }
+  }
+  const encodedBucket = uriEncode(bucket, false)
+  const path = key === '' ? `/${encodedBucket}` : `/${encodedBucket}/${uriEncode(key, false)}`
   return { url: base + path, canonicalUri: path }
 }
 

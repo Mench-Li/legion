@@ -90,6 +90,14 @@ const PROBES = [
     find: `    region, accessKey, secretKey, date: now,`,
     replace: `    region, accessKey, secretKey, date: new Date(),`,
   },
+  {
+    id: 'O4',
+    test: 'scripts/update/oss-put.test.mjs',
+    desc: '缺失的 bucket 被拼成字面量 undefined（打到 /undefined/ 却像个正常的 404）',
+    file: 'scripts/update/oss-put.mjs',
+    find: `  const hasBucket = typeof bucket === 'string' && bucket.trim() !== ''`,
+    replace: `  const hasBucket = true`,
+  },
 ]
 
 function patchText(original, find, replace) {

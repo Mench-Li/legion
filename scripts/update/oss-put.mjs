@@ -267,6 +267,33 @@ function parseArgs(argv) {
   return args
 }
 
+/**
+ * 取一个字符串参数，并**去掉首尾空白与控制字符**。
+ *
+ * ★ 这个 trim 是踩出来的，不是洁癖。
+ *
+ *   第一次从 Windows 上用 here-string 管道喂给远端 bash 时，PowerShell 的行尾
+ *   是 CRLF，于是 `--region cn-north-1` 实际变成了 `cn-north-1\r`。CR 进了签名的
+ *   作用域字符串，Authorization 头里就多了一个控制字符，undici 直接抛
+ *   `Headers.append: "AWS4-HMAC-SHA256 Credential=…" is an invalid header value`。
+ *
+ *   更坏的是它**不是每次都报错**：若 CR 落进的是"参与签名但不参与校验"的位置，
+ *   服务端只会回一个 `SignatureDoesNotMatch` —— 那与"密钥不对"长得一模一样。
+ *
+ *   > 一个"把参数原样拿去签名"的工具，
+ *   > 与一个"把不可见字符也一起签进去"的工具，在行尾是 LF 的机器上完全一样——
+ *   > 只不过前者的报错指向密钥，而真正的问题是调用方多带了一个字节。
+ *
+ *   本站的三个参数（bucket / region / key）与 endpoint 都是"单个词或路径"，
+ *   去掉首尾空白与 C0 控制字符没有歧义。
+ */
+export function argString(value) {
+  if (typeof value !== 'string') return null
+  // `\s` 覆盖 CR/LF/Tab/空格；再显式剔掉其余 C0 控制字符（`\s` 不含 \0、\x01 等）。
+  const cleaned = value.replace(/[\u0000-\u001f\u007f]/g, '').trim()
+  return cleaned === '' ? null : cleaned
+}
+
 // ---------------------------------------------------------------------------
 // 自检：用**公开的已知向量**验签名器
 // ---------------------------------------------------------------------------
@@ -332,19 +359,20 @@ const isMain = process.argv[1] !== undefined
 
 if (isMain) {
   const args = parseArgs(process.argv.slice(2))
-  const accessKey = process.env.JD_OSS_ACCESS_KEY ?? ''
-  const secretKey = process.env.JD_OSS_SECRET_KEY ?? ''
+  // ★ 环境变量也过一遍同样的清洗：CRLF 行尾、复制粘贴带进来的空白与
+  //   不可见字符，都会静默地把签名改掉（见 `argString` 的注释）。
+  const accessKey = argString(process.env.JD_OSS_ACCESS_KEY ?? '') ?? ''
+  const secretKey = argString(process.env.JD_OSS_SECRET_KEY ?? '') ?? ''
   if (accessKey === '' || secretKey === '') {
     process.stderr.write('oss-put 需要 JD_OSS_ACCESS_KEY / JD_OSS_SECRET_KEY 环境变量'
       + '（**刻意**不支持命令行参数：那会让密钥进 shell 历史并且 `ps` 可见）\n')
     process.exit(2)
   }
-  const bucket = typeof args.get('bucket') === 'string' ? args.get('bucket') : null
-  const region = typeof args.get('region') === 'string' ? args.get('region') : 'cn-north-1'
+  const bucket = argString(args.get('bucket'))
+  const region = argString(args.get('region')) ?? 'cn-north-1'
   if (bucket === null) { process.stderr.write('oss-put 需要 --bucket\n'); process.exit(2) }
-  const endpoint = typeof args.get('endpoint') === 'string'
-    ? args.get('endpoint')
-    : DEFAULT_ENDPOINT_TEMPLATE.replace('{region}', region)
+  const endpointArg = argString(args.get('endpoint'))
+  const endpoint = endpointArg ?? DEFAULT_ENDPOINT_TEMPLATE.replace('{region}', region)
 
   const common = { endpoint, bucket, region, accessKey, secretKey }
 
@@ -386,8 +414,8 @@ if (isMain) {
     process.exit(1)
   }
 
-  const file = typeof args.get('file') === 'string' ? args.get('file') : null
-  const key = typeof args.get('key') === 'string' ? args.get('key') : null
+  const file = argString(args.get('file'))
+  const key = argString(args.get('key'))
   if (file === null || key === null) { process.stderr.write('oss-put 需要 --file 与 --key\n'); process.exit(2) }
   const stat = statSync(file)
   const publicRead = args.get('public-read') === 'true'

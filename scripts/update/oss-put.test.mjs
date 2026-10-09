@@ -19,7 +19,7 @@ import { resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 import {
-  FIXED_VECTOR, OSS_PUT_CHECKED, UNSIGNED_PAYLOAD, amzDates, buildUrl,
+  FIXED_VECTOR, OSS_PUT_CHECKED, UNSIGNED_PAYLOAD, amzDates, argString, buildUrl,
   describeS3Error, judgeProbe, ossRequest, selfCheckOssPut, signRequest, uriEncode,
 } from './oss-put.mjs'
 
@@ -229,5 +229,38 @@ describe('SigV4 上传器', () => {
     assert.equal(unknown.ok, false)
     assert.equal(unknown.hint, null, '认不出的错误不该编一条提示——那会把人引到错的方向')
     assert.match(unknown.message, /InternalError/)
+  })
+
+  // ── 参数清洗：CRLF 行尾会静默改掉签名 ────────────────────────────────────
+  //
+  // ★ 真实踩到：从 Windows 上用 here-string 管道喂远端 bash 时行尾是 CRLF，
+  //   于是 `--region cn-north-1` 实际成了 `cn-north-1\r`。CR 进了签名作用域，
+  //   undici 抛 `Headers.append: … is an invalid header value`。
+  //   更坏的是它**不总是报错**：CR 落在别的位置时服务端只会回
+  //   `SignatureDoesNotMatch` —— 与"密钥不对"长得一模一样。
+
+  test('⑰ argString 去掉 CR/LF/Tab/控制字符与首尾空白', () => {
+    assert.equal(argString('cn-north-1\r'), 'cn-north-1')
+    assert.equal(argString('  legion-releases \n'), 'legion-releases')
+    assert.equal(argString('a\tb'), 'ab')
+    assert.equal(argString('a\u0000b'), 'ab')
+    assert.equal(argString('\r\n'), null, '只剩空白时返回 null（调用方据此报"缺参数"）')
+    assert.equal(argString(''), null)
+    assert.equal(argString(null), null)
+    assert.equal(argString('正常值'), '正常值')
+  })
+
+  test('⑱ 带 CR 的 region 不再产出非法 Authorization 头', () => {
+    // 这一条直接断言"清洗之后签名头是合法的"——因为脏参数的**表现**
+    // 是 fetch 抛 TypeError 或服务端回 SignatureDoesNotMatch，两者都不指向参数。
+    const region = argString('cn-north-1\r')
+    const headers = { host: 's3.cn-north-1.jdcloud-oss.com', 'x-amz-date': '20261009T120000Z', 'x-amz-content-sha256': 'UNSIGNED-PAYLOAD' }
+    const s = signRequest({
+      method: 'GET', canonicalUri: '/b', headers, payloadSha256: 'UNSIGNED-PAYLOAD',
+      region, accessKey: 'AK', secretKey: 'SK', date: new Date(Date.UTC(2026, 9, 9, 12, 0, 0)),
+    })
+    const illegal = [...s.authorization].filter((c) => c.charCodeAt(0) < 32 || c.charCodeAt(0) > 126)
+    assert.equal(illegal.length, 0, `Authorization 里不该有控制字符：${JSON.stringify(illegal)}`)
+    assert.match(s.authorization, /\/cn-north-1\/s3\/aws4_request/)
   })
 })

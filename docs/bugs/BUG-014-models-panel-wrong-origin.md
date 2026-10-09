@@ -222,3 +222,37 @@ DSH 自己的 `web-app` 就是这么分的：`export const inject = ['webServer'
 - 面板侧还要 **重建 `workbench/dist`**（已做；`serve.mjs` 每次请求读磁盘，不需要重启 workbench 进程）。
 - 操作：刷新页面 → 面板显示未授权提示与「连接 DSH 服务」按钮 → 点一下（新标签会落到 DSH 界面）
   → 回到指挥台点「刷新配置」。会话约 30 天有效。
+
+## 8. ★★ 第二版的整体方向被否掉并已拆除（2026-10-09，将军裁决）
+
+> 「这样做肯定不行啊，我最终是反向包 DSH 的，也就是我在这个页面支持配置……**用户感知不到是 DSH才对**」
+
+**§7 那一版（设计 A：让用户的浏览器去登 DSH）已按方向性错误拆除**，不是被改好。拆除清单：
+
+| 拆掉的 | 位置 |
+| --- | --- |
+| `GET /api/dsh-models/connect`（302 到宿主登录 URL） | `workbench/scripts/serve.mjs` |
+| 「连接 DSH 服务（本机浏览器登录一次）」按钮 | `workbench/src/components/DshProvidersPanel.tsx` |
+| `deriveDshModelsLoginUrl()` + `DSH_MODELS_LOGIN_URL` 注入 | `services-plugin/index.js`、`workbench/scripts/config-schema.mjs` |
+| `dsh-models-connect.test.mjs`（6 例）与它的 run-ci 登记 | 已删（登记处留了路标注释） |
+| **保留** | `dsh-models-base`（同源相对路径 + 网络层具名文案，5 例）——它修的是**另一个**真缺陷（请求打到 4820） |
+
+**为什么是方向错，而不是"层数不够"**：宿主 `/api/*` 只认它自己的浏览器会话 —— 这个事实是真的。
+但"因此让用户去登 DSH"把**引擎的鉴权模型搬到了产品表面上**：用户会看到一个他不认识的登录页，
+而 Legion 的配置面从此绑死在那条 30 天 cookie 上。产品要的是**用户只跟 Legion 打交道**。
+
+**正确方向见 [docs/DECISION-legion-owns-model-config.md](../DECISION-legion-owns-model-config.md)**：
+Legion 拥有配置（`team.db` + DPAPI 密钥库 = 唯一真相），DSH 的活配置由 Legion **派生**；
+物化走宿主进程内的 `ctx.settings.mutate` / `ctx.credentials.set` / `ctx.llm` —— **无 HTTP、无 cookie、无登录**。
+这四个服务一直是可用的（`legion-services` 就住在宿主进程里），只是前两版都没往那儿看。
+
+**我在这条线上的两次同类错**（记在决定文档 §9，也记在这里）：第一次把桥接层的**地址**修对了却
+没问"这条桥该不该存在"；第二次在错误的**传输方式**上又加了一层。
+两次都是"在给定的那层里把活干好"，而不是"先问这一层对不对"。
+**判据：动手之前先答一句「用户最终看到的是什么」。**
+
+### 7.5 的生效条件随之作废
+
+那一版的"重启宿主 + 点登录按钮"不再适用。当前状态：`/api/dsh-models` 仍是旧桥（转发到宿主已鉴权
+`/api`），因此面板会如实显示未授权 —— **这是已知的、被接受的中间态**，直到
+DECISION 文档的 P1/P3 落地（那时这一页读写的将是 **Legion 自己的库**）。

@@ -177,6 +177,14 @@ export const SCHEMA = defineSchema({
   ],
   nonEnvLiterals: [
     'COMMIT', 'ROLLBACK', 'DELETE', 'OPTIONS', 'SIGINT', 'SIGTERM', 'ENOENT',
+    // ── `product/paths.mjs` 的**布局诊断码**（`secret-admin.mjs` 逐个点名它们）──
+    //
+    // 它们是 `layoutDiagnostics()` 产出的 `code`，不是环境变量读取点 ——
+    // 只是长得像（全大写）。`ensure()` 现在**点名**与密钥库有关的那几个，
+    // 而不是"任何 error 诊断都拒"（理由见 `secret-admin.mjs` 里那个集合）。
+    'INSTALL_DIR_UNRESOLVED', 'PRODUCT_HOME_UNRESOLVED', 'PRODUCT_HOME_INSIDE_INSTALL_DIR',
+    'WORKSPACE_NOT_CONFIGURED', 'PATH_NOT_ABSOLUTE', 'ROLE_DIRS_OVERLAP',
+    'SECRETS_INSIDE_INSTALL_DIR', 'SECRETS_INSIDE_DATA_DIR', 'SECRETS_INSIDE_CACHE_DIR',
     // ── 远程 Agent 通道（S-B / S-D）的具名错误码 ──
     //
     // 三个来源，都**不是**环境变量读取点，只是长得像（全大写）：

@@ -16,7 +16,7 @@ import { readFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-import { buildWorkbenchEnv, deriveDshModelsBaseUrl, deriveDshModelsLoginUrl } from './index.js'
+import { buildWorkbenchEnv, deriveDshModelsBaseUrl } from './index.js'
 
 const SRC = readFileSync(join(dirname(fileURLToPath(import.meta.url)), 'index.js'), 'utf8')
 
@@ -83,68 +83,21 @@ test('★ 取不到宿主时**不注入** DSH_MODELS_BASE_URL，而不是注入�
   assert.equal(JSON.stringify(env).includes('3080'), false, '宿主地址取不到时，环境里不许凭空出现 3080')
 })
 
-// ── BUG-014 第二层（凭证）：宿主操作员登录 URL ─────────────────────────────────
-// 地址修对之后，面板拿到的是 401 —— 因为宿主 `/api/*` 只认它**自己的浏览器会话**。
-// 解药是让用户浏览器登一次；这条 URL 就是登的东西，由本插件从 `ctx.connection` 铸出。
-
-test('★ 登录 URL 必须真的带 token：没有令牌的地址只会把浏览器送到宿主的 401 页', () => {
-  const ok = { authenticatedUrl: (b) => `${b.replace(/\/$/, '')}/?token=T0K3N` }
-  assert.equal(deriveDshModelsLoginUrl({ connection: ok, webServerPort: 19387 }), 'http://127.0.0.1:19387/?token=T0K3N')
-  // 反向：返回了地址但**没有** token ⇒ 视为拿不到（"看起来配了、其实没配"是同一族的错）
-  const noToken = { authenticatedUrl: (b) => b }
-  assert.equal(deriveDshModelsLoginUrl({ connection: noToken, webServerPort: 19387 }), '',
-    '没有 token 的 URL 必须被判成空 —— 否则界面会显示"已连接"而实际还是 401')
-})
-
-test('★ 取不到就返回空（与宿主地址同一条纪律：不编一个值）', () => {
-  const ok = { authenticatedUrl: () => 'http://127.0.0.1:19387/?token=T' }
-  for (const input of [
-    {},
-    { connection: ok },                                   // 没有端口
-    { connection: ok, webServerPort: 0 },                 // 端口 0 = 还没绑
-    { connection: ok, webServerPort: 70000 },
-    { connection: null, webServerPort: 19387 },           // 宿主没暴露 connection 服务
-    { webServerPort: 19387 },                             // 同上（字段缺省）
-    { connection: {}, webServerPort: 19387 },             // 有服务但没这个方法
-  ]) {
-    assert.equal(deriveDshModelsLoginUrl(input), '', `${JSON.stringify(input)} 应当明确返回空`)
-  }
-})
-
-test('★ authenticatedUrl 抛错时返回空，而不是把异常带进启动流程', () => {
-  const boom = { authenticatedUrl: () => { throw new Error('connection 还没就绪') } }
-  assert.equal(deriveDshModelsLoginUrl({ connection: boom, webServerPort: 19387 }), '')
-})
-
-test('★ 登录 URL 只在拿得到时注入 workbench 环境（空 ⇒ 不注入）', () => {
-  const withUrl = buildWorkbenchEnv({ baseEnv: {}, hubUpstream: 'h', dshModelsLoginUrl: 'http://127.0.0.1:19387/?token=T' })
-  assert.equal(withUrl.DSH_MODELS_LOGIN_URL, 'http://127.0.0.1:19387/?token=T')
-  const without = buildWorkbenchEnv({ baseEnv: {}, hubUpstream: 'h' })
-  assert.equal('DSH_MODELS_LOGIN_URL' in without, false,
-    '注入空值会让指挥台把"宿主没给登录地址"读成"给了个空地址"，两者的修法不同')
-})
-
-test('★ 注入项之间互不影响：给了登录 URL 不会挤掉宿主地址（反之亦然）', () => {
-  const both = buildWorkbenchEnv({
-    baseEnv: {}, hubUpstream: 'h', dshModelsBaseUrl: 'http://127.0.0.1:19387',
-    dshModelsLoginUrl: 'http://127.0.0.1:19387/?token=T',
-  })
-  assert.equal(both.DSH_MODELS_BASE_URL, 'http://127.0.0.1:19387')
-  assert.equal(both.DSH_MODELS_LOGIN_URL, 'http://127.0.0.1:19387/?token=T')
-})
-
-// ── ★ 一条**反向**护栏：`connection` 绝不许进硬依赖 ──────────────────────────────
-// 我自己在写这一版时把它写进了 `inject`，那是个会**停服**的错误：
-// Cordis 的 `inject` 是硬依赖，名字在而组合里没有 ⇒ 整个插件 pending ⇒
-// **team-hub 与指挥台都不会启动**。而它换来的只是"登录 URL 能不能铸出来"。
+// ── ★ 一条**反向**护栏：本插件的硬依赖只有 `webServer` ──────────────────────────
+// 这里曾经因为「铸宿主操作员登录 URL」而需要 `connection`，我第一版把它写进了 `inject`——
+// 那是个会**停服**的错误：Cordis 的 `inject` 是硬依赖，名字在而组合里没有 ⇒ 整个插件 pending ⇒
+// **team-hub 与指挥台都不会启动**。那条能力后来连方向一起拆了（见
+// docs/DECISION-legion-owns-model-config.md），但这条护栏留着：
+// **凡是"锦上添花"的宿主服务，一律 `ctx.get(...)` 软取，绝不进 inject。**
 // DSH 自己的 `web-app` 就是这么分的：`inject = ['webServer']`（硬）+ 软取 connection。
-test('★ connection 不许进 inject（硬依赖会让整个插件 pending ⇒ 两个服务都起不来）', () => {
+test('★ 硬依赖只有 webServer；别的宿主服务一律软取（硬依赖会让整个插件 pending ⇒ 两个服务都起不来）', () => {
   const injectLine = /export const inject = (\[[^\]]*\])/.exec(SRC)?.[1] ?? ''
   assert.ok(injectLine.length > 0, '找不到 inject 声明')
-  assert.equal(injectLine.includes("'connection'"), false,
-    'connection 是可选增强：写进 inject 会让"宿主没这个服务"变成"team-hub 与指挥台都不启动"')
   assert.equal(injectLine.includes("'webServer'"), true, 'webServer 是硬依赖（宿主端口来自它）')
-  // 软取的写法必须留着：否则拿不到 connection 时连"未注入"都说不出来
-  assert.match(SRC, /ctx\?\.get\?\.\('connection'\)/,
-    'connection 必须用 ctx.get(...) 软取 —— 这条路径正是"拿不到也不影响服务启动"的实现')
+  assert.equal(injectLine.includes("'connection'"), false, 'connection 不许进 inject')
+  // 这一步的 P1/P3 还要用到 ctx.settings / ctx.credentials / ctx.llm —— 同样必须是软取。
+  for (const svc of ['settings', 'credentials', 'llm']) {
+    assert.equal(injectLine.includes(`'${svc}'`), false,
+      `${svc} 不许进 inject：物化是增强能力，缺了它服务仍须启动`)
+  }
 })

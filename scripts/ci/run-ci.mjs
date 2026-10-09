@@ -1883,13 +1883,11 @@ async function stageTest() {
     //   这一组守的是**地址选择**（必须同源，因为路由在发页面的那台 serve.mjs 上且服务端强制同源）
     //   与**网络层文案**（不许把浏览器原话当结论），并反向钉住 apiBase() 的默认值不许被顺手改掉。
     { label: 'dsh-models-base（BUG-014：面板必须打到本页自己的源，且连不上时说得清）', files: ['workbench/scripts/dsh-models-base.test.mjs'], cwd: ROOT },
-    // ── BUG-014 第二层（凭证）：宿主 `/api/*` 只认它**自己的浏览器会话**，而桥接层转发的是
-    //   浏览器自己的 cookie ⇒ 地址修对之后仍然 401（实测）。修法是让**用户的浏览器**登一次：
-    //   legion-services 从 `ctx.connection.authenticatedUrl()` 铸出带 `?token=` 的操作员登录 URL，
-    //   指挥台用 302 把浏览器**顶层导航**过去（Set-Cookie 只对顶层导航生效）。
-    //   这一组守：302 原样带令牌 / no-store+no-referrer / 没注入时 503 且明说"是凭证缺不是地址错" /
-    //   配了 token 就必须带 Bearer（这条路由发出去的是一个操作员凭证）/ 非 GET 与跨源各自被拒。
-    { label: 'dsh-models-connect（BUG-014 第二层：让浏览器登一次，且凭证不裸奔）', files: ['workbench/scripts/dsh-models-connect.test.mjs'], cwd: ROOT },
+    // ★ 这里曾经有 `dsh-models-connect`（「让用户的浏览器登一次宿主」那条 302 路）。**已拆除**：
+    //   它解决的问题是真的（宿主 `/api/*` 只认它自己的浏览器会话），但方向与产品目标相反 ——
+    //   用户不该感知 DSH。正确方向见 docs/DECISION-legion-owns-model-config.md：
+    //   Legion 拥有配置、DSH 的配置由 Legion **派生**，物化走进程内 ctx.settings/ctx.credentials。
+    //   这一段留在这里，是为了让"下一步该往哪走"在 CI 清单里也有个路标。
     //   同一个 Bug #1 的**注入侧**：`DSH_MODELS_BASE_URL` 由 legion-services 按宿主端口派生。
     //   这一侧的失败形状更隐蔽——注入了错的地址，界面还是那句 `fetch failed`。
     { label: 'legion-services（服务托管插件：宿主地址派生自本次启动的宿主，取不到就**不注入**）', files: ['services-plugin/index.test.mjs'], cwd: ROOT },

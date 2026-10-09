@@ -79,46 +79,21 @@ export function deriveDshModelsBaseUrl({ configured = '', webServerPort = null, 
  * 抽出来的理由与 `deriveDshModelsBaseUrl` 相同：能被断言的东西，才拦得住回归。
  * 特别是"取不到宿主就不注入"这一条——静默注入一个默认地址会退化成 Bug #1 的形状。
  */
-export function buildWorkbenchEnv({ baseEnv = {}, hubUpstream = '', teamHubToken = '', dshModelsBaseUrl = '', dshModelsLoginUrl = '' } = {}) {
+export function buildWorkbenchEnv({ baseEnv = {}, hubUpstream = '', teamHubToken = '', dshModelsBaseUrl = '' } = {}) {
   return {
     ...baseEnv,
     DSH_HUB_UPSTREAM: hubUpstream,
     TEAM_HUB_TOKEN: teamHubToken,
     ...(dshModelsBaseUrl ? { DSH_MODELS_BASE_URL: dshModelsBaseUrl } : {}),
-    ...(dshModelsLoginUrl ? { DSH_MODELS_LOGIN_URL: dshModelsLoginUrl } : {}),
   }
 }
 
-/**
- * 派生「宿主操作员一次性登录 URL」（BUG-014 的第二层：桥接层 → 宿主的 401）。
- *
- * 背景：宿主 `/api/*` 只认它**自己的浏览器会话**（`browser-auth.ts`：按 authority 签名、
- * 30 天、authority 绑定）。桥接层转发的是浏览器自己的 cookie，而普通浏览器里没有那条 cookie
- * ⇒ 无论地址多正确，那三个读取永远是 401。
- *
- * 修法（设计 A，将军 2026-10-09 裁决）：**让用户的浏览器登一次**。宿主进程里的本插件
- * 可以拿到那条带 `?token=<launchToken>` 的 URL（DSH 自己的桌面壳就是这么给窗口登录的：
- * `apps/desktop-host/src/index.ts` 的 `ctx.connection.authenticatedUrl(...)`），
- * 把它交给指挥台；指挥台在用户点「连接 DSH 服务」时让浏览器**顶层导航**过去，
- * 宿主随即种下会话 cookie（cookie 按主机存放、不按端口隔离），于是同一个浏览器里的
- * `:5173` 与 `:19387` 就共享了它。
- *
- * ★ 与 `deriveDshModelsBaseUrl` 同一条纪律：**拿不到就返回空，不编一个地址**。
- *   而且这里多一道判据 —— 拿到的 URL 必须**真的带 `token=`**：
- *   一个"看起来配了、其实没有令牌"的地址，与一个没配的地址，在界面上是同一种失败
- *   （又一个 BUG-001 形状）。
- */
-export function deriveDshModelsLoginUrl({ connection = null, webServerPort = null } = {}) {
-  const port = Number(webServerPort)
-  if (!Number.isInteger(port) || port <= 0 || port > 65535) return ''
-  if (connection === null || typeof connection.authenticatedUrl !== 'function') return ''
-  try {
-    const url = connection.authenticatedUrl(`http://127.0.0.1:${port}/`)
-    if (typeof url !== 'string' || !url) return ''
-    // 令牌必须真的在里面：否则这条 URL 只会把浏览器带到宿主的 401 页
-    return new URL(url).searchParams.get('token') ? url : ''
-  } catch { return '' }
-}
+// ★ 这里曾经有一个 `deriveDshModelsLoginUrl()`（派生"宿主操作员一次性登录 URL"，让用户的浏览器
+//   去登 DSH），**已拆除**。它解决的问题是真的（宿主 `/api/*` 只认它自己的浏览器会话），
+//   但解法方向错了：让用户感知 DSH 与"反向包 DSH"的产品目标相反。
+//   正确方向见 docs/DECISION-legion-owns-model-config.md：**Legion 拥有配置，DSH 的配置由它派生**，
+//   物化走进程内的 `ctx.settings.mutate` / `ctx.credentials.set`（无 HTTP、无 cookie、无登录）。
+//   拆除的是方向，不是"还差一层"。
 
 export function apply(ctx, rawConfig = {}) {
   const cfg = rawConfig && typeof rawConfig === 'object' ? rawConfig : {}
@@ -153,13 +128,6 @@ export function apply(ctx, rawConfig = {}) {
   const resolveDshModelsBaseUrl = () => deriveDshModelsBaseUrl({
     configured: cfgDshModelsBaseUrl, webServerPort: ctx?.webServer?.port, env: baseEnv,
   })
-  /** ★ 同上：登录 URL 每次 spawn 现取（令牌可能是新的一轮进程令牌，固化就等于发一个过期的）。
-   *  `ctx.get(...)` 而不是 `ctx.connection`：**软取**，服务缺席时返回 undefined 而不是把插件拖成 pending
-   *  （理由见文件头 `inject` 那段：这个能力是锦上添花，不该有"少一个服务就什么都不起"的失败模式）。 */
-  const resolveDshModelsLoginUrl = () => deriveDshModelsLoginUrl({
-    connection: ctx?.get?.('connection') ?? ctx?.connection ?? null,
-    webServerPort: ctx?.webServer?.port,
-  })
 
   const services = [
     {
@@ -180,7 +148,6 @@ export function apply(ctx, rawConfig = {}) {
       // （不在 apply 时固化成常量——那正是"看起来配了、其实取不到"的来源）。
       env: () => buildWorkbenchEnv({
         baseEnv, hubUpstream, teamHubToken, dshModelsBaseUrl: resolveDshModelsBaseUrl(),
-        dshModelsLoginUrl: resolveDshModelsLoginUrl(),
       }),
     },
   ]
@@ -277,13 +244,6 @@ export function apply(ctx, rawConfig = {}) {
       log(dshModelsBaseUrl
         ? `模型配置宿主地址 DSH_MODELS_BASE_URL=${dshModelsBaseUrl}（派生自本次启动的宿主；Bug #1：写死 3080 时「供应商与模型」读不出来）`
         : '取不到宿主端口（ctx.webServer.port / DSH_WEB_URL 都没有）→ 不注入 DSH_MODELS_BASE_URL，workbench 将按自身默认回落；Desktop 部署下「供应商与模型」可能读不出来')
-      // ★ 只报"注入了没有"，**绝不打印这条 URL 本身**：它携带的是宿主的操作员进程令牌，
-      //   而这个日志文件（`.legion-services.log`）是明文、且长期留存。
-      //   一条把令牌写进日志的"方便排查"，就是把一次登录换成一份永久凭证。
-      const dshModelsLoginUrl = resolveDshModelsLoginUrl()
-      log(dshModelsLoginUrl
-        ? '模型配置登录地址 DSH_MODELS_LOGIN_URL=已注入（携带宿主操作员令牌，故不打印；BUG-014：宿主 /api 只认它自己的浏览器会话）'
-        : '未注入 DSH_MODELS_LOGIN_URL（取不到 ctx.connection.authenticatedUrl 或没带 token）→ 指挥台的「供应商与模型」会在桥接层拿到 401；那是**凭证**缺，不是地址错')
       for (const svc of services) {
         if (disposed) return
         await startService(svc)

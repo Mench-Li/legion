@@ -1,20 +1,16 @@
-# T-192 测试执行报告（tester）——BUG-007 worker 超时后写入预约不释放
+# T-011 测试执行报告（tester）——端到端验收「请写一个 greet 函数并跑一次测试」
 
-> 角色：测试执行（tester）｜任务：T-192（隔离 worktree `w/T-192`）｜父任务：T-190（代码审查）
-> 被测基线：**本 worktree HEAD = 93990c75f0916b4c7c66b797b7e4f992fb0da1f5**，
-> 与 main 同点（`git rev-list --count main..HEAD` = 0、`git status --short` 为空）⇒ 本 worktree 无编码 diff；
-> BUG-007 的实现来自上游 **`efc11c9c`（初修）+ `d8c29923`（T-184 续修）**，两者均为 HEAD 的祖先。
+> 角色：测试执行（tester）｜任务：T-011（隔离 worktree `w/T-011`）｜上游：T-004（coder 交付）→ T-007（reviewer 审查）
+> 被测基线：**本 worktree HEAD = `c87f4c71`**（`git rev-list --count main..HEAD` = 0、`git status --short` 除本任务证据目录外为空）⇒ 本 worktree 无编码 diff；
+> 实现本任务目标的是上游 **T-004 的 `09140411`**（`tests/e2e-acceptance/`，已在 main）。
 >
-> **结论速览：判定「不通过」。**
-> 机制层（要求 1/3/4）全绿：typecheck/emit exit 0；`timeout-settlement` **8/0**；`claim-reservation.e2e` **1/0**；
-> 6 个回归套件全绿（stateMachine 40/0、reclamation 21/0、write-eligibility 8/0、boot-orphan-reclaim-order 5/0、
-> write-intent-store 25/0、write-intent-routes 7/0）；断言只增不减（0→47、72→102），无新增 skip/only。
-> 但**要求 2（"文案必须与实现一致"）未全绿**：两个分支文案给出的**人工恢复命令，照抄执行当场走不通**——
-> - **F1**：hold 分支（取不到终止证据）的恢复命令 **400 `MISSING_SCOPE`**（补上 scope 后 **403 `STOP_CONFIRMATION_REQUIRED`**，
->   因为该分支**故意不动状态**，任务仍是 `in_progress`）；这正是 reviewer T-190 标记为「必须修改」的 **R1**，本轮独立复现确认**未修**。
-> - **F2**（本轮新发现，同类）：`planTimeoutTransitionFailure` 的失败文案**步骤②**同样缺 `scope` ⇒ **400 `MISSING_SCOPE`**。
->
-> 归属：两处都在 `plugins/src/timeoutSettlement.ts`（F1 = 91-92 行；F2 = 139 行），需 coder 修改文案（本角色只报告、不改代码）。
+> **结论速览：整体判定「不通过（全绿未达成）」。**
+> - **交付物用例全绿**：`greet` 契约用例 **5/5 pass / 0 fail / exit 0**（两种跑法各一次）；`node --check` ×2 exit 0；边界探针 10 项契约成立；零新增依赖。
+> - **仓库 `test` 阶段完备性门禁红（F1）**：`git ls-files '*.test.mjs'` 的 547 个文件里，有 **2 个挂了却没有任何套件执行它们** ——
+>   `desktop/scripts/payload-filter.test.mjs`、`team-hub/site-routes.test.mjs`。按 `run-ci.mjs:5106-5115 + :5183` 的判据，`listingIncomplete=true` ⇒ `test` 阶段 FAIL。
+>   二者本地实跑分别 **6/6**、**47/47** 全绿，是「写好了、没人跑」的同一形态（正是 T-007 的 **R2** 的复发，只是换了两个文件）。
+> - **T-007 的 R1/R2 就「本交付物」而言本轮实测已闭合**：`greet.test.mjs` 已在 `run-ci.mjs:933-934` 登记（R2 解法）；手机下发截断已由 `daea3313` 修（R1），本轮用真替身 Hub 复现：**全文 `端到端验收：请写一个 greet 函数并跑一次测试` 逐字到达 body**。
+> - 另有 `product/server/phone-act.test.mjs` 的 3/4 用例在本沙箱被 `spawn EPERM` 挡住（**环境边界，非产品缺陷**，已用不依赖 spawn 的真子进程逐条复现产品行为）。
 
 ---
 
@@ -22,198 +18,169 @@
 
 | 项 | 值 |
 | --- | --- |
-| 执行机 | Windows，DSH 文件沙箱 workspace-write、禁网、审批关闭 |
-| Node | v24.19.0 |
-| TypeScript 编译器 | `D:/project/DSH/dsh/deepseek-harness/node_modules/typescript/bin/tsc`（Test-Path True） |
-| 被测树 | `.legion-worktrees/T-192`，HEAD 93990c75（= main） |
-| 执行口径 | 沙箱内 `node --test <file>` **入口即 `spawn EPERM`**（测试运行器要以管道 stdio 派生子进程）。改用**每文件一个进程**直跑 `node <file>`（node:test 被直跑时会自行执行并回写 exit code），与 CI「每套件一个进程」语义等价。 |
-| 证据目录 | `docs/T192-evidence/`（01~05 原始日志 + 3 个复现探针） |
-| 复现探针 | `docs/T192-evidence/probe-a-hold-and-directions.mjs`、`probe-b-failpath-commands.mjs`、`probe-c-comment-strings.mjs`（对真 hub 起临时库、走 HTTP，不改被测文件） |
+| 执行机 | Windows，DSH 文件沙箱 `workspace-write`、禁网、审批关闭 |
+| Node / npm | `v24.19.0` / `11.17.0` |
+| 被测树 | `.legion-worktrees/T-011`，`w/T-011` @ `c87f4c71`（= `main`，零编码 diff） |
+| 交付物 | `tests/e2e-acceptance/{greet.mjs,greet.test.mjs,README.md}`（T-004 `09140411`） |
+| 执行口径 | 沙箱内 `node --test <file>` 的默认隔离要 fork 子进程 ⇒ **`Error: spawn EPERM`（exit 1）**。故用 `--test-isolation=none` 同进程直跑，另用 `node <file>` 直跑交叉验证（两者断言结果一致） |
+| 证据目录 | `docs/T011-evidence/`（00~05 原始日志 + 3 个探针/复刻脚本） |
+| 上游核对 | 参考团队经验 **exp-t092**「回归复跑先查上游验证防空转」：T-004 已交付实现、T-007 已审查；但本轮**有新增验证增量**（CI 门禁现状 + R1 活链路），故不是空转 |
 
-### 1.1 上游验证核对（参考团队经验 exp-t092「回归复跑先查上游验证防空转」）
+### 1.1 关于本任务派单被截断（为什么 spec 只有「端到端验收：请写一个」）
 
-按该经验先核对上游是否已交付验证，避免空转：
+这不是笔误：下发脚本旧写法把参数经 `ssh <host> "… $*"` 拼串，远端 shell 再按空格分词，`_phone-act.mjs` 旧的 `argv.slice(2)` 只取前两个 ⇒ 标题在**第一个空格**处被截断。
+T-007 的 **R1** 已定位并修复（`daea3313`，2026-10-07）：发送端 `product/server/verify-experience.sh:28-32` 改成**逐个 base64**，接收端 `product/server/_phone-act.mjs:43+79-87` 加 `--b64` 解码 + **网络之前**的参数校验。本轮已独立复现（§2 用例 7/8）。
 
-- BUG-007 的实现在 `efc11c9c` + `d8c29923`（T-184），现场记录 `docs/bugs/BUG-007-*.md` §八/§九 已登记改法与读数，**均为 HEAD 祖先**；
-- T-190 审查已独立复跑 typecheck/build、`timeout-settlement` 8/0、`claim-reservation.e2e` 1/0，并落盘 `docs/review/T-190-REVIEW.md`；
-- **但**：T-190 判定 **R1 为「必须修改」**，而看板中**没有** T-190 之后的 coder 修复任务（`SELECT ... WHERE parent IN ('T-184','T-190')` 只有 T-192 自身），本 worktree 也无 diff。
-- ⇒ 本轮**不是**「目标已被上游验证」的空转场景：R1 仍未修，存在**新的验证增量**（对"人工恢复命令是否可执行"做真 hub 复现）。
+## 2. 用例执行矩阵（跑在 `w/T-011` @ `c87f4c71`）
 
-## 2. 用例执行矩阵（跑在 w/T-192 @ 93990c75）
+| # | 用例 / 命令 | 实际结果 | exit | 证据 |
+| --- | --- | --- | --- | --- |
+| 1 | `node --check tests/e2e-acceptance/greet.mjs` | 无输出 | **0** | `01-greet.log` |
+| 2 | `node --check tests/e2e-acceptance/greet.test.mjs` | 无输出 | **0** | `01-greet.log` |
+| 3 | `node --test --test-isolation=none tests/e2e-acceptance/greet.test.mjs` | **tests 5 / pass 5 / fail 0 / skipped 0** | **0** | `01-greet.log` |
+| 4 | `node tests/e2e-acceptance/greet.test.mjs`（直跑交叉验证） | **5 / 5 / 0** | **0** | `01-greet.log` |
+| 5 | 边界探针 `node docs/T011-evidence/boundary-probe.mjs` | 10 项契约成立；非字符串输入不抛（见 §4 R-Risk） | **0** | `05-boundary.log` |
+| 6 | **CI 套件清单完备性**（忠实复刻）`node docs/T011-evidence/ci-completeness-check.mjs` | **missing = 2** ⇒ 判定 FAIL | **1** | `03-ci-completeness.log` |
+| 7 | R1 直探针：坏 base64 `node product/server/_phone-act.mjs --b64 '@@@@' <b64>` | `--b64 的第 1 个参数解出来是空的`，**未触网** | **2** | `02-phone-transport.log` |
+| 8 | R1 活链路：替身 Hub（`stub-hub.mjs`）捕获 `_phone-act.mjs` 的 body | body = **全文** `端到端验收：请写一个 greet 函数并跑一次测试` | 见注 | `02-phone-transport.log` + `_captured-body.json` |
+| 9 | 对照（旧写法无 `--b64`，多词被切成 4 段） | body = `AAA`（在第一个空格截断） | 见注 | `02-phone-transport.log` |
+| 10 | `node --test --test-isolation=none product/server/phone-act.test.mjs` | 1 pass / 3 fail（**全部为 spawn EPERM**，见 §4 E1） | 1 | 报告 §4 E1 |
+| 11 | 未登记文件仍可跑：`desktop/scripts/payload-filter.test.mjs` | **tests 6 / pass 6 / fail 0** | **0** | `04-unregistered-tests.log` |
+| 12 | 未登记文件仍可跑：`team-hub/site-routes.test.mjs` | **tests 47 / pass 47 / fail 0** | **0** | `04-unregistered-tests.log` |
+| 13 | `node --test tests/e2e-acceptance/greet.test.mjs`（默认隔离，仅证沙箱边界） | `Error: spawn EPERM` | 1 | `00-environment.log` |
 
-| # | 用例 / 套件 | 命令 | 实际结果 | exit | 证据 |
-| --- | --- | --- | --- | --- | --- |
-| 1 | typecheck | `tsc -p plugins/tsconfig.json --noEmit` | 无输出 | **0** | 本报告 |
-| 2 | build/emit | `tsc -p plugins/tsconfig.json` | 生成 `plugins/lib/*.js`（含 `timeoutSettlement.js`） | **0** | 本报告 |
-| 3 | 超时结算单测（8 例） | `node plugins/tests/timeout-settlement.test.mjs` | **8 tests / 8 pass / 0 fail / 0 skipped** | **0** | `01-timeout-settlement.log` |
-| 4 | hub 认领+预约 e2e（含 BUG-007 三半对照 ⑰） | `node team-hub/claim-reservation.e2e.test.mjs` | **1 test / 1 pass / 0 fail**（19.16s） | **0** | `02-claim-reservation-e2e.log` |
-| 5 | 回归：stateMachine | `node plugins/tests/stateMachine.test.mjs` | 40 / 40 / 0 | **0** | `05-regression.log` |
-| 6 | 回归：reclamation | `node plugins/tests/reclamation.test.mjs` | 21 / 21 / 0 | **0** | `05-regression.log` |
-| 7 | 回归：write-eligibility | `node plugins/tests/write-eligibility.test.mjs` | 8 / 8 / 0 | **0** | `05-regression.log` |
-| 8 | 回归：boot-orphan-reclaim-order | `node plugins/tests/boot-orphan-reclaim-order.test.mjs` | 5 / 5 / 0 | **0** | `05-regression.log` |
-| 9 | 回归：write-intent-store | `node team-hub/write-intent-store.test.mjs` | 25 / 25 / 0 | **0** | `05-regression.log` |
-| 10 | 回归：write-intent-routes | `node team-hub/write-intent-routes.test.mjs` | 7 / 7 / 0 | **0** | `05-regression.log` |
-| 11 | **追加验收**：hold 分支现场 + 三方向 | `node docs/T192-evidence/probe-a-hold-and-directions.mjs` | A 组**失败**（见 F1）；B/C/D/E 通过 | 0 | `03-hold-branch-probe.log` |
-| 12 | **追加验收**：失败文案两步命令逐字复跑 | `node docs/T192-evidence/probe-b-failpath-commands.mjs` | 步骤②**失败**（见 F2） | 0 | `04-failpath-commands.log` |
+> 注：用例 8/9 的 Node 进程在打印正确 JSON 之后，于沙箱内退出时触发 libuv 的 `Assertion failed: … uv_handle_closing`（退出码 `-1073740791`）。这是**沙箱下 Node 关闭期的环境伪影**——JSON 输出与替身 Hub 捕获的 body 均已正确落盘，产品行为判据以捕获到的 body 为准。
+>
+> 用例 6 为何是「复刻」而非真跑：`run-ci.mjs` 执行套件与 `exec('git', …)` 都走 `spawn` 管道，本沙箱一律 `EPERM`（用例 13 实证），故 `node scripts/ci/run-ci.mjs --only test` 在本沙箱不可运行。复刻脚本 `docs/T011-evidence/ci-completeness-check.mjs` 逐行对应 `run-ci.mjs:5054-5125/5183`，并已把「注释里提到的路径」排除（避免把注释当登记）。
 
-## 3. 要求逐条对应（要求 1/3/4 通过，要求 2 不通过）
+## 3. 验收标准逐条对应
 
-### 要求 1 —— 超时结算走诚实出口：先证实、再决定 ✅（机制通过）
+### 标准 1：按用例实际执行并记录（环境 / 步骤 / 实际结果 / 日志证据）✅
 
-| 验证点 | 结果 | 证据 |
-| --- | --- | --- |
-| 顺序「先 `dispose()` → 再取证 `workerStoppedWithin` → 才决定」 | 成立 | `plugins/src/index.ts:2500-2507`；单测 ⑥ 钉住该顺序（8/0） |
-| 能证实 ⇒ `confirmedStopped=true` + `to='todo'` | 成立 | 单测 ①；`planTimeoutSettlement` `timeoutSettlement.ts:71-80` |
-| 释放走"执行者本人"出口（`by = t.soldier`） | 成立 | `index.ts:1246`（`by = t.soldier ?? config.role`）+ `:2514` |
-| 真 hub 行为：能证实 ⇒ 预约 **released** + 任务 **todo** + 下一轮 claim **200** | 通过 | 探针 C：`C_release=200 {"task":"todo","reservation":"released"}`、`C_reclaim=200`；e2e ⑰① |
-| 不能证实 ⇒ **保持冻结**（不动状态、不释放） | 通过 | 单测 ②④；探针 A：`A_AFTER={"task":"in_progress","reservation":"reserved"}`（评论命令未能解锁）；e2e ⑰② |
-| 非执行者拿 `confirmedStopped=true` 声明 ⇒ 403 且整事务回滚 | 通过 | 探针 E：`E_imposter=403 STOP_CONFIRMATION_DENIED`、`E_AFTER=in_progress/reserved`；e2e ⑰③ |
+见 §1、§2：13 条命令全部真跑，原始输出落 `docs/T011-evidence/00~05*.log`；探针与复刻脚本一并入库，可无网复跑。
 
-> 释放路径之所以能解开与机制 B（stale 回收器）的互锁：`releaseStaleTasks`（`team-hub/server.mjs:6140`）只扫
-> `status='in_progress'`，任务释放回 todo 后该回收器不再触及它；而对"不能证实"的 hold 分支，超龄冻结仍然是安全方向。
+### 标准 2：全绿才判定通过；有失败给出复现步骤与归属 ❌（F1）
 
-### 要求 2 —— 文案必须与实现一致：部分成立，**核心文案已诚实，但两处恢复命令走不通** ❌
+- 交付物层：**全绿**（5/5、exit 0，两种跑法一致）。
+- 仓库 `test` 阶段层：**不完备门禁 FAIL**（§4 F1：2 个已跟踪测试文件无归属）。按验收口径「全绿才判定通过」，**整体不通过**。
+- 另有环境边界项 E1（不属产品缺陷，不计入失败，但如实登记）。
 
-**已达成**（不抹杀）：
-- 旧的"任务保留在 in_progress，下一轮自动重试"已从**可执行代码**删除（对照：`git show efc11c9c^:plugins/src/index.ts` 含该句 = True；当前 `stripComments(index.ts)` 不含 = 单测 ⑥ 通过）。
-- 释放成功文案只在 `transitionTo` **成功后**打印（单测 ⑧、探针 C）；
-- `transitionTo` 抛错时改写为 `planTimeoutTransitionFailure` 的"释放失败 / 仍被持有 / 不会自动重试"（单测 ⑦）；
-- hold 分支不再承诺"下一轮自动重试"（单测 ②）。
+### 标准 3：说明回归范围与结论 ✅
 
-**未达成**（F1/F2，见 §4）：两个分支文案附加的**人工恢复命令照抄不可执行**——
-`confirm-stopped` 路由（`team-hub/routes/write-intent.mjs:37-47,172-186`）要求 body 必须含非空 `scope`，
-且要求任务状态 ∈ `{todo, blocked, canceled}` 且存在 `reconciling` 预约；
-而 hold 文案给的 body 只有 `by`/`confirm`（无 scope），失败文案步骤②同样无 scope。**"给出一个走不通的出口"与"读数必须说实话"直接冲突。**
-
-### 要求 3 —— 回归测试覆盖两个方向 + 对照 ✅
-
-| 方向 | 用例 | 结果 |
-| --- | --- | --- |
-| 能证实 ⇒ 释放 + todo + 下一轮能认领 | 单测① + e2e ⑰① + 探针 C | ✅ `released` + `todo` + claim 200 |
-| 不能证实 ⇒ 保持冻结 | 单测②④ + e2e ⑰② + 探针 A | ✅ `reserved`（hold 未释放）；e2e 侧 `reconciling` + claim 409 |
-| 对照：普通 `in_progress→todo`（`confirmedStopped=false`）仍冻结 | e2e ⑰② + 探针 D | ✅ `D_transition=200 {"task":"todo","reservation":"reconciling"}`、`D_reclaim=409 RECONCILING` |
-| 非执行者声明 ⇒ 403 回滚 | e2e ⑰③ + 探针 E | ✅ |
-| 人工两步恢复路径（补 scope 后）确实能解锁 | 探针 B | ✅ `200 / 200 / reclaim 200` |
-
-### 要求 4 —— 不放宽断言、不把 expected 改成 actual ✅
-
-| 指标 | 改前 | 本轮 | 说明 |
-| --- | --- | --- | --- |
-| `plugins/tests/timeout-settlement.test.mjs` `assert.` | 0（文件不存在） | **47** | 只增 |
-| `team-hub/claim-reservation.e2e.test.mjs` `assert.` | 72（`efc11c9c^` 实测） | **102** | 只增（+30） |
-| `test.skip / test.only / describe.skip / describe.only / .only(` | 0 | **0** | 两文件全库扫描零命中 |
-
-通读两份测试文件：无 `assert.equal` 降级为 `assert.ok`、无 expected/actual 互换、无新增豁免分支。
+见 §5。
 
 ## 4. 失败项（复现步骤 + 实际输出 + 归属）
 
-### F1【必须修改·沿用 reviewer T-190 的 R1】hold 分支恢复命令当场不可执行
+### F1【必须处置·门禁红】2 个已跟踪测试文件没有任何套件执行 ⇒ `test` 阶段完备性门禁 FAIL
 
-- **位置**：`plugins/src/timeoutSettlement.ts:91-92`（hold 文案），约束方 `team-hub/routes/write-intent.mjs:37-47` 与 `:172-186`。
-- **实际文案**（探针 C 直接打印纯函数产物，非转述）：
-
-  ```text
-  ⚠ worker 超时（>25 分钟），但**未能确认该 worker 已停止**（abort 后 20 秒内 run 未结算）。为避免两个写者落进同一个 worktree，**写入占用仍被本轮持有，且不会自动重试**。确认执行者已停止后请执行：POST /api/tasks/T-178/reservation/confirm-stopped（body: {"by":"general","confirm":"stopped:T-178"}）。
-  contains scope? false
-  ```
-
-- **复现步骤**（真 hub、临时库）：
-  1. `node docs/T192-evidence/probe-a-hold-and-directions.mjs`；
-  2. 探针 claim `T-hold-a`（⇒ `in_progress` + `reserved`，这正是 hold 分支"不动状态"的现场）；
-  3. 逐字照抄文案命令：`POST /api/tasks/T-hold-a/reservation/confirm-stopped {by:'general',confirm:'stopped:T-hold-a'}`。
-- **实际输出**（`03-hold-branch-probe.log`）：
+- **判据位置**：`scripts/ci/run-ci.mjs`
+  - `:5104` `const tracked = await exec('git', ['ls-files', '*.test.mjs'], …)`
+  - `:5066-5071` `listed = 每个 suite 的 files 按各自 cwd 归一成仓库相对路径`
+  - `:5080` `conditionalDirs = ['plugins/tests/','board-plugin/tests/']`；`:5100-5103` `conditionalFiles`；`:5054-5058` `EXEMPT`
+  - `:5106-5110` `missing = tracked - listed - conditionalDirs - conditionalFiles - EXEMPT`
+  - `:5111-5115` `missing.length > 0 ⇒ listingIncomplete = true`；`:5183` `ok: allOk && !listingIncomplete`
+- **复现步骤**（普通终端可用真命令；沙箱内用复刻）：
+  1. 生成全仓测试清单：`git ls-files '*.test.mjs'`（本轮 = **547** 个）；
+  2. 真门禁（普通终端）：`node scripts/ci/run-ci.mjs --only test`，看 `套件清单完备性` 一行；
+  3. 本沙箱内等价复刻：`node docs/T011-evidence/ci-completeness-check.mjs`（先由 `git ls-files` 写入 `_tracked-tests.txt`）。
+- **实际输出**（`03-ci-completeness.log`，exit 1）：
 
   ```text
-  A_BEFORE={"task":"in_progress","reservation":"reserved"}
-  A_评论原样(无scope)=400 {"ok":false,"code":"MISSING_SCOPE","message":"缺少 scope"}
-  A_补scope=403 {"ok":false,"code":"STOP_CONFIRMATION_REQUIRED","message":"请确认该任务的执行进程已经停止"}
-  A_AFTER={"task":"in_progress","reservation":"reserved"}
+  HEAD tracked *.test.mjs      = 547
+  listed（去注释后字面量 + 动态） = 512
+  missing                      = 2
+    MISSING  desktop/scripts/payload-filter.test.mjs
+    MISSING  team-hub/site-routes.test.mjs
+  tests/e2e-acceptance/greet.test.mjs 有归属?  true
+  => 判定：FAIL（listingIncomplete=true ⇒ test 阶段红）
   ```
 
-  ⇒ 照抄 **400**；即使操作者自己补上 `scope: 'default'` 仍 **403**（因为 hold 分支刻意保持 `in_progress`，
-  不满足路由的 `['todo','blocked','canceled']` 前置）——**评论指向的人工出口是关着的**。
-- **对照（能走通的路径）**：先 `POST /api/transition {id,to:'todo',by:'general',scope:'default'}`（⇒ 任务 todo、预约 reconciling），
-  再带 scope 调 `confirm-stopped` ⇒ **200 / released / reclaim 200**（`B_step1=200 … B_step2=200 … B_reclaim=200`）。
-- **归属**：`plugins/src/timeoutSettlement.ts`（hold 文案缺 `scope`，且未先迁回 todo）；与 `plugins/tests/timeout-settlement.test.mjs:68-69`
-  的断言只钉"URL + confirm 字面量"、**不钉可执行性**有关——所以"套件全绿"不能推出"命令可用"。
-- **加重情形**：`planTimeoutSettlement` 用的是判断句"确认执行者已停止后请执行"，但**在当前状态下该操作必然失败**，
-  与 reviewer R1 的定性一致（又一次"读数与事实两张皮"）。
+- **反证（不是「跑不起来」）**：两个文件都被 `git ls-files` 跟踪、都本地实跑全绿（`04-unregistered-tests.log`：**6/6**、**47/47**，各 exit 0），且 `grep -n "payload-filter\|site-routes" scripts/ci/run-ci.mjs` = **0 命中**；`desktop` 套件只逐条列了 `desktop/main.test.mjs`、`desktop/scripts/update-payload.test.mjs`、`desktop/scripts/platform-filter.test.mjs`（`:601/620/694`），恰好漏了同目录的 `payload-filter.test.mjs`。
+- **引入提交**：
+  - `desktop/scripts/payload-filter.test.mjs` ← `f621052a`（2026-10-07，`fix(desktop): 三个 34 MB 的数据库备份差点被打进公开安装包`）；
+  - `team-hub/site-routes.test.mjs` ← `af0f7809`（2026-10-08，`feat(site): 官网 —— 根路径从「门口页」升级为一页正式官网`）。
+  - 两者都**晚于** `c1bac79f`（2026-10-07 一次性补登记 56 个文件）⇒ 是「同类缺陷的复发」，不是旧账。
+- **归属**：`scripts/ci/run-ci.mjs` 的 `suites` 登记表缺这两条（**不是** `greet` 交付物引入，也**不是** `tests/e2e-acceptance` 的问题）。按仓库纪律，`greet.test.mjs` 一类可执行且能过的文件应**登记**而非豁免；同理这两条应补登记（或按 `:5054` EXEMPT 并写明理由）。本角色只报告，不代改。
 
-### F2【本轮新发现，同类】失败文案步骤②同样缺 `scope`
+### E1【环境边界·非产品缺陷】`phone-act.test.mjs` 3/4 用例被沙箱 `spawn EPERM` 挡住
 
-- **位置**：`plugins/src/timeoutSettlement.ts:139`（`planTimeoutTransitionFailure` 的步骤②），约束同 F1。
-- **实际文案**（探针 C）：
+- `node --test --test-isolation=none product/server/phone-act.test.mjs`：**1 pass / 3 fail**，`fail` 的实际值均为 `status = null`（`spawnSync` 返回 `error.code = 'EPERM'`），stdout 为空：
+  - ✖ 「解不开的 base64 当场具名退出」：期望 exit 2，实际 `null`；
+  - ✖ 「正确的 base64 过得去参数这一关」：实际输出 `''`，匹配不到 `/fetch|bad port/`；
+  - ✖ 「不带 --b64 的老写法仍可用」：同上，实际输出 `''`；
+  - ✔ 「带空格的参数经 base64 往返逐字不变」（纯计算，不 spawn）。
+- **独立复现（绕开 spawn，跑真子进程）**见 `02-phone-transport.log`：用例 7 得到 `EXIT_BAD=2` 与具名消息且未触网；用例 8/9 都前进到网络（`bad port`）——与套件三条期望逐条一致。
+- 结论：**测试文件的期望是对的、产品行为也是对的**，红的只是「沙箱不允许 Node 用管道捕获子进程输出」这一条环境约束。按仓库先例（T-191/T-192/R-18）如实登记，不计入产品失败。
 
-  ```text
-  ⚠ worker 超时：已确认该次执行终止，但**自动把任务释放回 todo 失败**（乐观锁冲突）。写入占用仍被本轮持有，**不会自动重试**（放开会有两个写者落进同一个 worktree）。人工恢复：① POST /api/transition {"id":"T-178","to":"todo","by":"general","scope":"default"} ② POST /api/tasks/T-178/reservation/confirm-stopped {"by":"general","confirm":"stopped:T-178"}。
-  step2 missing scope? true
-  ```
+### R-Risk【建议项·不计入失败】reviewer T-007 的 R4~R7 复核
 
-  注意步骤①**带** `scope:"default"`，步骤②**不带** —— 同一句恢复路径里两种写法。
-- **复现**：`node docs/T192-evidence/probe-b-failpath-commands.mjs`，逐字复跑两步。
-- **实际输出**（`04-failpath-commands.log`）：
+| 项 | 本轮实测 | 是否失败 |
+| --- | --- | --- |
+| R5 `greet` 无输入校验 | `greet(undefined) → "Hello, undefined!"`、`null → "Hello, null!"`、`123 → "Hello, 123!"`，均不抛（JSDoc 声明「调用方保证字符串」） | 不失败（契约未要求），但**取舍未被用例钉住** |
+| R6 第 5 条弱断言 | `assert.equal(typeof greet('Ada'), 'string')` 与前 4 条重复 | 不失败，建议换成真边界 |
+| R4 README 口径 | `README.md:3-4` 把纯函数单测说成验证整条链路 | 不失败（文档口径） |
+| R7 命名 | `greet.test.mjs` 是单测却在 `e2e-acceptance` 目录 | 不失败（命名） |
 
-  ```text
-  BEFORE task=in_progress res=reserved
-  STEP1(文案原样)=200 task=todo res=reconciling
-  STEP2(文案原样,无scope)=400 {"ok":false,"code":"MISSING_SCOPE","message":"缺少 scope"}
-  STEP2(补scope)=200 res=released
-  RECLAIM=200
-  ```
+## 5. 回归范围与结论
 
-  ⇒ 步骤① 可用、步骤② 照抄 **400**；补 `scope` 后才 `released` 且能重认领。**失败文案的恢复路径也有一半走不通。**
-- **归属**：`plugins/src/timeoutSettlement.ts:139`；断言盲区同 F1（`timeout-settlement.test.mjs:134-135`）。
+### 5.1 回归范围（为什么是这三块）
 
-## 5. 残留风险（本轮**未能行为级复现**，如实登记，不计入失败项）
+本交付物（T-004 `09140411`）**只新增 3 个文件、零既有文件修改、零第三方依赖、纯函数**（`git show 09140411 --stat`），因此：
 
-- **R2（reviewer T-190 提出）in-process provider 下 hold 分支不可达 / 真挂死时无读数**：本轮独立核对 DSH 检出源码，
-  确认 `packages/subagent/subagent-in-process-driver/src/index.ts:199-207` 的 `dispose()` 是
-  `await Promise.allSettled([handle.dispose(), result])` ⇒ **dispose 本身在等 result**。因此
-  (a) 正常 abort 后 `workerStoppedWithin` 只会为 true（hold 分支对 in-process 不可达）；
-  (b) 若 `result` 真永不结算，`await run.dispose()`（`index.ts:2500`）会卡在**取证之前**，连 hold 读数都不会落。
-  本沙箱无法起真挂死 worker，**未做行为级验证**，故仅作风险记录（reviewer 亦标注为非阻塞）。
-- **R3**：`plugins/src/index.ts:2456` 注释仍无条件写"下轮自动重试（带退避）"，与 hold 分支"不会自动重试"不一致；
-  单测 ⑥ 会剥离注释，故扫不到。属注释级读数漂移（低）。
-- **R5**：`timeoutSettlement.ts:134` 的 `reason` 未转义（会原样进评论），`index.ts:2506` 用 `Math.round` 分钟数（<30s 会显示">0 分钟"）（低）。
+1. **交付物自身**：`tests/e2e-acceptance/greet.test.mjs`（5 例）+ 契约夹具一致性。→ 全绿。
+2. **CI 登记面**（T-007 R2 的直接落点）：`run-ci.mjs` 的 `suites` 是否给这个新文件一个归属。→ `greet.test.mjs` 已登记（`:933-934`）；但同一张表整体不完备 ⇒ 门禁红（F1）。
+3. **R1 活链路**（本任务 spec 被截断的根因）：`verify-experience.sh` → `ssh` → `_phone-act.mjs` 的参数保真。→ 已修并复现通过。
 
-## 6. 回归范围与结论
+未做（并说明理由）：未跑 `run-ci.mjs` 全量 `test` 阶段（沙箱 `spawn EPERM`，§2 用例 13 实证）；未起真手机/真 Hub（禁网、无宿主）。这两条的替代表征已分别给出（复刻判定 + 替身 Hub 捕获）。
 
-- **改动面（上游 T-184）**：`plugins/src/timeoutSettlement.ts`（新增决策/文案模块）、`plugins/src/index.ts`（超时结算调用点 +33/-2 与失败分支 +13/-8）、
-  `plugins/tests/timeout-settlement.test.mjs`、`team-hub/claim-reservation.e2e.test.mjs`、现场记录。
-- **本轮回归范围**：上述两套件 + 直接相关的 6 个套件（stateMachine / reclamation / write-eligibility / boot-orphan-reclaim-order /
-  write-intent-store / write-intent-routes），共 **8 条测试命令、115 例、0 失败**（另 typecheck/emit 各 exit 0）；无新增依赖。
-- **结论**：
-  1. **机制层通过**：先 dispose→取证→决定 的接线成立；能证实走 `by=t.soldier + confirmedStopped=true` 的诚实出口 ⇒ 预约 released + todo + 下一轮可认领；
-     不能证实保持冻结；对照（普通 `in_progress→todo`）仍冻结；非执行者 403 回滚。要求 1/3/4 满足。
-  2. **要求 2 不通过**：hold 分支与失败分支的**人工恢复命令照抄不可执行**（F1 400/403、F2 400）——评论指向的出口走不通，
-     仍是"读数与事实不一致"；其中 F1 = reviewer R1（必须修改），本轮确认**未修**。
-  3. 因此**整体判定：不通过（全绿未达成）**。属"缺陷未修完"，不是"测试执行失败"；修复归属见 §4，本角色只报告、不改代码。
-  4. 未虚报通过：F1/F2 均为真 hub 上逐字复跑的真实 HTTP 读数，已随 `03/04` 日志落盘。
+### 5.2 结论
 
-## 7. 环境边界（如实标注，不是产品缺陷）
+1. **greet 交付物：通过。** `node --check` ×2 exit 0；5 条用例 5/5（两种跑法）exit 0；边界探针 10 项契约成立（名字逐字、含空格、中文、空串、换行、前后空白、长文本）；零新增依赖。
+2. **T-007 的 R1：本轮确认为「已修」**（`daea3313`，HEAD 祖先）。真替身 Hub 捕获到 `body` = **全文**；旧写法对照捕获到 `body` = `AAA`——截断机制与修复同时被钉住。
+3. **T-007 的 R2：就 `greet.test.mjs` 而言已闭合**（`run-ci.mjs:933-934` 有登记）。**但完备性门禁整体仍红**：另有两个测试文件（F1）无归属 ⇒ `test` 阶段 FAIL。
+4. **整体判定：不通过（全绿未达成）**，红点 = F1，归属 `scripts/ci/run-ci.mjs` 的 `suites` 登记表（引入者 `f621052a`、`af0f7809`），与 `greet` 交付物无关。**没有虚报通过**：所有红/绿均来自可复跑命令与原始日志。
+5. 流程/输入缺口未消：本任务派单文本仍是截断后的 `端到端验收：请写一个`（R1 的传输层已修，但**存量派单文本不会自动补齐**）；且 `w/T-011` 相对 main **零编码 diff**，与 T-007 的 R3 同形——本报告即本任务唯一交付物。
 
-- `node --test <file>` 在本沙箱 **`Error: spawn EPERM`（exit 1）**，故改用 `node <file>` 每文件一进程直跑（与 CI 语义等价）。
-- 无法在本沙箱内起"真 worker + 25 分钟超时"的完整守护活体链路（需真实子进程/长挂），故守护端为
-  "决策单测（①②③④⑤⑦⑧）+ 接线文本断言（⑥⑧）+ hub 行为 e2e（⑰）"三段拼接，而非真超时活体。
-  F1/F2 的复现不依赖该链路：它们直接检验"评论命令是否被 hub 接受"。
+## 6. 环境边界（如实标注，不是产品缺陷）
 
-### 普通终端复跑命令
+- 沙箱内 Node 以**管道 stdio** 派生子进程一律 `EPERM`（`00-environment.log` 实证：`spawnSync.status = null, error.code = 'EPERM'`）。因此：`node --test` 默认隔离、`run-ci.mjs` 的 `spawn` 与 `exec('git')`、`phone-act.test.mjs` 的 `spawnSync` 都无法在本会话内运行；已分别用 `--test-isolation=none`、复刻判定、直跑真子进程替代，并在证据里标明替代关系（`00-environment.log` 另收 `execSync('git --version') → EPERM`，即 `run-ci.mjs` 的 `exec('git', …)` 同样不可用）。
+- 本机 **禁网**：真 Hub / 真手机链路不可达。R1 的活链路验证使用 **`127.0.0.1` 替身 Hub**（`stub-hub.mjs`），只替身网络那一层，被调用的是**真实**的 `_phone-act.mjs`。
+- 未联网、未 push、未调用任何 `taskctl`/看板写接口。
+
+## 7. 复跑命令（普通终端）
 
 ```powershell
-# 机制（应全绿）
-node plugins/tests/timeout-settlement.test.mjs
-node team-hub/claim-reservation.e2e.test.mjs
-# 回归
-node plugins/tests/stateMachine.test.mjs; node plugins/tests/reclamation.test.mjs
-node plugins/tests/write-eligibility.test.mjs; node plugins/tests/boot-orphan-reclaim-order.test.mjs
-node team-hub/write-intent-store.test.mjs; node team-hub/write-intent-routes.test.mjs
-# F1/F2 复现（应分别在 400/403 与 400 上失败）
-node docs/T192-evidence/probe-a-hold-and-directions.mjs
-node docs/T192-evidence/probe-b-failpath-commands.mjs
-node docs/T192-evidence/probe-c-comment-strings.mjs
+# 交付物用例（应 5/5、exit 0）
+node --check tests/e2e-acceptance/greet.mjs
+node --check tests/e2e-acceptance/greet.test.mjs
+node --test tests/e2e-acceptance/greet.test.mjs          # 普通终端
+node --test --test-isolation=none tests/e2e-acceptance/greet.test.mjs   # 受限沙箱
+
+# 边界探针（应 10 项契约成立）
+node docs/T011-evidence/boundary-probe.mjs
+
+# F1 复现：完备性门禁（普通终端直接跑真门禁；本沙箱用复刻）
+git ls-files '*.test.mjs' > docs/T011-evidence/_tracked-tests.txt
+node docs/T011-evidence/ci-completeness-check.mjs         # 期望 exit 1、missing=2
+node scripts/ci/run-ci.mjs --only test                    # 普通终端：看「套件清单完备性」一行
+
+# 未登记文件本身是绿的（反证：缺的是登记，不是用例）
+node --test --test-isolation=none desktop/scripts/payload-filter.test.mjs   # 6/6
+node --test --test-isolation=none team-hub/site-routes.test.mjs             # 47/47
+
+# R1 直探针（坏参数当场退出；新的 base64 路径前进到网络）
+node product/server/_phone-act.mjs --b64 '@@@@' <b64>
 ```
 
-### 未入库说明
+## 附：证据落点
 
-本会话沙箱对 worktree 的 git 元数据写入受限（与 T-190/T-191 同一形态），故**未 `git add`/`commit`**；
-本报告与 `docs/T192-evidence/` 留在 `w/T-192`，由守护捕获/promote。**未 push。**
+| 结论 | 证据 |
+| --- | --- |
+| 交付物 5/5、syntax exit 0 | `docs/T011-evidence/01-greet.log` |
+| 边界/输入契约读数 | `docs/T011-evidence/05-boundary.log`、`boundary-probe.mjs` |
+| F1 门禁红（missing=2） | `docs/T011-evidence/03-ci-completeness.log`、`ci-completeness-check.mjs` |
+| 未登记文件实跑全绿 | `docs/T011-evidence/04-unregistered-tests.log` |
+| R1 修复被独立复现（全文到达 body） | `docs/T011-evidence/02-phone-transport.log`、`_captured-body.json`、`stub-hub.mjs` |
+| 环境/注册核对 | `docs/T011-evidence/00-environment.log`（含 `run-ci.mjs:933-934` 登记行、EPERM 实证、HEAD/干净树读数） |
+
+> 未入库说明：按回执纪律，本角色只落盘、`git add`/`commit` 未执行（diff 由守护自动捕获并记录到任务）；本报告与 `docs/T011-evidence/` 留在 `w/T-011`，由将军验收后 promote；**未 push、未动 taskctl**。

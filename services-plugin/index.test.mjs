@@ -13,7 +13,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 
-import { buildWorkbenchEnv, deriveDshModelsBaseUrl } from './index.js'
+import { buildWorkbenchEnv, deriveDshModelsBaseUrl, deriveDshModelsLoginUrl } from './index.js'
 
 test('★ 宿主端口就是本次启动的那个：Desktop 实测 19387，不是 3080', () => {
   assert.equal(deriveDshModelsBaseUrl({ webServerPort: 19387 }), 'http://127.0.0.1:19387')
@@ -76,4 +76,54 @@ test('★ 取不到宿主时**不注入** DSH_MODELS_BASE_URL，而不是注入�
   assert.equal('DSH_MODELS_BASE_URL' in env, false,
     '注入了空值/默认值会让 workbench 拿到一个"看起来配了"的地址 —— 那正是 Bug #1 的形状')
   assert.equal(JSON.stringify(env).includes('3080'), false, '宿主地址取不到时，环境里不许凭空出现 3080')
+})
+
+// ── BUG-014 第二层（凭证）：宿主操作员登录 URL ─────────────────────────────────
+// 地址修对之后，面板拿到的是 401 —— 因为宿主 `/api/*` 只认它**自己的浏览器会话**。
+// 解药是让用户浏览器登一次；这条 URL 就是登的东西，由本插件从 `ctx.connection` 铸出。
+
+test('★ 登录 URL 必须真的带 token：没有令牌的地址只会把浏览器送到宿主的 401 页', () => {
+  const ok = { authenticatedUrl: (b) => `${b.replace(/\/$/, '')}/?token=T0K3N` }
+  assert.equal(deriveDshModelsLoginUrl({ connection: ok, webServerPort: 19387 }), 'http://127.0.0.1:19387/?token=T0K3N')
+  // 反向：返回了地址但**没有** token ⇒ 视为拿不到（"看起来配了、其实没配"是同一族的错）
+  const noToken = { authenticatedUrl: (b) => b }
+  assert.equal(deriveDshModelsLoginUrl({ connection: noToken, webServerPort: 19387 }), '',
+    '没有 token 的 URL 必须被判成空 —— 否则界面会显示"已连接"而实际还是 401')
+})
+
+test('★ 取不到就返回空（与宿主地址同一条纪律：不编一个值）', () => {
+  const ok = { authenticatedUrl: () => 'http://127.0.0.1:19387/?token=T' }
+  for (const input of [
+    {},
+    { connection: ok },                                   // 没有端口
+    { connection: ok, webServerPort: 0 },                 // 端口 0 = 还没绑
+    { connection: ok, webServerPort: 70000 },
+    { connection: null, webServerPort: 19387 },           // 宿主没暴露 connection 服务
+    { webServerPort: 19387 },                             // 同上（字段缺省）
+    { connection: {}, webServerPort: 19387 },             // 有服务但没这个方法
+  ]) {
+    assert.equal(deriveDshModelsLoginUrl(input), '', `${JSON.stringify(input)} 应当明确返回空`)
+  }
+})
+
+test('★ authenticatedUrl 抛错时返回空，而不是把异常带进启动流程', () => {
+  const boom = { authenticatedUrl: () => { throw new Error('connection 还没就绪') } }
+  assert.equal(deriveDshModelsLoginUrl({ connection: boom, webServerPort: 19387 }), '')
+})
+
+test('★ 登录 URL 只在拿得到时注入 workbench 环境（空 ⇒ 不注入）', () => {
+  const withUrl = buildWorkbenchEnv({ baseEnv: {}, hubUpstream: 'h', dshModelsLoginUrl: 'http://127.0.0.1:19387/?token=T' })
+  assert.equal(withUrl.DSH_MODELS_LOGIN_URL, 'http://127.0.0.1:19387/?token=T')
+  const without = buildWorkbenchEnv({ baseEnv: {}, hubUpstream: 'h' })
+  assert.equal('DSH_MODELS_LOGIN_URL' in without, false,
+    '注入空值会让指挥台把"宿主没给登录地址"读成"给了个空地址"，两者的修法不同')
+})
+
+test('★ 注入项之间互不影响：给了登录 URL 不会挤掉宿主地址（反之亦然）', () => {
+  const both = buildWorkbenchEnv({
+    baseEnv: {}, hubUpstream: 'h', dshModelsBaseUrl: 'http://127.0.0.1:19387',
+    dshModelsLoginUrl: 'http://127.0.0.1:19387/?token=T',
+  })
+  assert.equal(both.DSH_MODELS_BASE_URL, 'http://127.0.0.1:19387')
+  assert.equal(both.DSH_MODELS_LOGIN_URL, 'http://127.0.0.1:19387/?token=T')
 })

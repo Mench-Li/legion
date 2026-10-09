@@ -189,6 +189,101 @@ test('⑩ 重复 id 的快照必须整份拒绝（不是"后者覆盖前者"）'
     '整份拒绝：半份写进去会让"这份快照对不对"变成一个没法回答的问题')
 })
 
+test('⑪ ★ 面板的写入路径：建 → 改（带版本）→ 删（立墓碑），全程 source=legion', async () => {
+  const created = await post('/api/model-providers', {
+    actor: 'general',
+    provider: { id: 'panel-ds', displayName: '面板建的', api: 'openai-completions', baseURL: 'https://p.example/v1', models: [{ id: 'pm1', name: 'PM1' }] },
+  })
+  assert.equal(created.status, 200, JSON.stringify(created.body))
+  assert.equal(created.body.id, 'panel-ds')
+  assert.equal(created.body.version, 1)
+  assert.equal(created.body.source, 'legion', '面板建的是**用户意图**，不能伪装成 dsh-import')
+
+  // 改名（整体替换 + CAS）
+  const updated = await post('/api/model-providers/panel-ds', {
+    actor: 'general', version: 1,
+    provider: { id: 'panel-ds', displayName: '改过名', api: 'openai-completions', baseURL: 'https://p.example/v1', models: [{ id: 'pm1', name: 'PM1' }, { id: 'pm2', name: 'PM2' }] },
+  })
+  assert.equal(updated.status, 200, JSON.stringify(updated.body))
+  assert.equal(updated.body.displayName, '改过名')
+  assert.equal(updated.body.version, 2)
+  assert.equal(updated.body.models.length, 2)
+
+  // ★ 版本不对 ⇒ 409（两个界面同时保存不许静默覆盖）
+  const stale = await post('/api/model-providers/panel-ds', {
+    actor: 'general', version: 1,
+    provider: { id: 'panel-ds', displayName: '用旧版本覆盖', api: 'openai-completions', baseURL: 'https://p.example/v1', models: [] },
+  })
+  assert.equal(stale.status, 409, '旧版本写入必须被拒')
+  assert.match(JSON.stringify(stale.body), /已被别人改过/)
+  assert.equal((await get('/api/model-providers')).body.providers.find((p) => p.id === 'panel-ds').displayName, '改过名',
+    '被拒的那次不许改动任何东西')
+
+  // 删 = 立墓碑
+  const removed = await call('DELETE', '/api/model-providers/panel-ds', { actor: 'general', version: 2 })
+  assert.equal(removed.status, 200, JSON.stringify(removed.body))
+  const after = (await get('/api/model-providers')).body.providers.map((p) => p.id)
+  assert.equal(after.includes('panel-ds'), false, '删掉之后不在列表里')
+  const row = mod.db.prepare("SELECT deleted_at_ms, version FROM model_providers WHERE id='panel-ds'").get()
+  assert.notEqual(row.deleted_at_ms, null, '是**墓碑**，不是 DELETE 掉那一行（历史可能还记着这个引用）')
+  assert.equal(Number(row.version), 3)
+
+  // 删过的 id 不许重用
+  const reuse = await post('/api/model-providers', {
+    actor: 'general', provider: { id: 'panel-ds', displayName: '重名', api: 'openai-completions', baseURL: 'https://p.example/v1' },
+  })
+  assert.equal(reuse.status, 409, '删过的 id 不许重用（历史里那个引用会指向另一个供应商）')
+})
+
+test('⑫ 改/删都要 actor 与 version；缺了就具名拒绝', async () => {
+  await post('/api/model-providers', { actor: 'general', provider: { id: 'guard-ds', displayName: 'G', api: 'openai-completions', baseURL: 'https://g.example/v1' } })
+  const noActor = await post('/api/model-providers/guard-ds', { version: 1, provider: { id: 'guard-ds', displayName: 'X', api: 'openai-completions', baseURL: 'https://g.example/v1' } })
+  assert.equal(noActor.status, 400)
+  assert.match(JSON.stringify(noActor.body), /actor/)
+  const noVersion = await post('/api/model-providers/guard-ds', { actor: 'general', provider: { id: 'guard-ds', displayName: 'X', api: 'openai-completions', baseURL: 'https://g.example/v1' } })
+  assert.equal(noVersion.status, 400)
+  assert.match(JSON.stringify(noVersion.body), /version/)
+  // 不存在的 id
+  const missing = await call('DELETE', '/api/model-providers/nope-ds', { actor: 'general' })
+  assert.equal(missing.status, 404)
+})
+
+test('⑬ ★ 自动读模型目录：Legion 自己按 OpenAI 约定去问（不绕道 DSH）', async () => {
+  const { discoverProviderModels } = await import('./routes/model-providers.mjs')
+  const seen = []
+  const ok = async (url, init) => {
+    seen.push({ url, init })
+    return { ok: true, status: 200, text: async () => JSON.stringify({ data: [{ id: 'm1' }, { id: 'm2' }, { id: 'm1' }] }) }
+  }
+  const ids = await discoverProviderModels({ baseURL: 'https://v.example/v1', apiKey: 'sk-x', fetchImpl: ok })
+  assert.deepEqual(ids, ['m1', 'm2'], '要去重')
+  assert.equal(seen[0].url, 'https://v.example/v1/models')
+  assert.equal(seen[0].init.headers.authorization, 'Bearer sk-x')
+
+  // 反向：非 OpenAI 兼容（没有 data/models）⇒ 具名报错，**不返回空数组**
+  const weird = async () => ({ ok: true, status: 200, text: async () => JSON.stringify({ result: [] }) })
+  await assert.rejects(() => discoverProviderModels({ baseURL: 'https://v.example/v1', fetchImpl: weird }), /没有 data\/models 数组/)
+  // 4xx ⇒ 具名报错
+  const bad = async () => ({ ok: false, status: 401, text: async () => 'nope' })
+  await assert.rejects(() => discoverProviderModels({ baseURL: 'https://v.example/v1', fetchImpl: bad }), /HTTP 401/)
+  // 连不上 ⇒ 具名报错
+  const boom = async () => { throw new Error('ECONNREFUSED') }
+  await assert.rejects(() => discoverProviderModels({ baseURL: 'https://v.example/v1', fetchImpl: boom }), /连不上 v\.example/)
+  // 内嵌账号密码 ⇒ 拒（与 provider-store 的 baseURL 口径一致）
+  await assert.rejects(() => discoverProviderModels({ baseURL: 'https://u:p@v.example/v1', fetchImpl: ok }), /不能内嵌账号密码/)
+  // 只认 http(s)
+  await assert.rejects(() => discoverProviderModels({ baseURL: 'file:///etc/passwd', fetchImpl: ok }), /只能是 http\(s\)/)
+})
+
+test('⑭ ★ 路由顺序：`/discover` 必须排在通配 id 之前（否则会被当成 id="discover"）', async () => {
+  // 真的打一次：如果顺序反了，POST /discover 会被当作"改一条 id=discover 的供应商"→ 404/400
+  const r = await post('/api/model-providers/discover', { actor: 'general', baseURL: 'http://127.0.0.1:9/v1' })
+  // 127.0.0.1:9 必定连不上 ⇒ 期望 502 的"连不上"，而不是"没有这个供应商：discover"
+  assert.equal(r.status, 502, JSON.stringify(r.body))
+  assert.match(JSON.stringify(r.body), /连不上/)
+  assert.equal(JSON.stringify(r.body).includes('discover'), false, '不该被当成 id=discover 去查供应商')
+})
+
 after(() => {
   try { mod.server.close() } catch { /* ignore */ }
   // ★ 清理是**尽力而为**：Windows 上 SQLite 的句柄还没放开时 `rmSync` 会 EPERM，

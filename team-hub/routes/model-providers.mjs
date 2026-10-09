@@ -32,12 +32,15 @@
 // 若哪一天要收紧，应当**整族一起收**（读也一样），而不是只给这一族加。
 // ============================================================================
 
+import { ModelError, MODEL_ERRORS } from '../model-store.mjs'
+
 /**
  * @param json         写 JSON 响应的注入件（属于 server.mjs）
  * @param handleRun    带鉴权与错误映射的写包装（属于 server.mjs）
  * @param providerStore `createProviderStore(...)` 的返回值
+ * @param discoverModels `({baseURL, apiKey}) => Promise<string[]>`（可注入；见 `discoverProviderModels`）
  */
-export function createModelProvidersRoutes({ json, handleRun, providerStore }) {
+export function createModelProvidersRoutes({ json, handleRun, providerStore, discoverModels = discoverProviderModels }) {
   const routes = [
     {
       method: 'GET',
@@ -50,11 +53,57 @@ export function createModelProvidersRoutes({ json, handleRun, providerStore }) {
     {
       method: 'POST',
       match: 'exact',
+      path: '/api/model-providers',
+      async run(req, res) {
+        // 建一条：面板的"保存"。`source` 固定为 `legion`（**用户表达意图**），
+        // 不接受调用方指定成 `dsh-import` —— 那会把"我建的"伪装成"从 DSH 抄来的"。
+        await handleRun(req, res, (body) => providerStore.create(body.provider ?? body, { actor: body.actor }))
+      },
+    },
+    {
+      method: 'POST',
+      match: 'exact',
       path: '/api/model-providers/import',
       async run(req, res) {
         await handleRun(req, res, (body) => providerStore.importSnapshot(body.providers ?? [], {
           actor: body.actor, source: body.source ?? 'dsh-import',
         }))
+      },
+    },
+    {
+      method: 'POST',
+      match: 'exact',
+      path: '/api/model-providers/discover',
+      async run(req, res) {
+        // 读供应商的模型目录。**与 DSH 无关**：Legion 自己按 OpenAI 兼容约定去问一次，
+        // 于是"自动读取模型列表"这个能力不再需要绕道 DSH 的 `llm/discoverModels`。
+        await handleRun(req, res, async (body) => {
+          const ids = await discoverModels({
+            baseURL: body.baseURL, apiKey: body.apiKey ?? null, fetchImpl: fetch,
+          })
+          return { models: ids.map((id) => ({ id })) }
+        })
+      },
+    },
+    // ★ 下面两条必须排在 `/discover` 之后（它也是 prefix 下的路径，顺序反了会被当成 id="discover"）。
+    {
+      method: 'POST',
+      match: 'prefix',
+      path: '/api/model-providers/',
+      async run(req, res, { path }) {
+        const id = decodeURIComponent(path.slice('/api/model-providers/'.length))
+        if (id === '') { json(res, 400, { ok: false, error: '缺少供应商 id', code: 'MISSING_PARAM' }); return }
+        await handleRun(req, res, (body) => providerStore.update(id, body.provider ?? body, { actor: body.actor, version: body.version }))
+      },
+    },
+    {
+      method: 'DELETE',
+      match: 'prefix',
+      path: '/api/model-providers/',
+      async run(req, res, { path }) {
+        const id = decodeURIComponent(path.slice('/api/model-providers/'.length))
+        if (id === '') { json(res, 400, { ok: false, error: '缺少供应商 id', code: 'MISSING_PARAM' }); return }
+        await handleRun(req, res, (body) => providerStore.remove(id, { actor: body.actor, version: body.version }))
       },
     },
   ]
@@ -69,7 +118,7 @@ export function createModelProvidersRoutes({ json, handleRun, providerStore }) {
   return {
     id: 'model-providers',
     routes,
-    /** 2 条。 */
+    /** 6 条；顺序与上面一致（`/discover` 在前，通配 id 在后）。 */
     async dispatch(req, res, ctx) {
       for (const r of routes) {
         if (req.method !== r.method || !matches(r, ctx.path)) continue
@@ -79,4 +128,64 @@ export function createModelProvidersRoutes({ json, handleRun, providerStore }) {
       return false
     },
   }
+}
+
+/**
+ * 按 **OpenAI 兼容约定**读一次模型目录：`GET {baseURL}/models`，带 `Authorization: Bearer <key>`。
+ *
+ * 为什么不复用 DSH 的 `llm/discoverModels`：那是引擎的能力，
+ * 而"用户在这一页点一下读取列表"是**Legion 自己的功能** —— 绕道引擎就又把产品表面接回引擎了
+ * （这正是 BUG-014 两版修错的地方）。
+ *
+ * 三条纪律：
+ *   · 只认 `http(s)`，且**不允许内嵌账号密码**（与 `provider-store` 的 baseURL 校验同口径）；
+ *   · 超时 8 秒（供应商不回话时不许把请求挂住）；
+ *   · 非 2xx 或形状不对 ⇒ **具名报错**，不返回空数组 ——
+ *     "它没返回模型"与"我没问成"在界面上是同一种空白，而修法完全不同。
+ */
+export async function discoverProviderModels({ baseURL, apiKey = null, fetchImpl = fetch, timeoutMs = 8000 } = {}) {
+  if (typeof baseURL !== 'string' || baseURL.trim() === '') {
+    throw new ModelError(MODEL_ERRORS.INVALID_PROFILE, '读取模型目录需要 API 地址', { statusCode: 400 })
+  }
+  let url
+  try { url = new URL(baseURL.trim()) } catch {
+    throw new ModelError(MODEL_ERRORS.INVALID_PROFILE, `API 地址不是合法 URL：${baseURL.slice(0, 120)}`, { statusCode: 400 })
+  }
+  if (url.protocol !== 'http:' && url.protocol !== 'https:') {
+    throw new ModelError(MODEL_ERRORS.INVALID_PROFILE, 'API 地址只能是 http(s)', { statusCode: 400 })
+  }
+  if (url.username || url.password) {
+    throw new ModelError(MODEL_ERRORS.INVALID_PROFILE, 'API 地址不能内嵌账号密码', { statusCode: 400 })
+  }
+  const target = `${url.origin}${url.pathname.replace(/\/+$/, '')}/models`
+
+  const ctrl = new AbortController()
+  const timer = setTimeout(() => ctrl.abort(), timeoutMs)
+  let res
+  try {
+    res = await fetchImpl(target, {
+      method: 'GET',
+      headers: { accept: 'application/json', ...(typeof apiKey === 'string' && apiKey !== '' ? { authorization: `Bearer ${apiKey}` } : {}) },
+      signal: ctrl.signal,
+    })
+  } catch (e) {
+    throw new ModelError(MODEL_ERRORS.INVALID_PROFILE,
+      `读模型目录失败：连不上 ${url.host}（${e instanceof Error ? e.message : String(e)}）`, { statusCode: 502 })
+  } finally { clearTimeout(timer) }
+
+  if (!res.ok) {
+    throw new ModelError(MODEL_ERRORS.INVALID_PROFILE,
+      `读模型目录失败：${url.host} 返回 HTTP ${res.status}`, { statusCode: 502 })
+  }
+  let body = null
+  try { body = JSON.parse(await res.text()) } catch {
+    throw new ModelError(MODEL_ERRORS.INVALID_PROFILE,
+      `读模型目录失败：${url.host} 的响应不是 JSON（可能不是 OpenAI 兼容接口）`, { statusCode: 502 })
+  }
+  const list = Array.isArray(body?.data) ? body.data : (Array.isArray(body?.models) ? body.models : null)
+  if (list === null) {
+    throw new ModelError(MODEL_ERRORS.INVALID_PROFILE,
+      `读模型目录失败：${url.host} 的响应里没有 data/models 数组`, { statusCode: 502 })
+  }
+  return [...new Set(list.map((m) => (typeof m === 'string' ? m : m?.id)).filter((id) => typeof id === 'string' && id !== ''))]
 }

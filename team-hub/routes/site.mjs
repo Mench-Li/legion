@@ -85,6 +85,28 @@ function esc(value) {
     .replaceAll('"', '&quot;').replaceAll("'", '&#39;')
 }
 
+/**
+ * 这个地址能不能写进 `href`（只有 http/https）。
+ *
+ * ★ 为什么在**转义之外**还需要它：`esc()` 处理的是"这段文本会不会破坏 HTML"，
+ *   而 `javascript:alert(1)` 是一个**完全合法的 HTML 属性值**——转义之后它照样
+ *   会在点击时执行。两者防的不是同一件事。
+ *
+ *   > 一个"所有插值都转义了"的页面，
+ *   > 与一个"转义了、但 href 里能塞 javascript: 协议"的页面，是同一个东西——
+ *   > 只不过前者在代码审查时看起来已经处理过注入了。
+ *
+ * 备选线路来自配置文件（`parseDownloadLines` 已经拒过非 http(s)），但
+ * `renderLiveBlocks` 是导出函数，调用方可以给任意数据——所以在这里再筛一次。
+ */
+function isHttpUrl(value) {
+  if (typeof value !== 'string' || value.trim() === '') return false
+  try {
+    const p = new URL(value)
+    return p.protocol === 'https:' || p.protocol === 'http:'
+  } catch { return false }
+}
+
 /** 字节 → `183.4 MB`。给不出精确值时返回空串（宁可少一行，也不编一个数）。 */
 function formatSize(bytes) {
   if (!Number.isFinite(bytes) || bytes <= 0) return ''
@@ -115,6 +137,8 @@ const COPY = Object.freeze({
     ctaWarnShort: '当前为内部验证版：安装包未做代码签名。',
     deployWinEmpty: '桌面端安装包还没上传到这台 Hub；先向管理员索取。',
     notYet: '电脑版尚未发布',
+    // T-196：备选线路那一段的前缀。措辞与 `.dl-meta` 同一路（短、无句号）。
+    otherLines: '其他线路：',
     mobile: '打开手机端',
     regOpen: '这台 Hub 开放注册，打开手机端即可注册。',
     regInvite: '这台 Hub 开放注册（需要邀请码），打开手机端即可注册。',
@@ -134,6 +158,7 @@ const COPY = Object.freeze({
     deployWin: 'Desktop and web share one backend and one set of data. It is at internal-validation stage: the installer is not code-signed, so Windows will push back — that is expected, not a broken download.',
     deployWinEmpty: 'No desktop installer has been uploaded to this Hub yet; ask the administrator.',
     notYet: 'Desktop build not yet published',
+    otherLines: 'Other mirrors: ',
     mobile: 'Open the mobile app',
     regOpen: 'This Hub is open for sign-up — open the mobile app to register.',
     regInvite: 'This Hub is open for sign-up (invite code required) — open the mobile app to register.',
@@ -149,7 +174,12 @@ const COPY = Object.freeze({
  *
  * @param {object} input
  * @param {'zh'|'en'} input.lang
- * @param {string} input.downloadUrl  桌面版下载地址；留空 = 尚未发布
+ * @param {string} input.downloadUrl  桌面版安装包的下载地址；留空 = 尚未发布。
+ *        T-196 起，**服务端已经把它换成了按地区选中的那条线路**（见
+ *        `server.mjs` 的 `describeDownload`），所以渲染层只认这一个主地址——
+ *        多一个 `featuredUrl` 参数会让"主按钮到底用哪个"有两个来源。
+ * @param {ReadonlyArray<object>} [input.lines] 备选线路（T-196）；空数组 = 不渲染那一段。
+ * @param {'zh'|'en'} input.lang
  * @param {string} [input.version]    版本号（可空 —— 空就不显示这一行，不猜）
  * @param {string} [input.size]       已格式化的体积（可空）
  * @param {string} [input.date]       发布日期（可空）
@@ -157,7 +187,7 @@ const COPY = Object.freeze({
  * @param {string} [input.mobilePath]
  */
 export function renderLiveBlocks({
-  lang = 'zh', downloadUrl = '', version = '', size = '', date = '',
+  lang = 'zh', downloadUrl = '', lines = [], version = '', size = '', date = '',
   registration = 'closed', mobilePath = MOBILE_PATH_DEFAULT,
 } = {}) {
   const c = COPY[lang] ?? COPY.zh
@@ -198,6 +228,28 @@ export function renderLiveBlocks({
     ? `<p class="dl-meta">${metaBits.map((bit) => `<span>${bit}</span>`).join('<span class="sep">·</span>')}</p>`
     : ''
 
+  // ③ 备选线路（T-196 多线路）。
+  //
+  // 为什么备选线路要**显示**而不是只留主按钮：按地区选线路用的是
+  // Cloudflare 的 `CF-IPCountry`，而它对**部分**访客不准（VPN、企业出口、
+  // 以及 `XX`/`T1` 这两个"不知道"的取值）。一个只给一条线路的页面，
+  // 会让选错的那部分用户**没有任何办法**换一条。
+  //
+  //   > 一个"按地区自动选、选错了也没得换"的页面，
+  //   > 与一个"只有一条线路"的页面，对那部分用户是同一个东西——
+  //   > 只不过前者看起来更聪明。
+  //
+  // ★ 这里**再**筛一次协议：`parseDownloadLines` 已经拒了非 http(s)，
+  //   但本函数是导出的纯函数，调用方可以传任意数据。`esc()` 只处理引号与
+  //   尖括号，**不会**让 `javascript:` 变成无害的——而它会被直接写进 `href`。
+  const otherLines = (Array.isArray(lines) ? lines : [])
+    .filter((l) => l !== null && typeof l === 'object' && isHttpUrl(l.url))
+  const othersRow = has && otherLines.length > 0
+    ? `<p class="dl-lines">${c.otherLines}${otherLines
+      .map((l) => `<a href="${esc(l.url)}">${esc(lang === 'en' ? (l.labelEn || l.label) : l.label)}</a>`)
+      .join('<span class="sep">·</span>')}</p>`
+    : ''
+
   // 下载卡片：一句话 + **一个**动作 + 元信息 + 未签名说明 + 摘要。
   // 按钮只留下载那一个 —— "查看协作界面"在首屏已经是第二个动作，这张卡片里再放一次
   // 是重复；而这张卡片的主题就是"把这个包装到你机器上"。
@@ -205,6 +257,7 @@ export function renderLiveBlocks({
     ? `<div class="dl-actions">
          <a class="btn primary" href="${href}">${c.cta}</a>
        </div>
+       ${othersRow}
        ${meta}`
     : `<p>${c.deployWinEmpty}</p>
        <div class="dl-actions"><span class="btn" aria-disabled="true">${c.notYet}</span></div>`
@@ -383,11 +436,22 @@ export function createSiteRoutes({
     const template = readTemplate(abs)
     // 模板不存在 = 这个部署没有官网。返回 `false` 让请求落到门口页。
     if (template === null) return false
-    const r = live ? (resolveRelease() ?? {}) : {}
+    // ★ 访客地区来自 **Cloudflare 注入的 `CF-IPCountry`**（本站经 Tunnel 对外，
+    //   源站能直接读到）。读不到时传 null，由选线逻辑回退到默认线路——
+    //   本地开发、直连部署、以及非 Cloudflare 前置的部署都走这一条。
+    //
+    //   刻意**不做**前端探测：那段 JS 本身要经同一条慢路送达，
+    //   而"探测超时就选默认"在探测必然慢的那一侧总是选错。
+    const country = typeof req.headers?.['cf-ipcountry'] === 'string'
+      ? req.headers['cf-ipcountry']
+      : null
+    const r = live ? (resolveRelease({ country }) ?? {}) : {}
     const blocks = live
       ? renderLiveBlocks({
         lang,
         downloadUrl: r.url ?? '',
+        // 备选线路：**不含**被选中的那条（服务端已经排除）。
+        lines: Array.isArray(r.others) ? r.others : [],
         version: r.version ?? '',
         size: formatSize(r.sizeBytes),
         date: formatDate(r.at),

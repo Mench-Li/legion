@@ -85,6 +85,21 @@ export const SCHEMA = defineSchema({
       key: 'desktopVersion', env: 'LEGION_DESKTOP_VERSION', type: 'string', default: '',
       doc: '桌面版版本号（只用于首页展示，可空）',
     },
+    // ── 多线路下载（T-196）──
+    //
+    // 2026-10-09 实测：本站只经 Cloudflare Tunnel 对外，境内访客被分配到洛杉矶
+    // 边缘，195MB 安装包只有约 1.8 KB/s（而源站直连 connect 仅 0.06s）。
+    // 「两边都有人下」意味着单线路必然亏待一边，所以加了线路表。
+    //
+    // **默认留空 = 维持原有的单线路行为**（一条都不改）：没有表就没有多线路，
+    // 首页照旧用 `downloadUrl` 或"最新一份安装包"的现算结果。这样别的 Hub 部署
+    // 与既有用例都不受影响——*一个"没配就多出一条空线路"的默认值，
+    // 会在每一个部署上悄悄改变首页的样子*。
+    {
+      key: 'downloadLines', env: 'LEGION_DOWNLOAD_LINES', type: 'path', default: '',
+      doc: '多线路下载的线路表（JSON 文件，格式 legion/download-lines@1）；留空 = 单线路。'
+        + '按访客地区（Cloudflare 的 CF-IPCountry）选线路，读不到就回退到默认线路',
+    },
     // 发布目录：其下应有 `feeds/` 与 `releases/`（结构见桌面自动更新设计 §4）。
     //
     // **默认留空 = 不托管**（这一族根本不注册，`/legion/*` 落到通用 404）。

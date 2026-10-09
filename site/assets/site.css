@@ -299,6 +299,14 @@ html[data-theme=dark] .hero:before { opacity: .6; }
 .dl-actions .btn[aria-disabled=true] { background: var(--soft); color: var(--muted); border-color: var(--line); cursor: not-allowed; }
 .dl-meta { font: 10px var(--mono); color: var(--muted); margin-top: 12px; display: flex; flex-wrap: wrap; gap: 5px 13px; }
 .dl-meta .sep { color: var(--line); }
+/* T-196 多线路：主按钮下面那一行备选线路。
+   刻意比主按钮弱（沿用 `.dl-meta` 的等宽小字 + 强调色链接）——它是"主线路不通时的
+   第二条路"，不该与主按钮争注意力；但它必须是**可点的链接**：按地区自动选线路对
+   部分访客（VPN、企业出口、Cloudflare 给 XX/T1 的那些）本来就会选错，没有备选
+   就等于那部分人换不了线路。 */
+.dl-lines { font: 10px var(--mono); color: var(--muted); margin-top: 10px; display: flex; flex-wrap: wrap; gap: 5px 7px; align-items: baseline; }
+.dl-lines a { color: var(--accent); text-decoration: underline; text-underline-offset: 2px; }
+.dl-lines .sep { color: var(--line); }
 
 .hub-line { margin-top: 16px; font-size: 11px; color: var(--muted); line-height: 1.9; }
 .hub-line a { color: var(--accent); }

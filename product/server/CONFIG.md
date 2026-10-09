@@ -140,8 +140,23 @@ LEGION_PW_FILE=/etc/legion-hub/first-admin-password.txt \
 | 变量 | 默认 | 说明 |
 | --- | --- | --- |
 | `LEGION_RELEASES_DIR` | *(空)* | 发布目录（含 `feeds/` 与 `releases/`）。留空 = 不托管，`/legion/*` 落 404 |
-| `LEGION_DOWNLOAD_URL` | *(空)* | 门口页的下载地址。**显式配置优先**；没配就从 `RELEASES_DIR` 里现找最新那份安装包 |
+| `LEGION_DOWNLOAD_URL` | *(空)* | 门口页/官网的下载地址。**显式配置优先**；没配就从 `RELEASES_DIR` 里现找最新那份安装包 |
+| `LEGION_DOWNLOAD_LINES` | *(空)* | **多线路**下载的线路表文件（JSON，格式 `legion/download-lines@1`，样例见 `product/release/download-lines.example.json`）。留空 = 单线路。按访客地区（Cloudflare 的 `CF-IPCountry`）选线路，读不到该头就回退到「没有 `countries` 的那条」（最多一条） |
 | `LEGION_DESKTOP_VERSION` | *(空)* | 只用于门口页展示版本号 |
+
+**为什么需要多线路**（2026-10-09 实测）：本站只经 Cloudflare 隧道对外，境内访客被分配到
+**洛杉矶**边缘，195MB 安装包只有约 **1.8 KB/s**（连 34 KB 的 `app.mjs` 都 30 秒超时），
+而源站直连 connect 仅 0.06s。而「两边都有人下」意味着**单一线路必然亏待一边**。
+
+线路表配好后**必须**跑一次镜像校验（证明每条线路与原站同字节）：
+
+```bash
+node scripts/update/verify-mirrors.mjs --lines /etc/legion-download-lines.json \
+  --manifest /var/lib/legion-hub/releases/releases/<releaseId>/manifest.json --full
+```
+
+⚠️ 它量的速度是**在跑脚本那台机器上**的，不代表其他地区；要判断真实体验请分别在
+境内与境外的机器上各跑一次。
 
 ### 4.4 `LEGION_REGISTRATION` 的三种取值
 

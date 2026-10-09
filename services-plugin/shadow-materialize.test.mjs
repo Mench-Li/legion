@@ -178,6 +178,22 @@ test('⑩ 读不到 Legion 目录 ⇒ 也不说 clean，且不写', async () => 
   assert.match(lines.join('\n'), /读不到 Legion 的目录/)
 })
 
+test('⑩b ★ 中枢**连不上**（网络层抛错）⇒ 变成"读不到"，绝不冒出去', async () => {
+  // 这条守的是**启动路径**上的静默失效：那一轮是被 await 的，
+  // 抛出会跳过它后面的 `schedule.start()` ⇒ P4 的周期收敛永远不启动，
+  // 而唯一的症状是"日志里少了一行"。中枢刚起来那一瞬间的 ECONNREFUSED 是常态。
+  const ctx = fakeCtx({ providers: DSH })
+  const boom = async () => { throw new Error('ECONNREFUSED 127.0.0.1:8787') }
+  const lines = []
+  const r = await runShadowMaterialization({ ctx, hubUpstream: 'http://hub.test', fetchImpl: boom, log: (m) => lines.push(m) })
+  assert.equal(r.ok, false, '连不上 ⇒ ok=false')
+  assert.equal(r.legionReadOk, false)
+  assert.deepEqual(ctx.probe.touched, [], '读都读不到，更不许写')
+  assert.match(lines.join('\n'), /读不到 Legion 的目录/)
+  assert.match(lines.join('\n'), /连不上中枢/, '要说清是**连不上**，不是别的')
+  assert.match(lines.join('\n'), /不是 clean/)
+})
+
 test('⑪ 请求带令牌，且**不**把密钥值放进任何请求体（影子模式没有值可写）', async () => {
   const seen = []
   const hub = async (url, init) => {

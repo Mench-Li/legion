@@ -200,7 +200,33 @@ test('⑦ 周期读数里带"每 N 秒一轮"，且跑完会自己续下一拍',
   assert.match(logs.join('\n'), /连续无差异 1 轮/)
 })
 
-test('⑧ 缺 run 直接抛（这个调度器没有 run 就没有意义，不该静默什么都不做）', () => {
+test('⑩ ★ 启动路径用 `runNow` 而不是直接调那一轮：连不上中枢也不许挡住 `schedule.start()`', async () => {
+  // 这是**启动路径**上的静默失效，最值得钉：
+  //   `const first = await runOneReconcileRound()` —— 网络一抛（中枢刚起来时的 ECONNREFUSED 是常态），
+  //   后面的 `schedule.start()` 就被跳过了 ⇒ 周期收敛永远不启动，而唯一症状是"日志里少一行"。
+  //   `runNow` 内部 catch ⇒ 构造上不抛 ⇒ start() 一定执行得到。
+  const timers = fakeTimers()
+  const logs = []
+  const s = createReconcileSchedule({
+    run: async () => { throw new Error('ECONNREFUSED') },
+    intervalMs: 300000,
+    setTimeoutImpl: timers.setTimeoutImpl,
+    clearTimeoutImpl: timers.clearTimeoutImpl,
+    log: (m) => logs.push(m),
+  })
+  // 模拟启动路径：先跑首轮（不 try/catch —— 正确实现下它本来就该不抛），再 start()
+  let threw = null
+  let first = null
+  try { first = await s.runNow() } catch (e) { threw = e }
+  s.start()
+  assert.equal(threw, null, '首轮出错不许把异常抛给启动路径')
+  assert.equal(first.clean, false)
+  assert.match(first.error, /ECONNREFUSED/)
+  assert.equal(timers.queued.length, 1, '首轮出错之后，周期**仍然**必须被排上')
+  assert.match(logs.join('\n'), /每 300 秒一轮/)
+})
+
+test('⑪ 缺 run 直接抛（这个调度器没有 run 就没有意义，不该静默什么都不做）', () => {
   assert.throws(() => createReconcileSchedule({ intervalMs: 100 }), /需要 run/)
 })
 

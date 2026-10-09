@@ -1878,6 +1878,11 @@ async function stageTest() {
     //   Bug #1 的真因（宿主地址写死 3080）当时也没有任何一条断言守着——正是这件事的后果。
     //   处置选**登记**而不是 `EXEMPT`：这些断言是真的、也能过，豁免等于把它们降级成声明。
     { label: 'dsh-models（模型配置桥：宿主地址随部署走、连不上时说得清、宿主鉴权与写入边界）', files: ['workbench/scripts/dsh-models-bridge.test.mjs'], cwd: ROOT },
+    // ── BUG-014：「供应商与模型」页的请求**发到了错误的数据源**（apiBase() 默认 4820 = v1 看板那条源），
+    //   而 4820 上没人监听 ⇒ 浏览器只回 `Failed to fetch` ⇒ 用户看到的就是「failed」。
+    //   这一组守的是**地址选择**（必须同源，因为路由在发页面的那台 serve.mjs 上且服务端强制同源）
+    //   与**网络层文案**（不许把浏览器原话当结论），并反向钉住 apiBase() 的默认值不许被顺手改掉。
+    { label: 'dsh-models-base（BUG-014：面板必须打到本页自己的源，且连不上时说得清）', files: ['workbench/scripts/dsh-models-base.test.mjs'], cwd: ROOT },
     //   同一个 Bug #1 的**注入侧**：`DSH_MODELS_BASE_URL` 由 legion-services 按宿主端口派生。
     //   这一侧的失败形状更隐蔽——注入了错的地址，界面还是那句 `fetch failed`。
     { label: 'legion-services（服务托管插件：宿主地址派生自本次启动的宿主，取不到就**不注入**）', files: ['services-plugin/index.test.mjs'], cwd: ROOT },

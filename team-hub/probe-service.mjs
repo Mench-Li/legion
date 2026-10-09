@@ -130,7 +130,9 @@ export function createProbeService({
       return await resolveLayoutImpl({ env })
     }
     const mod = await import('../product/paths.mjs')
-    return mod.resolveLayout({ env })
+    // ★ 同 `secret-admin.mjs`：操作系统事实必须一起给，否则家目录是 null、
+    //   探测报告里的 `secretsFile` 永远是 null（于是"密钥库在哪"这个问题也答不了）。
+    return mod.resolveLayout({ env, ...mod.osHomeFacts(env) })
   }
 
   async function openSecretsImpl(args) {

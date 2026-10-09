@@ -27,7 +27,7 @@
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { join } from 'node:path'
 
-import { LEGION_ENV, resolveLayout } from '../paths.mjs'
+import { LEGION_ENV, resolveLayout, OS_HOME_ENV, osHomeFacts } from '../paths.mjs'
 import { DSH_CREDENTIALS_FILENAME } from '../../security/secrets/index.mjs'
 // `readJsonFile` 一起 import：清单是**配置面**的最后一个来源，它的读取规则
 // （BOM、坏 JSON、顶层不是对象）应当只有一份实现——本文件不再写第二个 JSON 读取器。
@@ -315,49 +315,22 @@ export function readReadinessTimeoutMs(env = {}) {
 export const LEGION_READINESS_TIMEOUT_ENV = 'LEGION_READINESS_TIMEOUT_MS'
 
 /**
- * 操作系统级的家目录事实（不是 Legion 的配置，是它必须读的环境）。
+ * 操作系统级的家目录事实 —— **定义已搬到 `product/paths.mjs`**。
  *
- * 这三个变量属于**操作系统/用户会话**，不属于 Legion —— 因此它们是
- * `foreignEnv`（登记在 `product/config-schema.mjs`），不是本进程的配置项。
+ * 理由：`osHomeFacts` 是 `resolveLayout` 的输入，而 `paths.mjs` 才是布局概念的家；
+ * 更要紧的是**托管进程也需要它**（`team-hub/secret-admin.mjs` / `probe-service.mjs`），
+ * 而 team-hub 不该 import 整个 CLI（本文件末尾有顶层 `process.exitCode = code`）。
+ * 放在这里时那两处只能自己抄一份派生逻辑 —— 那就是"两份实现会漂移"的形状。
+ *
+ * 这里**转出**以保持既有导入路径可用（`isolated-space.test.mjs` 就从这里取）。
+ * 原始说明（含 PRT-255 那次实测缺陷的来龙去脉）保留在 `paths.mjs` 的同名函数上。
+ *
+ * ★ 上面的 `import` 与这里的 `export` **两件都要**：`export { … } from '…'`
+ *   只做转出、**不在本模块建立本地绑定**，而本文件后面（`osHomeFacts(env)`）
+ *   还要用它。只写转出的话，`--init` 会以 `osHomeFacts is not defined` 失败 ——
+ *   实测：`isolated-space.test.mjs` 的 8 条一起变红，而报错只指到 cli.mjs 的行号。
  */
-export const OS_HOME_ENV = Object.freeze({
-  LOCAL_APP_DATA: 'LOCALAPPDATA',
-  USER_PROFILE: 'USERPROFILE',
-  HOME: 'HOME',
-})
-
-/**
- * 从**进程环境**推出家目录事实，交给 `resolveLayout`。
- *
- * ## 为什么这件事必须在这里做（PRT-255 实测抓到的缺陷）
- *
- * `resolveLayout` 的签名里一直有 `homeDir` / `appDataDir` 两个入参，
- * 而 `defaultProductHome` 在拿不到它们时会返回 `root: null`。可是**唯一的生产
- * 调用方从来没有传过它们**——于是产品家目录永远是 null，`secretsFile` 永远是
- * null，接着每一次启动都被 `SECRETS_PLACEMENT_INVALID` 拒绝。
- *
- * 实测形态：用文档上的那几个开关（`--install-dir` / `--data-dir` / `--workspace`）
- * 装完之后，`--init` 成功、诊断包能导出，**而产品根本起不来**：
- *
- *   > 一个「装得上、也导得出诊断包」的产品，
- *   > 与一个「装完起不来」的产品，是同一个东西——
- *   > 只不过前者在"安装成功"这个返回值上是完全正确的。
- *
- * ## 优先级
- *
- * `LEGION_HOME`（受控环境变量，显式覆盖）> 操作系统事实 > 未解析。
- * 显式覆盖这一条不受本函数影响：它由 `resolveLayout` 内部的 `defaultProductHome`
- * 先判，所以"部署时设的 LEGION_HOME 不生效"这种倒置不会发生。
- */
-export function osHomeFacts(env = {}) {
-  const nonEmpty = (v) => (typeof v === 'string' && v.trim() !== '' ? v : null)
-  return {
-    appDataDir: nonEmpty(env[OS_HOME_ENV.LOCAL_APP_DATA]),
-    // POSIX 上是 HOME，Windows 上是 USERPROFILE；两者都给，由
-    // `defaultProductHome` 按 platform 决定怎么用。
-    homeDir: nonEmpty(env[OS_HOME_ENV.USER_PROFILE]) ?? nonEmpty(env[OS_HOME_ENV.HOME]),
-  }
-}
+export { OS_HOME_ENV, osHomeFacts }
 
 /**
  * DSH 的家目录变量名。**DSH 自己**用它定位 `.credentials.yaml`。

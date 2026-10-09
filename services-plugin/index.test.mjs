@@ -16,7 +16,7 @@ import { readFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-import { buildWorkbenchEnv, deriveDshModelsBaseUrl } from './index.js'
+import { buildTeamHubEnv, buildWorkbenchEnv, deriveDshModelsBaseUrl } from './index.js'
 
 const SRC = readFileSync(join(dirname(fileURLToPath(import.meta.url)), 'index.js'), 'utf8')
 
@@ -100,4 +100,52 @@ test('★ 硬依赖只有 webServer；别的宿主服务一律软取（硬依赖
     assert.equal(injectLine.includes(`'${svc}'`), false,
       `${svc} 不许进 inject：物化是增强能力，缺了它服务仍须启动`)
   }
+})
+
+// ── ★ 产品目录的**事实**必须由启动方传给 team-hub（2026-10-09 实测缺陷）──────────────
+// 不传的后果实测过：团队中枢解析不出安装目录 ⇒ 密钥库落点校验过不去（INSTALL_DIR_UNRESOLVED）
+// ⇒ **用户在面板里填密钥永远存不进去**，而报错只提"产品目录布局未确定"。
+// `product/paths.mjs` 那条诊断的原话就是"请设置 LEGION_INSTALL_DIR **或由 Launcher 传入**"，
+// 而本插件正是这台机器上的启动方。
+test('★ team-hub 环境里必须带 LEGION_INSTALL_DIR（启动方的责任，漏了密钥就存不进）', () => {
+  const env = buildTeamHubEnv({ baseEnv: {}, port: 8787, host: '127.0.0.1', token: '', installDir: 'D:/project/DSH/legion' })
+  assert.equal(env.LEGION_INSTALL_DIR, 'D:/project/DSH/legion')
+  // 没有安装目录时**不注入**（而不是注入空串）：空串会让下游以为"给了但为空"，
+  // 而两者在下游是同一句 `INSTALL_DIR_UNRESOLVED`，可读性却完全不同。
+  const without = buildTeamHubEnv({ baseEnv: {}, port: 8787, host: '127.0.0.1', token: '', installDir: '' })
+  assert.equal('LEGION_INSTALL_DIR' in without, false)
+})
+
+test('★ 工作区只透传、绝不编默认值（规范：工作区是用户授权的项目目录）', () => {
+  const none = buildTeamHubEnv({ baseEnv: {}, port: 8787, host: 'h', token: '', installDir: 'I' })
+  assert.equal('LEGION_WORKSPACE_DIR' in none, false, '没给工作区就不许注入 —— 编一个会让"用户授权"失去意义')
+  const given = buildTeamHubEnv({ baseEnv: {}, port: 8787, host: 'h', token: '', installDir: 'I', workspaceDir: 'D:/work' })
+  assert.equal(given.LEGION_WORKSPACE_DIR, 'D:/work')
+})
+
+test('★ 原有注入一项不少（端口/地址/令牌/环境透传）', () => {
+  const env = buildTeamHubEnv({
+    baseEnv: { PATH: '/usr/bin', LEGION_WORKSPACE_DIR: 'D:/from-env' },
+    port: 9000, host: '0.0.0.0', token: 'T', installDir: 'I',
+  })
+  assert.equal(env.TEAM_HUB_PORT, '9000')
+  assert.equal(env.TEAM_HUB_HOST, '0.0.0.0')
+  assert.equal(env.TEAM_HUB_TOKEN, 'T')
+  assert.equal(env.PATH, '/usr/bin', 'baseEnv 要透传（子进程继承整个环境）')
+  assert.equal(env.LEGION_WORKSPACE_DIR, 'D:/from-env', '环境里已有的工作区要跟着走（baseEnv 在前）')
+})
+
+test('★ **接线处**真的把 legionDir 当成安装目录传下去了（不是只写了助手函数）', () => {
+  // ★ 这条是补出来的：上面那些用例验的是 `buildTeamHubEnv` 的行为，
+  //   而用户遇到的那次失败断在**接线处** —— 助手函数写得再对，
+  //   `env:` 里不传 `installDir` 就一样是"密钥存不进去"。
+  //   实测：把接线处的 `installDir: legionDir` 去掉，只验助手函数的用例**全绿**。
+  //
+  //   > 一个"助手函数被验过"的读数，
+  //   > 与一个"这个助手函数真的被接线处用上了"的读数，
+  //   > 在两者都绿的时候是同一个东西 —— 差别只在接线处被改动的那一次。
+  const wiring = /env: buildTeamHubEnv\(\{([\s\S]*?)\}\),/.exec(SRC)?.[1] ?? ''
+  assert.ok(wiring.length > 0, '找不到 team-hub 的 env 接线')
+  assert.match(wiring, /installDir:\s*legionDir/, '接线处必须把 legionDir 作为安装目录传下去')
+  assert.match(wiring, /workspaceDir\b/, '工作区也要一起传（哪怕它常常是空的）')
 })

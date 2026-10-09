@@ -538,3 +538,36 @@ test('★★★ 真并发实测的回归闸：6 个进程各写 15 条，90 条�
     cleanup()
   }
 })
+
+// ============================================================================
+// ★ 全新产品上的**第一次**写入（2026-10-09 实测缺陷）
+// ----------------------------------------------------------------------------
+// 锁文件与库文件同级，而目录只在 `writeAll` 里才建 —— 那个 mkdir 跑在**拿到锁之后**。
+// 于是目录不存在时 `wx` 拿到 `ENOENT`，而 `ENOENT` 既不是 `EEXIST` 也不是 `EPERM`，
+// 被具名抛成 `SECRET_STORE_LOCK_FAILED`（cause: ENOENT）。
+//
+// 用户看到的是「无法在密钥库旁创建写锁文件：检查目录是否可写、磁盘是否已满」——
+// 而磁盘是空的、目录并不存在，也不可写（因为它还不存在）。
+//
+//   > 一个"第一次写失败"的存储，与一个"从来没有第一次"的存储，在用户那边是同一个东西。
+// ============================================================================
+test('★ 库所在目录**不存在**时，第一次写入也要成功（锁不在 mkdir 之前）', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'legion-fresh-'))
+  try {
+    // 刻意多一层**不存在**的子目录：库文件直接落在里面
+    const file = join(root, 'secrets', 'credentials.json')
+    assert.equal(existsSync(dirname(file)), false, '前提：这个目录一开始不存在')
+    // 用**文件后端 + 可逆假保护器**：这条要验的是锁与 mkdir 的次序，
+    // 与"用什么保护"无关；绑上 DPAPI 会让它在非 Windows 上因平台而跳。
+    const store = createSecretStore({ backend: fileBackend({ file }), protector: fakeProtector() })
+    // ★ 必须 await：这两步是异步的，不 await 会让写入还没落地就去读 ——
+    //   实测形态是用例"通过"了，却在测试结束后抛出未处理的 `SECRET_NOT_FOUND`。
+    await store.put('FRESH_KEY', 'v1')
+    // `get()` 给的是 `{ ref, value, resolvedAt }`（解析结果），不是裸字符串
+    assert.equal((await store.get('FRESH_KEY')).value, 'v1')
+    assert.equal(existsSync(file), true, '文件要真的落盘')
+    assert.equal(existsSync(`${file}.lock`), false, '写完不留锁文件')
+  } finally {
+    try { rmSync(root, { recursive: true, force: true }) } catch { /* Windows 句柄 */ }
+  }
+})

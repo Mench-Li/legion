@@ -224,20 +224,22 @@ export const SCHEMA = defineSchema({
   //   把写目标写进 `dynamicEnvReads` 就是让这份声明说谎，而这份声明的价值全在它说的每句都真。
   dynamicEnvReads: [
     {
-      file: 'product/launcher/cli.mjs',
+      // ★ 条目跟着**函数**走：`osHomeFacts` 已从 `cli.mjs` 搬到 `product/paths.mjs`
+      //   （托管进程也要用它，而 team-hub 不该 import 整个 CLI）。读取点在哪，登记就在哪。
+      file: 'product/paths.mjs',
       expr: 'env[OS_HOME_ENV.LOCAL_APP_DATA]',
       reason: 'osHomeFacts(env) 从 OS_HOME_ENV 键名表取 Windows 的 `%LOCALAPPDATA%`（表值 LOCALAPPDATA）。'
         + '键必须计算：那张表是「这三个名字属于操作系统、不属于 Legion 配置」的唯一住处，'
         + '三个名字逐条登记在本 schema 的 foreignEnv 里；在读取点写死字面量会让这条事实两处各说一半。',
     },
     {
-      file: 'product/launcher/cli.mjs',
+      file: 'product/paths.mjs',
       expr: 'env[OS_HOME_ENV.USER_PROFILE]',
       reason: '同上（`nonEmpty(env[OS_HOME_ENV.USER_PROFILE]) ?? nonEmpty(env[OS_HOME_ENV.HOME])` 的第一顺位）：'
         + 'Windows 的家目录事实。名字来自同一张 OS_HOME_ENV 表，归属登记在 foreignEnv（USERPROFILE）。',
     },
     {
-      file: 'product/launcher/cli.mjs',
+      file: 'product/paths.mjs',
       expr: 'env[OS_HOME_ENV.HOME]',
       reason: '同上：POSIX 家目录事实（表值 HOME），是上面那个 `??` 的第二顺位。'
         + 'HOME 与别的进程共用同一个名字，所以在 foreignEnv 里逐个登记归属（操作系统 POSIX），不靠前缀猜。',

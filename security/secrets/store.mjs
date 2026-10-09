@@ -301,6 +301,27 @@ export function fileBackend({
 
   /** 在锁的保护下跑 `fn`。拿不到锁**就抛**，绝不无锁照写。 */
   const withWriteLock = (fn) => {
+    // ★★ 先把库文件所在目录建出来，**再**抢锁。这是本机实测出来的次序缺陷：
+    //
+    //   锁文件与库文件**同级**（同卷才能保证 `wx` 的原子性），于是目录不存在时
+    //   `wx` 拿到的是 `ENOENT` —— 而 `ENOENT` 既不是 `EEXIST` 也不是 `EPERM`，
+    //   所以它被具名抛成 `SECRET_STORE_LOCK_FAILED`（`cause: 'ENOENT'`）。
+    //   而那个目录本来由 `writeAll` 里的 `mkdirSync` 建 —— 但它跑在**拿到锁之后**。
+    //
+    //   后果很具体：**全新产品上的第一把钥匙永远存不进去**。
+    //   实测形态（2026-10-09）：`%LOCALAPPDATA%\Legion` 里已经有 data/ 与 cache/，
+    //   唯独没有 secrets/（因为还没成功写过一次）；用户点"保存"得到
+    //   「无法在密钥库旁创建写锁文件：检查目录是否可写、磁盘是否已满」——
+    //   而磁盘是空的、目录是可写的，真正的原因是**那个目录还不存在**。
+    //
+    //   > 一个"第一次写失败、第二次成功"的存储，
+    //   > 与一个"从来没有第一次"的存储，在用户那边是同一个东西。
+    try {
+      io.mkdirSync(dirname(file), { recursive: true })
+    } catch (e) {
+      // 建不出来是真的建不出来（权限/磁盘）⇒ 具名抛，不退化。
+      throw new SecretStoreError('SECRET_STORE_LOCK_FAILED', { cause: e?.code ?? 'mkdir-error' })
+    }
     const deadline = nowMs() + lockTimeoutMs
     for (;;) {
       if (tryAcquireLock()) break

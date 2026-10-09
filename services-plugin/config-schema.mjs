@@ -1,4 +1,4 @@
-﻿// config-schema.mjs — 服务托管插件（services-plugin/）的配置声明（P3-4 插件配置面统一）
+// config-schema.mjs — 服务托管插件（services-plugin/）的配置声明（P3-4 插件配置面统一）
 //
 // 它与其他进程的关系是**反向**的：它不监听端口、不读业务配置，而是替三个进程决定「启动时拿到什么环境」。
 // 因此本 schema 除了声明它**读取**的 env，还声明它**注入**的 env/CLI（`injects`）——
@@ -52,11 +52,17 @@ export const SCHEMA = defineSchema({
       doc: 'P4 周期收敛的间隔（毫秒）；**显式给 0 表示只要启动时收敛一次**，不排周期。'
         + '注意这里 0 是有效值（与 num() 的"0 视为没给"不同）：把 0 当成"没给"会让"我想关掉周期"静默变成"用默认周期"',
     },
+    {
+      key: 'workspaceDir', env: 'LEGION_WORKSPACE_DIR', type: 'path', default: '',
+      doc: '工作区（用户授权的项目目录）：**只透传**给 team-hub，不编默认值（规范 §6.11 明确工作区不提供默认值）。'
+        + '它是 team-hub 解析产品目录布局的一部分；安装目录（LEGION_INSTALL_DIR）则由本插件按 legionDir 直接注入',
+    },
   ],
   // 本文件自己会被扫描（dirs 含整个 services-plugin/）：injects 里的 `TEAM_HUB_PORT` /
-  // `DSH_WORKBENCH_PORT` / `DSH_MODELS_BASE_URL` 是**注入目标的变量名**，不是本进程的读取点，
-  // 故显式排除，否则 `scan --check` 会要求把它们当成读取点登记（P3-4 实测：这正是「未处理字面量」的两项）。
-  nonEnvLiterals: ['TEAM_HUB_PORT', 'DSH_WORKBENCH_PORT', 'DSH_MODELS_BASE_URL'],
+  // `DSH_WORKBENCH_PORT` / `DSH_MODELS_BASE_URL` / `LEGION_INSTALL_DIR` 是**注入目标的变量名**
+  // （给 team-hub 用的），不是本进程的读取点，故显式排除，否则 `scan --check` 会要求把它们
+  // 当成读取点登记（P3-4 实测：这正是「未处理字面量」的两项）。
+  nonEnvLiterals: ['TEAM_HUB_PORT', 'DSH_WORKBENCH_PORT', 'DSH_MODELS_BASE_URL', 'LEGION_INSTALL_DIR'],
   injects: [
     {
       target: 'team-hub', env: 'TEAM_HUB_PORT', via: 'env', value: String(DEFAULT_TEAM_HUB_PORT), from: 'teamHubPort',

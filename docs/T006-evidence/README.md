@@ -1,3 +1,8 @@
+<!-- evidence-banner:start -->
+> ⚠️ **历史快照 —— 不作为当前状态依据。** 本目录文档反映 **2026-10-06**（commit `aae4542a`） 的基线，其中的测试数量、端口、命令与结论只代表当时状态。
+> 当前状态请看：[docs/STATUS.md](../STATUS.md)（状态与测试基线）· [README.md](../../README.md)（总览）· [docs/DEPLOY.md](../DEPLOY.md)（部署）· 最新 CI 证据 `.ci/<run>/summary.json`。
+<!-- evidence-banner:end -->
+
 # T-006 验收复跑证据（coder）
 
 > 角色：编码实现（coder）｜任务：T-006（隔离 worktree `w/T-006`，基线 `fcbfaf18`）

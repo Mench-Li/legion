@@ -175,44 +175,10 @@ describe('官网：下载区诚实地缺席', () => {
     assert.match(explicit.body, /https:\/\/cdn\.test\/a\.exe/, '显式配置那条路照旧')
   })
 
-  test('★ 未签名说明只在有链接时出现（对着不会出现的警告做说明，与漏掉真会出现的警告同形）', async (t) => {
-    const withDl = await call(createSiteRoutes({ root: makeSite(t), readRelease: FIXED }), { path: '/' })
-    assert.match(withDl.body, /Smart App Control/)
-    assert.match(withDl.body, /尚未做代码签名/)
-
-    const without = await call(createSiteRoutes({ root: makeSite(t), readRelease: () => ({ url: '' }) }), { path: '/' })
-    assert.doesNotMatch(without.body, /Smart App Control/)
-  })
-
-  test('★ 清单里没有 sha256 ⇒ 那一行**整行不出现**（空的校验值比没有更坏）', async (t) => {
-    // 一个显示成空的 sha256 看起来像"校验过了"。所以：拿不到就一行都不给。
-    const routes = createSiteRoutes({ root: makeSite(t), readRelease: () => ({ url: '/legion/releases/r-1/x.exe', sha256: '' }) })
-    const r = await call(routes, { path: '/' })
-    assert.doesNotMatch(r.body, /sha256/)
-    assert.doesNotMatch(r.body, /class="sha/)
-    assert.doesNotMatch(r.body, /data-copy/)
-  })
-
-  test('★ 畸形 sha256 也当没有：不是 64 位十六进制就不显示', async (t) => {
-    for (const bad of ['abc', 'zz'.repeat(32), 'ab'.repeat(31), '', 'undefined']) {
-      const routes = createSiteRoutes({ root: makeSite(t), readRelease: () => ({ url: '/legion/releases/r-1/x.exe', sha256: bad }) })
-      const r = await call(routes, { path: '/' })
-      assert.doesNotMatch(r.body, /class="sha-value"/, `坏值 ${JSON.stringify(bad)} 不该显示`)
-    }
-  })
-
-  test('★ 合法 sha256 就显示，并带可复制的数据属性', async (t) => {
-    const sha = 'b8be07da8fcb0dc6dff3561328ce8385a9193256b8d42ef883d60dce7b0ffee3'
-    const routes = createSiteRoutes({ root: makeSite(t), readRelease: () => ({ url: '/legion/releases/r-1/x.exe', sha256: sha.toUpperCase() }) })
-    const r = await call(routes, { path: '/' })
-    assert.match(r.body, new RegExp(`class="sha-value">${sha}<`), '应显示（且小写归一）')
-    assert.match(r.body, new RegExp(`data-copy="${sha}"`))
-  })
-
   test('★ 下载卡片里**没有**「本次更新」那一块（业主看过之后要求撤掉）', async (t) => {
     // 那张卡片已经承载了下载、版本/体积/日期、未签名说明与摘要校验。
     // 再挂四段更新条目就不是"一张卡片"而是一页文档了 —— 超过上限之后
-    // **每一段都变便宜了**，包括那段真正要紧的"Windows 会拦你，点保留"。
+    // **每一段都变便宜了**。
     const routes = createSiteRoutes({
       root: makeSite(t),
       readRelease: () => ({ url: '/legion/releases/r-1/x.exe', changes: ['把**正文**送到电脑端'], changesEn: [] }),
@@ -463,26 +429,27 @@ describe('官网：真实模板不漂移', () => {
     }
   })
 
-  test('★ `/demo` 发演示页；它没有动态块，所以不该去扫发布目录', async (t) => {
+  test('★ `/demo` 已**收起**：路由不认它，请求落到通用 404', async (t) => {
+    // 业主 2026-10-09：先把产品演示注释掉。模板 `site/demo/index.html` **没有删**，
+    // 恢复就是把 `routes` 表与 `dispatch` 里那两处注释解开。这条用例钉住"现在确实关着"。
     const root = makeSite(t)
     mkdirSync(join(root, 'demo'), { recursive: true })
-    writeFileSync(join(root, 'demo', 'index.html'), '<!doctype html><html lang="zh-CN"><head><link rel="stylesheet" href="/site/assets/site.css"></head><body>示例数据 · 静态快照</body></html>')
-    let scanned = 0
-    const routes = createSiteRoutes({ root, readRelease: () => { scanned++; return {} } })
-    const r = await call(routes, { path: '/demo' })
-    assert.equal(r.status, 200)
-    assert.match(r.headers['content-type'], /text\/html/)
-    assert.match(r.body, /示例数据/)
-    assert.match(r.body, /site\.css\?v=/, '演示页也要带版本串')
-    assert.equal(scanned, 0, '静态演示页不该触发发布目录扫描')
-    // HEAD 与 /demo/ 也要通
-    assert.equal((await call(routes, { method: 'HEAD', path: '/demo' })).status, 200)
-    assert.equal((await call(routes, { path: '/demo/' })).status, 200)
+    writeFileSync(join(root, 'demo', 'index.html'), '<!doctype html><html lang="zh-CN"><body>产品演示</body></html>')
+    const routes = createSiteRoutes({ root, readRelease: FIXED })
+    assert.equal((await call(routes, { path: '/demo' })).handled, false, '收起时不该认领 /demo')
+    assert.equal((await call(routes, { path: '/demo/' })).handled, false)
   })
 
-  test('`/demo` 的模板不存在时返回 false（与落地页同一套让路逻辑）', async (t) => {
-    const routes = createSiteRoutes({ root: makeSite(t), readRelease: FIXED })
-    assert.equal((await call(routes, { path: '/demo' })).handled, false)
+  test('★ 落地页里不许再有指向 `/demo` 的链接（收起要收干净）', () => {
+    // 一条"指向已被注释掉的路由"的链接，与一条 404 的死链是同一个东西 ——
+    // 而且它比死链更坏：它在**导航栏**上。
+    for (const p of ['index.html', join('en', 'index.html')]) {
+      const html = read(p)
+      // 注释掉的残留是允许的（业主就是要"注释掉"），但**活着的**链接不许有。
+      const live = html.replace(/<!--[\s\S]*?-->/g, '')
+      assert.equal(live.includes('href="/demo"'), false, `${p} 里还有活的 /demo 链接`)
+      assert.equal(live.includes('产品演示'), false, `${p} 里还有"产品演示"入口`)
+    }
   })
 
   test('★ 演示页必须**标明是示例数据**（一个看起来像真产品的演示会骗人）', () => {
@@ -527,25 +494,31 @@ describe('官网：真实模板不漂移', () => {
     }
   })
 
-  test('★ 数字人一节：四个状态、两页都有，且四色与 `Employee3D.tsx` 对得上', () => {
-    // 这一节的**主张**是"状态一眼可见"，所以：
+  test('★ 数字人一节：用**真实 3D 场景**，四个状态色与 `Employee3D.tsx` 对得上', () => {
+    // 业主 2026-10-09：这一节应当取 3D 场景，更直观。所以视觉是**真实截图**
+    // （`team-scene.png`，等距办公室 + 八个岗位各有其位），四个状态改成一条图例。
     //   ① 四个状态一个都不能少（少一个就不是体系了）；
     //   ② 四个色值必须与工作台 3D 场景的实现一致 —— 它们是与产品界面一一对应的
     //      标识，抄错了就与实物对不上（`workbench/src/components/Employee3D.tsx` 的 STATUS）。
     const css = readFileSync(fileURLToPath(new URL('../site/assets/site.css', import.meta.url)), 'utf8')
     for (const key of ['idle', 'busy', 'review', 'blocked']) {
-      assert.match(css, new RegExp(`\\.s-${key}\\s*\\{`), `CSS 里缺 .s-${key}`)
+      assert.match(css, new RegExp(`\\.l-${key}\\s*\\{`), `CSS 里缺 .l-${key}`)
     }
     // 深色主题下必须回到实现里的原值（浅色另取可读的同色相值）。
     for (const [key, hex] of [['busy', '#40ffa0'], ['review', '#ffd54a'], ['blocked', '#ff5c5c'], ['idle', '#5b8cff']]) {
-      assert.match(css, new RegExp(`html\\[data-theme=dark\\] \\.s-${key} \\{ --state-color: ${hex}\\b`), `深色下 .s-${key} 应为 ${hex}`)
+      assert.match(css, new RegExp(`html\\[data-theme=dark\\] \\.legend \\.l-${key} \\{ --state-color: ${hex}\\b`), `深色下 .l-${key} 应为 ${hex}`)
     }
     for (const p of ['index.html', join('en', 'index.html')]) {
       const html = read(p)
       assert.match(html, /id="crew"/, `${p} 缺数字人一节`)
-      assert.equal((html.match(/class="state s-/g) || []).length, 4, `${p} 应有四个状态卡`)
-      assert.match(html, /2D 简化示意|simplified 2D rendering/, `${p} 必须写明是示意的、不是场景截图`)
+      assert.equal((html.match(/class="l-(idle|busy|review|blocked)"/g) || []).length, 4, `${p} 应有四条状态图例`)
+      assert.match(html, /shots\/team-scene\.png/, `${p} 这一节要用真实 3D 场景图`)
+      assert.doesNotMatch(html, /class="state s-/, `${p} 不该再有自绘的 2D 形象`)
     }
+    // 场景图必须真的在仓库里（引用了不存在的文件 = 一张破图）。
+    const img = readFileSync(fileURLToPath(new URL('../site/assets/shots/team-scene.png', import.meta.url)))
+    assert.ok(img.length > 50000, '场景图应当是真实截图，不是占位')
+    assert.equal(img.readUInt32BE(16), 1764, '场景图宽度')
   })
 
   test('★ 同一张截图不许出现在两处（重复会造成审美疲劳）', () => {
@@ -570,6 +543,44 @@ describe('官网：真实模板不漂移', () => {
     assert.match(html, />产品演示</)
     assert.doesNotMatch(html, /在线试用/)
     assert.match(html, /PRODUCT DEMO/)
+  })
+
+  test('★ 部署卡：Web 一路指向仓库，Windows 一路只有徽标 + 一个按钮', async (t) => {
+    // 业主 2026-10-09 定的形态：
+    //   · Web：**本地启动**（不是托管在 hub 上），并从这里**直达仓库**；
+    //   · Windows：打一个「内部验证 · 未签名」徽标就够了，不再展开三条处理说明、
+    //     不再显示 sha256 —— 那些字比它们解决的问题更长。
+    const routes = createSiteRoutes({ root: makeSite(t), readRelease: FIXED })
+    const r = await call(routes, { path: '/' })
+
+    // Web 那一路：指向真实仓库，且开在新窗口时不留 opener 隐患。
+    assert.match(r.body, /href="https:\/\/github\.com\/Mench-Li\/legion"/, 'Web 卡必须直达仓库')
+    assert.match(r.body, /rel="noopener"/, '外链要带 rel=noopener')
+
+    // Windows 那一路：卡片里不再有 ①② 说明、sha256 与更新条目。
+    // （徽标是**模板**里的静态内容，由 `真实模板不漂移` 那条守。）
+    assert.doesNotMatch(r.body, /Smart App Control/, '三条处理说明已撤')
+    assert.doesNotMatch(r.body, /sha256/, '摘要已撤')
+    assert.doesNotMatch(r.body, /本次更新/, '更新条目已撤')
+    // 下载链接出现**两处**是设计要的：首屏第一个动作 + 部署卡里那一个按钮。
+    // 多出来就是有人又加了一个入口。
+    assert.equal((r.body.match(/Legion-Setup-win-x64\.exe/g) || []).length, 2, '下载链接只该有两处（首屏 + 部署卡）')
+
+    const en = await call(routes, { path: '/en' })
+    assert.match(en.body, /href="https:\/\/github\.com\/Mench-Li\/legion"/)
+    assert.doesNotMatch(en.body, /sha256/)
+  })
+
+  test('★ 部署卡：Windows 一路只有徽标——签名状态由它承担，不再展开三条处理说明', () => {
+    // 业主 2026-10-09：那些字比它们解决的问题更长。徽标是**模板**里的静态内容。
+    for (const [p, badge] of [['index.html', /内部验证 · 未签名/], [join('en', 'index.html'), /Internal build · unsigned/]]) {
+      const html = read(p)
+      assert.match(html, /class="label human"/, `${p} 的徽标要保留`)
+      assert.match(html, badge, `${p} 的徽标文案`)
+      // 卡片里不该再有那三条处理说明或摘要。
+      assert.doesNotMatch(html, /Smart App Control/, `${p} 不该再有 Smart App Control 说明`)
+      assert.doesNotMatch(html, /未知发布者/, `${p} 不该再有"未知发布者"说明`)
+    }
   })
 
   test('★ 产品窗口与文字左右对齐（不许突破文字列）', () => {

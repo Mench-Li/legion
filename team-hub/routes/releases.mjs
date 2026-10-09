@@ -118,20 +118,6 @@ export function readReleaseManifest(root, releaseId) {
   } catch { return null }
 }
 
-/**
- * 清单里的 sha256：只接受 64 位十六进制，其余（含缺失）一律视为没有。
- *
- * 注：这里**曾经**还有一个 `manifestChanges()`，取清单里的 `changes[]` 给官网的
- * 「本次更新」用。2026-10-08 业主看过官网后要求撤掉那一块 —— 下载卡片已经承载了
- * 下载、版本/体积/日期、未签名说明与摘要校验，再挂四段更新条目就不是"一张卡片"
- * 而是一页文档了。清单里的 `changes` 仍在（那是发布端写的），要再显示就是把那个
- * 函数加回来的事；但没人读的解析函数留着就是死代码，所以删掉。
- */
-export function manifestSha256(manifest) {
-  const v = manifest?.artifacts?.installer?.sha256
-  return typeof v === 'string' && /^[0-9a-f]{64}$/i.test(v) ? v.toLowerCase() : ''
-}
-
 
 /**
  * 造发布目录路由族。

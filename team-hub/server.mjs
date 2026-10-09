@@ -7686,7 +7686,7 @@ function routeHarnessForTask(input) {
 import { createIdentityRoutes } from './routes/identity.mjs'
 import { createMobileRoutes } from './routes/mobile.mjs'
 import { createPortalRoutes } from './routes/portal.mjs'
-import { createReleaseRoutes, latestInstaller, manifestSha256, readReleaseManifest } from './routes/releases.mjs'
+import { createReleaseRoutes, latestInstaller, readReleaseManifest } from './routes/releases.mjs'
 import { createSiteRoutes } from './routes/site.mjs'
 import { createUserStore } from './user-store.mjs'
 import { createDeviceStore } from './device-store.mjs'
@@ -7965,9 +7965,9 @@ if (REMOTE_AGENT_ENABLED) {
     if (found === null) {
       return { url: '', sizeBytes: null, at: null, version: desktopVersion, sha256: '' }
     }
-    // 清单里带着**这份发布自己**说的版本与 sha256。它随安装包一起走，
+    // 清单里带着**这份发布自己**说的版本。它随安装包一起走，
     // 所以比运营者在环境变量里填的版本更权威——两者不一致时以清单为准，
-    // 配置只作为清单缺席时的兜底。读不到清单就少显示两行，不编。
+    // 配置只作为清单缺席时的兜底。读不到清单就少显示一行，不编。
     const manifest = readReleaseManifest(releasesDir, found.releaseId)
     const manifestVersion = typeof manifest?.productVersion === 'string' ? manifest.productVersion : ''
     return {
@@ -7975,7 +7975,6 @@ if (REMOTE_AGENT_ENABLED) {
       sizeBytes: found.sizeBytes,
       at: found.mtimeMs,
       version: manifestVersion.length > 0 ? manifestVersion : desktopVersion,
-      sha256: manifestSha256(manifest),
     }
   }
   router.families.unshift(createPortalRoutes({

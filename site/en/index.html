@@ -35,7 +35,9 @@
     <a href="#workflow">Talking to agents</a>
     <a href="#crew">The crew</a>
     <a href="#delivery">Delivery &amp; acceptance</a>
+    <!-- Product demo hidden for now (owner: comment it out). To restore, uncomment this line and re-enable the /demo route in site.mjs.
     <a href="/demo">Demo</a>
+    -->
   </nav>
   <div class="nav-end">
     <span class="lang"><a href="/" hreflang="zh-CN" lang="zh-CN">中</a><a href="/en" aria-current="page">EN</a></span>
@@ -73,10 +75,8 @@
     </button>
     <div class="shot-bottom">
       <span id="shot-description">One goal, eight stages. Every step has a task and an owning role.</span>
-      <span class="mono">CAPTURED FROM LOCAL WORKSPACE</span>
     </div>
   </div>
-  <p class="mock-caption" id="shot-caption">Real product screenshot · goal detail, partial crop · eight staged tasks complete</p>
 
   <div class="promise"><span><i>✓</i>Goal-driven execution</span><span><i>✓</i>You decide the key moments</span><span><i>✓</i>Process and results on record</span></div>
 </section>
@@ -137,7 +137,6 @@
     <span><b>02</b> Read past exchanges and task messages</span>
     <span><b>03</b> Ask, add requirements, or open a task</span>
   </div>
-  <p class="mock-caption">An existing conversation from a local environment · historical messages and UI state kept as-is · the screenshot does not mean the agent is currently executing</p>
 </section>
 
 <!-- ── Delivery &amp; acceptance ───────────────────────────────────────────── -->
@@ -151,58 +150,16 @@
     <p>In the 3D scene each crew member has a place and a posture.<br>Who is busy, who is waiting on you, who is stuck — no click needed.</p>
   </div>
 
-  <div class="states">
-    <div class="state s-idle">
-      <!-- Idle: arms hanging at the sides, feet together -->
-      <svg viewBox="0 0 52 70" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">
-        <circle cx="26" cy="10" r="6.5" />
-        <path d="M26 17 V42" />
-        <path d="M26 24 L14 40" /><path d="M26 24 L38 40" />
-        <path d="M26 42 L20 60" /><path d="M26 42 L32 60" />
-      </svg>
-      <span class="lbl"><i></i>Idle</span>
-      <span class="key">idle</span>
-      <p>Nothing in hand. Arms down, slow breathing.</p>
-    </div>
-    <div class="state s-busy">
-      <!-- Working: hands up in front (forearms folded) -->
-      <svg viewBox="0 0 52 70" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">
-        <circle cx="26" cy="10" r="6.5" />
-        <path d="M26 17 V42" />
-        <path d="M26 24 L15 31 L21 40" /><path d="M26 24 L37 31 L31 40" />
-        <path d="M26 42 L20 60" /><path d="M26 42 L32 60" />
-      </svg>
-      <span class="lbl"><i></i>Working</span>
-      <span class="key">busy</span>
-      <p>On the job. Hands up in front — and it <strong>walks over before it starts</strong>.</p>
-    </div>
-    <div class="state s-review">
-      <!-- Awaiting: holding a result up in front of itself -->
-      <svg viewBox="0 0 52 70" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">
-        <circle cx="26" cy="10" r="6.5" />
-        <path d="M26 17 V42" />
-        <path d="M26 26 L16 34" /><path d="M26 26 L36 34" />
-        <path d="M16 34 H36" />
-        <path d="M26 42 L20 60" /><path d="M26 42 L32 60" />
-      </svg>
-      <span class="lbl"><i></i>Awaiting acceptance</span>
-      <span class="key">review</span>
-      <p>Done, holding the result, waiting on your call. It will not move on by itself.</p>
-    </div>
-    <div class="state s-blocked">
-      <!-- Blocked: right arm raised — the only "hand up" posture -->
-      <svg viewBox="0 0 52 70" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">
-        <circle cx="26" cy="10" r="6.5" />
-        <path d="M26 17 V42" />
-        <path d="M26 24 L15 38" /><path d="M26 24 L37 8" />
-        <path d="M26 42 L20 60" /><path d="M26 42 L32 60" />
-      </svg>
-      <span class="lbl"><i></i>Blocked</span>
-      <span class="key">blocked</span>
-      <p>Stuck, with its <strong>right arm raised</strong>. The one state that needs you.</p>
-    </div>
-  </div>
-  <p class="mock-caption">State colours and postures taken from the workbench 3D scene · figures are a simplified 2D rendering, not a scene screenshot</p>
+  <figure class="scene">
+    <img src="/site/assets/shots/team-scene.png" width="1764" height="1422" alt="The workbench team scene: an isometric office with the requirements analyst, solution researcher, task breaker, test designer, coder, reviewer, test runner and DevOps each at their own desk.">
+  </figure>
+
+  <ul class="legend" role="list">
+    <li class="l-idle"><i></i><b>Idle</b><span>Arms down, slow breathing</span></li>
+    <li class="l-busy"><i></i><b>Working</b><span>Hands up in front; it walks over before it starts</span></li>
+    <li class="l-review"><i></i><b>Awaiting acceptance</b><span>Holding the result, waiting on your call</span></li>
+    <li class="l-blocked"><i></i><b>Blocked</b><span>Right arm raised — the one state that needs you</span></li>
+  </ul>
 </section>
 
 <section class="artifacts" id="delivery">
@@ -236,11 +193,11 @@
   <div class="deploy-grid">
     <article class="deploy-item">
       <h3>Local web workbench <span class="label">Self-hosted entry</span></h3>
-      <p>Connect projects and workspaces, and manage goals, tasks and delivery in the browser. Running it needs an environment prepared per the deployment docs, with the execution service and model configuration in place.</p>
+      <p>Started locally from the repository, used in a browser — it is simply a web client, not a separately hosted service.</p>
       <!-- legion:hub-line -->
     </article>
     <article class="deploy-item">
-      <h3>Windows desktop app <span class="label human">Internal validation</span></h3>
+      <h3>Windows desktop app <span class="label human">Internal build · unsigned</span></h3>
       <!-- legion:download -->
     </article>
   </div>
@@ -298,13 +255,11 @@ var shots = {
     src: '/site/assets/shots/goal-detail.png', w: 2160, h: 734,
     alt: 'Local Legion goal detail: one goal split into eight staged tasks for requirements, research, breakdown, test design, coding, review, testing and deployment, all 8/8 complete.',
     description: 'One goal, eight stages. Every step has a task and an owning role.',
-    caption: 'Real product screenshot · goal detail, partial crop · eight staged tasks complete'
   },
   tasks: {
     src: '/site/assets/shots/tasks.png', w: 2880, h: 1800,
     alt: 'Local Legion task centre: task lanes by status, role filters and task cards.',
     description: 'Tasks grouped by status, filterable by role and executor.',
-    caption: 'Real product screenshot · task centre · actual task counts and UI state kept as-is'
   }
 }
 var tabButtons = document.querySelectorAll('[data-shot]')
@@ -316,7 +271,6 @@ Array.prototype.forEach.call(tabButtons, function (button) {
     img.src = shot.src; img.alt = shot.alt; img.width = shot.w; img.height = shot.h
     document.querySelector('.hero-shot').setAttribute('aria-label', 'Enlarge screenshot')
     document.getElementById('shot-description').textContent = shot.description
-    document.getElementById('shot-caption').textContent = shot.caption
   })
 })
 
@@ -333,19 +287,6 @@ Array.prototype.forEach.call(document.querySelectorAll('.shot-open'), function (
 document.getElementById('lightbox-close').addEventListener('click', function () { lightbox.close() })
 lightbox.addEventListener('click', function (e) { if (e.target === lightbox) lightbox.close() })
 
-// Copy the sha256. **Progressive enhancement**: without this the value is still plain selectable text.
-document.addEventListener('click', function (e) {
-  var b = e.target.closest && e.target.closest('.sha-copy')
-  if (!b) return
-  var text = b.getAttribute('data-copy') || ''
-  var done = b.getAttribute('data-copied') || 'OK'
-  if (!text || !navigator.clipboard) return
-  var prev = b.textContent
-  navigator.clipboard.writeText(text).then(function () {
-    b.setAttribute('data-done', '1'); b.textContent = done
-    setTimeout(function () { b.removeAttribute('data-done'); b.textContent = prev }, 1600)
-  }).catch(function () {})
-})
 </script>
 </body>
 </html>

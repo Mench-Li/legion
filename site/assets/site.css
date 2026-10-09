@@ -297,26 +297,8 @@ html[data-theme=dark] .hero:before { opacity: .6; }
 .dl-actions { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; margin-top: 16px; }
 .dl-actions .btn { min-height: 40px; padding: 0 18px; font-size: 13px; }
 .dl-actions .btn[aria-disabled=true] { background: var(--soft); color: var(--muted); border-color: var(--line); cursor: not-allowed; }
-.dl-note { font-size: 11px; color: var(--muted); margin-top: 13px; line-height: 1.8; }
-.dl-note b { color: var(--ink); font-weight: 550; }
-.dl-note .warn { color: var(--orange); }
 .dl-meta { font: 10px var(--mono); color: var(--muted); margin-top: 12px; display: flex; flex-wrap: wrap; gap: 5px 13px; }
 .dl-meta .sep { color: var(--line); }
-
-.sha { margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--line); display: flex; flex-wrap: wrap; align-items: center; gap: 9px; }
-.sha-label { font: 10px var(--mono); color: var(--muted); letter-spacing: .8px; flex: none; }
-.sha-value {
-  font: 10px/1.6 var(--mono); padding: 4px 8px; border-radius: 4px;
-  background: var(--soft); border: 1px solid var(--line); color: var(--accent);
-  word-break: break-all; flex: 1 1 100%; order: 3;
-}
-@media (min-width: 760px) { .sha-value { flex: 1 1 auto; order: 0; } }
-.sha-copy {
-  font: 10px var(--mono); padding: 5px 11px; border-radius: 4px; flex: none;
-  background: transparent; border: 1px solid var(--line); color: var(--muted);
-}
-.sha-copy:hover { filter: none; border-color: var(--accent); color: var(--accent); }
-.sha-copy[data-done] { border-color: var(--orange); color: var(--orange); }
 
 .hub-line { margin-top: 16px; font-size: 11px; color: var(--muted); line-height: 1.9; }
 .hub-line a { color: var(--accent); }
@@ -552,32 +534,32 @@ html[data-theme=dark] .hero:after { opacity: .72; }
    图是 **2D 简化示意**，不是 3D 场景的截图 —— 所以图注里写明了。
    ══════════════════════════════════════════════════════════════════════════ */
 
-.states { display: grid; grid-template-columns: repeat(4, 1fr); gap: 14px; margin-top: 8px; }
-@media (max-width: 860px) { .states { grid-template-columns: repeat(2, 1fr); } }
-@media (max-width: 460px) { .states { grid-template-columns: 1fr; } }
-
-.state {
-  border: 1px solid var(--line); border-radius: 9px; background: var(--surface);
-  padding: 20px 18px 18px; display: flex; flex-direction: column; align-items: flex-start; gap: 12px;
+/* 3D 团队场景：**真实截图**（等距办公室 + 八个岗位各有其位），不是自绘图。
+   底衬用深色 —— 场景本身是深蓝底，放在暖白页面上需要一层"照片"的边框。 */
+.scene {
+  margin: 0; border: 1px solid var(--line); border-radius: 11px; overflow: hidden;
+  background: #0b1a24; box-shadow: var(--shadow);
 }
-/* 形象本身按状态着色 —— 真实产品里数字人就是按状态上色的（`STATUS[mode]`），
-   只把颜色放在标签的小圆点上会让"状态一眼可见"变成一句空话：
-   四张图并排时，人形才是第一眼看到的东西。 */
-.state svg { width: 52px; height: 70px; display: block; color: var(--state-color); }
-.state .lbl { font-size: 14px; font-weight: 600; display: flex; align-items: center; gap: 8px; color: var(--ink); }
-.state .lbl i { width: 9px; height: 9px; border-radius: 50%; flex: none; background: var(--state-color); }
-.state p { font-size: 12.5px; color: var(--muted); margin: 0; }
-.state .key { font: 10px var(--mono); color: var(--muted); letter-spacing: .5px; }
+.scene img { display: block; width: 100%; height: auto; }
 
-.state { --state-color: var(--muted); }
-.s-idle { --state-color: #5b8cff; }
-.s-busy { --state-color: #22c55e; }
-.s-review { --state-color: #e0a80c; }
-.s-blocked { --state-color: #e5484d; }
+/* 四个状态的图例：照产品里场景底部那一条做成一条细带。
+   色值与 `Employee3D.tsx` 的 STATUS 一致（浅色主题用同色相压暗的可读值）。 */
+.legend {
+  list-style: none; margin: 14px 0 0; padding: 0;
+  display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px;
+}
+@media (max-width: 860px) { .legend { grid-template-columns: repeat(2, 1fr); } }
+@media (max-width: 460px) { .legend { grid-template-columns: 1fr; } }
+.legend li { display: grid; grid-template-columns: auto 1fr; gap: 4px 9px; align-items: center; }
+.legend i { width: 9px; height: 9px; border-radius: 50%; background: var(--state-color); grid-row: 1 / 3; }
+.legend b { font-size: 13.5px; font-weight: 600; }
+.legend span { font-size: 12px; color: var(--muted); grid-column: 2; }
 
-/* 浅色底上，`#40ffa0` 这类荧光绿读不出来；所以浅色主题下用同色相但压暗一档的值，
-   深色主题下才用 `Employee3D.tsx` 里的原值。**色相不变**，改的只是明度。 */
-html[data-theme=dark] .s-busy { --state-color: #40ffa0; }
-html[data-theme=dark] .s-review { --state-color: #ffd54a; }
-html[data-theme=dark] .s-blocked { --state-color: #ff5c5c; }
-html[data-theme=dark] .s-idle { --state-color: #5b8cff; }
+.legend .l-idle { --state-color: #5b8cff; }
+.legend .l-busy { --state-color: #22c55e; }
+.legend .l-review { --state-color: #e0a80c; }
+.legend .l-blocked { --state-color: #e5484d; }
+html[data-theme=dark] .legend .l-busy { --state-color: #40ffa0; }
+html[data-theme=dark] .legend .l-review { --state-color: #ffd54a; }
+html[data-theme=dark] .legend .l-blocked { --state-color: #ff5c5c; }
+html[data-theme=dark] .legend .l-idle { --state-color: #5b8cff; }

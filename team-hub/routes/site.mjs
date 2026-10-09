@@ -68,6 +68,16 @@ export const MARKER_HUB = '<!-- legion:hub-line -->'
 
 const MOBILE_PATH_DEFAULT = '/mobile/'
 
+/**
+ * 源码仓库地址。**业主 2026-10-09 明确要求**从这里直达 —— 我实测过它是公开的
+ * （匿名访问返回 200；私有库匿名会拿到 404，所以 200 就说明是公开的），
+ * 页面标题为 `GitHub - Mench-Li/legion`。
+ *
+ * 放在这里而不是散在模板里，是为了这条链接**只有一处**：将来换仓库或撤回，
+ * 改一行即可，不会漏掉某一页。
+ */
+const REPO_URL = 'https://github.com/Mench-Li/legion'
+
 /** HTML 转义。本族所有插值都走它——没有例外，即使当前插值都来自配置。 */
 function esc(value) {
   return String(value ?? '')
@@ -81,11 +91,6 @@ function formatSize(bytes) {
   return `${(bytes / 1048576).toFixed(1)} MB`
 }
 
-/** sha256 只认 64 位十六进制；其余（含缺失、含 `undefined`）一律视为"没有"。 */
-function normalizeSha(value) {
-  const s = String(value ?? '').trim().toLowerCase()
-  return /^[0-9a-f]{64}$/.test(s) ? s : ''
-}
 
 /** mtime → `2026-10-06`。 */
 function formatDate(ms) {
@@ -104,58 +109,38 @@ const COPY = Object.freeze({
     cta: '下载电脑版',
     ctaSecond: '查看协作界面',
     explore: '探索 Legion',
-    // 首屏只放**一句**。完整的三条处理方式在下方「Windows 桌面端」卡片里 ——
     // 设计稿的首屏节奏是「两个动作 + 一行小字」，塞进一整段会把节奏压垮。
-    ctaWarnShort: '安装包未做代码签名，Windows 会拦一下，处理方式见下方。',
-    deployWin: '桌面与 Web 共享后台和数据。当前为内部验证阶段：安装包未做代码签名，Windows 会拦一下 —— 那是预期的，不是包坏了。',
+    // 首屏一句。**自包含**，不再写「见下方」——详细处理方式已按业主意见撤掉，
+    // 留着那句就是一个指向空处的引用。签名状态由卡片上的徽标承担。
+    ctaWarnShort: '当前为内部验证版：安装包未做代码签名。',
     deployWinEmpty: '桌面端安装包还没上传到这台 Hub；先向管理员索取。',
     notYet: '电脑版尚未发布',
-    sha: '安装包 sha256',
-    shaHint: '取自随包发布的清单；下载后可自行比对，确认拿到的是这一份。',
-    copy: '复制',
-    copied: '已复制',
     mobile: '打开手机端',
     regOpen: '这台 Hub 开放注册，打开手机端即可注册。',
     regInvite: '这台 Hub 开放注册（需要邀请码），打开手机端即可注册。',
     regClosed: '这台 Hub 未开放自助注册，请向管理员索取邀请码。',
+    webRepo: '在 GitHub 上查看源码',
     trial: '产品演示（静态样本）',
     trialNote: '一个目标拆出的八个阶段任务，可点开看描述、验收标准与证据。示例数据，不连实例。',
     // ★ 未签名构建专有的说明。换签名构建时**这段必须跟着改**，否则它会变成
     //   "照它说的做、然后发现对不上"，而那种文案教会人忽略这一块。
-    unsigned:
-      '<p class="dl-note"><b>尚未做代码签名</b>（那要一张证书）。所以：<br />' +
-      '① 浏览器下载时若提示「不常见」，点<b>保留</b>；<br />' +
-      '② 双击运行时出现「未知发布者」，点<b>更多信息 → 仍要运行</b>。<br />' +
-      '<span class="warn">⚠ 例外</span>：若系统开着 <b>Smart App Control</b>（Windows 11 全新安装默认开），' +
-      '它会<b>直接阻止且不给「仍要运行」</b>。关掉它可以装，但关掉之后要重装系统才能再打开 —— ' +
-      '这台机器请改用别的机器下载。</p>',
   },
   en: {
     lang: 'en',
     cta: 'Download for Windows',
     ctaSecond: 'See the interface',
     explore: 'Explore Legion',
-    ctaWarnShort: 'The installer is not code-signed, so Windows will push back — details below.',
+    ctaWarnShort: 'Internal build: the installer is not code-signed.',
     deployWin: 'Desktop and web share one backend and one set of data. It is at internal-validation stage: the installer is not code-signed, so Windows will push back — that is expected, not a broken download.',
     deployWinEmpty: 'No desktop installer has been uploaded to this Hub yet; ask the administrator.',
     notYet: 'Desktop build not yet published',
-    sha: 'Installer sha256',
-    shaHint: 'Taken from the manifest published alongside the build; compare it after downloading to confirm you got this exact file.',
-    copy: 'Copy',
-    copied: 'Copied',
     mobile: 'Open the mobile app',
     regOpen: 'This Hub is open for sign-up — open the mobile app to register.',
     regInvite: 'This Hub is open for sign-up (invite code required) — open the mobile app to register.',
     regClosed: 'This Hub does not allow self sign-up; ask the administrator for an invite code.',
+    webRepo: 'View the source on GitHub',
     trial: 'Product demo (static sample)',
     trialNote: 'One goal split into eight staged tasks — open any of them to see its description, acceptance criteria and evidence. Sample data; not connected to an instance.',
-    unsigned:
-      '<p class="dl-note">The installer is <b>not code-signed</b> (that needs a certificate). So:<br />' +
-      '① If the browser says the file is “uncommon”, choose <b>Keep</b>;<br />' +
-      '② When you run it, Windows shows “Unknown publisher” — choose <b>More info → Run anyway</b>.<br />' +
-      '<span class="warn">⚠ Exception</span>: if <b>Smart App Control</b> is on (on by default in a fresh Windows 11 install) it will ' +
-      '<b>block the installer outright with no “Run anyway”</b>. Turning it off lets you install, but you must ' +
-      'reinstall Windows to turn it back on — use another machine instead.</p>',
   },
 })
 
@@ -168,14 +153,12 @@ const COPY = Object.freeze({
  * @param {string} [input.version]    版本号（可空 —— 空就不显示这一行，不猜）
  * @param {string} [input.size]       已格式化的体积（可空）
  * @param {string} [input.date]       发布日期（可空）
- * @param {string} [input.sha256]     安装包摘要。**只在是合法 64 位十六进制时显示**；
- *        空/畸形一律不显示那一行 —— 一个空的 sha256 比没有 sha256 更坏，它看起来像"校验过了"。
  * @param {string} [input.registration] 'closed' | 'invite' | 'open'
  * @param {string} [input.mobilePath]
  */
 export function renderLiveBlocks({
   lang = 'zh', downloadUrl = '', version = '', size = '', date = '',
-  sha256 = '', registration = 'closed', mobilePath = MOBILE_PATH_DEFAULT,
+  registration = 'closed', mobilePath = MOBILE_PATH_DEFAULT,
 } = {}) {
   const c = COPY[lang] ?? COPY.zh
   const has = String(downloadUrl).trim().length > 0
@@ -208,25 +191,6 @@ export function renderLiveBlocks({
   //   > 的守卫，在没人点过那个链接的时候，是同一个东西。
   //
   // 所以：站上不承诺任何版本历史/清单浏览。要加，得先有一个真的列表端点。
-  const sha = normalizeSha(sha256)
-  const shaBlock = sha.length > 0
-    ? `<div class="sha">
-        <span class="sha-label">${c.sha}</span>
-        <code class="sha-value">${sha}</code>
-        <button type="button" class="sha-copy" data-copy="${sha}" data-copied="${c.copied}">${c.copy}</button>
-      </div>
-      <p class="small">${c.shaHint}</p>`
-    : ''
-
-  // ★ 这里**曾经**渲染「本次更新」（清单里的 `changes[]`）。业主看过之后要求撤掉：
-  //   那张卡片已经承载了下载、版本/体积/日期、未签名说明与摘要校验，
-  //   再挂四段更新条目就不是"一张卡片"而是一页文档了。
-  //
-  //   > 一张卡片上能读的东西是有上限的；超过之后**每一段都变便宜了** ——
-  //   > 包括那段真正要紧的"Windows 会拦你，点保留"。
-  //
-  // 清单里的 `changes` 仍在（发布端写的），要再显示就是加回这一块的事；
-  // 但**不再解析**它 —— 没人读的字段留着就是死代码。
 
   // 元信息：有哪几项就写哪几项，一项都没有就不出现这一行。等宽，与稿子的标签同一路。
   const metaBits = ['Windows x64', version ? `v${esc(version)}` : '', esc(size), esc(date)].filter((s) => s.length > 0)
@@ -238,13 +202,10 @@ export function renderLiveBlocks({
   // 按钮只留下载那一个 —— "查看协作界面"在首屏已经是第二个动作，这张卡片里再放一次
   // 是重复；而这张卡片的主题就是"把这个包装到你机器上"。
   const download = has
-    ? `<p>${c.deployWin}</p>
-       <div class="dl-actions">
+    ? `<div class="dl-actions">
          <a class="btn primary" href="${href}">${c.cta}</a>
        </div>
-       ${meta}
-       ${c.unsigned}
-       ${shaBlock}`
+       ${meta}`
     : `<p>${c.deployWinEmpty}</p>
        <div class="dl-actions"><span class="btn" aria-disabled="true">${c.notYet}</span></div>`
 
@@ -253,10 +214,14 @@ export function renderLiveBlocks({
   const reg = registration === 'open' ? c.regOpen
     : registration === 'invite' ? c.regInvite
       : c.regClosed
-  const hub = `<p>${reg}</p>
-    <p><a href="/demo">${c.trial}</a></p>
-    <p class="small">${c.trialNote}</p>
+  const hub = `<p><a href="${REPO_URL}" rel="noopener">${c.webRepo}</a></p>
+    <p>${reg}</p>
     <a href="${esc(mobilePath)}">${c.mobile}</a>`
+  // ★ 「产品演示」暂时收起（业主 2026-10-09：先注释掉）。
+  //   要恢复：把下面两行解开，并把 `dispatch` 里的 `/demo` 路由与 `routes` 表里的
+  //   两条一起放开（`site/demo/index.html` 一直都在，没有被删）。
+  //   `<p><a href="/demo">${c.trial}</a></p>
+  //    <p class="small">${c.trialNote}</p>`
 
   return { cta, download, hub }
 }
@@ -296,7 +261,14 @@ export function createSiteRoutes({
   const resolveRelease = typeof readRelease === 'function' ? readRelease : () => ({ url: String(readRelease ?? '') })
 
   /** 两个入口页。`/` 是中文，`/en` 是英文（路径式双语，见方案）。 */
-  /** 入口页。`/` 是中文，`/en` 是英文（路径式双语），`/demo` 是只读演示。 */
+  /**
+   * 入口页。`/` 是中文，`/en` 是英文（路径式双语），`/demo` 是只读演示。
+   *
+   * ★ `/demo` 暂时收起（业主 2026-10-09）。它的模板**没有被删** ——
+   *   `site/demo/index.html` 一直在，`servePage` 的 `live: false` 分支也留着，
+   *   恢复就是把 `routes` 表与 `dispatch` 里那两处注释解开。所以这里保留它：
+   *   一个"注释掉就能恢复"的功能，不该顺手把它的家也拆了。
+   */
   const PAGES = {
     zh: join(absRoot, 'index.html'),
     en: join(absRoot, 'en', 'index.html'),
@@ -419,7 +391,6 @@ export function createSiteRoutes({
         version: r.version ?? '',
         size: formatSize(r.sizeBytes),
         date: formatDate(r.at),
-        sha256: r.sha256 ?? '',
         registration,
         mobilePath,
       })
@@ -446,8 +417,10 @@ export function createSiteRoutes({
     { method: 'HEAD', path: '/' },
     { method: 'GET', path: '/en' },
     { method: 'HEAD', path: '/en' },
-    { method: 'GET', path: '/demo' },
-    { method: 'HEAD', path: '/demo' },
+    // `/demo` 暂时收起（业主 2026-10-09）。`site/demo/index.html` 仍在，
+    // 恢复时把这两条与下面 `dispatch` 里的那行一起解开即可。
+    // { method: 'GET', path: '/demo' },
+    // { method: 'HEAD', path: '/demo' },
     { method: 'GET', path: `${prefix}/*` },
     { method: 'HEAD', path: `${prefix}/*` },
   ]
@@ -459,10 +432,11 @@ export function createSiteRoutes({
       if (req.method !== 'GET' && req.method !== 'HEAD') return false
       const path = ctx.path
 
-      // 入口页：**只有这三条**。其余路径一律不认，免得把 `/api/*` 之类吞掉。
+      // 入口页：**只有这两条**。其余路径一律不认，免得把 `/api/*` 之类吞掉。
       if (path === '/') return servePage(req, res, 'zh')
       if (path === '/en' || path === '/en/') return servePage(req, res, 'en')
-      if (path === '/demo' || path === '/demo/') return servePage(req, res, 'demo', { live: false })
+      // `/demo` 暂时收起（业主 2026-10-09）：
+      // if (path === '/demo' || path === '/demo/') return servePage(req, res, 'demo', { live: false })
 
       // 静态资源。前缀比对带分隔符，`/siteofsomething` 不被吞。
       if (path !== prefix && !path.startsWith(`${prefix}/`)) return false

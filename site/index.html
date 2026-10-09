@@ -35,7 +35,9 @@
     <a href="#workflow">Agent 沟通</a>
     <a href="#crew">数字人</a>
     <a href="#delivery">交付与验收</a>
+    <!-- 产品演示暂时收起（业主：先注释掉）。要恢复就把这行还原，并放开 site.mjs 里的 /demo 路由。
     <a href="/demo">产品演示</a>
+    -->
   </nav>
   <div class="nav-end">
     <span class="lang"><a href="/" aria-current="page">中</a><a href="/en" hreflang="en" lang="en">EN</a></span>
@@ -73,10 +75,8 @@
     </button>
     <div class="shot-bottom">
       <span id="shot-description">一个目标，八个阶段。每一步都有任务与负责岗位。</span>
-      <span class="mono">CAPTURED FROM LOCAL WORKSPACE</span>
     </div>
   </div>
-  <p class="mock-caption" id="shot-caption">真实产品截图 · 目标详情局部截取 · 八个阶段任务已完成</p>
 
   <div class="promise"><span><i>✓</i>目标驱动执行</span><span><i>✓</i>关键节点由你决定</span><span><i>✓</i>过程与结果留有记录</span></div>
 </section>
@@ -137,7 +137,6 @@
     <span><b>02</b> 查看历史交流和任务消息</span>
     <span><b>03</b> 询问、追加要求或新建任务</span>
   </div>
-  <p class="mock-caption">来自本地运行环境的已有对话 · 历史消息与界面状态保留原样 · 截图不代表 Agent 当前正在执行</p>
 </section>
 
 <!-- ── 交付与验收 ───────────────────────────────────────────────────────── -->
@@ -151,58 +150,16 @@
     <p>3D 场景里，编队成员各有自己的位置与姿态。<br>谁在忙、谁等你验收、谁卡住了，不用点开就知道。</p>
   </div>
 
-  <div class="states">
-    <div class="state s-idle">
-      <!-- 待命：双臂垂在身侧外张，双脚并立 -->
-      <svg viewBox="0 0 52 70" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">
-        <circle cx="26" cy="10" r="6.5" />
-        <path d="M26 17 V42" />
-        <path d="M26 24 L14 40" /><path d="M26 24 L38 40" />
-        <path d="M26 42 L20 60" /><path d="M26 42 L32 60" />
-      </svg>
-      <span class="lbl"><i></i>待命</span>
-      <span class="key">idle</span>
-      <p>没有在手任务。双臂垂在身侧，缓慢呼吸。</p>
-    </div>
-    <div class="state s-busy">
-      <!-- 进行中：双手抬到身前干活（前臂折起），与前一张明显不同 -->
-      <svg viewBox="0 0 52 70" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">
-        <circle cx="26" cy="10" r="6.5" />
-        <path d="M26 17 V42" />
-        <path d="M26 24 L15 31 L21 40" /><path d="M26 24 L37 31 L31 40" />
-        <path d="M26 42 L20 60" /><path d="M26 42 L32 60" />
-      </svg>
-      <span class="lbl"><i></i>进行中</span>
-      <span class="key">busy</span>
-      <p>正在干活。双手抬到身前 —— 而且<strong>接手时会先走过去上班</strong>。</p>
-    </div>
-    <div class="state s-review">
-      <!-- 待验收：双手在身前托着一份东西（多出一条横线），姿态是"停住等你" -->
-      <svg viewBox="0 0 52 70" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">
-        <circle cx="26" cy="10" r="6.5" />
-        <path d="M26 17 V42" />
-        <path d="M26 26 L16 34" /><path d="M26 26 L36 34" />
-        <path d="M16 34 H36" />
-        <path d="M26 42 L20 60" /><path d="M26 42 L32 60" />
-      </svg>
-      <span class="lbl"><i></i>待验收</span>
-      <span class="key">review</span>
-      <p>活干完了，托着结果等你拍板。它不会自己往下走。</p>
-    </div>
-    <div class="state s-blocked">
-      <!-- 受阻：右臂高举（照抄 Employee3D 的 -0.45 弧度），唯一"举手"的姿态 -->
-      <svg viewBox="0 0 52 70" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">
-        <circle cx="26" cy="10" r="6.5" />
-        <path d="M26 17 V42" />
-        <path d="M26 24 L15 38" /><path d="M26 24 L37 8" />
-        <path d="M26 42 L20 60" /><path d="M26 42 L32 60" />
-      </svg>
-      <span class="lbl"><i></i>受阻</span>
-      <span class="key">blocked</span>
-      <p>卡住了，<strong>右臂举起</strong>。这是唯一需要你介入的状态。</p>
-    </div>
-  </div>
-  <p class="mock-caption">状态色与姿态取自工作台 3D 场景的实现 · 图为 2D 简化示意，非场景截图</p>
+  <figure class="scene">
+    <img src="/site/assets/shots/team-scene.png" width="1764" height="1422" alt="工作台的团队场景：等距视角的办公室里，需求分析师、方案研究员、任务拆解师、测试设计师、编码工程师、代码审查员、测试执行员、部署运维员各自就位。">
+  </figure>
+
+  <ul class="legend" role="list">
+    <li class="l-idle"><i></i><b>待命</b><span>双臂垂在身侧，缓慢呼吸</span></li>
+    <li class="l-busy"><i></i><b>进行中</b><span>双手抬到身前干活；接手时会先走过去上班</span></li>
+    <li class="l-review"><i></i><b>待验收</b><span>托着结果等你拍板，不会自己往下走</span></li>
+    <li class="l-blocked"><i></i><b>受阻</b><span>右臂举起 —— 唯一需要你介入的状态</span></li>
+  </ul>
 </section>
 
 <section class="artifacts" id="delivery">
@@ -236,11 +193,11 @@
   <div class="deploy-grid">
     <article class="deploy-item">
       <h3>本地 Web 工作台 <span class="label">自托管入口</span></h3>
-      <p>连接项目与工作空间，在浏览器中管理目标、任务和交付。运行需要按部署文档准备环境，并确认执行服务与模型配置。</p>
+      <p>从仓库在本地启动，启动后在浏览器里使用 —— 它就是一个 Web 端，不是另外托管的服务。</p>
       <!-- legion:hub-line -->
     </article>
     <article class="deploy-item">
-      <h3>Windows 桌面端 <span class="label human">内部验证阶段</span></h3>
+      <h3>Windows 桌面端 <span class="label human">内部验证 · 未签名</span></h3>
       <!-- legion:download -->
     </article>
   </div>
@@ -296,13 +253,11 @@ var shots = {
     src: '/site/assets/shots/goal-detail.png', w: 2160, h: 734,
     alt: '本地 Legion 目标详情：一个目标拆成八个阶段任务，分别对应需求、方案、拆解、测试设计、编码、审查、测试与部署角色，8/8 已完成。',
     description: '一个目标，八个阶段。每一步都有任务与负责岗位。',
-    caption: '真实产品截图 · 目标详情局部截取 · 八个阶段任务已完成'
   },
   tasks: {
     src: '/site/assets/shots/tasks.png', w: 2880, h: 1800,
     alt: '本地 Legion 任务中心：按状态展示任务泳道、岗位筛选和任务卡片。',
     description: '任务按状态分组，支持按岗位和执行者筛选。',
-    caption: '真实产品截图 · 任务中心 · 保留实际任务数量与界面状态'
   }
 }
 var tabButtons = document.querySelectorAll('[data-shot]')
@@ -314,7 +269,6 @@ Array.prototype.forEach.call(tabButtons, function (button) {
     img.src = shot.src; img.alt = shot.alt; img.width = shot.w; img.height = shot.h
     document.querySelector('.hero-shot').setAttribute('aria-label', '放大查看截图')
     document.getElementById('shot-description').textContent = shot.description
-    document.getElementById('shot-caption').textContent = shot.caption
   })
 })
 
@@ -331,19 +285,6 @@ Array.prototype.forEach.call(document.querySelectorAll('.shot-open'), function (
 document.getElementById('lightbox-close').addEventListener('click', function () { lightbox.close() })
 lightbox.addEventListener('click', function (e) { if (e.target === lightbox) lightbox.close() })
 
-// 复制 sha256。**渐进增强**：脚本不跑时那串值仍是可选中的纯文本。
-document.addEventListener('click', function (e) {
-  var b = e.target.closest && e.target.closest('.sha-copy')
-  if (!b) return
-  var text = b.getAttribute('data-copy') || ''
-  var done = b.getAttribute('data-copied') || 'OK'
-  if (!text || !navigator.clipboard) return
-  var prev = b.textContent
-  navigator.clipboard.writeText(text).then(function () {
-    b.setAttribute('data-done', '1'); b.textContent = done
-    setTimeout(function () { b.removeAttribute('data-done'); b.textContent = prev }, 1600)
-  }).catch(function () {})
-})
 </script>
 </body>
 </html>

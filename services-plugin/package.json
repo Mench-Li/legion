@@ -6,7 +6,8 @@
   "type": "module",
   "main": "./index.js",
   "files": [
-    "index.js"
+    "index.js",
+    "*.mjs"
   ],
   "license": "BSD-3-Clause"
 }

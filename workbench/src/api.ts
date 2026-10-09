@@ -899,8 +899,47 @@ export async function fetchChatMessages(conv: number, opts: { before?: number; l
 }
 
 export interface DshModelCatalog { default: { provider: string; model: string }; groups: { id: string; name: string; models: { id: string; name: string }[] }[]; failures?: { id: string; message: string }[] }
+
+/**
+ * 「供应商与模型」那条路由的地址是**本页自己的源**，不是 `apiBase()`。
+ *
+ * ★ BUG-014：这里从前写的是 `${apiBase()}/api/dsh-models`，而 `apiBase()` 默认是
+ *   `http://127.0.0.1:4820` —— 那是**另一个**数据源（v1 看板，`scrum/serve.mjs`）的默认端口。
+ *   于是从 `http://127.0.0.1:5173/` 打开页面（不带 `?api=`）时，这个请求打到 4820，
+ *   那里没人监听，浏览器只回一句 `Failed to fetch`：不说地址、不说原因。
+ *
+ *   三个事实合起来说明它**必须**同源，不能跟着 `apiBase()` 走：
+ *     ① 这条路由住在 `workbench/scripts/serve.mjs` —— 也就是**发这个页面的那台进程**；
+ *     ② 服务端**强制同源**：`serve.mjs` 里 `Origin.host` 必须等于 `Host`，否则 403；
+ *     ③ 它还**只限本机**（非回环直接 403），所以远端页面本来也用不了它。
+ *   而 `apiBase()` 的 4820 也**不能**改成同源 —— 它服务的是 v1 看板（`/api/config`、
+ *   `/api/board`、`/api/activity`…），那些路由 `serve.mjs` 一条都不提供（已实测）。
+ *   两条数据源各有各的地址，混用哪一个方向都是错的。
+ *
+ *   用**相对路径**而不是拼 `location.origin`：相对路径由浏览器按页面源解析，
+ *   在 `file://`/自定义协议下也不会拼出一个假的绝对地址。
+ */
+const DSH_MODELS_PATH = '/api/dsh-models'
+
+/** 连不上时要说的话：把**实际用的地址**和**这是哪条链路**说清楚。
+ *  `Failed to fetch` 是浏览器的笼统说法——它不说是哪个地址、也不说是本机配置问题。 */
+function modelsUnreachableError(e: unknown): Error {
+  const cause = (e as { cause?: { code?: string; message?: string } })?.cause?.code
+    ?? (e as { cause?: { message?: string } })?.cause?.message
+    ?? (e instanceof Error ? e.name : '未知原因')
+  const where = typeof window !== 'undefined' && window.location?.origin ? window.location.origin : '(本页)'
+  return new Error(`连不上指挥台自身的数据面（${where}${DSH_MODELS_PATH}）：${cause}。`
+    + '这一页的「供应商与模型」由**发这个页面的那台 serve.mjs** 提供（同源、且仅限本机）；'
+    + '它与 4820 那个 v1 看板数据源不是同一台服务。')
+}
+
 export async function dshModelsRpc<T>(method: string, args: Record<string, unknown> = {}): Promise<T> {
-  const response = await fetch(`${apiBase()}/api/dsh-models`, { method: 'POST', credentials: 'include', headers: { 'content-type': 'application/json', ...authHeaders() }, body: JSON.stringify({ method, args }) })
+  let response: Response
+  try {
+    response = await fetch(DSH_MODELS_PATH, { method: 'POST', credentials: 'include', headers: { 'content-type': 'application/json', ...authHeaders() }, body: JSON.stringify({ method, args }) })
+  } catch (e) {
+    throw modelsUnreachableError(e)
+  }
   const body = await response.json()
   if (!response.ok || body.ok !== true) throw new Error(response.status === 401 ? '模型服务连接未授权，请重新连接服务后刷新配置。' : String(body.error ?? `模型服务返回 ${response.status}`).replace(/DSH/gi, '模型服务'))
   return body.value as T

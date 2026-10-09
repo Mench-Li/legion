@@ -111,6 +111,31 @@ export function buildWorkbenchEnv({ baseEnv = {}, hubUpstream = '', teamHubToken
 export { readDshProviderSnapshot } from './dsh-snapshot.mjs'
 
 /**
+ * team-hub 子进程要拿到的环境。
+ *
+ * 抽出来的理由与 `buildWorkbenchEnv` 相同：能被断言的东西才拦得住回归 ——
+ * 尤其是下面那两条**产品目录事实**，漏了它们的后果是"用户在面板里填密钥永远存不进去"。
+ *
+ * @param installDir 安装目录（**事实**：程序在哪）。`product/paths.mjs` 那条诊断的原话是
+ *   "请设置 LEGION_INSTALL_DIR **或由 Launcher 传入**"，而本插件正是这台机器上的启动方。
+ * @param workspaceDir 工作区（**用户授权**的项目目录）。规范明确"不提供默认值" ⇒ 只透传。
+ */
+export function buildTeamHubEnv({
+  baseEnv = {}, port = '', host = '', token = '', installDir = '', workspaceDir = '',
+} = {}) {
+  return {
+    ...baseEnv,
+    TEAM_HUB_PORT: String(port),
+    TEAM_HUB_HOST: host,
+    TEAM_HUB_TOKEN: token,
+    // ★ 安装目录不给默认值、也不允许为空：它是产品目录布局里密钥库落点校验的**必要输入**。
+    ...(installDir ? { LEGION_INSTALL_DIR: installDir } : {}),
+    // 工作区只在用户/配置真的给了时才传：编一个会让"用户授权"这件事失去意义。
+    ...(workspaceDir ? { LEGION_WORKSPACE_DIR: workspaceDir } : {}),
+  }
+}
+
+/**
  * 引导导入：**只在 Legion 的目录为空时**把 DSH 的现状收进来一次。
  *
  * ★ 为什么必须"只在空的时候"（这是 DECISION §3 那条方向纪律的执行点）：
@@ -214,6 +239,10 @@ export function apply(ctx, rawConfig = {}) {
   const teamHubToken = typeof cfg.teamHubToken === 'string' && cfg.teamHubToken
     ? cfg.teamHubToken
     : (typeof baseEnv.TEAM_HUB_TOKEN === 'string' ? baseEnv.TEAM_HUB_TOKEN : '')
+  /** 工作区（用户授权的项目目录）：只从配置/环境透传给团队中枢，**不编默认值**。 */
+  const workspaceDir = typeof cfg.workspaceDir === 'string' && cfg.workspaceDir.trim()
+    ? cfg.workspaceDir.trim()
+    : (typeof baseEnv.LEGION_WORKSPACE_DIR === 'string' && baseEnv.LEGION_WORKSPACE_DIR.trim() ? baseEnv.LEGION_WORKSPACE_DIR.trim() : '')
   const workbenchPort = num(cfg.workbenchPort, 5173)
   // ★ P3 的两道门，都**默认关**（见下方写入处的说明）。
   //   `applyModelConfig`：接管供应商配置（settings.mutate）。
@@ -248,7 +277,13 @@ export function apply(ctx, rawConfig = {}) {
       port: teamHubPort,
       cwd: legionDir,
       args: [join(legionDir, 'team-hub', 'server.mjs')],
-      env: { ...baseEnv, TEAM_HUB_PORT: String(teamHubPort), TEAM_HUB_HOST: teamHubHost, TEAM_HUB_TOKEN: teamHubToken },
+      env: buildTeamHubEnv({
+        baseEnv, port: teamHubPort, host: teamHubHost, token: teamHubToken,
+        // 安装目录是事实（程序在哪），不是用户选择 ⇒ 由 legionDir 直接给。
+        installDir: legionDir,
+        // 工作区是用户授权的项目目录 ⇒ 只透传，绝不编一个（规范 §6.11）。
+        workspaceDir,
+      }),
     },
     {
       key: 'workbench',

@@ -143,7 +143,13 @@ export function createSecretAdmin({
   async function resolveLayoutNow() {
     if (typeof resolveLayoutImpl === 'function') return await resolveLayoutImpl({ env })
     const mod = await import('../product/paths.mjs')
-    return mod.resolveLayout({ env })
+    // ★ 必须把**操作系统事实**一起给（`osHomeFacts`），否则家目录解析成 null
+    //   ⇒ 没有 `secretsFile` ⇒ 每一次用密钥库都被 `SECRETS_LAYOUT_BLOCKED` 拒。
+    //   实测形态：桌面壳能找到 `%LOCALAPPDATA%\Legion`（里面已经有 data/ 与 cache/），
+    //   而**由 legion-services 拉起的 team-hub 找不到** ⇒ 用户在面板里填密钥存不进去，
+    //   而这条链上没有任何东西会提醒"布局没解析"。
+    //   与 launcher（`product/launcher/cli.mjs`）用**同一份**派生，不是各写一遍。
+    return mod.resolveLayout({ env, ...mod.osHomeFacts(env) })
   }
 
   async function openSecretsImpl(args) {
@@ -162,6 +168,44 @@ export function createSecretAdmin({
   }
 
   /**
+   * 布局诊断里，**真的会让密钥库不可用**的那几个码。
+   *
+   * ★ 这里**点名**而不是"任何 error 诊断都拒"（后者是原来的写法）。理由是实测出来的一个
+   *   自相矛盾：同一个布局下 `describe()` 说 `ok: true`，而 `put()` 说不行 ——
+   *   因为 `describe` 不看诊断、`ensure` 看"有没有任何 error 诊断"，
+   *   而那时剩下的 error 是 **`WORKSPACE_NOT_CONFIGURED`**（工作区没选）。
+   *
+   *   工作区与密钥库的落点**没有关系**：`openProductSecrets` 只用
+   *   `secretsFile` / `dataDir` / `installDir` / `cacheDir` 校验落点（见 `product/secrets.mjs` ①）。
+   *   于是"还没选项目工作区"这件事，把"存一把钥匙"也一起挡掉了 ——
+   *   而用户看到的那句话（"产品目录布局未确定"）指的是另一些东西，他无从下手。
+   *
+   *   > 一个"任何布局问题都拒绝写密钥"的闸门，
+   *   > 与一个"点名密钥库真正依赖的那几个事实"的闸门，
+   *   > 在布局**完全**正常时是同一个东西 —— 差别只在布局**差一点**的时候：
+   *   > 前者会把用户挡在一件与他当前要做的事无关的事情后面。
+   *
+   * 收进来的每一条都能说出理由（见下），没有一条是"顺手也收进来"。
+   */
+  const SECRETS_BLOCKING_DIAGNOSTICS = new Set([
+    // 没有产品家目录 ⇒ 连 `secretsFile` 都算不出来。
+    'PRODUCT_HOME_UNRESOLVED',
+    // 家目录落在安装目录里 ⇒ 密钥也会落在只读程序区。
+    'PRODUCT_HOME_INSIDE_INSTALL_DIR',
+    // `assertSecretsPlacement` 要用安装目录判"密钥不在安装目录内"；
+    // 拿不到它，这条不变量就**验不了**（不是"验过没问题"）。
+    'INSTALL_DIR_UNRESOLVED',
+    // 密钥自己落在这些目录里 —— 备份/清理会顺手把它带走。
+    'SECRETS_INSIDE_INSTALL_DIR',
+    'SECRETS_INSIDE_DATA_DIR',
+    'SECRETS_INSIDE_CACHE_DIR',
+    // 相对路径 ⇒ 密钥库到底落在哪随启动方式变化，不可预测。
+    'PATH_NOT_ABSOLUTE',
+    // 角色目录互相重叠 ⇒ 密钥所在的那个目录同时属于别的角色（同上）。
+    'ROLE_DIRS_OVERLAP',
+  ])
+
+  /**
    * 确保密钥库可用。失败一律**抛**（读路径是"返回结果供显示"，写路径不是：
    * 一次写不进去的写入没有"部分成功"可言）。
    */
@@ -170,11 +214,15 @@ export function createSecretAdmin({
 
     const res = await resolveLayoutNow()
     const layout = res?.layout ?? null
-    const diagnostics = res?.diagnostics ?? []
-    if (Array.isArray(diagnostics) && diagnostics.some((d) => d?.severity === 'error')) {
+    const diagnostics = Array.isArray(res?.diagnostics) ? res.diagnostics : []
+    // 只被**点名**的那几个码挡住（理由见上面的集合）。
+    // 报错时把它们逐个列出来，而不是把整份诊断倒给用户 ——
+    // 一份包含"工作区没选"的清单会让人以为问题在工作区。
+    const blocking = diagnostics.filter((d) => d?.severity === 'error' && SECRETS_BLOCKING_DIAGNOSTICS.has(d?.code))
+    if (blocking.length > 0) {
       throw adminError(SECRET_ADMIN_CODES.STORE_UNAVAILABLE,
-        '无法管理凭证：产品目录布局未确定，因此不知道密钥库在哪里。' +
-        `（${diagnostics.filter((d) => d?.severity === 'error').map((d) => d?.code).filter(Boolean).join(', ')}）`,
+        '无法管理凭证：产品目录布局里与密钥库有关的部分没确定，因此不知道密钥库该放在哪。' +
+        `（${blocking.map((d) => d?.code).filter(Boolean).join(', ')}）`,
         { statusCode: 503 })
     }
 

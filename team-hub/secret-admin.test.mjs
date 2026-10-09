@@ -404,3 +404,49 @@ test('⑥ `describe` 在密钥库打不开时如实报，且不抛（它是要�
   assert.equal(d.ok, false)
   assert.equal(d.code, 'SECRETS_LAYOUT_BLOCKED')
 })
+
+// ============================================================================
+// ⑦ 布局诊断的闸门：**只认密钥库真正依赖的那几个**（2026-10-09 实测缺陷）
+// ============================================================================
+//
+// 原来的写法是"任何 error 诊断都拒"。于是同一个布局下 `describe()` 说 ok、`put()` 说不行，
+// 因为那时剩下的 error 是 `WORKSPACE_NOT_CONFIGURED`（**还没选项目工作区**）——
+// 而工作区与密钥库的落点毫无关系（`openProductSecrets` 只用 secretsFile/dataDir/installDir/cacheDir）。
+//
+//   用户的实际后果：他只想填一把密钥，却被一句"产品目录布局未确定"挡住，
+//   而那句话指的是工作区 —— 他无从下手。
+
+/** 造一个带诊断的假 resolveLayout。 */
+function adminWithDiagnostics(diagnostics) {
+  return createSecretAdmin({
+    env: {},
+    resolveLayoutImpl: async () => ({ layout: { secretsFile: SECRETS_FILE, dataDir: null, installDir: null, cacheDir: null }, diagnostics }),
+    openSecrets: fakeOpen(),
+    hardenAclImpl: async () => ACL_OK,
+  })
+}
+
+test('⑦ ★ `WORKSPACE_NOT_CONFIGURED` **不该**挡住写密钥（它与密钥库的落点无关）', async () => {
+  const a = adminWithDiagnostics([{ severity: 'error', code: 'WORKSPACE_NOT_CONFIGURED', role: 'workspace', message: '尚未指定工作区目录' }])
+  await a.put({ ref: 'k', value: 'v' })
+  const l = await a.list()
+  assert.deepEqual(l.entries.map((e) => e.ref), ['k'], '没选工作区不影响"存一把钥匙"')
+})
+
+test('⑦ ★ 密钥库真正依赖的那几个仍然挡住（闸门不是被放松，是被点名）', async () => {
+  for (const code of [
+    'PRODUCT_HOME_UNRESOLVED', 'PRODUCT_HOME_INSIDE_INSTALL_DIR', 'INSTALL_DIR_UNRESOLVED',
+    'SECRETS_INSIDE_INSTALL_DIR', 'SECRETS_INSIDE_DATA_DIR', 'SECRETS_INSIDE_CACHE_DIR',
+    'PATH_NOT_ABSOLUTE', 'ROLE_DIRS_OVERLAP',
+  ]) {
+    const a = adminWithDiagnostics([{ severity: 'error', code, role: 'data', message: 'x' }])
+    await assert.rejects(() => a.put({ ref: 'k', value: 'v' }), (e) => {
+      assert.equal(e.code, SECRET_ADMIN_CODES.STORE_UNAVAILABLE, `${code} 必须挡住写入`)
+      assert.match(e.message, new RegExp(code), '报错要点名是哪一个码，否则用户不知道去修什么')
+      return true
+    })
+  }
+  // 而 `warn` 级从来不该挡
+  const warnOnly = adminWithDiagnostics([{ severity: 'warn', code: 'INSTALL_DIR_UNRESOLVED', role: 'install', message: 'x' }])
+  await warnOnly.put({ ref: 'k', value: 'v' })
+})

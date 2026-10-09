@@ -250,10 +250,66 @@ export function defaultProductHome({ platform = process.platform, env = {}, home
 }
 
 /**
+ * 操作系统级的家目录事实（不是 Legion 的配置，是它必须读的环境）。
+ *
+ * 这三个变量属于**操作系统/用户会话**，不属于 Legion —— 因此它们是
+ * `foreignEnv`（登记在 `product/config-schema.mjs`），不是本进程的配置项。
+ *
+ * ★ 它们住在**本模块**而不是 `product/launcher/cli.mjs`：`osHomeFacts` 是
+ *   `resolveLayout` 的**输入**，而这里才是布局概念的家。放在 launcher 里时，
+ *   托管进程（team-hub / 探测服务）要么 import 整个 CLI（它有顶层 `process.exitCode`），
+ *   要么自己抄一份派生逻辑 —— 后者就是"两份实现会漂移"的形状。
+ *   `cli.mjs` 仍然**转出**这两个名字，以保持既有导入路径不变。
+ */
+export const OS_HOME_ENV = Object.freeze({
+  LOCAL_APP_DATA: 'LOCALAPPDATA',
+  USER_PROFILE: 'USERPROFILE',
+  HOME: 'HOME',
+})
+
+/**
+ * 从**进程环境**推出家目录事实，交给 `resolveLayout`。
+ *
+ * ## 为什么这件事必须有人做
+ *
+ * `resolveLayout` 的签名里一直有 `homeDir` / `appDataDir` 两个入参，
+ * 而 `defaultProductHome` 在拿不到它们时会返回 `root: null` ⇒ 没有 `secretsFile`
+ * ⇒ 每一次用密钥库都被拒（`SECRETS_LAYOUT_BLOCKED` / `SECRETS_PLACEMENT_INVALID`）。
+ *
+ * launcher 侧早在 PRT-255 就补过这一条；但**托管进程那一侧漏了** ——
+ * `team-hub/secret-admin.mjs` 与 `team-hub/probe-service.mjs` 调的是 `resolveLayout({ env })`。
+ * 于是同一台机器、同一个产品：桌面壳能找到产品目录（`%LOCALAPPDATA%\Legion` 已经建好、
+ * 里面躺着 `data/` 与 `cache/`），而**由 legion-services 拉起的 team-hub 找不到**，
+ * 表现为"面板里填密钥存不进去"，而这条链上没有任何东西会提醒"布局没解析"。
+ *
+ *   > 一个"启动器能找到产品目录、而它拉起的守护进程找不到"的产品，
+ *   > 与一个"根本没有产品目录"的产品，在用户看到的那一句错误上是同一个东西。
+ *
+ * ## 优先级
+ *
+ * `LEGION_HOME`（受控环境变量，显式覆盖）> 操作系统事实 > 未解析。
+ * 显式覆盖这一条不受本函数影响：它由 `defaultProductHome` 先判，
+ * 所以"部署时设的 LEGION_HOME 不生效"这种倒置不会发生。
+ */
+export function osHomeFacts(env = {}) {
+  const nonEmpty = (v) => (typeof v === 'string' && v.trim() !== '' ? v : null)
+  return {
+    appDataDir: nonEmpty(env[OS_HOME_ENV.LOCAL_APP_DATA]),
+    // POSIX 上是 HOME，Windows 上是 USERPROFILE；两者都给，由
+    // `defaultProductHome` 按 platform 决定怎么用。
+    homeDir: nonEmpty(env[OS_HOME_ENV.USER_PROFILE]) ?? nonEmpty(env[OS_HOME_ENV.HOME]),
+  }
+}
+
+/**
  * 解析产品目录布局。
  *
  * 入参全部显式：`env` 是调用方读到的环境变量对象（不传就用空对象，于是可以得到纯默认布局）。
  * 返回 `{ layout, diagnostics }`；`layout` 已冻结，`diagnostics` 见 `layoutDiagnostics`。
+ *
+ * ★ 只给 `env` 而**不给** `homeDir` / `appDataDir` 时，家目录会解析成 null
+ *   （`defaultProductHome` 不读 `LOCALAPPDATA`/`USERPROFILE`，它要的是**事实**）。
+ *   生产调用方请用 `resolveLayout({ env, ...osHomeFacts(env) })`。
  */
 export function resolveLayout({
   platform = process.platform,

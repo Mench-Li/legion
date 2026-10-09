@@ -6972,8 +6972,7 @@ const router = createRouter([
     handleRun, modelStore, probeService,
     MODEL_ERRORS,
   }),
-  createModelProvidersRoutes({ json, handleRun, providerStore }),
-  createUsageRoutes({
+  createModelProvidersRoutes({ json, handleRun, providerStore }),  createUsageRoutes({
     json,
     authorized, usageRollup, optionalIntParam,
     db, ROLLUP_DIMENSIONS, evaluateBudgetAlert,

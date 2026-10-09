@@ -305,5 +305,122 @@ export function createProviderStore({ db, clock = () => Date.now(), writeAudit =
     })
   }
 
-  return { list, get, isEmpty, importSnapshot }
+  // ── 目常写入（面板用）────────────────────────────────────────────────────
+  //
+  // 与 `importSnapshot` 的区别不只是"一条 vs 一批"：导入是**把 DSH 的现状收进来**
+  // （source='dsh-import'），而这里是**用户在指挥台里表达意图**（source='legion'）。
+  // 两者混起来会让"这条是我建的"与"这条是从 DSH 抄来的"分不开，
+  // 而 P2 的对账正是靠这个区分来判断"Legion 里没有 = 用户删了"。
+
+  function requireActor(actor) {
+    if (typeof actor !== 'string' || actor.trim() === '') {
+      throw new ModelError(MODEL_ERRORS.ACTOR_REQUIRED,
+        '缺少 actor：谁改的模型配置必须留痕（审计里没有密钥，但必须有人）')
+    }
+    return actor
+  }
+
+  /** 单条归一化（复用导入那条同一个 `normalizeProvider`，所以字段纪律完全一致）。 */
+  function normalizeOne(input) {
+    const dropped = new Set()
+    const p = normalizeProvider(input, dropped)
+    return { p, dropped: Object.freeze([...dropped].sort()) }
+  }
+
+  function create(input, { actor, source = 'legion' } = {}) {
+    requireActor(actor)
+    if (!PROVIDER_SOURCES.includes(source)) {
+      throw new ModelError(MODEL_ERRORS.INVALID_PROFILE, `未知的 source：${String(source)}`, { statusCode: 400 })
+    }
+    const { p, dropped } = normalizeOne(input)
+    const existing = rowToProvider(db.prepare('SELECT * FROM model_providers WHERE id = ?').get(p.id))
+    if (existing !== null) {
+      // 墓碑同样挡住：删掉再建同名会让"历史里那个 id 指向的供应商"被悄悄换掉。
+      throw new ModelError(
+        existing.deletedAtMs !== null ? MODEL_ERRORS.PROFILE_DELETED : MODEL_ERRORS.PROFILE_EXISTS,
+        existing.deletedAtMs !== null
+          ? `供应商 ${p.id} 曾被删除，不能重用同名 id（它可能是 DSH 里某条配置的来源）`
+          : `供应商已存在：${p.id}；要修改请用 update（它需要 version 做并发保护）`,
+        { statusCode: 409 })
+    }
+    const nowMs = clock()
+    db.prepare(
+      `INSERT INTO model_providers
+         (id, display_name, api, base_url, secret_ref, credential_configured, models_json, source, version, created_at_ms, updated_at_ms, deleted_at_ms)
+       VALUES (?,?,?,?,?,?,?,?,1,?,?,NULL)`,
+    ).run(p.id, p.displayName, p.api, p.baseURL, p.secretRef, p.credentialConfigured ? 1 : 0,
+      JSON.stringify(p.models), source, nowMs, nowMs)
+    audit({ action: 'model-provider.create', id: p.id, actor, detail: { source, api: p.api, modelCount: p.models.length, hasCredential: p.secretRef !== null, droppedFields: dropped } })
+    return get(p.id)
+  }
+
+  /**
+   * 整体替换一条（CAS）。
+   *
+   * 需要调用方给 `version`：不给就报错，**不默认成"最后一个版本"** ——
+   * 默认成最后一版时，两个界面同时保存会静默覆盖，而两边都显示成功
+   * （与 `model-store.update` 同一条纪律）。
+   */
+  function update(id, input, { actor, version, source = 'legion' } = {}) {
+    requireActor(actor)
+    if (!Number.isInteger(version)) {
+      throw new ModelError(MODEL_ERRORS.VERSION_REQUIRED,
+        '缺少 version：并发保存必须带版本，否则两个界面同时保存会静默覆盖', { statusCode: 400 })
+    }
+    const existing = rowToProvider(db.prepare('SELECT * FROM model_providers WHERE id = ?').get(id))
+    if (existing === null || existing.deletedAtMs !== null) {
+      throw new ModelError(MODEL_ERRORS.PROFILE_NOT_FOUND, `没有这个供应商：${id}`, { statusCode: 404 })
+    }
+    if (existing.version !== version) {
+      throw new ModelError(MODEL_ERRORS.VERSION_CONFLICT,
+        `供应商 ${id} 已被别人改过（当前 v${existing.version}，你手上是 v${version}）→ 请刷新后重试`,
+        { statusCode: 409, currentVersion: existing.version })
+    }
+    const { p, dropped } = normalizeOne({ ...input, id })
+    const nowMs = clock()
+    const changed = []
+    for (const [col, next, prev] of [
+      ['display_name', p.displayName, existing.displayName],
+      ['api', p.api, existing.api],
+      ['base_url', p.baseURL, existing.baseURL],
+      ['secret_ref', p.secretRef, existing.secretRef],
+      ['models_json', JSON.stringify(p.models), JSON.stringify(existing.models)],
+    ]) { if (next !== prev) changed.push(col) }
+    db.prepare(
+      `UPDATE model_providers SET display_name=?, api=?, base_url=?, secret_ref=?, credential_configured=?,
+         models_json=?, source=?, version=version+1, updated_at_ms=? WHERE id=?`,
+    ).run(p.displayName, p.api, p.baseURL, p.secretRef, p.credentialConfigured ? 1 : 0,
+      JSON.stringify(p.models), source, nowMs, id)
+    audit({ action: 'model-provider.update', id, actor, detail: { fields: changed, modelCount: p.models.length, droppedFields: dropped } })
+    return get(id)
+  }
+
+  /**
+   * 删除 = **立墓碑**（不是 DELETE 掉那一行）。
+   *
+   * 与 `model-store.remove` 同一条理由：一次 Run / 一条历史可能还记着这个引用，
+   * 而"删掉再建同名"会让历史指向另一个供应商。墓碑让"它被下线了"与"它从来不存在"分得开。
+   */
+  function remove(id, { actor, version } = {}) {
+    requireActor(actor)
+    const existing = rowToProvider(db.prepare('SELECT * FROM model_providers WHERE id = ?').get(id))
+    if (existing === null) {
+      throw new ModelError(MODEL_ERRORS.PROFILE_NOT_FOUND, `没有这个供应商：${id}`, { statusCode: 404 })
+    }
+    if (existing.deletedAtMs !== null) {
+      throw new ModelError(MODEL_ERRORS.PROFILE_DELETED, `供应商 ${id} 已经被删除过了`, { statusCode: 409 })
+    }
+    if (version !== undefined && existing.version !== version) {
+      throw new ModelError(MODEL_ERRORS.VERSION_CONFLICT,
+        `供应商 ${id} 已被别人改过（当前 v${existing.version}，你手上是 v${version}）→ 请刷新后重试`,
+        { statusCode: 409, currentVersion: existing.version })
+    }
+    const nowMs = clock()
+    db.prepare('UPDATE model_providers SET deleted_at_ms=?, updated_at_ms=?, version=version+1 WHERE id=?')
+      .run(nowMs, nowMs, id)
+    audit({ action: 'model-provider.remove', id, actor, detail: { source: existing.source } })
+    return Object.freeze({ id, deletedAtMs: nowMs, version: existing.version + 1 })
+  }
+
+  return { list, get, isEmpty, importSnapshot, create, update, remove }
 }

@@ -1883,6 +1883,12 @@ async function stageTest() {
     //   这一组守的是**地址选择**（必须同源，因为路由在发页面的那台 serve.mjs 上且服务端强制同源）
     //   与**网络层文案**（不许把浏览器原话当结论），并反向钉住 apiBase() 的默认值不许被顺手改掉。
     { label: 'dsh-models-base（BUG-014：面板必须打到本页自己的源，且连不上时说得清）', files: ['workbench/scripts/dsh-models-base.test.mjs'], cwd: ROOT },
+    // ── 最后一里：把「模型」面板接到 **Legion 自己的库**（DECISION-legion-owns-model-config）──
+    //   守：面板里不再出现任何 DSH RPC 方法名与那条桥（产品的配置面不许绑在引擎的鉴权上）/
+    //   四条读写都落在 /api/model-providers / **先写密钥再写供应商**（顺序反了会留下
+    //   "声称有密钥、其实没有"的配置）/ 删除带 version / 不给用户"去登引擎"的出路 /
+    //   密钥库不可用时**提前**说清（实测真实部署是 503 SECRETS_LAYOUT_BLOCKED）。
+    { label: 'model-library-panel（面板读写 Legion 自己的模型库，不经过 DSH）', files: ['workbench/scripts/model-library-panel.test.mjs'], cwd: ROOT },
     // ★ 这里曾经有 `dsh-models-connect`（「让用户的浏览器登一次宿主」那条 302 路）。**已拆除**：
     //   它解决的问题是真的（宿主 `/api/*` 只认它自己的浏览器会话），但方向与产品目标相反 ——
     //   用户不该感知 DSH。正确方向见 docs/DECISION-legion-owns-model-config.md：

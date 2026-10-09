@@ -33,10 +33,20 @@ import { planMaterialization, describeMaterializationPlan } from './materialize-
  */
 async function fetchLegionProviders({ hubUpstream, teamHubToken, fetchImpl }) {
   const qs = teamHubToken ? '?token=' + encodeURIComponent(teamHubToken) : ''
-  const res = await fetchImpl(`${hubUpstream}/api/model-providers${qs}`, {
-    method: 'GET',
-    headers: teamHubToken ? { authorization: `Bearer ${teamHubToken}` } : {},
-  })
+  let res
+  try {
+    res = await fetchImpl(`${hubUpstream}/api/model-providers${qs}`, {
+      method: 'GET',
+      headers: teamHubToken ? { authorization: `Bearer ${teamHubToken}` } : {},
+    })
+  } catch (e) {
+    // ★ 网络层抛错必须变成"读不到"，**不能**让它冒出去。
+    //   冒出去的后果不是少一行日志：启动路径上这一轮是被 `await` 的，
+    //   抛出会**跳过它后面的 `schedule.start()`** ⇒ P4 的周期收敛永远不启动，
+    //   而唯一的症状是"日志里少了一行" —— 一个安静到几乎发现不了的失效。
+    //   （这条在第一次真实重启前就被想到了：中枢刚起来的那一瞬间 ECONNREFUSED 是常态。）
+    return { ok: false, reason: `连不上中枢（${e instanceof Error ? e.message : String(e)}）` }
+  }
   if (res.status !== 200) return { ok: false, reason: `中枢返回 HTTP ${res.status}` }
   let body = null
   try { body = JSON.parse(await res.text()) } catch { return { ok: false, reason: '中枢响应不是 JSON' } }

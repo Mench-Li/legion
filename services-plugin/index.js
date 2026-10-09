@@ -407,8 +407,14 @@ export function apply(ctx, rawConfig = {}) {
       // ★ P2 + P3 + P4 的第一轮：对账（只报告）→ 门开着时物化（写 + 回读验收）→ 之后按周期重复。
       //   顺序不能换：P1 的导入必须先把 Legion 的目录建起来，P2 的读数才有意义；
       //   而 P3 的写入只有在"看见了要写什么"之后才允许发生。
+      //
+      //   ★ 走 `schedule.runNow()` 而不是直接调 `runOneReconcileRound()`：
+      //     `runNow` **构造上不抛**（内部 catch + streak 归零），而直接 await 那一轮时，
+      //     任何一次抛出（最典型的是中枢刚启动那一瞬间的 ECONNREFUSED）都会
+      //     **跳过下面的 `schedule.start()`** ⇒ 周期收敛永远不启动，
+      //     而唯一的症状是"日志里少了一行"。拿一次启动读数的形式换掉一个静默失效，值得。
       if (disposed) return
-      const first = await runOneReconcileRound()
+      const first = await schedule.runNow()
       if (disposed) return
       // ★ P4：把上面这一轮变成**周期性**的。
       //   `start()` 会先把 streak 记下来（首轮已跑过），之后每 `reconcileIntervalMs` 一拍。

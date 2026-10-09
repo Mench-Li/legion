@@ -1916,6 +1916,12 @@ async function stageTest() {
     //   值那一半：从 Legion 自己的受保护库按引用名取（宿主进程内，不经 HTTP —— 不新增明文传输面）。
     //   守：`requireProtected: true` 真的传下去 / 取不到一律 null（绝不空串）/ 抛错兜住且同一失败只报一次。
     { label: 'legion-secrets（P3：从 Legion 的 DPAPI 库按引用名取值，取不到就不写）', files: ['services-plugin/legion-secrets.test.mjs'], cwd: ROOT },
+    // ── P4（DECISION-legion-owns-model-config）：**周期收敛** ──
+    //   守：不叠轮（上一轮没跑完绝不并发下一轮 —— 那是 P2/P3"读—算—写—回读"不可分的前提）/
+    //   streak 只数"轮次开始时无差异"（按"写完之后干净"算会让放行条件被自己的写入满足 ⇒ 永远为真）/
+    //   一轮出错不打紧下一拍照跑、但 streak 必须归零 / stop() 真的停（卸载后不许还有一轮在写配置）/
+    //   间隔 <= 0 = 只在启动时收敛一次（"我想关掉周期"不许被静默变成"用默认周期"）。
+    { label: 'reconcile-schedule（P4：周期收敛不叠轮、streak 语义、可停）', files: ['services-plugin/reconcile-schedule.test.mjs'], cwd: ROOT },
     { label: 'hub-event-stream（F-01 scope/游标/信封）', files: ['workbench/scripts/hub-event-stream.test.mjs'], cwd: ROOT, nodeArgs: ['--experimental-strip-types'] },
     // ── 并行任务文件冲突治理（G-mujfc9vi-1 S1–S8）──
     // 每个测试文件都必须显式登记：未登记 = 不存在的断言（本文件 4568 行的完备性检查会拦）。

@@ -28,6 +28,8 @@ import { readDshProviderSnapshot } from './dsh-snapshot.mjs'
 // P3：接管写入 + 从 Legion 的受保护库取值。
 import { runMaterialization } from './materializer.mjs'
 import { createLegionSecretReader } from './legion-secrets.mjs'
+// P4：周期收敛的调度（递归 setTimeout ⇒ 不重叠是构造上的性质）。
+import { createReconcileSchedule } from './reconcile-schedule.mjs'
 
 export const name = '@dsh-external/dsh-legion-services'
 
@@ -220,6 +222,13 @@ export function apply(ctx, rawConfig = {}) {
   //   "读者看得见的叶子"（见 materialize-ops.mjs 文件头）。
   const applyModelConfig = flag(cfg.applyModelConfig ?? baseEnv.LEGION_APPLY_MODEL_CONFIG, false)
   const applyModelConfigDeletes = flag(cfg.applyModelConfigDeletes ?? baseEnv.LEGION_APPLY_MODEL_CONFIG_DELETES, false)
+  // ★ P4 的周期：默认 5 分钟一轮；显式给 0（或负数）⇒ **只**在启动时收敛一次。
+  //   为什么不复用 `num()`：它把 0 当成"没给"并回落到默认值 ——
+  //   于是"我想关掉周期"这个意图会被静默变成"用默认周期"，而那正好相反。
+  const rawInterval = cfg.reconcileIntervalMs ?? baseEnv.LEGION_RECONCILE_INTERVAL_MS
+  const reconcileIntervalMs = rawInterval === undefined || rawInterval === null || rawInterval === ''
+    ? 300000
+    : (Number.isFinite(Number(rawInterval)) ? Number(rawInterval) : 300000)
   const hubUpstream = typeof cfg.hubUpstream === 'string' && cfg.hubUpstream.trim()
     ? cfg.hubUpstream.trim()
     : (typeof baseEnv.DSH_HUB_UPSTREAM === 'string' && baseEnv.DSH_HUB_UPSTREAM ? baseEnv.DSH_HUB_UPSTREAM : 'http://127.0.0.1:8787')
@@ -344,6 +353,34 @@ export function apply(ctx, rawConfig = {}) {
     children.clear()
   }
 
+  /**
+   * P4 的一轮收敛 = P2 的对账 + （门开着时）P3 的物化。
+   *
+   * ★ 返回值里的 `clean` 报的是**轮次开始时**有没有差异，而不是"写完之后干不干净"。
+   *   两者的区别在 streak 上很要紧：如果按"写完之后"算，那么每一次成功的写入
+   *   都会让 streak +1，于是"连续 N 轮无差异"这个放行条件会被**自己的写入**满足 ——
+   *   那就成了一个永远为真的读数。
+   */
+  async function runOneReconcileRound() {
+    const shadow = await runShadowMaterialization({ ctx, hubUpstream, teamHubToken, log })
+    const cleanAtStart = shadow.ok === true && shadow.plan?.clean === true
+    await runMaterialization({
+      ctx, hubUpstream, teamHubToken, log,
+      enabled: applyModelConfig,
+      allowDeletes: applyModelConfigDeletes,
+      secretReader: readLegionSecret,
+    })
+    return { clean: cleanAtStart }
+  }
+
+  // 建在 bootTimer 之前：STM 之后才建会处在 TDZ 里（今天不会命中，因为 setTimeout 回调
+  // 一定异步执行 —— 但那是"取决于运行时细节"的正确性，不是构造上的正确性）。
+  const schedule = createReconcileSchedule({
+    run: runOneReconcileRound,
+    intervalMs: reconcileIntervalMs,
+    log,
+  })
+
   const bootTimer = setTimeout(() => {
     void (async () => {
       if (disposed) return
@@ -367,37 +404,30 @@ export function apply(ctx, rawConfig = {}) {
       })
       if (imported.skipped === undefined) log('供应商目录已由 DSH 现状建立（P1）；此后 Legion 是唯一真相')
 
-      // ★ P2 的影子对账：算出"接管后要写什么"并**只记一行读数**（一个字节都不写）。
-      //   它紧跟在 P1 的导入之后，所以首次启动的读数应当是 clean ——
-      //   而如果**不** clean，"接管会删掉"的那几个 id 会出现在同一行里（那正是这一段的目的）。
+      // ★ P2 + P3 + P4 的第一轮：对账（只报告）→ 门开着时物化（写 + 回读验收）→ 之后按周期重复。
+      //   顺序不能换：P1 的导入必须先把 Legion 的目录建起来，P2 的读数才有意义；
+      //   而 P3 的写入只有在"看见了要写什么"之后才允许发生。
       if (disposed) return
-      const shadow = await runShadowMaterialization({ ctx, hubUpstream, teamHubToken, log })
-      if (shadow.ok && shadow.plan !== null) {
-        // 把"连续为空"这件事记成显式读数：P3 的放行条件就是它。
-        log(shadow.plan.clean
-          ? '供应商影子对账：本轮**无差异**（P3 的放行条件是**连续多轮**都无差异；本插件目前只在启动时对账一次）'
-          : '供应商影子对账：**本轮有差异** → 暂不放行 P3（先把「删除/修改」那几条看明白）')
-      }
-
-      // ★ P3 的接管写入。**默认关**：它是这条链上唯一不可逆的一段（会 unset 掉 DSH 里
-      //   Legion 没有的供应商），所以"能写"与"在写"之间隔着一个显式开关，而不是"代码写完就生效"。
-      //   门关着时 `runMaterialization` 一个字节都不写，只记一行"未启用"——
-      //   那一行是必要的：否则日志里"没有物化记录"会被读成"物化没接上"，而两者处置完全不同。
+      const first = await runOneReconcileRound()
       if (disposed) return
-      await runMaterialization({
-        ctx, hubUpstream, teamHubToken, log,
-        enabled: applyModelConfig,
-        allowDeletes: applyModelConfigDeletes,
-        secretReader: readLegionSecret,
-      })
+      // ★ P4：把上面这一轮变成**周期性**的。
+      //   `start()` 会先把 streak 记下来（首轮已跑过），之后每 `reconcileIntervalMs` 一拍。
+      //   不重叠是构造上的性质（递归 setTimeout），不是靠调大间隔 —— 见 reconcile-schedule.mjs。
+      schedule.start()
+      log(`模型配置收敛：启动收敛完成（首轮${first?.clean ? '无差异' : '有差异'}）；`
+        + `接管门=${applyModelConfig ? '**已开**' : '关（只对账不写）'}`
+        + `，删除门=${applyModelConfigDeletes ? '**已开**' : '关（删除只报告）'}`)
     })()
   }, num(cfg.bootDelayMs, 1500))
 
   // effect 清理随插件卸载执行；普通 dispose 事件不代表 Cordis 生命周期。
   ctx.effect(() => () => {
     clearTimeout(bootTimer)
+    // ★ 周期收敛必须一起停：否则插件卸载后还有一轮在写 DSH 的配置，
+    //   而那时它已经不归任何人管了（disposeAll 只回收子进程，管不到这个定时器）。
+    schedule.stop()
     disposeAll()
-    log('legion-services 已随宿主停止（全部子服务已回收）')
+    log('legion-services 已随宿主停止（全部子服务已回收，周期收敛已停）')
   })
 
   const dirSource = cfgDir && looksLikeLegionRoot(cfgDir) ? 'config.legionDir'

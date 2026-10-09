@@ -1,4 +1,4 @@
-// config-schema.mjs — 服务托管插件（services-plugin/）的配置声明（P3-4 插件配置面统一）
+﻿// config-schema.mjs — 服务托管插件（services-plugin/）的配置声明（P3-4 插件配置面统一）
 //
 // 它与其他进程的关系是**反向**的：它不监听端口、不读业务配置，而是替三个进程决定「启动时拿到什么环境」。
 // 因此本 schema 除了声明它**读取**的 env，还声明它**注入**的 env/CLI（`injects`）——
@@ -34,6 +34,23 @@ export const SCHEMA = defineSchema({
     {
       key: 'dshWebUrl', env: 'DSH_WEB_URL', type: 'string', default: '',
       doc: '宿主自身的 GUI 地址（只读兜底）：拿不到 ctx.webServer.port 时用它派生给 workbench 的 DSH_MODELS_BASE_URL',
+    },
+    // ── P3/P4：模型配置的派生物化（DECISION-legion-owns-model-config） ──
+    // 这三个都是**本插件自己读**、控制"要不要把 Legion 的目录写进 DSH 的活配置"的开关。
+    {
+      key: 'applyModelConfig', env: 'LEGION_APPLY_MODEL_CONFIG', type: 'bool', default: false,
+      doc: 'P3 接管门：为真才把 Legion 的供应商目录写进 DSH 的 llm-pi-ai（**默认关**）。'
+        + '这条链上唯一不可逆的一段，所以"能写"与"在写"之间隔着一个显式开关 —— 也接受 composition 的 config.applyModelConfig',
+    },
+    {
+      key: 'applyModelConfigDeletes', env: 'LEGION_APPLY_MODEL_CONFIG_DELETES', type: 'bool', default: false,
+      doc: 'P3 的**第二道门**：为真才 unset 掉"Legion 里没有、DSH 里活着"的供应商（默认只报告不执行）。'
+        + '单独一道门是因为整块 unset 的逆操作只能还原读者看得见的叶子',
+    },
+    {
+      key: 'reconcileIntervalMs', env: 'LEGION_RECONCILE_INTERVAL_MS', type: 'int', default: 300000,
+      doc: 'P4 周期收敛的间隔（毫秒）；**显式给 0 表示只要启动时收敛一次**，不排周期。'
+        + '注意这里 0 是有效值（与 num() 的"0 视为没给"不同）：把 0 当成"没给"会让"我想关掉周期"静默变成"用默认周期"',
     },
   ],
   // 本文件自己会被扫描（dirs 含整个 services-plugin/）：injects 里的 `TEAM_HUB_PORT` /

@@ -28,8 +28,37 @@
 import { RELEASE_CHANNELS } from '../upgrade/channels.mjs'
 import { validateRelativePath } from './release.mjs'
 
-/** 正式环境的缓存策略（设计 §4 line 79）。 */
-export const RELEASE_CACHE_CONTROL = 'public, max-age=31536000, immutable'
+/**
+ * 发行文件的缓存策略（设计 §4 line 79）。
+ *
+ * ★★ 这个值同时受**两个**约束，而第二个是 2026-10-10 实测才量出来的：
+ *
+ *   ① 客户端（`evaluateResponse()`）要求它**含 `immutable`** —— 只查这一个词，
+ *      **不查 `public`、也不查 `max-age` 的具体数值**；
+ *   ② **京东云 OSS 的 `Cache-Control` 上限是 30 个字符**（31 起返回
+ *      `400 InvalidArgument: Cache-Control too long`）。
+ *
+ *   原先这里是 `'public, max-age=31536000, immutable'`（**35** 字符）——
+ *   在 nginx 上没问题，而一旦把发行文件托管到 OSS，上传**直接被拒**：
+ *
+ *     ✖ HTTP 400：InvalidArgument: Cache-Control too long. size = 35
+ *
+ *   实测边界（逐字符二分）：27/28/29/30 通过，31 起被拒。
+ *
+ *   > 一个"在某一个托管上能用的缓存头"，
+ *   > 与一个"在客户端与所有托管上都成立"的缓存头，
+ *   > 在 nginx 的响应里是同一个东西——只不过前者在换托管的那一天会被拒，
+ *   > 而拒绝信息只说"太长"，不说"客户端其实只要求一个词"。
+ *
+ *   所以取 `'max-age=31536000, immutable'`（**27** 字符）：它同时满足
+ *   ① 与 ②，于是 nginx 与对象存储可以用**同一个值**，不需要各自抄一份
+ *   （那正是本仓反复修过的"两处各判各的"）。
+ *
+ *   ⚠️ 不要再把 `public` 加回来：加了就 35 字符，OSS 会拒。
+ *      而且它没有语义损失 —— 更新的取件是**匿名**的（没有 `Authorization`
+ *      头），`public` 只影响"带凭据的请求能否被共享缓存"，与这里无关。
+ */
+export const RELEASE_CACHE_CONTROL = 'max-age=31536000, immutable'
 /** 通道清单必须完全不可缓存。 */
 export const FEED_CACHE_CONTROL = 'no-store'
 

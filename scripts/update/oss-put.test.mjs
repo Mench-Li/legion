@@ -20,8 +20,10 @@ import { fileURLToPath } from 'node:url'
 
 import {
   FIXED_VECTOR, OSS_PUT_CHECKED, UNSIGNED_PAYLOAD, amzDates, argString, buildUrl,
-  describeS3Error, judgeProbe, ossRequest, selfCheckOssPut, signRequest, uriEncode, verifyPublicRead,
+  cacheControlForObjectKey, describeS3Error, judgeProbe, ossRequest, selfCheckOssPut,
+  signRequest, uriEncode, verifyPublicRead,
 } from './oss-put.mjs'
+import { FEED_CACHE_CONTROL, RELEASE_CACHE_CONTROL } from '../../product/update/host.mjs'
 
 const ROOT = resolve(fileURLToPath(new URL('../../', import.meta.url)))
 
@@ -317,5 +319,105 @@ describe('SigV4 上传器', () => {
     const spy = async (url, init) => { seen = init; return new Response('', { status: 200 }) }
     await verifyPublicRead('https://x/o', { fetchImpl: spy })
     assert.equal(seen.method, 'GET', '必须用 GET：HEAD 出错时拿不到服务端原话')
+  })
+
+  // ── 缓存头：必须与客户端要求**同源** ────────────────────────────────────
+  //
+  // ★ 客户端（`product/update/transport.mjs`）对每个路径都有硬要求：
+  //   `feeds/**` 恰好 `no-store`、`releases/**` 含 `immutable`。而对象存储的
+  //   默认响应两条都不满足 ⇒ 客户端会在**校验响应头**这一步拒收，错因指向"服务器"。
+  //
+  //   上传器若自己抄一份字面量，就又是"两处各判各的"——本轮刚在
+  //   `roles-ozon.json` 上修过一次同类问题。所以这里断言它**就是**
+  //   `expectedCacheControl()` 的值（同一个函数），而不是"等于某个字符串"。
+
+  test('㉒ 缓存头从对象键派生，且与客户端判据同源', () => {
+    // 通道清单：**恰好** no-store（客户端不接受"含 no-store"的混合写法）。
+    assert.equal(cacheControlForObjectKey('legion/feeds/stable/win-x64.json', { objectPrefix: 'legion' }),
+      FEED_CACHE_CONTROL)
+    assert.equal(FEED_CACHE_CONTROL, 'no-store', 'feed 的常量本身变了的话，这条要跟着改')
+    // 发行文件：含 immutable。
+    for (const key of [
+      'legion/releases/rel-0.1.1/manifest.json',
+      'legion/releases/rel-0.1.1/legion-win-x64.zip',
+      'legion/releases/rel-0.1.1/notes-0.1.1.txt',
+    ]) {
+      assert.equal(cacheControlForObjectKey(key, { objectPrefix: 'legion' }), RELEASE_CACHE_CONTROL)
+    }
+    assert.match(RELEASE_CACHE_CONTROL, /immutable/)
+    // 无前缀（键本身就是树内相对路径）也要能用。
+    assert.equal(cacheControlForObjectKey('feeds/internal/win-x64.json'), FEED_CACHE_CONTROL)
+    assert.equal(cacheControlForObjectKey('/legion/feeds/canary/win-x64.json', { objectPrefix: 'legion' }), FEED_CACHE_CONTROL)
+  })
+
+  test('㉓ 键与前缀对不上时**拒绝**，不猜一个缓存策略', () => {
+    // 前缀不对：剥不掉前缀 ⇒ 若不拒绝，`legion/feeds/…` 会被当成发行文件。
+    assert.throws(() => cacheControlForObjectKey('legion/feeds/stable/win-x64.json', { objectPrefix: 'other' }),
+      /不在对象前缀/)
+    // 形状不是更新树：拒绝，而不是默认成"发行文件"。
+    assert.throws(() => cacheControlForObjectKey('legion/site/index.html', { objectPrefix: 'legion' }),
+      /既不是 feeds\/ 也不是 releases\//)
+    assert.throws(() => cacheControlForObjectKey('legion/README.md', { objectPrefix: 'legion' }),
+      /既不是 feeds\/ 也不是 releases\//)
+  })
+
+  test('㉔ ossRequest 把 Cache-Control 放进请求头**并参与签名**', async () => {
+    const realFetch = globalThis.fetch
+    let captured = null
+    globalThis.fetch = async (url, init) => { captured = { url, init }; return new Response('', { status: 200 }) }
+    try {
+      await ossRequest({
+        method: 'PUT', endpoint: 'https://s3.cn-north-1.jdcloud-oss.com', bucket: 'b', key: 'legion/feeds/stable/win-x64.json',
+        region: 'cn-north-1', accessKey: 'AKID', secretKey: 'SECRET',
+        cacheControl: FEED_CACHE_CONTROL, date: new Date(Date.UTC(2026, 9, 9, 12, 0, 0)),
+      })
+    } finally { globalThis.fetch = realFetch }
+
+    assert.ok(captured, 'fetch 应被调用')
+    assert.equal(captured.init.headers['cache-control'], 'no-store', '头里必须有 Cache-Control')
+    // ★ 参与签名：S3 系把它算作请求头，不签会被服务端按"未签名头"处理。
+    assert.match(captured.init.headers.authorization, /cache-control/,
+      'Cache-Control 必须出现在 SignedHeaders 里 —— 它不是可以事后补的元数据')
+  })
+
+  test('㉕ 不给 cacheControl 时**不加**这个头（默认行为不变）', async () => {
+    const realFetch = globalThis.fetch
+    let captured = null
+    globalThis.fetch = async (url, init) => { captured = { url, init }; return new Response('', { status: 200 }) }
+    try {
+      await ossRequest({
+        method: 'PUT', endpoint: 'https://s3.cn-north-1.jdcloud-oss.com', bucket: 'b', key: 'k',
+        region: 'cn-north-1', accessKey: 'AKID', secretKey: 'SECRET',
+        date: new Date(Date.UTC(2026, 9, 9, 12, 0, 0)),
+      })
+    } finally { globalThis.fetch = realFetch }
+    assert.equal(captured.init.headers['cache-control'], undefined)
+    assert.doesNotMatch(captured.init.headers.authorization, /cache-control/)
+  })
+
+  // ★★★ 发行文件的缓存头受**两个**约束，少一条就会在某一边坏掉。
+  //
+  //   实测（2026-10-10，京东云 OSS）：`Cache-Control` 上限 **30 字符**，
+  //   而原值 `'public, max-age=31536000, immutable'` 是 **35** 字符 ——
+  //   上传被拒 `400 InvalidArgument: Cache-Control too long. size = 35`。
+  //   同时客户端只要求**含 `immutable`**（不查 `public`、不查 `max-age` 数值）。
+  //
+  //   > 一个"在某一个托管上能用的缓存头"，
+  //   > 与一个"在客户端与所有托管上都成立"的缓存头，
+  //   > 在 nginx 的响应里是同一个东西——只不过前者在换托管的那一天会被拒，
+  //   > 而拒绝信息只说"太长"，不说"客户端其实只要求一个词"。
+  //
+  //   这一条把两个约束**一起**钉住：谁的"优化"（加回 `public`、调大 max-age）
+  //   只要破坏任一条，它就会红。
+  test('㉖ 发行文件的缓存头同时满足客户端与对象存储两个约束', () => {
+    assert.match(RELEASE_CACHE_CONTROL, /immutable/,
+      '客户端 evaluateResponse() 只查这一个词，丢了它会被拒收')
+    assert.ok(RELEASE_CACHE_CONTROL.length <= 30,
+      `发行缓存头 ${RELEASE_CACHE_CONTROL.length} 字符，超过京东云 OSS 的 30 字符上限`
+      + '（实测 31 起返回 400 InvalidArgument: Cache-Control too long）。'
+      + '客户端并不要求 public，别加回来。')
+    // 通道清单那条**恰好**是 no-store（客户端不接受混合写法），也远低于上限。
+    assert.equal(FEED_CACHE_CONTROL, 'no-store')
+    assert.ok(FEED_CACHE_CONTROL.length <= 30)
   })
 })

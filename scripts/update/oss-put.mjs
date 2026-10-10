@@ -50,6 +50,11 @@ import { createHash, createHmac } from 'node:crypto'
 import { createReadStream, statSync } from 'node:fs'
 import { basename } from 'node:path'
 
+// ★ 缓存策略的**单一真源**（与 `verify-host.mjs` / 客户端 transport 用的同一个）。
+//   上传器不再自己写 `no-store` / `immutable` 的字面量 —— 见
+//   `cacheControlForObjectKey` 的注释。
+import { expectedCacheControl } from '../../product/update/host.mjs'
+
 /** 默认端点形状（实测：`s3.<region>.jdcloud-oss.com` 有 A 记录且返回 S3 XML）。 */
 export const DEFAULT_ENDPOINT_TEMPLATE = 'https://s3.{region}.jdcloud-oss.com'
 
@@ -189,7 +194,7 @@ export function buildUrl(endpoint, bucket = '', key = '') {
 export async function ossRequest({
   method, endpoint, bucket, key = '', region, accessKey, secretKey,
   body = null, contentLength = null, contentType = null, publicRead = false, timeoutMs = 30_000,
-  date = null,
+  date = null, cacheControl = null,
 }) {
   const { url, canonicalUri } = buildUrl(endpoint, bucket, key)
   const { host } = new URL(url)
@@ -218,6 +223,25 @@ export async function ossRequest({
   }
   if (contentLength !== null) headers['content-length'] = String(contentLength)
   if (contentType !== null) headers['content-type'] = contentType
+  // ★ `Cache-Control` 是**对象元数据**，必须在 PUT 那一刻设上，之后再改要重传。
+  //
+  //   它在这里不是"优化"，而是**合同的一部分**：客户端的
+  //   `evaluateResponse()` 对每个路径都有硬要求 ——
+  //
+  //     · `feeds/**`  → Cache-Control 必须**恰好**是 `no-store`
+  //                    （判据不接受 `no-cache, max-age=600, no-store` 这种
+  //                     "含 no-store" 的写法：中间层仍可能留副本）
+  //     · `releases/**` → 必须**含** `immutable`
+  //
+  //   对象存储的默认响应是 `public, max-age=…` 之类，两条都不满足 ⇒ 客户端
+  //   会在**校验响应头**这一步就拒收，更新的每一步都失败而错因指向"服务器"。
+  //
+  //   > 一个"字节完全正确、签名也验得过"的对象，
+  //   > 与一个"客户端真的会接受"的对象，在对象存储的控制台上长得一模一样——
+  //   > 只不过前者缺一个响应头，而那个头只有客户端在核。
+  //
+  //   它参与签名（放进 `headers`），因为 S3 系把它算作请求头。
+  if (cacheControl !== null) headers['cache-control'] = String(cacheControl)
   // `x-amz-acl` 必须**参与签名**，否则服务端会拒（它是要执行的动作，不是元数据）。
   if (publicRead) headers['x-amz-acl'] = 'public-read'
 
@@ -244,6 +268,50 @@ export function describeS3Error(text) {
   const message = /<Message>([^<]*)<\/Message>/.exec(text)?.[1] ?? null
   if (code === null && message === null) return (text || '').trim().slice(0, 200) || '(空响应)'
   return `${code ?? '?'}: ${message ?? ''}`
+}
+
+/**
+ * 从**对象键**推出该对象必须带的 `Cache-Control` —— 判据来自
+ * `product/update/host.mjs` 的 `expectedCacheControl()`，**不在这里另写一份**。
+ *
+ * ## 为什么必须派生而不是抄
+ *
+ * 客户端对每个路径的 `Cache-Control` 有硬要求（`feeds/**` 恰好 `no-store`；
+ * `releases/**` 含 `immutable`）。如果上传器自己写一份字面量，那就又回到
+ * "两处各判各的"——本轮刚在 `roles-ozon.json` 上修过一次同类问题：
+ * 注释说一套、代码做另一套，而差异只在某一条路径上暴露。
+ *
+ * ## 为什么要求显式给 `objectPrefix`，而不是自己猜
+ *
+ * OSS 的键是 `legion/feeds/stable/win-x64.json` 这样的形状，而
+ * `expectedCacheControl()` 要的是**树内相对路径** `feeds/stable/win-x64.json`。
+ * 前缀不剥掉，`'/legion/feeds/…'.startsWith('feeds/')` 为 false ⇒ 通道清单
+ * 会被**静默**当成发行文件（发成 `immutable`），而客户端要求 `no-store`。
+ * 这正是 `team-hub/routes/releases.mjs` 上踩过的同一个坑。
+ *
+ *   > 一个"两处都用了同一个判定函数"的重构，
+ *   > 与一个"两边真的算出同一个结论"的重构，在代码审阅时是同一个东西——
+ *   > 只不过前者的输入形状还没对齐，而形状不对时它俩会各答一个。
+ *
+ * 所以这里**拒绝**形状不对的键，而不是猜一个前缀。
+ *
+ * @param {string} key      对象键（`<objectPrefix>/feeds/...` 或 `<objectPrefix>/releases/...`）
+ * @param {{objectPrefix?: string}} [opts] 对象前缀，例如 `legion`
+ */
+export function cacheControlForObjectKey(key, { objectPrefix = '' } = {}) {
+  const p = String(key).split('\\').join('/').replace(/^\/+/, '')
+  const rawPrefix = String(objectPrefix ?? '').replace(/^\/+|\/+$/g, '')
+  if (rawPrefix !== '' && !(p === rawPrefix || p.startsWith(`${rawPrefix}/`))) {
+    throw new TypeError(`cacheControlForObjectKey：键 ${JSON.stringify(key)} 不在对象前缀 ${JSON.stringify(rawPrefix)} 之下`)
+  }
+  const rel = rawPrefix === '' ? p : p.slice(rawPrefix.length).replace(/^\/+/, '')
+  // 必须是 `feeds/` 或 `releases/` 开头：`expectedCacheControl` 对其它形状会
+  // **当成发行文件**（它只判 `startsWith('feeds/')`），那是一条静默的错误分支。
+  if (!rel.startsWith('feeds/') && !rel.startsWith('releases/')) {
+    throw new TypeError(`cacheControlForObjectKey：相对路径 ${JSON.stringify(rel)} 既不是 feeds/ 也不是 releases/ ——`
+      + '拒绝猜一个缓存策略（猜错的方向是"通道清单被当成发行文件"，而它只在客户端那一侧报错）')
+  }
+  return expectedCacheControl(rel)
 }
 
 /**
@@ -480,16 +548,53 @@ if (isMain) {
   if (file === null || key === null) { process.stderr.write('oss-put 需要 --file 与 --key\n'); process.exit(2) }
   const stat = statSync(file)
   const publicRead = args.get('public-read') === 'true'
+
+  // ── 缓存头：显式给就用给的；否则从 `--object-prefix` 派生 ──────────────────
+  //
+  // ★ 派生是**默认**路径：`expectedCacheControl()` 是客户端与校验器用的同一个
+  //   函数，所以上传时算出的头与客户端要求的头不可能漂开。只有在对非更新树的
+  //   对象（例如首页图标）上传时才需要显式给。
+  const explicitCache = argString(args.get('cache-control'))
+  const objectPrefix = argString(args.get('object-prefix')) ?? ''
+  let cacheControl = explicitCache
+  if (cacheControl === null && objectPrefix !== '') {
+    try {
+      cacheControl = cacheControlForObjectKey(key, { objectPrefix })
+    } catch (error) {
+      process.stderr.write(`✖ 推不出缓存策略：${error.message}\n`
+        + '  给 --cache-control <字面量> 显式指定，或让 --object-prefix 与键对得上。\n')
+      process.exit(2)
+    }
+  }
+
+  // MIME 按扩展名给：写死成 exe 会让通道清单以 `application/vnd.microsoft.
+  // portable-executable` 送达 —— 客户端不按 MIME 判，但 CDN 与浏览器会。
+  const MIME_BY_EXT = {
+    '.exe': 'application/vnd.microsoft.portable-executable',
+    '.zip': 'application/zip',
+    '.json': 'application/json; charset=utf-8',
+    '.txt': 'text/plain; charset=utf-8',
+  }
+  const ext = (/\.[a-z0-9]+$/i.exec(file) ?? [''])[0].toLowerCase()
+  const contentType = MIME_BY_EXT[ext] ?? 'application/octet-stream'
+
   process.stdout.write(`上传 ${file}（${stat.size} 字节）→ ${endpoint}/${bucket}/${key}`
-    + `${publicRead ? '（公开读）' : ''}\n`)
+    + `${publicRead ? '（公开读）' : ''}`
+    + `${cacheControl === null ? '' : `（Cache-Control: ${cacheControl}）`}\n`)
+  if (cacheControl === null) {
+    process.stderr.write('⚠ 没有给 --cache-control 也推不出（缺 --object-prefix）：\n'
+      + '  对象会以存储默认头送达，而客户端的 evaluateResponse() 对更新树的每个路径都有硬要求\n'
+      + '  （feeds/** 恰好 no-store；releases/** 含 immutable）——它会在校验响应头时拒收。\n')
+  }
 
   const started = Date.now()
   const r = await ossRequest({
     ...common, method: 'PUT', key,
     body: createReadStream(file),
     contentLength: stat.size,
-    contentType: 'application/vnd.microsoft.portable-executable',
+    contentType,
     publicRead,
+    cacheControl,
     // 195MB 的 PUT 给足时间；中断会整体失败（见文件头"诚实边界"）。
     timeoutMs: 30 * 60_000,
   })

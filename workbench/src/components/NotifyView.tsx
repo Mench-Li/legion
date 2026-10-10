@@ -10,6 +10,7 @@ import {
 import type { NotifyCategory } from '../notify'
 import { toast } from './Toast'
 import { TaskDetailModal } from './TaskDetailModal'
+import { requestSystemNotifyPermission, systemNotifyPermission, systemNotifySupported } from '../desktopNotify'
 
 /** 面板一次拉取的审计条数（服务端 limit 上限 500；足够覆盖全部未读与展示尾部）。 */
 const LIST_LIMIT = 200
@@ -70,6 +71,8 @@ export function NotifyView({ scope, hubMode, onUnreadChange, onGoHome }: {
   const [sse, setSse] = useState<HubSseStatus | null>(null)
   const [refills, setRefills] = useState(0)
   const [detailTaskId, setDetailTaskId] = useState<string | null>(null)
+  /** 系统通知权限（BUG-021）：只在用户点按钮时请求，这里只显示当前状态。 */
+  const [notifyPerm, setNotifyPerm] = useState(() => systemNotifyPermission())
   const scopeRef = useRef<string | null>(null)
   scopeRef.current = scope
   /** 未过滤的全局 seq 水位（缺口判据；见 notify.shouldRefill）。 */
@@ -288,6 +291,24 @@ export function NotifyView({ scope, hubMode, onUnreadChange, onGoHome }: {
             {sse?.state === 'open' || sse?.state === 'reconnected' ? '🟢 ' : '🟡 '}{sseText}
           </span>
           <span className="chip">{unread > 0 ? ('🔴 ' + String(unread) + ' 条未读') : '✅ 全部已读'}</span>
+          {/* BUG-021：人离开电脑时页面里的弹框看不见，系统通知才是那一刻唯一能叫到人的东西。
+              授权只能在用户手势里请求，所以放在这里；不自动请求（自动弹授权框会被拒，拒一次就回不来）。 */}
+          {systemNotifySupported() && notifyPerm !== 'granted' && (
+            <button
+              className="btn ghost"
+              disabled={notifyPerm === 'denied'}
+              title={notifyPerm === 'denied'
+                ? '系统通知已被拒绝（要在浏览器的站点设置里重新允许），页面内的右下角弹框不受影响'
+                : '开启后，页面不在前台时也会用系统通知提醒（需要你点一次授权）'}
+              onClick={() => {
+                void requestSystemNotifyPermission().then(p => {
+                  setNotifyPerm(p)
+                  toast(p === 'granted' ? 'ok' : 'info',
+                    p === 'granted' ? '🔔 已开启系统提醒：页面不在前台时也会通知你' : '未开启系统提醒（页面内的右下角弹框照常）')
+                })
+              }}
+            >🔔 开启系统提醒</button>
+          )}
           <button className="btn ghost" disabled={loading} onClick={() => void load()} title="重新拉取通知列表">↻ 刷新</button>
         </span>
       </div>

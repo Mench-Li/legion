@@ -147,8 +147,28 @@ export function createModelProfilesRoutes({
             json(res, 400, { ok: false, error: '模型档案 id 不能包含斜杠', code: 'BAD_ID_ENCODING' }); return
           }
           await handleRun(req, res, async (body) => {
-            const profile = modelStore.get(probeId)
-            if (profile === null) {
+            // ★★ BUG-025：这里从前调的是 `modelStore.get()` —— 那返回的是**脱敏 descriptor**
+            //    （只有 `hasCredential`，**没有 `secretRef`**）。于是探针拿不到引用名、
+            //    一个 Authorization 头都不发，供应商回 401，判定却写成
+            //    「**凭证已成功解析**，但供应商拒绝」——一句**假话**，把人送去供应商控制台。
+            //
+            //    库层其实一直备着两个读取口，注释甚至点名了这个用途：
+            //      · `get(id)`         → descriptor，不含 `secretRef`（给 UI/API）
+            //      · `requireLive(id)` → 内部对象，**含 `secretRef`**
+            //                            「只在需要真的用凭证时调用（如 PRT-504 连通性测试）」
+            //    连通性测试正是这一条。读错了口子 ⇒ 任何一个档案都不可能通过鉴权。
+            //
+            //    > 一条"为了安全而脱敏"的读口，
+            //    > 与一条"把脱敏视图喂给要用密钥的那段代码"的读口，
+            //    > 在只看类型签名的时候是一模一样的。
+            //
+            //    `internalGet` 就是这个口子（它的注释点名了本用途），且**保留了原有的两条
+            //    错误语义**：拿不到（含墓碑）时按"有历史 ⇒ 409 墓碑 / 无历史 ⇒ 404 不存在"报。
+            const profile = modelStore.internalGet(probeId)
+            // 墓碑判定对**缺失字段**宽容（`undefined` 不算墓碑）：真实行一定带这个字段，
+            // 而一个"少字段就被当成墓碑"的判定会把活档案报成"已被删除"——那是更难查的那种错。
+            const tombstoned = profile !== null && profile.deletedAtMs !== null && profile.deletedAtMs !== undefined
+            if (profile === null || tombstoned) {
               const hist = modelStore.resolveForHistory(probeId)
               if (hist !== null) {
                 const err = new Error('模型档案 ' + probeId + ' 已被删除')

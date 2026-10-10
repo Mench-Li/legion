@@ -150,7 +150,9 @@ test('③ 401/403 → AUTH_FAILED（凭证已解析成功，是供应商拒绝�
   for (const status of [401, 403]) {
     const transport = okTransport()
     transport.calls.length = 0
-    const t = makeTransport({ kind: 'http', status })
+    // `credentialSent: true` —— 修好 BUG-025 之后的 transport 会明确报出这件事。
+    // 不报（老 transport）时按"带过"处理，所以这条既有判据仍然成立。
+    const t = makeTransport({ kind: 'http', status, credentialSent: true })
     const probe = createModelProbe({ transport: t, resolveSecret: async () => 'k' })
     const v = await probe.probe({ profile: PROFILE })
     assert.equal(v.ok, false, `HTTP ${status}`)
@@ -158,6 +160,30 @@ test('③ 401/403 → AUTH_FAILED（凭证已解析成功，是供应商拒绝�
     assert.equal(v.class, 'config')
     assert.match(v.message, /本机密钥库是好的/)
   }
+})
+
+test('★★ ③b 401 但**这次没带凭证** → 同一码，但话必须换（不许说"凭证已成功解析"）', async () => {
+  // BUG-025 的现场就是这一句：路由把脱敏视图喂给探针 ⇒ 一个 Authorization 头都没发 ⇒
+  // 供应商 401 ⇒ 判定写成「凭证已成功解析，但供应商拒绝」。用户会去供应商控制台换钥匙，
+  // 而真正要改的是本地的档案引用名。
+  // 档案**没有 secretRef** ⇒ 探针不发 Authorization 头（`needsCredential === false`），
+  // 而 transport 如实报 `credentialSent: false`。这才是"带了空手去敲门"的那一次。
+  const t = makeTransport({ kind: 'http', status: 401, credentialSent: false })
+  const probe = createModelProbe({ transport: t, resolveSecret: async () => 'unused' })
+  const v = await probe.probe({ profile: { ...PROFILE, secretRef: null } })
+  assert.equal(v.code, 'AUTH_FAILED', '码不变：供应商确实拒绝了')
+  assert.equal(v.class, 'config')
+  assert.doesNotMatch(v.message, /凭证已成功解析/,
+    '★ 这句假话会把人送去供应商控制台——而那是完全错误的方向')
+  assert.match(v.message, /没有带凭证|secretRef/, '要指向本地缺的那个东西：档案的凭证引用')
+})
+
+test('★ ③c 老 transport 不报 `credentialSent` 时，判定**逐字不变**（不因缺字段改变行为）', async () => {
+  const t = makeTransport({ kind: 'http', status: 401 })
+  const probe = createModelProbe({ transport: t, resolveSecret: async () => 'k' })
+  const v = await probe.probe({ profile: PROFILE })
+  assert.equal(v.code, 'AUTH_FAILED')
+  assert.match(v.message, /本机密钥库是好的/, '缺字段 ⇒ 按"带过"处理，与既有行为一致')
 })
 
 test('③ 凭证解析失败 → SECRET_UNAVAILABLE，且**根本不发请求**', async () => {

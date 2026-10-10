@@ -18,6 +18,7 @@ import {
   createHttpTransport,
   findModelRecord,
   hasModelList,
+  joinModelsUrl,
 } from './http.mjs'
 
 let server
@@ -272,4 +273,53 @@ test('② 错误的钥匙经真实 HTTP 后落到 AUTH_FAILED，而不是 SECRET
   assert.equal(v.code, 'AUTH_FAILED')
   assert.equal(v.class, 'config')
   assert.match(v.message, /本机密钥库是好的/, '要指向供应商侧的动作')
+})
+
+// ---------------------------------------------------------------------------
+// BUG-024：`endpoint` 已含 `/v1` 时不许拼成 `/v1/v1/models`
+//
+// 实测（2026-10-10，用户报的那条）：档案 endpoint = `https://fjbigmodel.fjdac.cn/v1`
+// （OpenAI 兼容的 base_url **惯例就是含版本段**），而默认探测路径是 `/v1/models`，
+// 朴素拼接得到 `/v1/v1/models` → 404 → 被翻译成「**供应商不认这个模型标识**」。
+//
+//   > 一个"把 /v1 拼两遍"的实现，
+//   > 与一个"模型 id 填错了"的实现，在界面上说的是同一句话。
+//
+// 而用户会照着那句话去核对模型 id —— 而它是对的。方向完全错了。
+// 下面第一条用**真的 HTTP 服务**证明：修好之后同一个档案能探通。
+// ---------------------------------------------------------------------------
+
+test('★★ joinModelsUrl：endpoint 已含版本段时不重复拼接', () => {
+  assert.equal(joinModelsUrl('https://h/v1', '/v1/models'), 'https://h/v1/models',
+    '★ 这条就是用户报的那个：/v1 + /v1/models 曾经拼成 /v1/v1/models')
+  assert.equal(joinModelsUrl('https://h/v1/', '/v1/models'), 'https://h/v1/models', '结尾斜杠不影响判定')
+})
+
+test('★★ joinModelsUrl：既有形状**逐字不变**（不能为了修一个而改了别的）', () => {
+  assert.equal(joinModelsUrl('https://api.example.com'), 'https://api.example.com/v1/models',
+    '不含版本段的 endpoint 必须与从前完全一样')
+  assert.equal(joinModelsUrl('https://api.example.com/'), 'https://api.example.com/v1/models')
+  assert.equal(joinModelsUrl('https://api.example.com/v1', '/models'), 'https://api.example.com/v1/models',
+    '调用方显式给了 /models 时不该被动过')
+  assert.equal(joinModelsUrl('https://api.example.com/v2', '/v1/models'), 'https://api.example.com/v2/v1/models',
+    '★ 只在**同一段**紧挨两次时去重 —— /v2 + /v1 不是重复，不能猜')
+  assert.equal(joinModelsUrl('', '/v1/models'), '/v1/models', '空 base 不抛')
+})
+
+test('★★ 真实 HTTP：endpoint 含 /v1 的档案能探通（修前这里是 404 → MODEL_NOT_FOUND）', async () => {
+  const { createModelProbe } = await import('./index.mjs')
+  const probe = createModelProbe({
+    transport: createHttpTransport(),
+    resolveSecret: async () => 'good-key',
+  })
+  // 注意 base 的写法：**含 /v1**，与用户那条档案一致。
+  // 模型名用夹具里**确实在清单里**的那个（`plain-model`）——否则 404 会来自"清单里没有它"，
+  // 那条路径已经在别的用例里覆盖了，这里要证明的是 **URL 拼接**。
+  const v = await probe.probe({ profile: profile('/v1', 'plain-model'), force: true })
+  assert.equal(v.ok, true, '★ 修 URL 之前这里会是 404 → MODEL_NOT_FOUND（"供应商不认这个模型标识"）')
+  assert.equal(v.code, 'OK')
+  // 而且请求真的打在了 /v1/models 上，不是 /v1/v1/models
+  const paths = seen.map((s) => s.url)
+  assert.ok(paths.includes('/v1/models'), '应当请求 /v1/models：' + JSON.stringify(paths.slice(-3)))
+  assert.equal(paths.some((u) => u.includes('/v1/v1/')), false, '★ 不许出现 /v1/v1/')
 })

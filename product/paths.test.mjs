@@ -34,6 +34,8 @@ import {
   writableDirsInsideInstall,
   resolveLayout,
   samePath,
+  SECRETS_BLOCKING_DIAGNOSTICS,
+  secretsBlockingDiagnostics,
 } from './paths.mjs'
 
 const WIN = 'win32'
@@ -427,4 +429,43 @@ test('公共出口：product/index.mjs 的再导出全部可解析（写错导�
   ]
   const missing = expected.filter((name) => mod[name] === undefined)
   assert.deepEqual(missing, [], `index.mjs 缺少导出：${missing.join(', ')}`)
+})
+
+// ---------------------------------------------------------------- 密钥库的闸门（BUG-023）
+//
+// 这一节的由来：`secret-admin`（写凭据）与 `probe-service`（测连接）**各自抄了一份**
+// "哪些布局事实与密钥库有关"，先修了前者 —— 于是同一台机器上"填密钥能用、测连接不能用"，
+// 而两份代码各自看都"很对"。集合与判据现在只有这一份，这一节守它**确实是那一份**。
+
+test('★★ `secretsBlockingDiagnostics` 只认被点名的码，不认识的一律不挡', () => {
+  const blocking = (codes) => secretsBlockingDiagnostics(codes.map((code) => ({ severity: 'error', code })))
+
+  // 被点名的每一条都要能挡住（逐条，不是抽查几个）
+  for (const code of SECRETS_BLOCKING_DIAGNOSTICS) {
+    assert.equal(blocking([code]).length, 1, `${code} 必须在闸门里`)
+  }
+
+  // 实测那一条：工作区没配与"密钥库在哪"无关 —— 它曾经把「测试连接」整条挡掉
+  assert.deepEqual(blocking(['WORKSPACE_NOT_CONFIGURED']), [],
+    '★ 工作区没配不许挡住密钥库（它曾经让「模型档案 → 测试连接」回 503）')
+  // 没见过的码也不挡：宁可少挡（用户能继续做事），也不要因为"多了个新诊断"把人拦住
+  assert.deepEqual(blocking(['SOME_FUTURE_CODE']), [])
+  // warn 级从来不挡（`hasBlockingDiagnostic` 的同一口径）
+  assert.deepEqual(secretsBlockingDiagnostics([{ severity: 'warn', code: 'PRODUCT_HOME_UNRESOLVED' }]), [])
+})
+
+test('★ `secretsBlockingDiagnostics` 返回**是哪几条**（好把它们报给用户），不是布尔', () => {
+  const r = secretsBlockingDiagnostics([
+    { severity: 'error', code: 'INSTALL_DIR_UNRESOLVED' },
+    { severity: 'error', code: 'WORKSPACE_NOT_CONFIGURED' },
+  ])
+  assert.equal(Array.isArray(r), true, '调用方需要"是哪几条"——只说"布局未确定"等于没说')
+  assert.deepEqual(r.map((d) => d.code), ['INSTALL_DIR_UNRESOLVED'])
+})
+
+test('★ 坏输入不抛（诊断缺字段/传 null 都不能把调用方炸掉）', () => {
+  assert.deepEqual(secretsBlockingDiagnostics(null), [])
+  assert.deepEqual(secretsBlockingDiagnostics(undefined), [])
+  assert.deepEqual(secretsBlockingDiagnostics([null, undefined, {}, { severity: 'error' }]), [],
+    '缺 code 的条目不该被当成"某个被点名的码"')
 })

@@ -307,6 +307,31 @@ test('⑥ probe：墓碑 → 409 PROFILE_DELETED（与 GET 的墓碑口径**一�
   assert.equal(g.body.code, r.body.code)
 })
 
+test('⑥b ★★ 带凭证的档案：探针必须**真的带着引用名**去取凭证（BUG-025）', async () => {
+  // 这一条是 BUG-025 的**入口级**判据。此前整套路由用例的夹具（`profile()`）都**没有
+  // `secretRef`**，而路由读的是脱敏口 `modelStore.get()` —— 两份盲点**重合**，
+  // 于是"探针拿不到凭证"这件事在整个套件里看不出来。
+  //
+  //   > 一个"喂给被测代码的夹具"与"被测代码本身"共有的盲点，
+  //   > 是唯一一种连变异测试都很难发现的盲点：改哪一边都还是绿的。
+  //
+  // 这里刻意用**带 secretRef 的档案**：本机（测试环境）密钥库打不开/没有这个引用，
+  // 所以结论必然是"取不到凭证"——但那必须是 `SECRET_UNAVAILABLE`（本地问题），
+  // 而**绝不能**是「凭证已成功解析，但供应商拒绝」那句假话。
+  const p = profile({ endpoint: 'https://example.invalid/v1', secretRef: 'SOME_MISSING_REF_13' })
+  const created = await call('POST', '/api/model-profiles', { actor: 'u1', profile: p })
+  assert.equal(created.status, 200, created.raw)
+
+  const r = await call('POST', `/api/model-profiles/${p.id}/probe`, {})
+  const code = r.body?.probe?.code ?? r.body?.code
+  const msg = String(r.body?.probe?.message ?? r.body?.error ?? '')
+  assert.notEqual(code, 'AUTH_FAILED',
+    '★ 带 secretRef 的档案在取不到凭证时必须报 SECRET_UNAVAILABLE；' +
+    'AUTH_FAILED 意味着"钥匙被拒"，而那时候我们连钥匙都没拿到：' + r.raw)
+  assert.doesNotMatch(msg, /凭证已成功解析/,
+    '★ 这句是假话——它把本地的取不到说成了供应商的拒绝，会把人送去供应商控制台')
+})
+
 test('⑥ probe：「没探测过」绝不能被表示成「探测失败」⇒ 503 且码是 PROBE_LAYOUT_BLOCKED', async () => {
   // 本档案没有 endpoint ⇒ 探测**根本没发生**。这一条钉的是 PRT-507 后半那条纪律
   // 在 **HTTP 层**的样子：不是 200（那会被前端当成一个判定）、也不是 5xx 里的
@@ -364,7 +389,14 @@ test('⑥ 建档：顶层字段形态会被拒（`actor` 是未知字段）—�
 // 直接构造族工厂，把 `probeService` 换成一个记录参数的桩。
 test('⑦ 缝上：probe 的 force 默认 true、requiredCapabilities 透传、profileId 回显', async () => {
   const { createModelProfilesRoutes } = await import('./routes/model-profiles.mjs')
-  const live = { id: 'live-13', displayName: 'x', provider: 'deepseek', model: 'm' }
+  // ★ 这个桩**必须带 `secretRef`**：探针要用它去密钥库取凭证（BUG-025）。
+  //   从前的桩是一个没有 `secretRef` 的对象，而路由那时读的是脱敏口 `get()`,
+  //   于是"路由把脱敏视图喂给探针"这件事**在夹具里看不出来**——
+  //   夹具和实现有着同一个盲点，用例就永远绿。
+  //
+  //   > 一个"喂给被测代码的夹具"与"被测代码本身"共有的盲点，
+  //   > 是唯一一种连变异测试都很难发现的盲点：改哪一边都还是绿的。
+  const live = { id: 'live-13', displayName: 'x', provider: 'deepseek', model: 'm', secretRef: 'DEEPSEEK_API_KEY', deletedAtMs: null }
 
   const build = (verdict) => {
     const calls = []
@@ -377,7 +409,7 @@ test('⑦ 缝上：probe 的 force 默认 true、requiredCapabilities 透传、p
           res.body = { ok: false, code: e.code, error: e.message }
         }
       },
-      modelStore: { get: () => live, resolveForHistory: () => null },
+      modelStore: { internalGet: () => live, resolveForHistory: () => null },
       probeService: () => ({ probeModelProfile: async (profile, opts) => { calls.push({ profile, opts }); return verdict } }),
       MODEL_ERRORS: { PROFILE_DELETED: 'PROFILE_DELETED', PROFILE_NOT_FOUND: 'PROFILE_NOT_FOUND' },
     })
@@ -395,6 +427,11 @@ test('⑦ 缝上：probe 的 force 默认 true、requiredCapabilities 透传、p
     assert.equal(res.status, 200)
     assert.equal(res.body.profileId, 'live-13', '回包必须说明探测的是哪一个档案')
     assert.deepEqual(res.body.probe, { verdict: 'ok' }, '判定对象要**原样**透出去（不能压成一个布尔或字符串）')
+    // ★★ BUG-025 的核心判据：喂给探针的 profile **必须带着 secretRef**。
+    //    读脱敏口（`get()`）时它不在，探针就一个 Authorization 头都不发，
+    //    401 还会被写成"凭证已成功解析，但供应商拒绝"——一句假话。
+    assert.equal(calls[0].profile.secretRef, 'DEEPSEEK_API_KEY',
+      '★ 探针拿到的档案必须含 secretRef（路由要读内部口 requireLive，不是脱敏口 get）')
   }
   // ② 显式 force:false 要**如实**传下去
   {

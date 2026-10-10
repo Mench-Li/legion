@@ -537,6 +537,62 @@ export function hasBlockingDiagnostic(diagnostics) {
   return diagnostics.some((d) => d.severity === 'error')
 }
 
+/**
+ * **密钥库**真正依赖的布局事实 —— 只有这几个码能挡住"管理/探测凭据"这件事。
+ *
+ * ## 为什么要单独点名，而不是复用 `hasBlockingDiagnostic`
+ *
+ * `hasBlockingDiagnostic` 问的是"这个布局能不能进**自动执行**"，那是**产品整体**的门槛。
+ * 而"我要打开密钥库"依赖的事实少得多：只有"家目录算不出来"和"密钥会落到不该落的地方"。
+ * 拿前者当后者的闸门，后果是**用户被一件与他当前要做的事无关的事情挡住**：
+ *
+ *   实测（2026-10-10）：这台机器只差"工作区目录没配"（`WORKSPACE_NOT_CONFIGURED`），
+ *   于是「模型档案 → 测试连接」回 503「产品目录布局未确定，因此不知道密钥库在哪里」——
+ *   而**密钥库好好的**（`GET /api/secrets` 正常列出凭据）。报错说的是一件没发生的事。
+ *
+ * ## 为什么它必须只有一份
+ *
+ * 这两个调用方（`team-hub/secret-admin.mjs` 写凭据、`team-hub/probe-service.mjs` 测连接）
+ * **各自抄过一份**：2026-10-10 先修了写凭据那份，探测那份没跟着改 ——
+ * 于是同一台机器上"填密钥能用、测连接不能用"，而两份代码各自看都"很对"。
+ *
+ *   > 一条被抄成两份的规则，
+ *   > 与一条只写了一份的规则，在**只修好其中一份**的那天之前，是一样的。
+ *
+ * 所以集合与判据都放在这里，两个调用方 `import` 同一份；有一条判据
+ * （`product/paths.test.mjs`）直接读那两个文件的源码，钉住它们不许再各自写一套。
+ *
+ * 收进来的每一条都能说出理由（见下），没有一条是"顺手也收进来"。
+ */
+export const SECRETS_BLOCKING_DIAGNOSTICS = Object.freeze(new Set([
+  // 没有产品家目录 ⇒ 连 `secretsFile` 都算不出来。
+  'PRODUCT_HOME_UNRESOLVED',
+  // 家目录落在安装目录里 ⇒ 密钥也会落在只读程序区。
+  'PRODUCT_HOME_INSIDE_INSTALL_DIR',
+  // `assertSecretsPlacement` 要用安装目录判"密钥不在安装目录内"；
+  // 拿不到它，这条不变量就**验不了**（不是"验过没问题"）。
+  'INSTALL_DIR_UNRESOLVED',
+  // 密钥自己落在这些目录里 —— 备份/清理会顺手把它带走。
+  'SECRETS_INSIDE_INSTALL_DIR',
+  'SECRETS_INSIDE_DATA_DIR',
+  'SECRETS_INSIDE_CACHE_DIR',
+  // 相对路径 ⇒ 密钥库到底落在哪随启动方式变化，不可预测。
+  'PATH_NOT_ABSOLUTE',
+  // 角色目录互相重叠 ⇒ 密钥所在的那个目录同时属于别的角色（同上）。
+  'ROLE_DIRS_OVERLAP',
+]))
+
+/**
+ * 从一份诊断里挑出**真正挡着密钥库**的那些（`error` 级 **且** 被点名）。
+ *
+ * 不在这里判"有没有"：调用方要的往往是**是哪几条**（好把它们报给用户），
+ * 而不是一个布尔 —— 一个布尔会让人只能写"布局未确定"这种没用的解释。
+ */
+export function secretsBlockingDiagnostics(diagnostics) {
+  const list = Array.isArray(diagnostics) ? diagnostics : []
+  return list.filter((d) => d?.severity === 'error' && SECRETS_BLOCKING_DIAGNOSTICS.has(d?.code))
+}
+
 /** 断言布局可进入自动执行；失败时抛错并带上全部诊断文本。 */
 export function assertLayoutUsable(layout, { diagnostics = null } = {}) {
   const list = diagnostics ?? layoutDiagnostics(layout)

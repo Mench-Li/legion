@@ -1888,6 +1888,13 @@ async function stageTest() {
     { label: 'web-history（P2-8 team-hub 抓取历史：按空间持久化、累加、隔离、清理）', files: ['team-hub/web-history.test.mjs'], cwd: ROOT },
     { label: 'browser-ui（P2-8 浏览器助手前端纯函数：限流文案、缓存与质量徽标、截图三态、配额读数）', files: ['workbench/scripts/browser-ui.test.mjs'], cwd: ROOT, nodeArgs: ['--experimental-strip-types'] },
     { label: 'doc-render（文档产物契约）', files: ['workbench/scripts/doc-render.test.mjs'], cwd: ROOT },
+    // ── T-199：Agent 人性化名称 + 人性化头像（S1~S7 收口）──────────────────────
+    { label: 'agent-avatar（S1 头像基座：内联人形 SVG / 位面构造性唯一 / 确定性 / 回退 / 离线零依赖）', files: ['workbench/scripts/agent-avatar.test.mjs'], cwd: ROOT },
+    { label: 'seed-roster（S2 数据面：两段式展示名 / 头像令牌 / 迁移保护 / 幂等）', files: ['team-hub/scripts/seed-roster.test.mjs'], cwd: ROOT },
+    { label: 'agent-identity-tokens（S3 接口面：新建自动分配人形令牌 / 读出口兜底收敛）', files: ['team-hub/agent-identity-tokens.test.mjs'], cwd: ROOT },
+    { label: 'agent-avatar-surfaces（S4 桌面展示面一：单一来源 / 无首字回退 / 无破图）', files: ['workbench/scripts/agent-avatar-surfaces.test.mjs'], cwd: ROOT },
+    { label: 'agent-avatar-settings（S5 桌面展示面二：新建不配置头像 / 三处成员头像接入）', files: ['workbench/scripts/agent-avatar-settings.test.mjs'], cwd: ROOT },
+    { label: 'avatar-parity（S6 移动端与桌面位面表逐项同轴 + 内联人形渲染）', files: ['workbench/mobile/avatar-parity.test.mjs'], cwd: ROOT },
     { label: 'skill-importer（技能导入契约）', files: ['workbench/scripts/skill-importer.test.mjs'], cwd: ROOT },
     { label: 'hub-board（v2 看板投影）', files: ['workbench/scripts/hub-board.test.mjs'], cwd: ROOT, nodeArgs: ['--experimental-strip-types'] },
     { label: 'artifact-policy（共享路径策略）', files: ['packages/shared/test/artifact-policy.test.mjs'], cwd: ROOT },

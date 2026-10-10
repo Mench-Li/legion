@@ -34,6 +34,7 @@
 // 2 条路由的函数体与 `server.mjs` 原文逐字节相同（仅缩进 +2）。
 // 依赖全部由调用方注入，本模块不 import 任何 hub 内部件。
 // ============================================================================
+import { isAvatarToken } from '../agent-avatars.mjs'
 
 /**
  * 造编队投影与改动重叠审计（两条只读视图：空间里每个智能体的状态 / 改到同一文件的任务）族路由。
@@ -81,7 +82,7 @@ export function createTeamViewsRoutes({
             arr.push(t)
             bySoldier.set(t.soldier, arr)
           }
-          const summarize = (id, label, list, kind = '', avatar = '🤖', external = false) => {
+          const summarize = (id, label, list, kind = '', avatar = '', external = false) => {
             const mine = list.filter(t => t.status !== 'done')
             const done = list.filter(t => t.status === 'done').length
             const inProgress = mine.filter(t => t.status === 'in_progress').length
@@ -111,7 +112,8 @@ export function createTeamViewsRoutes({
           // 编队岗位优先，再追加未入编队的活跃执行者
           for (const r of roster) {
             const mine = tasks.filter(t => t.status !== 'canceled' && (t.role ?? t.soldier) === r.role)
-            agents.push(summarize(r.role, r.name, mine, r.kind, r.avatar, false))
+            // 成员头像：只投影合法 human 令牌；旧 emoji / 空 / 非法值一律收敛为占位语义（'' → 客户端渲染占位人形）。
+            agents.push(summarize(r.role, r.name, mine, r.kind, isAvatarToken(r.avatar) ? r.avatar.trim() : '', false))
           }
           for (const [soldier, list] of bySoldier) {
             agents.push(summarize(soldier, `${soldier} · 执行中`, list, '', '⚙️', true))

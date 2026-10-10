@@ -1,4 +1,4 @@
-﻿import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { fetchAgentDetails, postAgentCommand } from '../api'
 import type { AgentDetail } from '../api'
 import type { RosterAgent, SpaceInfo } from '../types'
@@ -7,6 +7,7 @@ import { AgentTasksModal } from './AgentTasksModal'
 import { AgentConversationPanel, CONTROL_LABEL } from './AgentConversationPanel'
 import { TaskDetailModal } from './TaskDetailModal'
 import { UiIcon } from './UiIcon'
+import { AgentAvatar } from '../avatar'
 import { toast } from './Toast'
 
 interface Props {
@@ -108,7 +109,7 @@ export function AgentWorkspace({ agent, hubMode, spaces, roster, onModelSettings
   const mode = { busy: '进行中', review: '待验收', blocked: '受阻', idle: '空闲' }[agent.mode]
   const space = spaces.find(s => s.id === agent.scope)
   return <section className="agent-workspace">
-    <header className="agent-workspace-header"><span className="directory-avatar">{agent.name.slice(0, 1)}</span><div><h1>{agent.name}</h1><p>{space?.name ?? agent.scope} · {agent.role} · {mode}</p></div><div className="agent-header-actions"><button className="btn" aria-expanded={drawer} onClick={() => setDrawer(v => !v)}><UiIcon name="panel" />任务与控制 {agent.tasks.length}</button><button className="ui-icon-button" aria-label="岗位默认模型" title="岗位默认模型" onClick={onModelSettings}><UiIcon name="settings" /></button></div></header>
+    <header className="agent-workspace-header"><span className="directory-avatar"><AgentAvatar token={agent.avatar} /></span><div><h1>{agent.name}</h1><p>{space?.name ?? agent.scope} · {agent.role} · {mode}</p></div><div className="agent-header-actions"><button className="btn" aria-expanded={drawer} onClick={() => setDrawer(v => !v)}><UiIcon name="panel" />任务与控制 {agent.tasks.length}</button><button className="ui-icon-button" aria-label="岗位默认模型" title="岗位默认模型" onClick={onModelSettings}><UiIcon name="settings" /></button></div></header>
     <div className="agent-workspace-tabs" role="tablist" aria-label="Agent 页面"><button id="agent-chat-tab" role="tab" aria-controls="agent-chat-panel" aria-selected={tab === 'chat'} disabled={agent.external} title={agent.external ? '外部执行者尚未注册为独立岗位，当前可查看任务' : undefined} className={tab === 'chat' ? 'selected' : ''} onClick={() => setTab('chat')}>对话</button><button id="agent-tasks-tab" role="tab" aria-controls="agent-tasks-panel" aria-selected={tab === 'tasks'} className={tab === 'tasks' ? 'selected' : ''} onClick={() => setTab('tasks')}>任务</button><span>{agent.external ? '外部执行者 · 可查看任务' : agent.kind}</span></div>
     <div className="agent-workspace-body">
       {!agent.external && <div id="agent-chat-panel" role="tabpanel" aria-labelledby="agent-chat-tab" hidden={tab !== 'chat'} className="agent-chat-pane"><ChatView scope={agent.scope} hubMode={hubMode} spaces={spaces} agent={agent} /></div>}

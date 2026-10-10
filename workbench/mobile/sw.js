@@ -24,10 +24,11 @@
 // 服务器对入口与脚本本来就发 `Cache-Control: no-cache`（见 `mobile-routes.test.mjs`
 // 那条"发新版后手机能拿到新代码"）。缓存优先的 SW 会把那条**抵消掉**——
 // 两处规矩各写一半，合起来正好是谁都没生效。
-// v3：2026-10-10 预缓存清单加了 `popup.mjs`（BUG-021 的提醒弹框）。
-// 版本号一变，`activate` 就会把旧缓存整个删掉——不然换手机之前装在桌面上的那份
-// 壳里，`popup.mjs` 是缺的（而代码走网络优先，平时看不出这一点）。
-const CACHE = 'legion-mobile-v3'
+// v4：2026-10-10 预缓存清单同时加了 `popup.mjs`（BUG-021 提醒弹框）与
+// `avatar.mjs`（T-199 拟人头像）——两条改动各自都动了这个清单，合并时**取并集**。
+// 版本号一变，`activate` 就会把旧缓存整个删掉：不然装在桌面上的那份旧壳里会缺一个模块
+// （而代码走网络优先，平时看不出这一点，只在"装好 SW 后立刻离线"时露馅）。
+const CACHE = 'legion-mobile-v4'
 // ★ 这份清单必须覆盖 `index.html` 引到的**每一个模块**。
 //
 //   实测踩过：`refresh-loop.mjs` 是后加的一个模块，而这份清单没跟着更新。
@@ -39,8 +40,8 @@ const CACHE = 'legion-mobile-v3'
 //   `index.html` 的 `<script>` 与各模块的 import 语句核对，不靠人记得同步。
 const SHELL = [
   './', './index.html', './manifest.webmanifest',
-  // 入口 + 它的直接依赖（app.mjs 的四个 import 都在这里）
-  './app.mjs', './board.mjs', './timeline.mjs', './refresh-loop.mjs', './popup.mjs',
+  // 入口 + 它的直接依赖（合并时**取并集**：提醒的 popup.mjs 与头像的 avatar.mjs 都要在）
+  './app.mjs', './board.mjs', './timeline.mjs', './refresh-loop.mjs', './popup.mjs', './avatar.mjs',
 ]
 const CODE_EXT = /\.(?:mjs|js|html|webmanifest)$/
 

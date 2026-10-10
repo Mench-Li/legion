@@ -6,6 +6,7 @@ import type { SceneAgent, SceneCue, SceneFacts } from '../scene/sceneState'
 import { AgentTasksModal } from './AgentTasksModal'
 import { TaskDetailModal } from './TaskDetailModal'
 import { GoalsBoard } from './GoalsBoard'
+import { AgentAvatar } from '../avatar'
 
 const Scene3D = lazy(() => import('./Scene3D'))
 
@@ -17,8 +18,6 @@ interface AgentView {
   chips: Array<{ label: string; cls: string }>
   tasks: Array<{ id: string; title: string; status: CardStatus }>
 }
-
-const AVATARS = ['🦊', '🐺', '🦉', '🐻', '🦅', '🐯', '🐸', '🐼']
 
 function statusClass(status: CardStatus): string {
   return `st-dot st-${status}`
@@ -34,7 +33,6 @@ function agentViews(board: BoardData, labels: Record<string, string>): AgentView
       byRole.set(role, arr)
     }
   }
-  let i = 0
   return [...byRole.entries()].map(([role, tasks]) => {
     const active = tasks.filter(t => t.status !== 'done' && t.status !== 'canceled')
     const inProgress = tasks.filter(t => t.status === 'in_progress').length
@@ -46,9 +44,8 @@ function agentViews(board: BoardData, labels: Record<string, string>): AgentView
     if (inReview > 0) chips.push({ label: `待验收 ${inReview}`, cls: 'chip yellow' })
     if (blocked > 0) chips.push({ label: `受阻 ${blocked}`, cls: 'chip red' })
     if (chips.length === 0) chips.push({ label: '待命', cls: 'chip' })
-    const avatar = AVATARS[i % AVATARS.length]
-    i += 1
-    return { role, name: labels[role] ?? role, avatar, mode, chips, tasks: active.slice(0, 4).map(sc => ({ id: sc.card.id, title: sc.card.title, status: sc.status })) }
+    // v1 兜底没有 roster 头像令牌：留空 → 统一占位人形（不再有第二套动物 emoji 来源）。
+    return { role, name: labels[role] ?? role, avatar: '', mode, chips, tasks: active.slice(0, 4).map(sc => ({ id: sc.card.id, title: sc.card.title, status: sc.status })) }
   })
 }
 
@@ -213,7 +210,7 @@ export function CenterPanel({ board, labels, active, rosterAgents, scope, spaces
                     {list.map(a => (
                       <div key={a.role} className={`panel agent-card ${a.mode} clickable`} onClick={() => openAgent(a.role, a.scope)} title={`联系 ${a.name}`}>
                         <div className="agent-head">
-                          <div className="agent-avatar">{a.avatar}</div>
+                          <div className="agent-avatar"><AgentAvatar token={a.avatar} /></div>
                           <div>
                             <div className="agent-name">{a.name}</div>
                             <div className="agent-role">{a.role}</div>
@@ -233,7 +230,7 @@ export function CenterPanel({ board, labels, active, rosterAgents, scope, spaces
               : agents.map(a => (
                   <div key={a.role} className={`panel agent-card ${a.mode} clickable`} onClick={() => openAgent(a.role)} title={`查看 ${a.name} 的任务（进行中/待办/完成）`}>
                     <div className="agent-head">
-                      <div className="agent-avatar">{a.avatar}</div>
+                      <div className="agent-avatar"><AgentAvatar token={a.avatar} /></div>
                       <div>
                         <div className="agent-name">{a.name}</div>
                         <div className="agent-role">{a.role}</div>

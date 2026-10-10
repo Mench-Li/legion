@@ -21,6 +21,12 @@
 （`scrum/daemon-gf001.json`，`intervalMs: 15000`）同时运行时实测 **31 分钟**（约 7 倍）。
 **因此不要把耗时当回归基线**——只有套件数/用例数/通过与否可用于判定。
 
+> **T-199（Agent 人性化名称 + 人性化头像）新增 6 个套件并已登记 `scripts/ci/run-ci.mjs`**：
+> `agent-avatar`（S1 头像基座）、`seed-roster`（S2 数据面）、`agent-identity-tokens`（S3 接口面）、
+> `agent-avatar-surfaces`（S4 桌面展示面一）、`agent-avatar-settings`（S5 桌面展示面二）、`avatar-parity`（S6 移动端同轴）。
+> 本地直跑读数：9 / 6 / 9 / 5 / 6 / 6 例，全部 exit 0；**上面的 headline 基线（195 套件 / 5712 用例）保持不变**
+> ——全量 `run-ci` 由 devops（T-202）在有完整沙箱权限的环境重跑后再更新本行。
+
 > #### ✅ 一处授权缺口：**发现 → 已修**（PRT-612 期间发现，PRT-611 补记修掉）
 >
 > spec line 470 要求审批的授权主体含 `toolName` 与 `callId`，而 Legion 侧的

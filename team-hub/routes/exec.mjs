@@ -29,6 +29,28 @@
 //   > 一个"把名字登记成可用"的白名单，与一个"真的把它绑进来"的解构，
 //   > 在没人用那个名字的时候是同一个东西。
 //
+// ## ★ 2026-10-10 修正（BUG-016）：开关改写在**守护真正读的那张表**上
+//
+// 原来 `GET/POST /api/exec` 读写 `exec_state`，而**守护一行都不读它**——
+// 守护读的是 `space_runtime.enabled`（经 `GET /api/pipeline` → `planSpaceRunners`）。
+// 于是界面上那个「⚡ 持续执行编排」开关是个**骗人的控件**：
+// 将军打开它、看到「已开启」，而守护照样跳过这个空间，目标链静默停在 todo。
+//
+//   > 一个"写在没人读的表上"的开关，
+//   > 与一个"根本没有这个开关"，在将军那边是同一个东西——
+//   > 只不过前者会让他以为已经开好了。
+//
+// 现在：读也读 `space_runtime`，写也写 `space_runtime`；改的是**同一个**字段。
+// 附带一个必须守住的细节：拨这个开关**不能顺手把并发/隔离重置掉**
+// （`maxWorkers` / `isolate` / `review_workflow` 原样保留）。
+//
+// `exec_state` 表**保留**（历史行与空间删除的级联照旧），但不再参与判定：
+// 它记的从来就不是守护读过的东西。
+//
+// 注意本族另外 3 条（`/api/exec/queue`、`/api/exec/request`、`/api/exec/requests`）
+// **本次未动**：它们是「派 AI 执行」那条通道，同样没有消费者（见 runbook §5 #3）——
+// 那是另一件事，不在这次修正的范围里（宁可留着看得见，也不要顺手改一半）。
+//
 // ## 零注入改写
 //
 // 5 条路由的函数体与 `server.mjs` 原文逐字节相同（仅缩进 +2）。
@@ -60,8 +82,18 @@ export function createExecRoutes({
       path: '/api/exec',
       async run(req, res, { url }) {
         const scopeParam = url.searchParams.get('scope') ?? ''
-        const hit = scopeParam ? db.prepare('SELECT * FROM exec_state WHERE scope = ?').get(scopeParam) : undefined
-        json(res, 200, { scope: scopeParam, enabled: !!hit?.enabled, updatedAt: hit?.updatedAt ?? null })
+        // ★ 与守护同源：`space_runtime`（守护经 `/api/pipeline` 读的就是它）。
+        const hit = scopeParam ? db.prepare('SELECT * FROM space_runtime WHERE scope = ?').get(scopeParam) : undefined
+        json(res, 200, {
+          scope: scopeParam,
+          enabled: hit?.enabled === 1,
+          updatedAt: hit?.updatedAt ?? null,
+          // 顺带露出并发/隔离，好让界面说清"开通执行"之后这个空间会以什么形态跑。
+          maxWorkers: hit?.maxWorkers ?? null,
+          isolate: hit === undefined ? null : hit.isolate !== 0,
+          // 读的是哪张表：写给下一个以为这里还有第二份状态的人看。
+          source: 'space_runtime',
+        })
       },
     },
     {
@@ -69,13 +101,23 @@ export function createExecRoutes({
       match: 'exact',
       path: '/api/exec',
       async run(req, res) {
+        // 开关：只改 `enabled`，别的列原样保留 —— 拨一下开关就把并发/隔离重置成默认值，
+        // 是那种"看起来只是开了一下"却把空间跑法换掉的改动。
         await handleWrite(req, res, (body, by, scope) => {
           const targetScope = typeof body.scope === 'string' && body.scope.trim().length > 0 ? body.scope.trim() : scope
           const enabled = body.enabled === true
-          db.prepare('INSERT INTO exec_state (scope, enabled, updatedAt) VALUES (?, ?, ?) ON CONFLICT(scope) DO UPDATE SET enabled=excluded.enabled, updatedAt=excluded.updatedAt')
-            .run(targetScope, enabled ? 1 : 0, now())
-          audit(by, targetScope, 'exec:toggle', null, { enabled })
-          return { scope: targetScope, enabled }
+          const prev = db.prepare('SELECT * FROM space_runtime WHERE scope = ?').get(targetScope)
+          db.prepare(`INSERT INTO space_runtime (scope, enabled, maxWorkers, isolate, review_workflow, updatedAt)
+            VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(scope) DO UPDATE SET enabled = excluded.enabled, updatedAt = excluded.updatedAt`)
+            .run(targetScope, enabled ? 1 : 0, prev?.maxWorkers ?? 1, prev?.isolate ?? 1, prev?.review_workflow ?? null, now())
+          audit(by, targetScope, 'exec:toggle', null, { enabled, table: 'space_runtime' })
+          return {
+            scope: targetScope,
+            enabled,
+            maxWorkers: prev?.maxWorkers ?? 1,
+            isolate: (prev?.isolate ?? 1) !== 0,
+          }
         })
       },
     },

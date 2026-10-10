@@ -95,19 +95,79 @@ export function latestInstaller(root, { installerName = 'Legion-Setup-win-x64.ex
 }
 
 /**
- * 读一份发布的清单（`releases/<releaseId>/manifest.json`）。
+ * 把一份发布清单**归一**成读取方要的形状。
  *
- * 官网的下载区拿它来显示 sha256 与「本次更新」。**读不到就回 null**，不抛、不猜 ——
- * 清单是发布端可选写的，没有它的发布照样能下载，页面只是少显示两行，
- * 而不是显示一个空的校验值（一个空的 sha256 比没有 sha256 更坏：它看起来像"校验过了"）。
+ * ## 为什么需要它：发布端的形状换过，而这里只认旧的
  *
- * 期望的形状（本仓库发布端写的就是这个）：
+ * 本仓库的发布端现在写的是**签名信封**：
+ *
+ *   { keyId, signature, payload: { releaseId, productVersion, channel,
+ *                                  installer: { path, sizeBytes, sha256 },
+ *                                  package: {...}, notes: {...}, … } }
+ *
+ * 而这份文件原先按**扁平**形状读：
  *
  *   { releaseId, productVersion, channel, platform,
  *     artifacts: { installer: { path, sizeBytes, sha256 } },
  *     note, changes: [ "…" ] }
  *
- * 但**只按存在的字段取用**：字段缺失/类型不对时当作没有，不当成错误。
+ * 于是 `manifest.productVersion` 对**任何新发布**都是 `undefined` ——
+ * 门口页读不到版本，只能退回环境变量 `LEGION_DESKTOP_VERSION`。实测
+ * （2026-10-10）：页面显示 `v0.1.0`（环境变量的值），而下载按钮指向
+ * `rel-0.1.3`。两个数都"有值"，所以页面看起来完全正常。
+ *
+ *   > 一个"读不到就退回配置"的兜底，
+ *   > 与一个"真的读到了"的路径，在页面上都是 `v0.1.x`——
+ *   > 只不过前者的版本号会一直停在配置里那一个，而没人会发现。
+ *
+ * 上面那段注释原先还写着"期望的形状（**本仓库发布端写的就是这个**）"——
+ * 那句话在发布端改成签名信封的那一天就失效了，而没有任何东西会因此变红。
+ *
+ * ## 两种形状都认（而不是改掉旧的）
+ *
+ * 已经发出去的发布目录里躺着**两种**清单（旧的扁平、新的信封），
+ * 而发行目录按合同**不可覆盖**。所以这里读的时候归一，而不是要求磁盘上统一。
+ *
+ * 归一后至少暴露：`releaseId` / `productVersion` / `channel` / `platform` /
+ * `artifacts.installer{path,sizeBytes,sha256}`；并保留 `envelope`
+ * （`{keyId, format}`）以便调用方知道这是哪一路的清单。
+ * **只按存在的字段取用**：缺失/类型不对时当作没有，不当成错误。
+ */
+export function normalizeReleaseManifest(parsed) {
+  if (parsed === null || typeof parsed !== 'object') return null
+
+  // ① 扁平形状：顶层就有 productVersion。原样返回（已发出的旧清单走这条）。
+  if (typeof parsed.productVersion === 'string') return parsed
+
+  // ② 签名信封：版本在 payload 里。**只在** payload 确实带 productVersion
+  //    时才解包 —— 否则一个恰好名叫 payload 的无关字段会把清单读坏。
+  const inner = parsed.payload
+  if (inner === null || typeof inner !== 'object') return parsed
+  if (typeof inner.productVersion !== 'string') return parsed
+
+  const artifacts = {}
+  for (const kind of ['installer', 'package', 'notes']) {
+    const a = inner[kind]
+    if (a !== null && typeof a === 'object') artifacts[kind] = a
+  }
+
+  return {
+    ...inner,
+    // 覆写成读取方认识的形状（`artifacts.installer` 而不是 `installer`）。
+    artifacts: Object.keys(artifacts).length > 0 ? artifacts : undefined,
+    // 签名信封自带的标识：有了它，页面/排障能分辨"这份清单是谁签的"。
+    envelope: { keyId: typeof parsed.keyId === 'string' ? parsed.keyId : null, format: inner.format ?? null },
+  }
+}
+
+/**
+ * 读一份发布的清单（`releases/<releaseId>/manifest.json`），并**归一**形状
+ * （见 `normalizeReleaseManifest`）。
+ *
+ * 官网的下载区拿它来显示 sha256 与「本次更新」。**读不到就回 null**，不抛、不猜 ——
+ * 清单是发布端可选写的，没有它的发布照样能下载，页面只是少显示两行，
+ * 而不是显示一个空的校验值（一个空的 sha256 比没有 sha256 更坏：它看起来像"校验过了"）。
+ *
  * 这里刻意不缓存——官网是最冷的页面，而清单只有 1KB 上下；
  * 为它加一层缓存，换来的状态比省下的 IO 贵。
  */
@@ -120,7 +180,7 @@ export function readReleaseManifest(root, releaseId) {
   try {
     const raw = readFileSync(join(root, 'releases', releaseId, 'manifest.json'), 'utf8')
     const parsed = JSON.parse(raw)
-    return parsed !== null && typeof parsed === 'object' ? parsed : null
+    return normalizeReleaseManifest(parsed)
   } catch { return null }
 }
 

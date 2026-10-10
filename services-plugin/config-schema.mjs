@@ -57,6 +57,33 @@ export const SCHEMA = defineSchema({
       doc: '工作区（用户授权的项目目录）：**只透传**给 team-hub，不编默认值（规范 §6.11 明确工作区不提供默认值）。'
         + '它是 team-hub 解析产品目录布局的一部分；安装目录（LEGION_INSTALL_DIR）则由本插件按 legionDir 直接注入',
     },
+    // ── 手机/远程访问：让"人不在电脑前也能操控任务"有产品配置入口 ──
+    //
+    // ★ 在此之前，这两个开关**只能靠宿主进程的环境变量**才能生效：本插件只给 team-hub 注入
+    //    PORT / HOST / TOKEN 三个键，而手机面与远程门禁读的是 `identityKey` / `remoteAuth`。
+    //    后果与 BUG-016 是同一类 —— **功能存在、但没有入口**：用户只能去改系统环境变量，
+    //    而那条路既不在产品里、也不在配置门禁的视野里（改错了没有任何东西会响）。
+    //
+    //    语义（正本在 team-hub/config-schema.mjs）：
+    //      · `identityKey` 留空 ⇒ **关闭**远程 Agent 通道：手机面静态资源与身份系统全都注册不上，
+    //        `/mobile` 得到 404；>=16 字符 ⇒ 开启。
+    //      · `remoteAuth='1'` ⇒ 除公开白名单外全部 `/api/*` 要求**用户访问令牌**；
+    //        上游文档原话是"Hub 绑回环 + 反代时必须开" —— 这正是手机场景的推荐形态。
+    //
+    //    ★ 安全提醒写在这里，因为这是配置的人唯一会看的地方：`teamHubToken` 留空时
+    //      team-hub 的 `authorized()` 对**任何**写请求都放行（`TOKEN === '' → return true`）。
+    //      所以任何形式的对外暴露（隧道/反代）都必须同时给 `teamHubToken` 一个值。
+    {
+      key: 'teamHubIdentityKey', env: 'LEGION_IDENTITY_KEY', type: 'string', default: '', sensitive: true,
+      doc: '注入给 team-hub 的身份签名密钥（>=16 字符）—— **手机面与身份系统的总开关**，留空即关闭。'
+        + '优先级：composition 的 config.teamHubIdentityKey > 本环境变量 > 空。'
+        + '换掉它会作废已签发的访问令牌（手机需重新登录）',
+    },
+    {
+      key: 'teamHubRemoteAuth', env: 'LEGION_REMOTE_AUTH', type: 'string', default: '',
+      doc: "注入给 team-hub 的远程门禁开关：设为 '1' 时除公开白名单外全部 /api/* 要求用户访问令牌。"
+        + '**对外暴露（隧道/反代）时必须为 1**；纯本地单机可以留空',
+    },
   ],
   // 本文件自己会被扫描（dirs 含整个 services-plugin/）：injects 里的 `TEAM_HUB_PORT` /
   // `DSH_WORKBENCH_PORT` / `DSH_MODELS_BASE_URL` / `LEGION_INSTALL_DIR` 是**注入目标的变量名**
@@ -70,6 +97,14 @@ export const SCHEMA = defineSchema({
     },
     { target: 'team-hub', env: 'TEAM_HUB_HOST', via: 'env', from: 'teamHubHost', note: '回落到同环境变量' },
     { target: 'team-hub', env: 'TEAM_HUB_TOKEN', via: 'env', from: 'teamHubToken', note: '回落到同环境变量（为空也会显式注入空值）' },
+    {
+      target: 'team-hub', env: 'LEGION_IDENTITY_KEY', via: 'env', from: 'teamHubIdentityKey',
+      note: '手机面/身份系统总开关（>=16 字符才开启）。**只在有值时才注入** —— 注入空串会把宿主环境里的值盖掉',
+    },
+    {
+      target: 'team-hub', env: 'LEGION_REMOTE_AUTH', via: 'env', from: 'teamHubRemoteAuth',
+      note: "远程门禁（'1' 才开）。同样只在有值时才注入",
+    },
     { target: 'workbench', env: 'DSH_HUB_UPSTREAM', via: 'env', from: 'hubUpstream', note: '回落到同环境变量' },
     { target: 'workbench', env: 'TEAM_HUB_TOKEN', via: 'env', from: 'teamHubToken', note: '回落到同环境变量' },
     {

@@ -114,14 +114,19 @@ export { readDshProviderSnapshot } from './dsh-snapshot.mjs'
  * team-hub 子进程要拿到的环境。
  *
  * 抽出来的理由与 `buildWorkbenchEnv` 相同：能被断言的东西才拦得住回归 ——
- * 尤其是下面那两条**产品目录事实**，漏了它们的后果是"用户在面板里填密钥永远存不进去"。
+ * 尤其是下面那几条，漏了它们的后果分别是"用户在面板里填密钥永远存不进去"与
+ * "手机连不上这台机器、或者连上了但没有任何鉴权"。
  *
  * @param installDir 安装目录（**事实**：程序在哪）。`product/paths.mjs` 那条诊断的原话是
  *   "请设置 LEGION_INSTALL_DIR **或由 Launcher 传入**"，而本插件正是这台机器上的启动方。
  * @param workspaceDir 工作区（**用户授权**的项目目录）。规范明确"不提供默认值" ⇒ 只透传。
+ * @param identityKey 身份签名密钥（>=16 字符 ⇒ 开启手机面与身份系统）。**只在有值时注入**：
+ *   注入空串会把宿主环境里的值盖掉，而"没配"与"配了个空的"在下游是同一句话，读起来却完全不同。
+ * @param remoteAuth 远程门禁（`'1'` 才开）。同样只在有值时注入。
  */
 export function buildTeamHubEnv({
   baseEnv = {}, port = '', host = '', token = '', installDir = '', workspaceDir = '',
+  identityKey = '', remoteAuth = '',
 } = {}) {
   return {
     ...baseEnv,
@@ -132,6 +137,10 @@ export function buildTeamHubEnv({
     ...(installDir ? { LEGION_INSTALL_DIR: installDir } : {}),
     // 工作区只在用户/配置真的给了时才传：编一个会让"用户授权"这件事失去意义。
     ...(workspaceDir ? { LEGION_WORKSPACE_DIR: workspaceDir } : {}),
+    // 手机面总开关：空 ⇒ team-hub 不注册 /mobile 与身份系统（留空即关闭，这是它的设计）。
+    ...(identityKey ? { LEGION_IDENTITY_KEY: identityKey } : {}),
+    // 远程门禁：对外暴露时必须 '1'，否则除白名单外的 /api/* 不要求用户令牌。
+    ...(remoteAuth ? { LEGION_REMOTE_AUTH: remoteAuth } : {}),
   }
 }
 
@@ -243,6 +252,15 @@ export function apply(ctx, rawConfig = {}) {
   const workspaceDir = typeof cfg.workspaceDir === 'string' && cfg.workspaceDir.trim()
     ? cfg.workspaceDir.trim()
     : (typeof baseEnv.LEGION_WORKSPACE_DIR === 'string' && baseEnv.LEGION_WORKSPACE_DIR.trim() ? baseEnv.LEGION_WORKSPACE_DIR.trim() : '')
+  // ★ 手机/远程访问的两个开关：优先级与 token 一致（composition 配置 > 宿主环境 > 空）。
+  //   与 token 的**唯一区别**：这里"为空"意味着**不注入**（而不是显式注入空值）——
+  //   因为把宿主环境里已经配好的值用空串盖掉，会让"我在环境里设过了"静默失效。
+  const teamHubIdentityKey = typeof cfg.teamHubIdentityKey === 'string' && cfg.teamHubIdentityKey
+    ? cfg.teamHubIdentityKey
+    : (typeof baseEnv.LEGION_IDENTITY_KEY === 'string' ? baseEnv.LEGION_IDENTITY_KEY : '')
+  const teamHubRemoteAuth = typeof cfg.teamHubRemoteAuth === 'string' && cfg.teamHubRemoteAuth.trim()
+    ? cfg.teamHubRemoteAuth.trim()
+    : (typeof baseEnv.LEGION_REMOTE_AUTH === 'string' ? baseEnv.LEGION_REMOTE_AUTH.trim() : '')
   const workbenchPort = num(cfg.workbenchPort, 5173)
   // ★ P3 的两道门，都**默认关**（见下方写入处的说明）。
   //   `applyModelConfig`：接管供应商配置（settings.mutate）。
@@ -283,6 +301,9 @@ export function apply(ctx, rawConfig = {}) {
         installDir: legionDir,
         // 工作区是用户授权的项目目录 ⇒ 只透传，绝不编一个（规范 §6.11）。
         workspaceDir,
+        // 手机面/身份系统的总开关与远程门禁：只透传，空即"不注入"。
+        identityKey: teamHubIdentityKey,
+        remoteAuth: teamHubRemoteAuth,
       }),
     },
     {

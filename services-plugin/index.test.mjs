@@ -149,3 +149,50 @@ test('★ **接线处**真的把 legionDir 当成安装目录传下去了（不�
   assert.match(wiring, /installDir:\s*legionDir/, '接线处必须把 legionDir 作为安装目录传下去')
   assert.match(wiring, /workspaceDir\b/, '工作区也要一起传（哪怕它常常是空的）')
 })
+
+// ── ★ 手机/远程访问要有产品配置入口（BUG-018）──────────────────────────────────
+// 在此之前这两个开关**只能靠宿主环境变量**才能生效：本插件只注入 PORT/HOST/TOKEN，
+// 而手机面与远程门禁读 `identityKey`/`remoteAuth`。后果与 BUG-016 同类 ——
+// **功能存在、但没有入口**，用户只能去改系统环境变量，而那条路不在产品里。
+test('★ 身份密钥与远程门禁要能注入给 team-hub（手机面的总开关）', () => {
+  const env = buildTeamHubEnv({
+    baseEnv: {}, port: 8787, host: '127.0.0.1', token: 'T',
+    identityKey: 'x'.repeat(32), remoteAuth: '1',
+  })
+  assert.equal(env.LEGION_IDENTITY_KEY, 'x'.repeat(32), '>=16 字符才开启手机面，交给 team-hub 判')
+  assert.equal(env.LEGION_REMOTE_AUTH, '1', "对外暴露时门禁必须为 '1'")
+})
+
+test('★ 空值**不注入**（不许用空串把宿主环境里配好的值盖掉）', () => {
+  const env = buildTeamHubEnv({
+    baseEnv: { LEGION_IDENTITY_KEY: 'from-host-env-32-chars-long-xxxx', LEGION_REMOTE_AUTH: '1' },
+    port: 8787, host: '127.0.0.1', token: 'T',
+    identityKey: '', remoteAuth: '',
+  })
+  assert.equal(env.LEGION_IDENTITY_KEY, 'from-host-env-32-chars-long-xxxx',
+    '配置为空 ⇒ 不许注入空串，否则"我在环境里设过了"会静默失效')
+  assert.equal(env.LEGION_REMOTE_AUTH, '1')
+})
+
+test('★ 接线处真的把它们传下去了（助手函数被验过 ≠ 接线处用上了）', () => {
+  // 上一次的教训：只验 `buildTeamHubEnv` 时，接线处漏传 `installDir` 仍然是全绿。
+  const wiring = /env: buildTeamHubEnv\(\{([\s\S]*?)\}\),/.exec(SRC)?.[1] ?? ''
+  assert.ok(wiring.length > 0, '找不到 team-hub 的 env 接线')
+  assert.match(wiring, /identityKey:\s*teamHubIdentityKey/, '接线处必须传身份密钥')
+  assert.match(wiring, /remoteAuth:\s*teamHubRemoteAuth/, '接线处必须传远程门禁')
+})
+
+test('★ 配置面声明了这两个键，并且声明了向 team-hub 的注入（check.mjs 读这份）', async () => {
+  const { SCHEMA } = await import('./config-schema.mjs')
+  const keys = SCHEMA.fields.map((f) => f.key)
+  for (const k of ['teamHubIdentityKey', 'teamHubRemoteAuth']) {
+    assert.ok(keys.includes(k), `配置面缺 ${k} —— 没有它，用户只能去改系统环境变量`)
+  }
+  const injected = SCHEMA.injects.map((i) => `${i.target}:${i.env}`)
+  for (const e of ['team-hub:LEGION_IDENTITY_KEY', 'team-hub:LEGION_REMOTE_AUTH']) {
+    assert.ok(injected.includes(e), `injects 缺 ${e}（不声明注入，配置门禁会给出与现场相反的结论）`)
+  }
+  // 密钥是敏感项：日志/配置检查都不该回显它
+  const idField = SCHEMA.fields.find((f) => f.key === 'teamHubIdentityKey')
+  assert.equal(idField.sensitive, true, '身份密钥必须标 sensitive（否则它会被打进配置读数）')
+})

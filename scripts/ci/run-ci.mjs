@@ -5029,6 +5029,32 @@ async function stageTest() {
     // P4-3 增补两条竞态用例（⑧⑨）：连接未就绪窗口内的绘制必须入队 + 可见提示 + 重连后补发。
     // 找不到 Edge/Chrome 时整组 **SKIP**（用例侧显式调用 describe.skip 并打印探测路径），不计失败、也不假绿。
     { label: 'e2e-browser（P4-1 真实浏览器：白板房间/角色/只读/限流 + P4-3 重连窗口补发）', files: ['tests/browser/whiteboard-ui.e2e.test.mjs'], cwd: ROOT },
+    // T-195/T-198：**三端统一**端到端测试。四条腿共用**同一个** Hub 夹具
+    // （`tests/e2e-unified/harness.mjs`），而不是各写一套：
+    //
+    //   · 腿 1 移动端   —— 真浏览器移动仿真（390×844 / 触屏 / DPR3）→ 真 Hub
+    //   · 腿 2 桌面壳   —— 真后台进程 + 真壳页面
+    //   · 腿 3 自动更新 —— 真发布 → **真 Hub 托管** → 真客户端 → 真安装事务
+    //   · 腿 4 闭环     —— 手机派单 → Hub → 真电脑 Node → 进展回到手机
+    //
+    // ★ 为什么值得进 CI：腿 3 在真 Hub 上**真的抓出过一个生产缺陷**——
+    //   Hub 给发行文件发 `public, max-age=86400`，而客户端（`product/update`
+    //   的 transport）要求含 `immutable`，于是经 Hub 托管的发布目录**一份都不会
+    //   被接受**。`product/update/integration.test.mjs` 看不见它：那条的托管是
+    //   内存替身，替身返回的正是客户端想要的那个值。
+    //
+    //   > 一个"对着自己写的静态替身验证通过的更新链路"，
+    //   > 与一个"真的能从生产托管取到更新"的链路，在测试报告上是同一个东西——
+    //   > 只不过前者在缓存头写错时照样是绿的。
+    //
+    // 腿 1/2 需要本机有 Edge/Chrome；找不到时用例侧**显式 SKIP**（不假绿）。
+    // 破坏性验证：`node scripts/qa/unified-probes.mjs`（12 条，含上面那个缺陷）。
+    { label: 'e2e-unified（三端统一：移动仿真 / 桌面壳 / 自动更新 / 三端闭环）', files: [
+      'tests/e2e-unified/mobile.e2e.test.mjs',
+      'tests/e2e-unified/desktop.e2e.test.mjs',
+      'tests/e2e-unified/update.e2e.test.mjs',
+      'tests/e2e-unified/loop.e2e.test.mjs',
+    ], cwd: ROOT },
   ]
   const wbDir = WHITEBOARD
   const wbPkg = JSON.parse(readFileSync(join(wbDir, 'package.json'), 'utf8'))

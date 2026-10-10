@@ -15,7 +15,7 @@
  * 本组件只负责取数与渲染。**每个导出都有生产调用点**。
  */
 import { useCallback, useEffect, useState } from 'react'
-import { apiBase } from '../api'
+import { hubBase } from '../api'
 import {
   snapshotPath, snapshotListPath, tombstonesPath, exportPath,
   readSnapshotResponse, verifyVerdict, verifyText, shortHash,
@@ -45,8 +45,8 @@ export function SnapshotView({ scope, hubMode }: Props) {
     setErr('')
     try {
       const [listRes, tombRes] = await Promise.all([
-        fetch(`${apiBase()}${snapshotListPath({ scope: scope || undefined, limit: 200 })}`),
-        fetch(`${apiBase()}${tombstonesPath({ limit: 200 })}`),
+        fetch(`${hubBase()}${snapshotListPath({ scope: scope || undefined, limit: 200 })}`),
+        fetch(`${hubBase()}${tombstonesPath({ limit: 200 })}`),
       ])
       const list = await listRes.json()
       const tomb = await tombRes.json()
@@ -67,7 +67,7 @@ export function SnapshotView({ scope, hubMode }: Props) {
     setBusy(true)
     setErr('')
     try {
-      const res = await fetch(`${apiBase()}${snapshotPath(attemptId)}`)
+      const res = await fetch(`${hubBase()}${snapshotPath(attemptId)}`)
       const body = await res.json().catch(() => null)
       setFetchState(readSnapshotResponse(res.status, body))
     } catch (e) {
@@ -82,7 +82,7 @@ export function SnapshotView({ scope, hubMode }: Props) {
     setBusy(true)
     setErr('')
     try {
-      const res = await fetch(`${apiBase()}${exportPath(attemptId, { by: 'workbench', atMs: Date.now() })}`)
+      const res = await fetch(`${hubBase()}${exportPath(attemptId, { by: 'workbench', atMs: Date.now() })}`)
       const body = await res.json().catch(() => null)
       if (res.status !== 200 || body?.export === undefined) {
         setErr(`导出失败（${res.status}）：${body?.error ?? body?.code ?? '未知'}`)

@@ -1,15 +1,15 @@
 # Legion Workbench —— 军团指挥台（独立 Web 应用）
 
 把 legion 的看板/中枢数据投影为「AI Office 式」作战仪表盘，并承载 v2 主控操作：任务详情与 AI 执行过程、
-智能体任务清单、任务调度/验收、持续执行编排、模型×智能体配置。中枢模式（team-hub v2 :8787）下为**真分区主控台**；
-无中枢时回退 serve.mjs（:4820）只读 v1 视图。
+智能体任务清单、任务调度/验收、持续执行编排、模型×智能体配置。**只有中枢（team-hub v2 :8787）一个数据源**：
+探测不到中枢就如实报「未探测到中枢」，**没有回退视图**（v1 看板 `scrum/serve.mjs` 整条已删除，见 BUG-015）。
 
 ## 快速开始
 
 ```bash
-# 1) 先启动数据源（legion 看板服务）
+# 1) 先启动中枢（唯一数据源）
 cd D:\project\DSH\legion
-node scrum\serve.mjs --port 4820 --host 0.0.0.0 --token legion-kanban-4820
+node team-hub\server.mjs --port 8787
 
 # 2) 启动工作台
 cd D:\project\DSH\legion\workbench
@@ -23,9 +23,8 @@ node scripts/serve.mjs --port 5173   # 独立静态服务 → http://127.0.0.1:5
 
 ## 数据源配置
 
-- 默认 `http://127.0.0.1:4820`；可在右上角「⚙ 数据源」修改（存 localStorage）。
-- 页面刷新后可用 `?api=http://其他主机:4820` 覆盖（跨机器/局域网）。
-- 写操作（新建任务、验收、打回、评论）需令牌：右上角「🔑 令牌」填入 `--token` 值。
+- 默认 `/hub`（由工作台自己的 `scripts/serve.mjs` 代理到 `http://127.0.0.1:8787`）；右上角「🧭 中枢」可改地址（存 localStorage）。
+- 写操作（新建任务、验收、打回、评论）需令牌：右上角「🔑 令牌」填入中枢的 token。
 
 ## 与转型路线图的对应
 
@@ -33,16 +32,16 @@ node scripts/serve.mjs --port 5173   # 独立静态服务 → http://127.0.0.1:5
 | --- | --- | --- |
 | 顶部 KPI（任务/完成/待处理/AI 员工/资源） | `KpiBar`，资源为客户端本机指标 | ✅ |
 | 左侧模块 + 工作空间 | `Sidebar`：中枢模式下工作空间 = 全部空间 + team-hub 真实分区（`/api/scopes`），真分区切换 | ✅ |
-| 右侧「当前任务集」泳道 | `MissionPanel`：中枢模式走 `/api/missions?scope=`（scopeAware=true）；v1 回退 serve.mjs 或客户端聚合；每岗任务按状态排序（进行中→待认领→已完成）+「展开全部 N」看全量 | ✅ |
+| 右侧「当前任务集」泳道 | `MissionPanel`：走 `/api/missions?scope=`（scopeAware=true）；老服务端无该接口时退到客户端聚合；每岗任务按状态排序（进行中→待认领→已完成）+「展开全部 N」看全量 | ✅ |
 | 右侧「实时动态」 | `ActivityFeed`：SSE 实时流 | ✅ |
-| 快捷工具 | `QuickTools`：「打开内部看板」→ openKanban（经典看板新窗口）；「文件浏览/浏览网页」→ 进入文件中心/浏览器面板（`onOpenModule` 导航）；截图 OCR/语音待 DSH 工具面 | ✅/⏳ |
+| 快捷工具 | `QuickTools`：「文件浏览/浏览网页」→ 进入文件中心/浏览器面板（`onOpenModule` 导航）；截图 OCR/语音待 DSH 工具面。（「打开内部看板」这一项随经典看板一起删除，见 [BUG-015](../docs/bugs/BUG-015-经典看板取消后仍可见.md)） | ✅/⏳ |
 | 对话中心 | `ChatView`：team-hub v2 `/api/chat/*` 真实接入（会话列表/新建/发送/历史分页「加载更早」，随当前空间隔离）；实时 = 中枢**单一 `/api/events`** 按 `chat:*` kind 过滤；纯文本渲染（无 raw HTML）；「全部空间」可选空间开始对话 + 头部健康状态点 + ⚙ 回复设置弹窗 + 📎 附件上传（文本文件作当次回复上下文） | ✅ |
 | 文件中心 | `FilesView`：serve.mjs `/api/files`（同源，仅回环）——列表/逐层进入/文本预览（截断+行数，读取中可见 loading）/二进制提示/下载/上传（409→覆盖确认）/新建目录/重命名/删除（confirm 二次确认）；未绑定空间 → 引导打开空间设置，绑定后自动列出根目录 | ✅ |
 | 浏览器助手 | `BrowserPanel`：serve.mjs `/api/web/fetch`（SSRF 防护代理）——地址栏（自动补 https://）+ 标题/正文/链接结构化结果 + 分错误文案与重试；`ssrf_blocked` 明确文案 | ✅ |
 | 日程日历 / 通知中心 | `Sidebar` 模块为**占位**：点击给出「P1 后续阶段接入」提示（不静默无响应，TC-S8-03） | ⏳ |
 | 技能中心 | `SkillsPanel`：team-hub v2 技能库真实接入——列表（含待审/被拒复审视角）、注册新技能（提交即 pending）、将军发布/驳回、按成员或 scope 授权；随当前空间过滤，15s 轮询刷新 | ✅ |
-| 中央智能体状态 | `CenterPanel`：**中枢模式下智能体 = 当前工作空间的专属编队**（每空间不同职业，team-hub `/api/roster`）；首页 = 像素员工 3D 办公场景，「智能体」模块 = 2D 状态总览；v1 回退看板聚合 | ✅ |
-| 底部命令栏 | 新建任务/任务调度/导出日报可用；**全部暂停/继续已真实接入**（`/api/pause`/`/api/resume`，守护扫单前读取 control.json）；安排会议待引擎 | ✅/⏳ |
+| 中央智能体状态 | `CenterPanel`：**智能体 = 当前工作空间的专属编队**（每空间不同职业，team-hub `/api/roster`）；首页 = 像素员工 3D 办公场景，「智能体」模块 = 2D 状态总览 | ✅ |
+| 底部命令栏 | 新建任务/任务调度/导出日报可用；安排会议待引擎。（「全部暂停/继续」随 v1 看板一起删除 —— 它写的是 `serve.mjs` 的 `control.json`） | ✅/⏳ |
 | 中央 3D 办公场景 | `Scene3D.tsx`（three + @react-three/fiber v9 + drei，懒加载独立 chunk）：正交镜头、按人数扩展的工位、方块像素员工、四种场景预设、状态标记和任务事实驱动的短动作；支持员工列表、减少动画与无 WebGL 降级 | ✅ |
 
 ### 像素员工场景
@@ -61,8 +60,8 @@ node scripts/serve.mjs --port 5173   # 独立静态服务 → http://127.0.0.1:5
 - `dsh-scrum-worker`（`plugins/src/index.ts`）每轮扫单前读取 `control.json`：
   `paused:true` 时跳过认领/派工但保留心跳（`daemon.json` 带 `paused` 字段）。
   **守护插件已重新编译（`plugins/lib/index.js`，含空间仓库绑定消费逻辑）；正在运行的 Desktop 需重启一次才能加载新逻辑。**
-- 真 scope 分区（工作空间数据隔离）由 team-hub v2（SQLite `tasks.scope`）提供；
-  v1 文件模式 `scopeAware=false`，任何 `?scope=` 均返回全部任务。
+- 真 scope 分区（工作空间数据隔离）由 team-hub v2（SQLite `tasks.scope`）提供。
+  （v1 文件模式那条"`?scope=` 一律返回全部任务"的说明随经典看板一起删除，见 BUG-015。）
 
 ## 真 scope 分区（team-hub v2，SQLite）
 
@@ -73,7 +72,8 @@ node scripts/serve.mjs --port 5173   # 独立静态服务 → http://127.0.0.1:5
   `GET /api/scopes`（tasks+members 的 distinct scope）。
 - **数据迁移**：`node team-hub/scripts/migrate-tasks.mjs --scope software` 把 `scrum/tasks.json`
   导入 SQLite（幂等）；示例：`curl -X POST http://127.0.0.1:8787/api/create -H "Content-Type: application/json" -d '{"title":"…","scope":"marketing","by":"general"}'`。
-- v1 模式（中枢不可达）：自动回退 serve.mjs /api/missions（`scopeAware=false`）→ 客户端聚合，空间切换仅透传并提示。
+- **中枢是唯一数据源**：探测不到就如实报「未探测到中枢」，不再回退到任何本地视图
+  （v1 看板的回退路径整条已删除，见 BUG-015）。
 
 ## 工作空间专属编队（team-hub v2 /api/roster）
 
@@ -143,10 +143,9 @@ node scripts/serve.mjs --port 5173   # 独立静态服务 → http://127.0.0.1:5
 
 ## 任务中心（Scrum 看板为主体，指挥总览语义已并入）
 
-- **入口**：左侧「📋 任务中心」→ `TaskCenterView`（不再跳外部经典看板页；面板右上角仍保留「打开经典看板 ↗」作调试/历史对比入口）。
-- **按工作空间看 scrum 任务**：中枢模式下数据 = team-hub v2 `GET /api/board?scope=`（真分区）；
-  面板头部工作空间下拉与左侧栏选择联动（选「全部空间」= 跨空间聚合，卡片带 🗂 空间名徽标）；
-  v1 文件模式（无中枢）回退 serve.mjs 看板数据（无分区、只读提示）。
+- **入口**：左侧「📋 任务中心」→ `TaskCenterView`。**v1 看板（`scrum/serve.mjs`，:4820）整条已删除**（BUG-015）：没有「打开经典看板 ↗」按钮、没有 v1 只读回退、没有数据源切换；中枢不可达时如实报「未探测到中枢」。
+- **按工作空间看 scrum 任务**：数据 = team-hub v2 `GET /api/board?scope=`（真分区）；
+  面板头部工作空间下拉与左侧栏选择联动（选「全部空间」= 跨空间聚合，卡片带 🗂 空间名徽标）。
 - **单一视图（双 Tab 已合并）**：经典 Kanban 泳道（待批准 → 待认领 → 进行中 → 待验收 → 受阻 → 已完成）
   **中枢模式支持拖拽卡片跨列迁移状态**——服务端状态机（`team-hub/server.mjs` TRANSITIONS）预检 + 特例语义：
   in_review→done 弹确认（仅将军）、in_review→todo 填打回原因写评论、blocked→in_progress 自动 force；
@@ -230,8 +229,9 @@ workbench/
 ## 说明与边界
 
 - 只读接口完全开放；写接口与 serve.mjs 的 `--token` 一致（Bearer / x-dsh-token / ?token）。
-- 任务集（mission）= 按 `soldier`/role 聚合的任务泳道，命名优先 `/api/config` 的
+- 任务集（mission）= 按 `soldier`/role 聚合的任务泳道，命名优先中枢 `/api/config` 的
   pipeline 中文标签，未匹配回退原始 role id；不改动 scrum 引擎数据模型。
-- 中枢模式下 KPI/看板/动态仍来自 serve.mjs（v1 本地视图），任务集/空间/新建任务来自
-  team-hub v2；两套数据源并存期间请只写其中一个（守护换 v2 后以 SQLite 为准）。
-- 全局「全部暂停/继续」已真实接入（serve.mjs `/api/pause`/`/api/resume`）；「安排会议」待引擎。
+- **只有中枢一个数据源**：KPI/看板/动态/任务集/空间/新建任务全部来自 team-hub v2
+  （v1 `serve.mjs` 那条本地视图与它的回退已随经典看板整条删除，见
+  [BUG-015](../docs/bugs/BUG-015-经典看板取消后仍可见.md)）。
+- 「全部暂停/继续」已删除（它写的是 v1 看板的 `control.json`）；「安排会议」待引擎。

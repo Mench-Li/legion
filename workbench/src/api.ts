@@ -1,27 +1,14 @@
-import type { ActivityEvent, AgentCatalogItem, AgentModelCfg, ApiConfig, BoardData, CardStatus, ChatAttachmentRef, ChatConversation, ChatHealthInfo, ChatMessage, DirListing, FileListResponse, FilePreview, GoalInfo, GoalStatus, HubActivity, HubAuditEvent, HubDocContent, HubTask, MissionsResponse, ModelOption, OverlapGroup, RepoInspect, RosterResponse, ScenePreset, SkillInfo, SpaceInfo, WebFetchResult, WebHistoryResponse, WebMetaResponse, WebShotResult } from './types'
+import type { AgentCatalogItem, AgentModelCfg, CardStatus, ChatAttachmentRef, ChatConversation, ChatHealthInfo, ChatMessage, DirListing, FileListResponse, FilePreview, GoalInfo, GoalStatus, HubActivity, HubAuditEvent, HubDocContent, HubTask, MissionsResponse, ModelOption, OverlapGroup, RepoInspect, RosterResponse, ScenePreset, SkillInfo, SpaceInfo, WebFetchResult, WebHistoryResponse, WebMetaResponse, WebShotResult } from './types'
 import { subscribeHubEventStream } from './hubEventStream.ts'
 import { hubErrorFromBody } from './hub-errors.ts'
 import { getAccessToken, hasSession, recoverSession } from './identity.ts'
 
 /**
- * 数据源地址解析：?api= 查询参数优先，其次 localStorage，最后默认 4820。
- * serve.mjs 默认端口 4820（读开放、写需令牌）。
- */
-const DEFAULT_API = 'http://127.0.0.1:4820'
-
-export function apiBase(): string {
-  const fromQuery = new URLSearchParams(window.location.search).get('api')
-  if (fromQuery) return fromQuery.replace(/\/+$/, '')
-  return localStorage.getItem('legion.workbench.api') ?? DEFAULT_API
-}
-
-export function setApiBase(base: string): void {
-  localStorage.setItem('legion.workbench.api', base.replace(/\/+$/, ''))
-}
-
-/**
- * team-hub v2（SQLite 任务池，真 scope 分区）地址。任务集/空间面板优先走它：
- * ?hub= 查询参数 > localStorage > 默认 8787。探测不到时回退 serve.mjs 的 v1 接口。
+ * team-hub v2（SQLite 任务池，真 scope 分区）地址 —— **唯一**的数据源。
+ * ?hub= 查询参数 > localStorage > 默认 `/hub`（同源反代）。
+ *
+ * 这里曾经还有一条指向**另一个本机端口**的 v1 数据源地址：那条链路（连同整条 v1 接口）
+ * 现已删除，探测不到中枢时**不再回退**，而是明确报「中枢不可达」（见 App.tsx 的错误屏）。
  */
 const DEFAULT_HUB = '/hub'
 
@@ -85,8 +72,7 @@ function withAuthHeaders(headers?: HeadersInit): Headers {
 /**
  * 401 时抢救一次会话，然后原样重放请求。
  *
- * 只在本模块的两条中枢出口（`hubGet` / `hubPost`）上做，不铺到 `apiBase()`
- * 那一侧：那是 `serve.mjs` 的本地开发面，与账号体系无关。
+ * 只用在本模块的中枢出口（`hubGet` / `hubPost` / `hubRequest`）上。
  *
  * 三条纪律：
  *   ① **只在有刷新凭据时动手**。本机/桌面部署没有它 ⇒ 行为与改动前逐字相同。
@@ -114,72 +100,15 @@ async function readJson<T>(res: Response): Promise<T> {
   return res.json() as Promise<T>
 }
 
-export async function fetchConfig(): Promise<ApiConfig> {
-  return readJson<ApiConfig>(await fetch(`${apiBase()}/api/config`))
-}
-
-export async function fetchBoard(): Promise<BoardData> {
-  return readJson<BoardData>(await fetch(`${apiBase()}/api/board`))
-}
-
-export async function fetchActivity(limit = 60): Promise<ActivityEvent[]> {
-  return readJson<ActivityEvent[]>(await fetch(`${apiBase()}/api/activity?limit=${limit}`))
-}
-
 /**
- * 服务端任务集聚合视图（serve.mjs ≥ 转型第 2 步）。旧版服务端没有该接口时
- * 抛错（404），由调用方回退到客户端聚合（missions.ts buildMissions）。
+ * 走中枢写一条薄封装（`createTask` / `transitionTask` / `commentTask` / `rejectTask` 用）。
+ *
+ * 它从前打的是那条已删除的 v1 数据源地址；v1 接口整条取消后只剩中枢这一条数据源，
+ * 只剩中枢这一条数据源，这里也就跟着中枢走 —— `hubPost` 才是带超时与会话重放的
+ * 那一层，本函数是留给那几条薄导出的兼容入口，不新增调用方。
  */
-export async function fetchMissions(scope?: string | null): Promise<MissionsResponse> {
-  const qs = scope ? `?scope=${encodeURIComponent(scope)}` : ''
-  return readJson<MissionsResponse>(await fetch(`${apiBase()}/api/missions${qs}`))
-}
-
-/** 全局暂停/继续：写 serve.mjs 的 control.json，守护每轮扫单前读取。 */
-export async function setPaused(paused: boolean): Promise<{ ok: boolean; paused: boolean }> {
-  const res = await fetch(`${apiBase()}/api/${paused ? 'pause' : 'resume'}`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', ...authHeaders() },
-    body: '{}',
-  })
-  if (!res.ok) {
-    const text = await res.text().catch(() => '')
-    throw new Error(`${res.status}${text ? `：${text}` : ''}`)
-  }
-  return res.json() as Promise<{ ok: boolean; paused: boolean }>
-}
-
-/**
- * 订阅看板变化。serve.mjs 的 SSE 在每次写操作后推送完整 board.json。
- * 返回取消订阅函数；EventSource 自带断线重连。
- */
-export function subscribeBoard(onBoard: (board: BoardData) => void): () => void {
-  const es = new EventSource(`${apiBase()}/api/board/events`)
-  es.onmessage = (ev) => {
-    try {
-      onBoard(JSON.parse(ev.data) as BoardData)
-    } catch {
-      /* 忽略损坏帧，保留上一次看板 */
-    }
-  }
-  return () => es.close()
-}
-
-/** 订阅实时动态（守护生命周期事件流），新事件逐个回调。 */
-export function subscribeActivity(onEvent: (event: ActivityEvent) => void): () => void {
-  const es = new EventSource(`${apiBase()}/api/activity/events`)
-  es.onmessage = (ev) => {
-    try {
-      onEvent(JSON.parse(ev.data) as ActivityEvent)
-    } catch {
-      /* 忽略损坏帧 */
-    }
-  }
-  return () => es.close()
-}
-
 async function post(path: string, body: unknown): Promise<unknown> {
-  const res = await fetch(`${apiBase()}${path}`, {
+  const res = await fetch(`${hubBase()}${path}`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', ...authHeaders() },
     body: JSON.stringify(body),
@@ -858,11 +787,6 @@ export function commentTask(input: { id: string; by: string; text: string }): Pr
 export function rejectTask(input: { id: string; by: string; reason: string }): Promise<unknown> {
   return post('/api/reject', input)
 }
-
-/** 打开 serve.mjs 自带的经典看板（独立页面），任务中心/浏览器的真实落点。 */
-export function openKanban(): void {
-  window.open(apiBase(), '_blank', 'noopener')
-}
 // ───────────────────────── 对话中心（S2 ← S1 team-hub /api/chat/*）─────────────────────────
 
 /** team-hub v2：某空间会话列表（最新活跃在前；无 scope 时全量）。 */
@@ -901,20 +825,20 @@ export async function fetchChatMessages(conv: number, opts: { before?: number; l
 export interface DshModelCatalog { default: { provider: string; model: string }; groups: { id: string; name: string; models: { id: string; name: string }[] }[]; failures?: { id: string; message: string }[] }
 
 /**
- * 「供应商与模型」那条路由的地址是**本页自己的源**，不是 `apiBase()`。
+ * 「供应商与模型」那条路由的地址是**本页自己的源**，不是一个可配置的数据源地址。
  *
- * ★ BUG-014：这里从前写的是 `${apiBase()}/api/dsh-models`，而 `apiBase()` 默认是
- *   `http://127.0.0.1:4820` —— 那是**另一个**数据源（v1 看板，`scrum/serve.mjs`）的默认端口。
- *   于是从 `http://127.0.0.1:5173/` 打开页面（不带 `?api=`）时，这个请求打到 4820，
- *   那里没人监听，浏览器只回一句 `Failed to fetch`：不说地址、不说原因。
+ * ★ BUG-014：这里从前写的是 `${某个数据源地址}/api/dsh-models`，而那个地址默认指向
+ *   **另一个本机端口**上早已取消的 v1 看板进程。于是从本页的源打开页面时，这个请求
+ *   打到了那个没人监听的端口，浏览器只回一句 `Failed to fetch`：不说地址、不说原因。
  *
- *   三个事实合起来说明它**必须**同源，不能跟着 `apiBase()` 走：
+ *   三个事实合起来说明它**必须**同源，不能跟着任何"数据源地址"走：
  *     ① 这条路由住在 `workbench/scripts/serve.mjs` —— 也就是**发这个页面的那台进程**；
  *     ② 服务端**强制同源**：`serve.mjs` 里 `Origin.host` 必须等于 `Host`，否则 403；
  *     ③ 它还**只限本机**（非回环直接 403），所以远端页面本来也用不了它。
- *   而 `apiBase()` 的 4820 也**不能**改成同源 —— 它服务的是 v1 看板（`/api/config`、
- *   `/api/board`、`/api/activity`…），那些路由 `serve.mjs` 一条都不提供（已实测）。
- *   两条数据源各有各的地址，混用哪一个方向都是错的。
+ *   而那个数据源地址也**不能**改成同源 —— 它服务的是 v1 看板的路由
+ *   （`/api/config`、`/api/board`、`/api/activity`…），`serve.mjs` 一条都不提供（已实测）。
+ *   两条链路各有各的地址，混用哪一个方向都是错的；那条 v1 数据源**现已整条删除**，
+ *   这条路由仍必须同源（上面的 ①②③ 与它是否还存在无关）。
  *
  *   用**相对路径**而不是拼 `location.origin`：相对路径由浏览器按页面源解析，
  *   在 `file://`/自定义协议下也不会拼出一个假的绝对地址。
@@ -930,7 +854,7 @@ function modelsUnreachableError(e: unknown): Error {
   const where = typeof window !== 'undefined' && window.location?.origin ? window.location.origin : '(本页)'
   return new Error(`连不上指挥台自身的数据面（${where}${DSH_MODELS_PATH}）：${cause}。`
     + '这一页的「供应商与模型」由**发这个页面的那台 serve.mjs** 提供（同源、且仅限本机）；'
-    + '它与 4820 那个 v1 看板数据源不是同一台服务。')
+    + '它不是中枢那条数据源，也不是已取消的那条 v1 看板数据源。')
 }
 
 export async function dshModelsRpc<T>(method: string, args: Record<string, unknown> = {}): Promise<T> {

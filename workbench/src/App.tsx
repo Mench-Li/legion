@@ -1,34 +1,27 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import {
-  apiBase,
   countNotifyUnread,
-  fetchActivity,
-  fetchBoard,
-  fetchConfig,
   fetchExec,
   fetchGoal,
   fetchHubActivity,
   fetchHubMissions,
   fetchHubTasks,
   fetchChatHealth,
-  fetchMissions,
   fetchRoster,
   fetchSpaces,
+  hubBase,
   probeHub,
   publishGoal,
   setExec,
   setGoalContext,
   setGoalStatus,
-  subscribeActivity,
-  subscribeBoard,
   subscribeHubAudit,
 } from './api'
 import { createSceneController } from './scene/sceneController'
 import type { SceneCue, SceneFacts } from './scene/sceneState'
-import { buildMissions, labelsFromPipeline } from './missions'
+import { buildMissions } from './missions'
 import { boardFromHubTasks } from './hubBoard'
-import { activityFingerprint } from './dedupe'
-import type { ActivityEvent, ApiConfig, BoardData, GoalInfo, GoalStatus, Mission, RosterAgent, SpaceInfo } from './types'
+import type { ActivityEvent, BoardData, GoalInfo, GoalStatus, Mission, RosterAgent, SpaceInfo } from './types'
 import { WorkspaceNavigation } from './components/WorkspaceNavigation'
 import { AgentWorkspace } from './components/AgentWorkspace'
 import { WorkspaceSettings } from './components/WorkspaceSettings'
@@ -76,7 +69,6 @@ export default function App(): React.JSX.Element {
   const [missions, setMissions] = useState<Mission[]>([])
   const [scopeAware, setScopeAware] = useState(false)
   const [activity, setActivity] = useState<ActivityEvent[]>([])
-  const [paused, setPaused] = useState(false)
   const [scope, setScope] = useState<string | null>(null)
   const [hubMode, setHubMode] = useState(false)
   const [hubSpaces, setHubSpaces] = useState<SpaceInfo[]>([])
@@ -90,7 +82,6 @@ export default function App(): React.JSX.Element {
   const [execDaemonOnline, setExecDaemonOnline] = useState(false)
   const [showNewSpace, setShowNewSpace] = useState(false)
   const [spaceSettings, setSpaceSettings] = useState<SpaceInfo | null>(null)
-  const [, setConfig] = useState<ApiConfig | null>(null)
   const [conn, setConn] = useState<ConnState>('connecting')
   const [error, setError] = useState('')
   const [active, setActive] = useState(() => {
@@ -103,9 +94,6 @@ export default function App(): React.JSX.Element {
   /** 通知未读徽标（S7 ← R-B2）：通知面板打开时由 NotifyView 实时上报，否则本组件低频刷新。 */
   const [notifyUnread, setNotifyUnread] = useState(0)
   const labelsRef = useRef<Record<string, string>>({})
-  const seenEvents = useRef<Set<string>>(new Set())
-  const hubModeRef = useRef(false)
-  hubModeRef.current = hubMode
   useEffect(() => { try { localStorage.setItem('legion.workspace.page', active) } catch { /* 存储不可用不影响导航 */ } }, [active])
   useEffect(() => {
     if (!hubMode) return
@@ -119,63 +107,54 @@ export default function App(): React.JSX.Element {
     return () => { cancelled = true }
   }, [hubMode])
 
-  // v1 activity 事件内容指纹（P2-3 S6：实现统一在 ../dedupe.ts，供单测锁定与组件共用）
-  const eventKey = (ev: ActivityEvent): string => activityFingerprint(ev)
-
   /**
-   * 任务集加载：中枢（team-hub v2，真 scope 分区）优先，否则 serve.mjs v1（无分区）。
-   * 中枢探测在挂载后异步进行，探测成功即切换（hubMode → 自动重载）。
+   * 任务集加载：**中枢（team-hub v2，真 scope 分区）是唯一数据源**。
+   * v1 看板那条链路已整条取消，所以这里没有"探测不到就回退"的分支。
    */
   const loadMissions = useCallback(async (scopeValue: string | null): Promise<void> => {
     try {
-      const resp = hubMode ? await fetchHubMissions(scopeValue) : await fetchMissions(scopeValue)
+      const resp = await fetchHubMissions(scopeValue)
       setMissions(resp.missions)
       setScopeAware(resp.scopeAware)
     } catch {
-      // 服务端无该接口或探测失败：清空服务端数据，由 missionsShown 回退客户端聚合
+      // 服务端无该接口或中枢读取失败：清空服务端数据，由 missionsShown 回退客户端聚合
       setMissions([])
       setScopeAware(false)
     }
-  }, [hubMode])
+  }, [])
 
   useEffect(() => {
     let disposed = false
 
     const load = async (): Promise<void> => {
       try {
-        // v2 是主数据源：只要中枢可达，首屏不再依赖 4820 v1 看板。
-        if (await probeHub()) {
-          const [tasks, spaces, hubActs] = await Promise.all([
-            fetchHubTasks(null),
-            fetchSpaces(),
-            fetchHubActivity({ limit: MAX_ACTIVITY }),
-          ])
+        // 中枢是**唯一**的数据源：探测不到就明确报「中枢不可达」。
+        // 这里从前还有一段"回退到 v1 看板只读模式"的分支，已随那条被取消的链路一起删掉了 ——
+        // 那种回退会把"中枢没起来"显示成"有一份任务的旧快照"，用户看到的是**假数据**。
+        if (!(await probeHub())) {
           if (disposed) return
-          setHubMode(true)
-          setHubSpaces(spaces)
-          // 首屏保持「全部空间」语义；用户切换空间时再按 scope 拉专属数据。
-          setScope(null)
-          setBoard(boardFromHubTasks(tasks))
-          setActivity(hubActs.map(ev => ({ ts: ev.ts, kind: ev.action, taskId: ev.taskId ?? undefined, text: `${ev.member} · ${ev.action}` })))
-          seenEvents.current = new Set()
-          setConn('live')
-          setError('')
-          const hubMissions = await fetchHubMissions(null)
-          setMissions(hubMissions.missions)
-          setScopeAware(hubMissions.scopeAware)
+          setHubMode(false)
+          setConn('error')
+          setError(`未探测到中枢 ${hubBase()} 的响应`)
           return
         }
-        const [cfg, bd, acts] = await Promise.all([fetchConfig(), fetchBoard(), fetchActivity()])
+        const [tasks, spaces, hubActs] = await Promise.all([
+          fetchHubTasks(null),
+          fetchSpaces(),
+          fetchHubActivity({ limit: MAX_ACTIVITY }),
+        ])
         if (disposed) return
-        setConfig(cfg)
-        setPaused(cfg.paused === true)
-        labelsRef.current = labelsFromPipeline(cfg.pipeline)
-        setBoard(bd)
-        seenEvents.current = new Set(acts.map(eventKey))
-        setActivity(acts.slice(-MAX_ACTIVITY))
+        setHubMode(true)
+        setHubSpaces(spaces)
+        // 首屏保持「全部空间」语义；用户切换空间时再按 scope 拉专属数据。
+        setScope(null)
+        setBoard(boardFromHubTasks(tasks))
+        setActivity(hubActs.map(ev => ({ ts: ev.ts, kind: ev.action, taskId: ev.taskId ?? undefined, text: `${ev.member} · ${ev.action}` })))
         setConn('live')
         setError('')
-        await loadMissions(scope)
+        const hubMissions = await fetchHubMissions(null)
+        setMissions(hubMissions.missions)
+        setScopeAware(hubMissions.scopeAware)
       } catch (e) {
         if (disposed) return
         setConn('error')
@@ -185,30 +164,8 @@ export default function App(): React.JSX.Element {
 
     void load()
 
-    const offBoard = subscribeBoard(next => {
-      setBoard(next)
-      setConn('live')
-    })
-    const offActivity = subscribeActivity(ev => {
-      const key = eventKey(ev)
-      if (seenEvents.current.has(key)) return
-      seenEvents.current.add(key)
-      setActivity(prev => [...prev.slice(-(MAX_ACTIVITY - 1)), ev])
-    })
-
-    // 轮询兜底：SSE 断线时看板仍能刷新（低频，开销可忽略）
-    const poll = window.setInterval(() => {
-      if (hubModeRef.current) return
-      void fetchBoard()
-        .then(bd => setBoard(bd))
-        .catch(() => undefined)
-    }, 15000)
-
     return () => {
       disposed = true
-      offBoard()
-      offActivity()
-      window.clearInterval(poll)
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
@@ -226,7 +183,7 @@ export default function App(): React.JSX.Element {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [board, scope, hubMode])
 
-  // 中枢模式下按空间拉专属编队（每空间不同智能体；v1 模式回退看板聚合）
+  // 中枢模式下按空间拉专属编队（每空间不同智能体；编队只来自 team-hub）
   useEffect(() => {
     if (!hubMode) {
       setRoster(null)
@@ -358,22 +315,16 @@ export default function App(): React.JSX.Element {
   const refresh = async (): Promise<void> => {
     setRefreshing(true)
     try {
-      if (hubMode) {
-        const [tasks, acts, spaces] = await Promise.all([
-          fetchHubTasks(scope),
-          fetchHubActivity({ scope: scope ?? undefined, limit: MAX_ACTIVITY }),
-          fetchSpaces(),
-        ])
-        setBoard(boardFromHubTasks(tasks))
-        setActivity(acts.map(ev => ({ ts: ev.ts, kind: ev.action, taskId: ev.taskId ?? undefined, text: `${ev.member} · ${ev.action}` })))
-        setHubSpaces(spaces)
-        await sceneRefreshRef.current?.()
-      } else {
-        const [bd, acts] = await Promise.all([fetchBoard(), fetchActivity()])
-        setBoard(bd)
-        seenEvents.current = new Set(acts.map(eventKey))
-        setActivity(acts.slice(-MAX_ACTIVITY))
-      }
+      // 中枢是唯一数据源（v1 看板那条取数分支已随那条被取消的链路一起删除）。
+      const [tasks, acts, spaces] = await Promise.all([
+        fetchHubTasks(scope),
+        fetchHubActivity({ scope: scope ?? undefined, limit: MAX_ACTIVITY }),
+        fetchSpaces(),
+      ])
+      setBoard(boardFromHubTasks(tasks))
+      setActivity(acts.map(ev => ({ ts: ev.ts, kind: ev.action, taskId: ev.taskId ?? undefined, text: `${ev.member} · ${ev.action}` })))
+      setHubSpaces(spaces)
+      await sceneRefreshRef.current?.()
       await loadMissions(scope)
     } catch {
       /* 保持现有数据 */
@@ -381,16 +332,6 @@ export default function App(): React.JSX.Element {
       setRefreshing(false)
     }
   }
-
-  const refreshConfig = useCallback(async (): Promise<void> => {
-    try {
-      const cfg = await fetchConfig()
-      setConfig(cfg)
-      setPaused(cfg.paused === true)
-    } catch {
-      /* 保持现有状态 */
-    }
-  }, [])
 
   const selectScope = useCallback((next: string | null): void => {
     setScope(next)
@@ -505,9 +446,8 @@ export default function App(): React.JSX.Element {
   // ★ 它必须排在下面那两个 `conn` 提前返回**之前**。
   //
   // 实测踩过：Hub 要求远程鉴权、而浏览器手上没有会话时，每一个请求都是 401，
-  // `conn` 于是变成 `error`——界面显示「无法连接数据源 http://127.0.0.1:4820，
-  // 错误：401 Unauthorized」，外加一句"请在 Legion 安装目录运行
-  // node scrum/serve.mjs --port 4820"。**那是句错话**：数据源好好的，
+  // `conn` 于是变成 `error`——界面显示「无法连接中枢 …，
+  // 错误：401 Unauthorized」，外加一句"请去启动数据源"。**那是句错话**：中枢好好的，
   // 用户只是还没登录，而他会照着那句话去起一个本地的开发服务端。
   //
   //   > 一个把"你还没登录"说成"连不上、请去启动服务"的界面，
@@ -546,10 +486,7 @@ export default function App(): React.JSX.Element {
   if (conn === 'connecting') {
     return (
       <div className="state-box">
-        <div>⏳ 正在连接数据源 {apiBase()} …</div>
-        <div style={{ fontSize: 11, color: 'var(--muted-2)' }}>
-          需先启动 <code>node scrum/serve.mjs --port 4820</code>
-        </div>
+        <div>⏳ 正在连接中枢 {hubBase()} …</div>
       </div>
     )
   }
@@ -557,13 +494,17 @@ export default function App(): React.JSX.Element {
   if (conn === 'error') {
     return (
       <div className="state-box">
-        <div className="err">✕ 无法连接数据源 {apiBase()}</div>
+        <div className="err">✕ 无法连接中枢 {hubBase()}</div>
         <div style={{ fontSize: 12 }}>错误：{error}</div>
         <div style={{ fontSize: 12, lineHeight: 1.9 }}>
-          1. 启动看板服务：
-          <code>在 Legion 安装目录运行：node scrum/serve.mjs --port 4820</code>
+          1. 确认中枢 team-hub v2 已启动，且本页的 <code>{hubBase()}</code> 指向它（默认走同源 <code>/hub</code> 反代）。
           <br />
-          2. 换数据源：刷新页面后加 <code>?api=http://其他主机:4820</code>
+          2. 中枢在别处时：在浏览器控制台执行
+          <code>localStorage.setItem('legion.workbench.hub', 'http://127.0.0.1:8787')</code>
+          后刷新页面。
+          <br />
+          说明：v1 看板那条数据源已**整条取消**，这里不再有任何回退 —— 中枢不可达就是「没有数据」，
+          不会退回去显示一份过期快照。
         </div>
         <button className="btn primary" onClick={() => window.location.reload()}>
           重试
@@ -606,7 +547,7 @@ export default function App(): React.JSX.Element {
           ) : active === 'agents' ? (
             <AgentWorkspace key={selectedAgent ? agentKey(selectedAgent.scope ?? '', selectedAgent.role) : 'unselected'} agent={selectedAgent} hubMode={hubMode} spaces={hubSpaces} roster={roster} onContactAgent={contactAgent} onModelSettings={() => { if (selectedAgent?.scope) selectScope(selectedAgent.scope); setActive('settings-models') }} />
           ) : active.startsWith('settings-') ? (
-            <WorkspaceSettings active={active} scope={scope} spaces={hubSpaces} roster={roster} hubMode={hubMode} execEnabled={execEnabled} execDaemonOnline={execDaemonOnline} paused={paused} onToggleExec={handleToggleExec} onPausedChange={() => void refreshConfig()} onNewSpace={openNewSpace} onSpaceSettings={s => setSpaceSettings(s)} />
+            <WorkspaceSettings active={active} scope={scope} spaces={hubSpaces} roster={roster} hubMode={hubMode} execEnabled={execEnabled} execDaemonOnline={execDaemonOnline} onToggleExec={handleToggleExec} onNewSpace={openNewSpace} onSpaceSettings={s => setSpaceSettings(s)} />
           ) : active === 'activity-feed' ? (
             <div className="center-col workspace-activity"><ActivityFeed events={activity} /></div>
           ) : active === 'tasks' ? (
@@ -657,10 +598,8 @@ export default function App(): React.JSX.Element {
         board={displayBoard}
         activity={activity}
         labels={labels}
-        paused={paused}
         scope={scope}
         hubMode={hubMode}
-        onPausedChange={() => void refreshConfig()}
         goalCount={hubMode ? (goalInfo?.goals.filter(g => g.status === 'active' || g.status === 'paused').length ?? 0) : 0}
         spaceName={scope ? hubSpaces.find(s => s.id === scope)?.name ?? scope : undefined}
         onPublishGoal={hubMode ? handlePublishGoal : undefined}

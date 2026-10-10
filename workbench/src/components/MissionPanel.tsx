@@ -73,11 +73,6 @@ export function MissionPanel({ missions, scopeAware, scope, hubMode, onDataChang
           🟢 中枢 team-hub v2 · 真分区{scope ? `：仅「${scope}」空间任务` : '：全部空间'}
         </div>
       )}
-      {!scopeAware && scope && (
-        <div style={{ padding: '8px 14px', fontSize: 10.5, color: 'var(--yellow)' }}>
-          ⓘ 空间「{scope}」：v1 文件模式无 scope 分区，显示全部任务（接入 team-hub v2 后启用真分区）
-        </div>
-      )}
       {missions.length === 0 && (
         <div style={{ padding: 14, color: 'var(--muted-2)', fontSize: 12 }}>暂无任务集（发布 goal 后自动生成）</div>
       )}

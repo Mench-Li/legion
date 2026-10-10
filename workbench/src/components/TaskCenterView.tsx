@@ -1,31 +1,30 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
-  fetchBoard,
   fetchHubTasks,
   hubComment,
   hubTransition,
-  openKanban,
   subscribeHubAudit,
 } from '../api'
-import type { Card, CardComment, CardStatus, HubTask, SpaceInfo } from '../types'
+import type { CardComment, CardStatus, HubTask, SpaceInfo } from '../types'
 import { toast } from './Toast'
 import { deliveryBadgeOf, schedulingBadgeOf } from '../deliveryBadge.ts'
 import { TaskDetailModal } from './TaskDetailModal'
 
 /**
- * 任务中心（TaskCenterView）—— 「Scrum 看板」与「总指挥部/指挥中心」已合并为**单一视图**，以 Scrum 看板为主体：
+ * 任务中心（TaskCenterView）—— 「Scrum 看板」与「总指挥部/指挥中心」已合并为**单一视图**，以 Scrum 泳道为主体：
  *
- *  - 主体 = 经典 Kanban 泳道（待批准→待认领→进行中→待验收→受阻→已完成），中枢模式支持拖拽卡片跨列迁移
+ *  - 主体 = Kanban 泳道（待批准→待认领→进行中→待验收→受阻→已完成），支持拖拽卡片跨列迁移
  *    状态（服务端状态机校验，非法迁移被拒并提示）。
  *  - 「指挥总览」不再是第二个 Tab：它的将军视角分组语义（⚡ 工作中 / ⏳ 待我决定 / ⚪ 待办 / ✅ 已完成）
  *    并进泳道顶部的**视角过滤**——点选即按该语义筛卡片，泳道结构与拖拽目标始终完整可见，
  *    「待我决定」（in_review + blocked）仍是一眼可点的将军待办清单。
- *  - 按工作空间（scope）查看 scrum 任务：中枢模式拉 team-hub v2 `/api/board?scope=`（真分区；
- *    scope=null = 全部空间聚合，卡片带空间名）；v1 文件模式回退 serve.mjs 看板（无分区，只读）。
+ *  - 按工作空间（scope）查看 scrum 任务：拉 team-hub v2 `/api/board?scope=`（真分区；
+ *    scope=null = 全部空间聚合，卡片带空间名）。**唯一数据源就是中枢** ——
+ *    从前还有一条"文件模式只读"的回退，随那条被取消的旧看板一起删掉了。
  *  - 点击卡片 → 打开既有任务详情（TaskDetailModal：验收/打回/评论/转派/拦截/派 AI），状态变更后联动刷新。
  *
  * 实时性：hub 审计 SSE（/api/events）按 action 过滤任务类事件即时刷新 + 20s 轮询兜底。
- * 数据一律来自中枢/看板只读接口，本组件不持有业务状态（UI 不写库）。
+ * 数据一律来自中枢只读接口，本组件不持有业务状态（UI 不写库）。
  */
 
 /** 将军视角（原「指挥总览」的分组语义，并入看板后作为泳道过滤）。 */
@@ -57,7 +56,7 @@ const TRANSITIONS: Record<CardStatus, CardStatus[]> = {
   canceled: [],
 }
 
-/** Kanban 泳道顺序与中文标签（v1 COLUMN_LABEL 中文口径 + 调度台命名统一）。 */
+/** Kanban 泳道顺序与中文标签（与调度台命名统一）。 */
 const KANBAN_COLUMNS: Array<{ status: CardStatus; label: string; icon: string }> = [
   { status: 'backlog', label: '待批准', icon: '📥' },
   { status: 'todo', label: '待认领', icon: '⚪' },
@@ -94,7 +93,7 @@ const TASK_ACTIONS = new Set<string>([
 const isTaskEvent = (action: string): boolean =>
   TASK_ACTIONS.has(action) || action.startsWith('goal:') || action.startsWith('space:') || action.startsWith('exec:request')
 
-/** 任务中心的轻量行模型（hub 与 v1 看板归一化，只保留展示/操作所需叶子字段）。 */
+/** 任务中心的轻量行模型（只保留展示/操作所需叶子字段）。 */
 interface TcRow {
   id: string
   title: string
@@ -144,27 +143,6 @@ function rowFromHub(t: HubTask): TcRow {
     evidenceCount: (t.evidence ?? []).length,
     patchesCount: (t.patches ?? []).length,
     artifactsCount: (t.artifacts ?? []).length,
-  }
-}
-
-function rowFromCard(c: Card, status: CardStatus): TcRow {
-  return {
-    id: c.id,
-    title: c.title,
-    status,
-    priority: c.priority ?? 'medium',
-    role: undefined,
-    soldier: c.soldier,
-    hold: false,
-    version: c.version,
-    blocks: c.blocks ?? [],
-    blockedBy: c.blockedBy ?? [],
-    claimedAt: c.claimedAt ?? null,
-    updatedAt: c.updatedAt,
-    comments: c.comments ?? [],
-    evidenceCount: c.evidence ?? 0,
-    patchesCount: (c.patches ?? []).length,
-    artifactsCount: (c.artifacts ?? []).length,
   }
 }
 
@@ -222,22 +200,13 @@ export function TaskCenterView({ scope, hubMode, spaces = [], onSelectScope, onD
 
   const load = useCallback(async (): Promise<void> => {
     try {
-      if (hubMode) {
-        const list = await fetchHubTasks(scope)
-        setRows(list.map(rowFromHub))
-      } else {
-        const board = await fetchBoard()
-        const flat: TcRow[] = []
-        for (const col of board.columns) {
-          for (const card of col.cards) flat.push(rowFromCard(card, col.id))
-        }
-        setRows(flat)
-      }
+      const list = await fetchHubTasks(scope)
+      setRows(list.map(rowFromHub))
       setLoadErr(null)
     } catch (e) {
       setLoadErr(e instanceof Error ? e.message : String(e))
     }
-  }, [hubMode, scope])
+  }, [scope])
 
   useEffect(() => {
     setRows(null)
@@ -348,12 +317,8 @@ export function TaskCenterView({ scope, hubMode, spaces = [], onSelectScope, onD
     done: summary.done,
   }), [summary])
 
-  /** 拖拽迁移（中枢模式）：先按服务端状态机预检，语义特例（验收/打回/解阻）走确认/填因，再写 /api/transition。 */
+  /** 拖拽迁移：先按服务端状态机预检，语义特例（验收/打回/解阻）走确认/填因，再写 /api/transition。 */
   const moveTo = async (item: TcRow, to: CardStatus): Promise<void> => {
-    if (!hubMode) {
-      toast('info', 'v1 文件模式只读：请在中枢模式（team-hub v2）下拖拽迁移，或到经典看板页操作')
-      return
-    }
     if (item.status === to) return
     const allowed = TRANSITIONS[item.status] ?? []
     if (!allowed.includes(to)) {
@@ -390,10 +355,6 @@ export function TaskCenterView({ scope, hubMode, spaces = [], onSelectScope, onD
   }
 
   const openDetail = (id: string): void => {
-    if (!hubMode) {
-      toast('info', 'v1 文件模式只读：任务详情与迁移请用右上角「打开经典看板 ↗」')
-      return
-    }
     setDetailId(id)
   }
 
@@ -477,7 +438,7 @@ export function TaskCenterView({ scope, hubMode, spaces = [], onSelectScope, onD
         onClick={() => openDetail(r.id)}
         onDragStart={e => onDragStart(e, r.id)}
         onDragEnd={() => { setDragId(null); setDropCol(null) }}
-        title={`${r.id} · ${r.title}${hubMode ? '（点击查看详情/AI 执行过程' : ''}${hubMode && doneOpen(r) ? '；拖拽到其它列迁移状态' : ''}${hubMode ? '）' : '（v1 只读总览）'}`}
+        title={hubMode ? `${r.id} · ${r.title}（点击查看详情/AI 执行过程${doneOpen(r) ? '；拖拽到其它列迁移状态' : ''}）` : `${r.id} · ${r.title}`}
       >
         <div className="tc-card-title">
           <span className="tc-tid">{r.id}</span>
@@ -522,11 +483,11 @@ export function TaskCenterView({ scope, hubMode, spaces = [], onSelectScope, onD
 
   return (
     <div className="center-col">
-      {/* 头部：标题 + 工作空间下拉 + 数据源/入口（原「指挥总览 / Scrum 看板」双 Tab 已合并为单一泳道视图） */}
+      {/* 头部：标题 + 工作空间下拉 + 数据源（原「指挥总览 / Scrum 看板」双 Tab 已合并为单一泳道视图） */}
       <div className="panel tc-head">
         <span className="tc-head-title">📋 任务中心</span>
         <span className="tc-head-hint">
-          Scrum 泳道 · {hubMode ? '拖拽卡片跨列迁移状态' : 'v1 只读'} · 点卡片看详情与 AI 执行过程
+          Scrum 泳道 · 拖拽卡片跨列迁移状态 · 点卡片看详情与 AI 执行过程
         </span>
         <div className="tc-head-right">
           {hubMode && onSelectScope && (
@@ -550,14 +511,9 @@ export function TaskCenterView({ scope, hubMode, spaces = [], onSelectScope, onD
             value={query}
             onChange={e => setQuery(e.target.value)}
           />
-          {hubMode ? (
+          {hubMode && (
             <span className="tc-src" title="数据源：team-hub v2（SQLite，真分区）">🟢 中枢 {scope ? `「${scope}」` : '全部空间'}</span>
-          ) : (
-            <span className="tc-src" title="数据源：serve.mjs v1（文件模式，无 scope 分区）">🟡 v1 文件模式（只读）</span>
           )}
-          <button className="btn ghost" onClick={openKanban} title="在新标签页打开经典看板（v1 页面）">
-            打开经典看板 ↗
-          </button>
         </div>
       </div>
 
@@ -571,7 +527,7 @@ export function TaskCenterView({ scope, hubMode, spaces = [], onSelectScope, onD
             style={view === v.id ? { color: v.tone } : undefined}
             onClick={() => switchView(v.id)}
             title={v.id === 'all'
-              ? '全部任务：完整泳道（经典看板全貌）'
+              ? '全部任务：完整泳道（六个状态列全展开）'
               : `只看「${v.label}」：${v.statuses.map(s => STATUS_TEXT[s]).join(' + ')}（再点一次「📊 全部」恢复）`}
           >
             {v.icon} {v.label} {viewCounts[v.id]}
@@ -615,7 +571,7 @@ export function TaskCenterView({ scope, hubMode, spaces = [], onSelectScope, onD
 
       {rows !== null && !loadErr && rows.length === 0 && (
         <div className="panel" style={{ padding: 28, textAlign: 'center', color: 'var(--muted-2)', fontSize: 12, lineHeight: 1.9 }}>
-          当前{hubMode ? (scope ? `工作空间「${spaceName(scope)}」` : '工作空间（全部空间）') : '数据源'}暂无任务。
+          当前{scope ? `工作空间「${spaceName(scope)}」` : '工作空间（全部空间）'}暂无任务。
           <br />
           用底部「🎯 发布目标」自动生成阶段任务链，或「＋ 新建任务」开始。
         </div>

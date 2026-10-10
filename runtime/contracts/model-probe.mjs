@@ -355,6 +355,23 @@ const DEFAULT_MESSAGES = Object.freeze({
   UNCLASSIFIED: '无法归类这次失败：请查看原始诊断（不要当作可用，也不要静默重试）',
 })
 
+/**
+ * `AUTH_FAILED` 的另一种说法：**这次请求里根本没有凭证**。
+ *
+ * 实测（2026-10-10，BUG-025）：路由把**脱敏视图**喂给了探针（那份视图没有 `secretRef`），
+ * 于是探针一个 `Authorization` 头都没发，供应商回 401，判定写成
+ * 「**凭证已成功解析**，但供应商拒绝」——一句假话，还把人送去供应商控制台换钥匙。
+ *
+ *   > 一句"凭证已成功解析"，
+ *   > 在**根本没带凭证**的那次请求上，是最坏的一种错误信息：
+ *   > 它把本地的配置缺口说成了对方的拒绝。
+ *
+ * 所以判定码不变（供应商确实拒绝了），但话必须换。
+ */
+export const AUTH_FAILED_WITHOUT_CREDENTIAL =
+  '供应商要求鉴权，但**这次请求没有带凭证**（这个档案没有 secretRef）：' +
+  '请给档案配一个凭证引用；若这个 endpoint 本来就不需要密钥，请核对它为什么回了未授权'
+
 export function defaultProbeMessage(code) {
   return DEFAULT_MESSAGES[code] ?? DEFAULT_MESSAGES.UNCLASSIFIED
 }

@@ -109,6 +109,86 @@ test('**布局不合法 → UNAVAILABLE，而不是"连不上"**', async () => {
   assert.match(r.message, /这次没有探测过/)
 })
 
+// ---------------------------------------------------------------------------
+// BUG-023：闸门必须**点名**密钥库真正依赖的事实，而不是"任何 error 都拒"
+//
+// 上面那条用例的夹具用的是 `SECRETS_INSIDE_DATA_DIR` —— 它在点名集合里，
+// 所以**修前修后都绿**。夹具恰好绕开了出问题的那一条，这正是缺陷活下来的原因：
+//
+//   > 一条"永远用同一个合法输入"的用例，
+//   > 与一条"从没跑过"的用例，在缺陷恰好落在别的输入上时，是一样的。
+//
+// 实测（2026-10-10）：这台机器只差 `WORKSPACE_NOT_CONFIGURED`（工作区没配），
+// 而「测试连接」回 503「产品目录布局未确定，因此不知道密钥库在哪里」，
+// 可密钥库好好的（`GET /api/secrets` 正常列凭据）—— 报错说的是一件没发生的事。
+// ---------------------------------------------------------------------------
+
+test('★★ 只有 `WORKSPACE_NOT_CONFIGURED`（工作区没配）**不许**挡住测试连接', async () => {
+  let opened = 0
+  let asked = 0
+  const s = service({
+    resolveLayoutImpl: () => ({
+      layout: LAYOUT_OK.layout,
+      // 这台机器实测就只剩这一条 error
+      diagnostics: [{ severity: 'error', code: 'WORKSPACE_NOT_CONFIGURED' }],
+    }),
+    openSecrets: async () => { opened += 1; return openOk()() },
+    transport: async () => { asked += 1; return { kind: 'http', status: 200, latencyMs: 9, capabilities: { chat: true } } },
+  })
+  const r = await s.probeModelProfile(PROFILE)
+  assert.equal(r.unavailable, undefined, '★ 工作区没配与"密钥库在哪"无关，不许把它当成"没探测过"')
+  assert.equal(r.ok, true, '★ 应当真的探测了')
+  assert.equal(asked, 1, '★ 必须真的发过请求（不是拿缓存或直接拒）')
+  assert.equal(opened, 1, '密钥库该被打开')
+})
+
+test('★★ 被点名的码挡住时，**必须把是哪个码说出来**（只说"布局未确定"等于没说）', async () => {
+  const s = service({
+    resolveLayoutImpl: () => ({
+      layout: {},
+      diagnostics: [
+        { severity: 'error', code: 'INSTALL_DIR_UNRESOLVED' },
+        { severity: 'error', code: 'WORKSPACE_NOT_CONFIGURED' }, // 无关的**不许**出现在报错里
+      ],
+    }),
+  })
+  const r = await s.probeModelProfile(PROFILE)
+  assert.equal(r.code, PROBE_UNAVAILABLE_CODES.LAYOUT_BLOCKED)
+  assert.match(r.message, /INSTALL_DIR_UNRESOLVED/, '★ 用户要看到是哪一条挡住了（否则无从下手）')
+  assert.doesNotMatch(r.message, /WORKSPACE_NOT_CONFIGURED/,
+    '★ 把无关的那条也列出来会把人送去查工作区 —— 那正是他这次遇到的问题')
+})
+
+test('★ 告警级（warn）不挡；无关的 error 也不挡', async () => {
+  const s = service({
+    resolveLayoutImpl: () => ({
+      layout: LAYOUT_OK.layout,
+      diagnostics: [
+        { severity: 'warn', code: 'SOMETHING_WARN' },
+        { severity: 'error', code: 'TOTALLY_UNRELATED_CODE' },
+      ],
+    }),
+  })
+  const r = await s.probeModelProfile(PROFILE)
+  assert.notEqual(r.code, PROBE_UNAVAILABLE_CODES.LAYOUT_BLOCKED)
+})
+
+test('★★ 防漂移：探测与写凭据**用同一个判据**，不许各自写一套', async () => {
+  // 这是 BUG-023 的**成因**级判据：当时两个模块各抄了一份"哪些布局事实与密钥库有关"，
+  // 先修了写凭据那份，探测这份没跟着改 —— 于是同一台机器上"填密钥能用、测连接不能用"。
+  const { readFileSync } = await import('node:fs')
+  const { dirname, resolve } = await import('node:path')
+  const { fileURLToPath } = await import('node:url')
+  const HERE = dirname(fileURLToPath(import.meta.url))
+  for (const file of ['secret-admin.mjs', 'probe-service.mjs']) {
+    const src = readFileSync(resolve(HERE, file), 'utf8')
+    assert.match(src, /secretsBlockingDiagnostics/, `${file} 必须用 product/paths.mjs 的那一份判据`)
+    // 不许再出现"任何 error 都拒"的写法（那正是被抄错的那一份）
+    assert.doesNotMatch(src, /diagnostics\.some\(\s*\(?d\)?\s*=>\s*d\.severity === 'error'\s*\)/,
+      `${file} 又写了"任何 error 都拒"——这条规则只能有一份，在 product/paths.mjs`)
+  }
+})
+
 test('**没有 endpoint → 说"配置缺失"，不说"供应商故障"**', async () => {
   const r = await service().probeModelProfile({ ...PROFILE, endpoint: '' })
   assert.equal(r.unavailable, true)

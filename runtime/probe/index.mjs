@@ -45,6 +45,7 @@ import {
   probeClassOf,
   probeFingerprint,
   ttlForVerdict,
+  AUTH_FAILED_WITHOUT_CREDENTIAL,
 } from '../contracts/model-probe.mjs'
 
 /** 探测自身抛出的异常类别（与"探测结论是失败"是两件事）。 */
@@ -194,6 +195,13 @@ export function createModelProbe({
         return { ok: true, latencyMs, capabilities: caps }
       }
       const code = classifyFailure({ kind: 'http', status })
+      // ★ BUG-025：401/403 **且这次请求没带凭证**时，不能说"凭证已成功解析，但供应商拒绝"——
+      //   那是一句假话，还把用户送去供应商控制台换钥匙。码不变（供应商确实拒绝了），话要换。
+      //   `credentialSent === false` 是 transport 明确报出来的；老 transport 不报时按"带过"处理
+      //   （保持既有行为，不让一个字段的缺席改变判定）。
+      if (code === 'AUTH_FAILED' && raw.credentialSent === false) {
+        return { ok: false, code, message: AUTH_FAILED_WITHOUT_CREDENTIAL, latencyMs }
+      }
       return { ok: false, code, message: defaultProbeMessage(code), latencyMs }
     }
     const code = classifyFailure({ kind: raw.kind })

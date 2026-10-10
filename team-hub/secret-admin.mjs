@@ -185,25 +185,14 @@ export function createSecretAdmin({
    *   > 在布局**完全**正常时是同一个东西 —— 差别只在布局**差一点**的时候：
    *   > 前者会把用户挡在一件与他当前要做的事无关的事情后面。
    *
-   * 收进来的每一条都能说出理由（见下），没有一条是"顺手也收进来"。
+   * ★★ 2026-10-10（BUG-023）：**这份集合已经搬到 `product/paths.mjs`**，这里改成 import。
+   *   原因是它当时被抄成了两份 —— `secret-admin`（写凭据）与 `probe-service`（测连接）
+   *   各写一套；先修了这一份，于是同一台机器上"填密钥能用、测连接不能用"，
+   *   而两份代码各自看都"很对"。
+   *
+   *   > 一条被抄成两份的规则，
+   *   > 与一条只写了一份的规则，在**只修好其中一份**的那天之前，是一样的。
    */
-  const SECRETS_BLOCKING_DIAGNOSTICS = new Set([
-    // 没有产品家目录 ⇒ 连 `secretsFile` 都算不出来。
-    'PRODUCT_HOME_UNRESOLVED',
-    // 家目录落在安装目录里 ⇒ 密钥也会落在只读程序区。
-    'PRODUCT_HOME_INSIDE_INSTALL_DIR',
-    // `assertSecretsPlacement` 要用安装目录判"密钥不在安装目录内"；
-    // 拿不到它，这条不变量就**验不了**（不是"验过没问题"）。
-    'INSTALL_DIR_UNRESOLVED',
-    // 密钥自己落在这些目录里 —— 备份/清理会顺手把它带走。
-    'SECRETS_INSIDE_INSTALL_DIR',
-    'SECRETS_INSIDE_DATA_DIR',
-    'SECRETS_INSIDE_CACHE_DIR',
-    // 相对路径 ⇒ 密钥库到底落在哪随启动方式变化，不可预测。
-    'PATH_NOT_ABSOLUTE',
-    // 角色目录互相重叠 ⇒ 密钥所在的那个目录同时属于别的角色（同上）。
-    'ROLE_DIRS_OVERLAP',
-  ])
 
   /**
    * 确保密钥库可用。失败一律**抛**（读路径是"返回结果供显示"，写路径不是：
@@ -215,10 +204,12 @@ export function createSecretAdmin({
     const res = await resolveLayoutNow()
     const layout = res?.layout ?? null
     const diagnostics = Array.isArray(res?.diagnostics) ? res.diagnostics : []
-    // 只被**点名**的那几个码挡住（理由见上面的集合）。
+    // 只被**点名**的那几个码挡住（判据与集合都在 `product/paths.mjs`，**只有一份**：
+    // `probe-service.mjs` 用的是同一个 —— 抄第二份正是 BUG-023 的成因）。
     // 报错时把它们逐个列出来，而不是把整份诊断倒给用户 ——
     // 一份包含"工作区没选"的清单会让人以为问题在工作区。
-    const blocking = diagnostics.filter((d) => d?.severity === 'error' && SECRETS_BLOCKING_DIAGNOSTICS.has(d?.code))
+    const { secretsBlockingDiagnostics } = await import('../product/paths.mjs')
+    const blocking = secretsBlockingDiagnostics(diagnostics)
     if (blocking.length > 0) {
       throw adminError(SECRET_ADMIN_CODES.STORE_UNAVAILABLE,
         '无法管理凭证：产品目录布局里与密钥库有关的部分没确定，因此不知道密钥库该放在哪。' +

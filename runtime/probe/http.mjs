@@ -35,6 +35,45 @@ import { MODEL_CAPABILITIES } from '../contracts/model-probe.mjs'
 /** 默认的探测路径（OpenAI 兼容）。 */
 export const DEFAULT_MODELS_PATH = '/v1/models'
 
+/**
+ * 把 `endpoint`（base_url）与 `modelsPath` 拼成一个 URL，**不重复版本段**。
+ *
+ * ## 为什么需要这个函数（BUG-024，实测）
+ *
+ * OpenAI 兼容生态里 `base_url` 的**惯例是已经含版本段**：
+ *
+ *     base_url = https://fjbigmodel.fjdac.cn/v1      ← 用户/DSH 就是这么填的
+ *
+ * 而本模块默认的探测路径是 `/v1/models`，于是朴素的 `${base}${path}` 拼出：
+ *
+ *     https://fjbigmodel.fjdac.cn/v1/v1/models  →  404
+ *
+ * 而那 404 被翻译成「**供应商不认这个模型标识**」——一条**方向完全错误**的结论：
+ * 用户会去核对模型 id（而它是对的），真正的问题在拼接。
+ *
+ *   > 一个"把 /v1 拼两遍"的实现，
+ *   > 与一个"模型 id 填错了"的实现，在界面上说的是同一句话。
+ *
+ * ## 规则（只做一件事：同一段紧挨着出现两次时去掉一次）
+ *
+ * 当 `base` 的**最后一段**与 `modelsPath` 的**第一段**相同时，把 `modelsPath` 的那一段去掉。
+ * 这不是"猜"：两段一模一样的路径紧挨着出现，就是同一次拼接被写了两遍。
+ * 也不改变既有行为：`base` 不以该段结尾时（如 `https://api.example.com`），
+ * 拼出来与从前逐字相同。
+ */
+export function joinModelsUrl(base, modelsPath = DEFAULT_MODELS_PATH) {
+  const b = String(base ?? '').replace(/\/+$/, '')
+  const p = String(modelsPath ?? '')
+  if (p === '') return b
+  const path = p.startsWith('/') ? p : '/' + p
+  const lastSegmentOfBase = b.slice(b.lastIndexOf('/') + 1)
+  const firstSegmentOfPath = path.slice(1).split('/')[0]
+  if (lastSegmentOfBase !== '' && lastSegmentOfBase === firstSegmentOfPath) {
+    return b + path.slice(1 + firstSegmentOfPath.length)
+  }
+  return b + path
+}
+
 /** 一个"需要管理员声明能力"的显式信号（供调用方决定要不要提示用户）。 */
 export const CAPABILITY_EVIDENCE = Object.freeze({
   /** 响应里没有任何能力信息——调用方不该把空表读成"什么都不支持" */
@@ -162,11 +201,16 @@ export function createHttpTransport({
 
   return async function httpTransport({ profile, credential }) {
     const startedAtMs = clock()
-    const base = String(profile.endpoint ?? '').replace(/\/+$/, '')
-    const url = `${base}${modelsPath}`
+    // ★ 用 `joinModelsUrl` 而不是 `${endpoint}${modelsPath}`：后者在
+    //   `endpoint` 已含 `/v1`（OpenAI 兼容的 base_url 惯例）时会拼出 `/v1/v1/models`，
+    //   404 再被翻译成"供应商不认这个模型标识"——一条方向完全错误的结论。见该函数的注释。
+    const url = joinModelsUrl(profile.endpoint, modelsPath)
 
     const headers = { accept: 'application/json' }
-    if (typeof credential === 'string' && credential !== '') {
+    // ★ 把"这次到底带没带凭证"作为**观测的一部分**报出去（BUG-025）：
+    //   判定层需要用它在 401 时区分"钥匙被拒"与"根本没带钥匙"——两者的用户动作完全不同。
+    const credentialSent = typeof credential === 'string' && credential !== ''
+    if (credentialSent) {
       headers.authorization = `Bearer ${credential}`
     }
 
@@ -180,7 +224,8 @@ export function createHttpTransport({
     if (status < 200 || status >= 300) {
       // 不读正文：错误正文里可能回显被提交的凭证（部分供应商会这么干），
       // 而这份观测最终会进诊断。分类只需要状态码。
-      return { kind: 'http', status, latencyMs }
+      // `credentialSent` 只是"我们发了什么"，不含凭证本身，进诊断是安全的。
+      return { kind: 'http', status, latencyMs, credentialSent }
     }
 
     let payload = null

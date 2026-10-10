@@ -100,12 +100,30 @@ export function createProbeService({
     if (opened !== null) return { ok: true, ...opened }
 
     const { layout, diagnostics } = await resolveLayoutNow()
-    if (Array.isArray(diagnostics) && diagnostics.some((d) => d.severity === 'error')) {
+    // ★★ BUG-023：这里从前写的是「**任何** error 级诊断都拒」——
+    //    与 `secret-admin.mjs` 里那条被点名过的闸门**抄了两份**，而只修好了那一份。
+    //
+    //    实测（2026-10-10）：这台机器只差"工作区目录没配"（`WORKSPACE_NOT_CONFIGURED`），
+    //    于是「模型档案 → 测试连接」回 503「产品目录布局未确定，因此不知道密钥库在哪里」，
+    //    而**密钥库好好的**（`GET /api/secrets` 正常列出凭据）。报错说的是一件没发生的事。
+    //
+    //    > 一条被抄成两份的规则，
+    //    > 与一条只写了一份的规则，在**只修好其中一份**的那天之前，是一样的。
+    //
+    //    现在两边都用 `product/paths.mjs` 的那**唯一一份**判据；有一条判据直接读这两个
+    //    文件的源码，钉住它们不许再各自写一套（见 `product/paths.test.mjs`）。
+    //
+    //    报错时把**是哪几条**列出来（`secret-admin` 一直这么做）：只说"布局未确定"
+    //    等于没说 —— 用户无从下手，而这正是他这次报上来的那句话的问题。
+    const { secretsBlockingDiagnostics } = await import('../product/paths.mjs')
+    const blocking = secretsBlockingDiagnostics(diagnostics)
+    if (blocking.length > 0) {
       return {
         ok: false,
         result: unavailableResult(PROBE_UNAVAILABLE_CODES.LAYOUT_BLOCKED,
-          '无法测试连接：产品目录布局未确定，因此不知道密钥库在哪里。**这次没有探测过**。',
-          { detail: diagnostics.filter((d) => d.severity === 'error').map((d) => d.code).join(',') }),
+          '无法测试连接：产品目录布局里与密钥库有关的部分没确定，因此不知道密钥库在哪。' +
+          `**这次没有探测过**。（${blocking.map((d) => d?.code).filter(Boolean).join(', ')}）`,
+          { detail: blocking.map((d) => d?.code).filter(Boolean).join(',') }),
       }
     }
 

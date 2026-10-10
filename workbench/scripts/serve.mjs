@@ -2642,7 +2642,21 @@ function routeRequest(req, res) {
     const proxyReq = request({
       hostname: up.hostname, port: up.port, path: up.pathname + up.search,
       method: req.method, headers: { ...req.headers, host: up.host,
-        ...(CFG.values.desktopMode ? { ...hubAuthHeaders(), ...(req.headers.origin ? { origin: up.origin } : {}) } : {}) },
+        // ★★ 中枢的机器令牌**始终**附上（配了就附；没配就是空对象，行为与从前一致）。
+        //
+        //   从前这里写的是 `...(CFG.values.desktopMode ? { ...hubAuthHeaders(), ... } : {})` ——
+        //   于是"给中枢设了 token"这件事会让**非 desktop 部署**的面板在 `/hub` 代理上静默 401：
+        //   界面读不出任何数据，日志里只有 401，很难想到"是因为我给中枢加了令牌"。
+        //   实测路径（2026-10-10）：为了手机远程访问给中枢设 token ⇒ 桌面面板当场坏掉。
+        //
+        //   > 一个"配了令牌才能远程访问"的开关，
+        //   > 与一个"一配令牌就把本地面板弄坏"的开关，是同一个开关——
+        //   > 只不过后者会让人以为是自己配错了。
+        //
+        //   优先级顺带明确：**代理自己知道中枢的令牌**，就不该依赖调用方碰巧也带着同一把
+        //   （浏览器那边的 Authorization 可能是 workbench 自己的令牌，两者不是同一个东西）。
+        ...hubAuthHeaders(),
+        ...(CFG.values.desktopMode && req.headers.origin ? { origin: up.origin } : {}) },
     }, (upRes) => {
       try {
         res.writeHead(upRes.statusCode, upRes.headers)

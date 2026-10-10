@@ -1,0 +1,38 @@
+# T-201 探针输出  env.node=24.19.0
+PROBE-1 重复 POST (software,hr-analyst) x3  HTTP=200/200/200  落库 avatar: human:s01 -> human:s02 -> human:s01  => DRIFT
+PROBE-2 连续 16 个自建 role 落库 avatar: human:s01, human:s02, human:s03, human:s04, human:s05, human:s06, human:s07, human:s08, human:s09, human:s10, human:s11, human:s12, human:s13, human:s14, human:s15, human:s16
+PROBE-2 第 16 个令牌=human:s16（第 1..15=human:s01,human:s02,human:s03,human:s04,human:s05,human:s06,human:s07,human:s08,human:s09,human:s10,human:s11,human:s12,human:s13,human:s14,human:s15）
+PROBE-2 移动端位面表 slotKeys 长度=40 含s15=true 含s16=false
+PROBE-2 移动端 resolveSlot("human:s16")=null
+PROBE-2 移动端 renderAvatar("human:s16") === renderAvatar(null)（是否退化为占位）: true
+PROBE-2 移动端两个不同自建令牌渲染是否相同: false
+PROBE-2 桌面真源 slots.ts slotKeys 长度=40 含s15=true 含s16=false
+PROBE-2 桌面真源 resolveSlot("human:s16")=null
+PROBE-3 播种后成员数=25
+  default | assistant | 小通 | 日常事务与杂务 | human:assistant
+  default | research-assistant | 小辑 | 信息检索与整理 | human:research-assistant
+  default | writer | 执笔 | 文档与文案 | human:writer
+  marketing | ad-optimizer | 定投 | 广告投放与 ROI 优化 | human:ad-optimizer
+  marketing | brand-copy | 润声 | 品牌表达与文案 | human:brand-copy
+  marketing | content-planner | 谋篇 | 选题与内容产出 | human:content-planner
+  marketing | growth-hacker | 拓流 | 增长实验与渠道 | human:growth-hacker
+  marketing | market-analyst | 观市 | 市场洞察与竞品分析 | human:market-analyst
+  ops | campaign-planner | 造势 | 活动方案与执行 | human:campaign-planner
+  ops | data-ops | 呈数 | 运营数据与报表 | human:data-ops
+  ops | ops-specialist | 理常 | 日常运营执行 | human:ops-specialist
+  ops | support-lead | 解忧 | 客户反馈与 SLA | human:support-lead
+  product | data-analyst | 明数 | 数据指标与洞察 | human:data-analyst
+  product | product-manager | 谋远 | 需求定义与路线图 | human:product-manager
+  product | ui-designer | 绘色 | 界面视觉与设计规范 | human:ui-designer
+  product | user-researcher | 问真 | 用户洞察与调研 | human:user-researcher
+  product | ux-designer | 疏径 | 交互流程与原型 | human:ux-designer
+  software | breaker | 分略 | 任务拆分与依赖规划 | human:breaker
+  software | coder | 衡码 | 实现与自测 | human:coder
+  software | devops | 启舟 | CI/CD 与发布 | human:devops
+  software | requirement | 析言 | 需求澄清与拆解 | human:requirement
+  software | researcher | 探微 | 技术选型与搜索 | human:researcher
+  software | reviewer | 鉴微 | 质量审查与反馈 | human:reviewer
+  software | test-designer | 构验 | 用例设计与验收标准 | human:test-designer
+  software | tester | 寻瑕 | 执行用例与回归 | human:tester
+PROBE-3 同空间重名行数=0
+PROBE-3 跨空间同 role name/avatar 分叉数=0

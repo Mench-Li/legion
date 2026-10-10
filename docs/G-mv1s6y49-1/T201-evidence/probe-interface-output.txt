@@ -1,0 +1,10 @@
+# T-201 接口/边界探针  node=24.19.0
+PROBE-A role 长度 63/64/65 → HTTP 63=200 64=200 65=400  预期 63/64=2xx 65=400
+PROBE-B kind 缺省落库=""（预期 ""）
+PROBE-B sort 递增序列=[{"role":"coder","sort":0},{"role":"aa-role","sort":1},{"role":"bb-role","sort":2}]  严格递增=true
+PROBE-C 无 by 字段 POST → HTTP 400  库行数=0（预期 400 + 0）
+PROBE-D 显式传 human:zzz → 落库="human:zzz"（格式合法即被接受；两端口位面表均无 zzz → 渲染退化为占位人形）
+PROBE-E 显式传 "not-a-token" → 落库="human:coder"
+PROBE-E 显式传 "<img src=x onerror=alert(1)>" → 落库="human:coder"
+PROBE-E 显式传 "🤖🦊" → 落库="human:coder"
+PROBE-F AgentAvatar token=human:coder size 0/-1/1024/64/缺省 → width=0:32 -1:32 1024:32 64:64 undefined:32（预期 0/-1/1024/缺省=32，64=64）

@@ -44,6 +44,10 @@ import { CLOSURE_ENTRY_NAME, closureDigest } from '../../product/update/closure.
 import { packDirectory } from '../../scripts/update/publish.mjs'
 import { sha256Hex } from '../../product/update/canonical.mjs'
 import { isSemver } from '../../product/update/semver.mjs'
+// ★ 与安装包（`stage.mjs`）**共用**这一条：根下 `roles*.json` 里哪些不进产品树。
+//   此前这里是硬编码的 `'roles-ozon.json'`，而 `stage.mjs` 用的是
+//   `/^roles[^/]*\.json$/`（放行它）——两侧对"产品树包含什么"各说各话。
+import { isShippableRootRoleFile } from './payload-filter.mjs'
 
 /** 载荷根相对 stage 目录的位置。与 `main.mjs` 的 `installRoot` 同源。 */
 export const PAYLOAD_RELATIVE_ROOT = Object.freeze(['resources', 'legion'])
@@ -57,13 +61,31 @@ export const PAYLOAD_RELATIVE_ROOT = Object.freeze(['resources', 'legion'])
  *     而 helper 正是执行这次替换的那段代码。
  *   · `.legion` / `.desktop-build` / `dist` / `scratch` / `.tmp*`：构建与本机
  *     状态。
- *   · `roles-ozon.json`：`stage.mjs` 的注释明确说它"属于用户数据，永不进安装"。
+ *   · `roles-ozon.json`：本地/空间数据。判据**不在这里写死**，而是从
+ *     `payload-filter.mjs` 的 `isShippableRootRoleFile()` 取 ——
+ *     与安装包（`stage.mjs`）用的是同一条。写死过一次，结果与安装包漂开了。
  */
 export const FORBIDDEN_PAYLOAD_ENTRIES = Object.freeze([
   'update', 'node', 'git', 'dsh.asar', 'desktop-release.json',
   '.legion', '.desktop-build', 'dist', 'scratch', '.tmp',
   'roles-ozon.json',
 ])
+
+/**
+ * 载荷禁止项判据：名字清单 + **共享的 roles 判据**。
+ *
+ * 单列一个函数是为了让"这里的规则"与"`stage.mjs` 的规则"能被同一套用例
+ * 同时驱动——见 `payload-filter.test.mjs` 里那条跨路径判据。
+ */
+export function isForbiddenPayloadEntry(relative, { top } = {}) {
+  const rel = String(relative).split('\\').join('/')
+  const head = top ?? rel.split('/')[0]
+  if (FORBIDDEN_PAYLOAD_ENTRIES.includes(head)) return true
+  if (FORBIDDEN_PAYLOAD_PATTERNS.some((pattern) => pattern.test(rel))) return true
+  // 根下的 `roles*.json`：共享判据说不能发 → 载荷里也不许出现。
+  if (!rel.includes('/') && /^roles[^/]*\.json$/.test(rel) && !isShippableRootRoleFile(rel)) return true
+  return false
+}
 
 /** 名字类判据：`node_modules`、`*.test.mjs`、`.part` 之类。 */
 export const FORBIDDEN_PAYLOAD_PATTERNS = Object.freeze([

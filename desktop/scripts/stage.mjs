@@ -10,7 +10,7 @@ import { validateWorkflowPack } from '../../product/workflow-packs/pack.mjs'
 import { createSoftwareCollaborationPack } from './software-collaboration-pack.mjs'
 import { pruneWindowsX64Payload } from './platform-filter.mjs'
 import { DESKTOP_SHELL_DIRS, DESKTOP_SHELL_FILES, HELPER_ENTRY, SHELL_PRODUCT_FILES, helperClosure } from './shell-files.mjs'
-import { isShippablePayloadFile } from './payload-filter.mjs'
+import { isShippablePayloadFile, isShippableRootRoleFile } from './payload-filter.mjs'
 
 const root = fileURLToPath(new URL('../../', import.meta.url))
 const build = join(root, '.desktop-build')
@@ -56,7 +56,16 @@ const untracked = await exec('git', ['ls-files', '--others', '--exclude-standard
 const productionRoots = new Set(['product', 'team-hub', 'runtime', 'orchestrator', 'security', 'mesh', 'scrum', 'whiteboard', 'skills', 'instructions', 'plugins', 'packages'])
 const paths = [...new Set(`${stdout}${untracked.stdout}`.split('\0').filter(Boolean))]
 for (const path of paths) {
-  const production = productionRoots.has(path.split('/')[0]) || path.startsWith('workbench/scripts/') || /^roles[^/]*\.json$/.test(path)
+  // ★ 根下的 `roles*.json`：判据在 `payload-filter.mjs` 的
+  //   `isShippableRootRoleFile()` —— **升级包那一侧用的是同一条**。
+  //
+  //   这里原本写的是 `/^roles[^/]*\.json$/`，于是 `roles-ozon.json`（54 KB 本地
+  //   数据）也进了安装包，而升级包的 `FORBIDDEN_PAYLOAD_ENTRIES` 禁止它。
+  //   两条构建路径对"产品树包含什么"必须一致，否则"装完机"与"升完级"的文件集合不同。
+  //   完整来龙去脉见 `payload-filter.mjs` 那个函数的注释。
+  const production = productionRoots.has(path.split('/')[0])
+    || path.startsWith('workbench/scripts/')
+    || isShippableRootRoleFile(path)
   if (!production || /(^|\/)(tests?|__tests__|node_modules|archive|fixtures?|probes)(\/|$)/.test(path) || /\.(test|spec)\.[cm]?[jt]s$/.test(path)) continue
   // Legacy task/daemon snapshots belong to a user's data, never an installation.
   if (path.startsWith('scrum/') && !/\.(mjs|sql|html|css)$/.test(path)) continue
@@ -93,12 +102,33 @@ await writeFile(join(packDir, 'software-collaboration.legionpack'), `${JSON.stri
 const vendorRoot = join(resources, 'legion', 'vendor', 'archive', 'node_modules')
 await mkdir(vendorRoot, { recursive: true })
 const desktopModules = join(root, 'desktop', 'node_modules')
+/**
+ * vendor 的**来源根**，默认 `desktop/node_modules`。
+ *
+ * ★ `LEGION_VENDOR_SOURCE` 是一个**可选注入点**，默认不用时行为逐字不变。
+ *   它存在的原因是 pnpm：pnpm 的 `node_modules` 顶层依赖全是 junction，而
+ *   `inventoryTree()` 按纪律**拒绝**链接（"Production link rejected"）。就地
+ *   物化那些 junction 又会破坏 pnpm 的解析语义 —— 实测踩到：
+ *
+ *     Error: Cannot find module 'brace-expansion'
+ *     requireStack: node_modules/minimatch/dist/commonjs/index.js   ← 被拍平成 v10
+ *                   node_modules/@electron/asar/lib/asar.js
+ *
+ *   > 一个"把链接换成真实文件"的物化脚本，
+ *   > 与一个"真的装好了依赖"的目录树，在文件计数上是同一个东西——
+ *   > 只不过前者的**解析语义**变了：pnpm 靠"每个包看见自己那一份版本"
+ *   > 来避免冲突，而拍平会把这个保证去掉。
+ *
+ *   所以需要时在**仓库之外**按 asar 期望的形状（`@electron/asar/node_modules/
+ *   {minimatch,glob,…}` 与根下并列）造一份物化副本，再用这个变量指过来。
+ */
+const vendorSourceRoot = process.env.LEGION_VENDOR_SOURCE ?? desktopModules
 const archivePackages = [
-  ['@electron/asar', join(desktopModules, '@electron', 'asar')],
-  ['glob', join(desktopModules, 'glob')],
-  ['minimatch', join(desktopModules, '@electron', 'asar', 'node_modules', 'minimatch')],
+  ['@electron/asar', join(vendorSourceRoot, '@electron', 'asar')],
+  ['glob', join(vendorSourceRoot, 'glob')],
+  ['minimatch', join(vendorSourceRoot, '@electron', 'asar', 'node_modules', 'minimatch')],
   ...['fs.realpath', 'inflight', 'inherits', 'once', 'path-is-absolute', 'wrappy', 'concat-map']
-    .map(name => [name, join(desktopModules, name)]),
+    .map(name => [name, join(vendorSourceRoot, name)]),
 ]
 for (const [name, source] of archivePackages) {
   await inventoryTree(source)

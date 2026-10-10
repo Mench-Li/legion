@@ -10,7 +10,7 @@ import { mkdtempSync, mkdirSync, rmSync, writeFileSync, utimesSync } from 'node:
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { createReleaseRoutes, latestInstaller, readReleaseManifest } from './routes/releases.mjs'
+import { createReleaseRoutes, latestInstaller, normalizeReleaseManifest, readReleaseManifest } from './routes/releases.mjs'
 
 /** 造一个发布目录现场。返回 { root, req } 之类的工具。 */
 function scene(t, { releaseIds = ['r-2026-10-01', 'r-2026-10-05'], withExe = true } = {}) {
@@ -208,4 +208,76 @@ describe('读发布清单', () => {
     assert.equal(readReleaseManifest(root, 'a\\b'), null)
   })
 
+  // ══════════════════════════════════════════════════════════════════════════
+  // ★★★ 签名信封形状（发布端**现在**写的）也必须读出 productVersion
+  //
+  // 实测（2026-10-10）：发布端早就改成写签名信封了，而这里只认扁平形状 ⇒
+  // `manifest.productVersion` 对任何新发布都是 undefined ⇒ 门口页退回环境变量
+  // `LEGION_DESKTOP_VERSION`。页面于是显示 `v0.1.0`（配置里的值），而下载按钮
+  // 指向 `rel-0.1.3`。两个数都"有值"，页面看起来完全正常。
+  //
+  //   > 一个"读不到就退回配置"的兜底，
+  //   > 与一个"真的读到了"的路径，在页面上都是 `v0.1.x`——
+  //   > 只不过前者的版本号会一直停在配置里那一个，而没人会发现。
+  //
+  // 旧清单（扁平）与磁盘上已发出的发布**都不许动**（发行目录按合同不可覆盖），
+  // 所以是"读的时候归一"，不是"要求磁盘上统一"。
+  // ══════════════════════════════════════════════════════════════════════════
+  test('★★★ 签名信封形状也能读出 productVersion（否则页面退回环境变量）', (t) => {
+    const root = withManifest(t, {
+      keyId: 'release-2026-a',
+      signature: 'x'.repeat(128),
+      payload: {
+        format: 'legion/update-release@1',
+        releaseId: 'rel-0.1.3', productVersion: '0.1.3', channel: 'stable',
+        platform: 'win32', arch: 'x64',
+        installer: { path: 'releases/rel-0.1.3/Legion-Setup-win-x64.exe', sizeBytes: 205127026, sha256: SHA },
+        package: { path: 'releases/rel-0.1.3/legion-win-x64.zip', sizeBytes: 6734418, sha256: SHA },
+        notes: { path: 'releases/rel-0.1.3/notes-0.1.3.txt', sizeBytes: 215, sha256: SHA },
+      },
+    })
+    const m = readReleaseManifest(root, 'r-1')
+    assert.equal(m.productVersion, '0.1.3', '信封里的版本必须读得到')
+    assert.equal(m.releaseId, 'rel-0.1.3')
+    assert.equal(m.channel, 'stable')
+    // 产物走读取方认识的形状：`artifacts.installer`（而不是裸的 `installer`）。
+    assert.equal(m.artifacts?.installer?.sizeBytes, 205127026)
+    assert.equal(m.artifacts?.installer?.sha256, SHA)
+    assert.equal(m.artifacts?.package?.path, 'releases/rel-0.1.3/legion-win-x64.zip')
+    assert.equal(m.artifacts?.notes?.sizeBytes, 215)
+    // 签名者是谁要留痕 —— 排障时"这份清单谁签的"是第一个要问的。
+    assert.equal(m.envelope?.keyId, 'release-2026-a')
+    assert.equal(m.envelope?.format, 'legion/update-release@1')
+  })
+
+  test('★ 扁平形状**原样**返回（已发出的旧清单不受影响）', (t) => {
+    const flat = { releaseId: 'r-1', productVersion: '0.1.0', channel: 'internal', artifacts: { installer: { sizeBytes: 1 } } }
+    const root = withManifest(t, flat)
+    assert.deepEqual(readReleaseManifest(root, 'r-1'), flat,
+      '扁平形状不该被改写 —— 磁盘上已发出的发布不可覆盖，读取方要能照旧用')
+  })
+
+  test('★ 反例：payload 里没有 productVersion 时**不解包**（不猜）', (t) => {
+    // 一个恰好名叫 payload 的无关字段不该把清单读成另一种东西。
+    const root = withManifest(t, { releaseId: 'r-1', payload: { whatever: 1 } })
+    const m = readReleaseManifest(root, 'r-1')
+    assert.equal(m.productVersion, undefined, 'payload 里没有 productVersion ⇒ 不解包')
+    assert.equal(m.releaseId, 'r-1', '顶层字段照旧可见')
+    assert.equal(m.artifacts, undefined, '没有造出空的 artifacts —— 空 artifacts 比没有更像"校验过了"')
+    assert.equal(m.envelope, undefined)
+  })
+
+  test('★ 归一函数本身：非对象 / null ⇒ null', () => {
+    assert.equal(normalizeReleaseManifest(null), null)
+    assert.equal(normalizeReleaseManifest(undefined), null)
+    assert.equal(normalizeReleaseManifest('字符串'), null)
+    assert.equal(normalizeReleaseManifest(42), null)
+  })
+
+  test('★ 信封里没有产物字段时不造空 artifacts', (t) => {
+    const root = withManifest(t, { keyId: 'k', signature: 's', payload: { productVersion: '0.1.4' } })
+    const m = readReleaseManifest(root, 'r-1')
+    assert.equal(m.productVersion, '0.1.4')
+    assert.equal(m.artifacts, undefined)
+  })
 })

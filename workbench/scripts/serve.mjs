@@ -2639,23 +2639,29 @@ function routeRequest(req, res) {
   if (pathname === '/hub' || pathname.startsWith('/hub/')) {
     const qs = url.search
     const up = new URL((process.env.DSH_HUB_UPSTREAM ?? 'http://127.0.0.1:8787') + pathname.slice(4) + qs)
+    // ★★ 转发身份的三条规则（这里踩过两次，写清楚免得下次再改错）：
+    //
+    //   调用方带的 Authorization 可能是**三种完全不同的东西**，代理必须分开对待：
+    //
+    //   ① **没有** Authorization —— 本机尚未登录的界面。附上中枢机器令牌，它才读得动。
+    //      漏掉这一条的后果（实测 2026-10-10）：给中枢设 token ⇒ 非 desktop 部署的面板
+    //      在 `/hub` 上静默 401，界面读不出任何数据。
+    //   ② **workbench 自己的令牌**（desktop 模式下浏览器带的那把）—— 它是**本服务**的凭据，
+    //      对中枢毫无意义，必须**换成**中枢机器令牌。
+    //   ③ **用户访问令牌**（身份系统签发的）—— 它就是给中枢用的，必须**原样透传**。
+    //      代理一旦覆盖它，中枢会把机器令牌当用户令牌去解 ⇒ `IDENTITY_TOKEN_MALFORMED`
+    //      ⇒ 前端启动时那次 `/hub/api/identity/me` 失败 ⇒ **整个页面卡在登录门**（实测同上）。
+    //
+    //   > 一个"替调用方决定它该用哪个身份"的代理，
+    //   > 与一个"把用户令牌换成机器令牌"的代理，区别只在有没有人登录过——
+    //   > 而那恰好是最难复现的那种坏。
+    const callerAuth = String(req.headers.authorization ?? '')
+    const workbenchToken = String(CFG.values.token ?? '')
+    const callerSentWorkbenchCredential = workbenchToken !== '' && callerAuth === `Bearer ${workbenchToken}`
     const proxyReq = request({
       hostname: up.hostname, port: up.port, path: up.pathname + up.search,
       method: req.method, headers: { ...req.headers, host: up.host,
-        // ★★ 中枢的机器令牌**始终**附上（配了就附；没配就是空对象，行为与从前一致）。
-        //
-        //   从前这里写的是 `...(CFG.values.desktopMode ? { ...hubAuthHeaders(), ... } : {})` ——
-        //   于是"给中枢设了 token"这件事会让**非 desktop 部署**的面板在 `/hub` 代理上静默 401：
-        //   界面读不出任何数据，日志里只有 401，很难想到"是因为我给中枢加了令牌"。
-        //   实测路径（2026-10-10）：为了手机远程访问给中枢设 token ⇒ 桌面面板当场坏掉。
-        //
-        //   > 一个"配了令牌才能远程访问"的开关，
-        //   > 与一个"一配令牌就把本地面板弄坏"的开关，是同一个开关——
-        //   > 只不过后者会让人以为是自己配错了。
-        //
-        //   优先级顺带明确：**代理自己知道中枢的令牌**，就不该依赖调用方碰巧也带着同一把
-        //   （浏览器那边的 Authorization 可能是 workbench 自己的令牌，两者不是同一个东西）。
-        ...hubAuthHeaders(),
+        ...(callerAuth === '' || callerSentWorkbenchCredential ? hubAuthHeaders() : {}),
         ...(CFG.values.desktopMode && req.headers.origin ? { origin: up.origin } : {}) },
     }, (upRes) => {
       try {

@@ -186,6 +186,43 @@ test('① ★★★ 渲染出来的文本是**合法 JSON**，且带上"这是�
   assert.equal(renderVersionManifest(null), '')
 })
 
+// ★★★ 这一条补的是上面那条**缺掉的判据**。
+//
+// 上面只断言了"渲染出来的是**合法 JSON**"。而 `JSON.parse` 能读回来，
+// 与"安装器会**接受**它"是两个不同的问题——判据必须问后一个。
+//
+// 实测（2026-10-10，T-197 的工作中撞到）：渲染器只渲染 `fieldSources` 里的
+// **八个 spec 字段**，而 `manifestFormat` 按注释是"格式标记、不算字段"，
+// 于是产物里没有它。结果是一份**自相矛盾**的清单：
+//
+//   buildVersionManifest(...)  → ok = true
+//   renderVersionManifest(...) → 解析得回来、八个字段齐全
+//   validateManifest(那份产物) → **ok = false**
+//     manifest-field-missing: manifestFormat
+//
+//   > 一个"渲染得出来、也 JSON.parse 得回来"的清单，
+//   > 与一个"装的时候真的会被接受"的清单，在渲染器自己的用例里是同一个东西——
+//   > 只不过前者的绿来自只断言了"是合法 JSON"，而消费者问的是另一个问题。
+//
+// 所以这里做的是**往返判据**：渲染 → `JSON.parse` → 生产校验器必须通过。
+// 少了它，一个"生成器写得很对、产物却装不进去"的缺口可以一直绿着。
+test('①b ★★★★ 渲染出来的产物必须**通过生产校验器**（往返，不只是合法 JSON）', () => {
+  const r = buildVersionManifest(DECISIONS)
+  assert.equal(r.ok, true, '夹具前提：组装器本身要成功')
+  const parsed = JSON.parse(renderVersionManifest(r))
+  const verdict = validateManifest(parsed)
+  assert.equal(verdict.ok, true,
+    '渲染器的产物没通过生产校验器 —— 消费者（安装器/Launcher）会拒收它：'
+    + `${JSON.stringify(verdict.problems)}`)
+  // 逐字段同形：渲染产物必须是**同一份清单**，不是"另一份碰巧合法的清单"。
+  // 比之前先剔掉 `_` 前缀的**元数据标记**（`_generated` / `_fieldSources`）——
+  // 它们是渲染器刻意加的"别手改"标记，不属于清单本身。
+  const stripMeta = (o) => Object.fromEntries(Object.entries(o).filter(([k]) => !k.startsWith('_')))
+  const canon = (o) => JSON.stringify(Object.entries(stripMeta(o)).sort())
+  assert.equal(canon(parsed), canon(r.manifest),
+    '渲染产物与组装器的清单不是同一份（剔除 `_` 前缀元数据后仍不同）')
+})
+
 test('① ★★★★★ 磁盘上的 `releases/*/MANIFEST.json` **没有一份**能当 §9.1 清单用', () => {
   // 这一条是缺口①的机器可读形式，而且它是**真的在读磁盘**。
   // ★ 前向兼容：将来真的出了一份合法清单时，它自己会通过校验；
@@ -267,7 +304,18 @@ test('⑨ ★★★★★ 产品**真的带了一份** §9.1 清单，而且它�
   })
   assert.equal(rebuilt.ok, true, `生成器拒绝重造这份清单：${rebuilt.code} ${rebuilt.message}`)
   // JSON 的键序没有语义，所以比规范化后的形式。
-  const canon = (o) => JSON.stringify(Object.entries(o).sort())
+  //
+  // ★ 比之前先剔掉 `_` 前缀的**元数据标记**：`renderVersionManifest` 会写
+  //   `_generated` / `_fieldSources` 两个"别手工编辑"的标记，而
+  //   `buildVersionManifest` 造的清单里没有它们。用 `scripts/release/version.mjs
+  //   bump` 改过版本之后，磁盘上那份**就是**渲染器的产物（带标记），
+  //   于是这里如果不剔，会在一次正常的 bump 之后变红——而那次 bump 是正确的。
+  //
+  //   > 一条"磁盘上那份与生成器造的不是同一份"的判据，
+  //   > 在它把**生成器自己加的元数据**也算进去之后，
+  //   > 抓到的就不再是"有人手改了"，而是"有人用了渲染器"。
+  const stripMeta = (o) => Object.fromEntries(Object.entries(o).filter(([k]) => !k.startsWith('_')))
+  const canon = (o) => JSON.stringify(Object.entries(stripMeta(o)).sort())
   assert.equal(canon(rebuilt.manifest), canon(parsed),
     '磁盘上那份清单与生成器用同一批决策造出来的**不是同一份**——'
     + '说明有人手工改过它（或改了字段却没改生成器）。'

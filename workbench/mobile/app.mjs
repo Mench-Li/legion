@@ -603,7 +603,12 @@ async function refreshTasks() {
   //   「正在执行」**——而那正是最要紧的那条口径（把人送去做错决定的那种）。
   //   `service.list()` 走的 `detail()` 里本来就带 `attempt`，所以覆盖全部 Agent
   //   与覆盖一个 Agent 花的是**同样一次**请求。
-  const board = await api(`/api/board?scope=${encodeURIComponent(state.scope)}`)
+  //
+  // ★ `compact=1`（2026-10-10 实测后加的）：完整看板响应 4071.6KB，其中 `patches` 占 3498KB
+  //   （每个任务存着完整 git diff），而手机这张看板只读 id/title/status/role/soldier/priority。
+  //   不过隧道时那是"45 秒 / 直接超时"，加了 compact 之后是三百多 KB。
+  //   > 一个"把 git diff 也发给手机"的接口，与一个"看板要 45 秒才出来"，是同一件事的两面。
+  const board = await api(`/api/board?scope=${encodeURIComponent(state.scope)}&compact=1`)
   const agents = await api(`/api/agents?scope=${encodeURIComponent(state.scope)}`)
   // ★ 空间在这一段里被切走了 → 这批数据已经不属于当前界面，丢掉。
   if (gen !== state.scopeGen) return

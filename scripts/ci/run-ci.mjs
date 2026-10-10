@@ -623,6 +623,11 @@ async function stageTest() {
         'product/launcher/desktop-protocol.test.mjs',
         'desktop/scripts/shell-files.test.mjs',
         'desktop/scripts/update-payload.test.mjs',
+        // ★ 安装包文件名的**跨模块判据**：产出侧（build.mjs）与消费侧
+        //   （`latestInstaller()`、门口页、设计文档 §4）必须是同一个名字。
+        //   实测分歧：产出侧叫 `Legion-0.1.2-internal-x64-setup.exe`，而
+        //   消费侧按 `Legion-Setup-win-x64.exe` 找 ⇒ 找不到任何一份。
+        'desktop/scripts/artifact-name.test.mjs',
         'scripts/update/publish.test.mjs',
         // ★ 公钥轮换的端到端判据（设计 §5 line 128 + §10 验收表第 8 行）：
         //   rotate 签增量 → apply 落到随包信任表 → **新钥匙签的清单能被接受**，

@@ -54,6 +54,34 @@ const SOURCE_EXTENSIONS = Object.freeze([
 ])
 
 /**
+ * ★★★ 仓库**根目录下** `roles*.json` 的判据 —— **两条构建路径共用这一条**。
+ *
+ * 抽出来是因为 2026-10-10 实测发现了一处分歧，两边一度各判各的：
+ *
+ *   · 安装包（`stage.mjs`）当时写的是 `/^roles[^/]*\.json$/` —— **放行**
+ *     `roles-ozon.json`（54 KB 本地数据）；
+ *   · 升级包（`update-payload.mjs` 的 `FORBIDDEN_PAYLOAD_ENTRIES`）**禁止**它，
+ *     于是造载荷时直接报 `payload-forbidden-entry: roles-ozon.json`。
+ *
+ *   而 `stage.mjs` 与 `update-payload.mjs` 的注释**都**写着它属于用户数据、
+ *   永不进安装包。
+ *
+ *   > 一条"排除本地数据"的注释，与一段真的排除它的代码，
+ *   > 在代码审阅时是同一个东西——只不过前者的产物里多了一个 54 KB 的本地文件，
+ *   > 而它只在**升级包**那一侧被拦下，
+ *   > 于是差异要等到两条构建路径都跑过才看得见。
+ *
+ * 现在两侧都从这个函数取答案，因此不可能再漂开。
+ */
+export function isShippableRootRoleFile(path) {
+  const p = String(path).split('\\').join('/')
+  if (!/^roles[^/]*\.json$/.test(p)) return false
+  // `roles.json` 是产品文件（`createSoftwareCollaborationPack` 直接读它），必须留；
+  // `roles-ozon.json` 是本地/空间数据，永不进包。
+  return p === 'roles.json'
+}
+
+/**
  * 判断一个仓库相对路径能不能进安装包。
  *
  * @param {string} path 仓库相对路径，正斜杠分隔

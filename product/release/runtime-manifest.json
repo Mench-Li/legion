@@ -7,8 +7,8 @@
   "packProtocolVersion": 1,
   "schemaVersion": 1,
   "dshVersion": "0.1.5-rc.2",
-  "productVersion": "0.1.2",
-  "legionVersion": "0.1.2",
-  "channel": "internal",
+  "productVersion": "0.1.3",
+  "legionVersion": "0.1.3",
+  "channel": "stable",
   "releasedAt": "2026-09-16T00:00:00.000Z"
 }

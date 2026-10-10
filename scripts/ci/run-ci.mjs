@@ -5260,9 +5260,25 @@ async function stageTest() {
   //
   // 版本号住在**两个互相独立**的地方，而在这一条之前**没有任何机器判据**要求它们相等：
   //
-  //   · `desktop/package.json` 的 `version`        → 安装包**文件名**
+  //   · `desktop/package.json` 的 `version`        → **Electron 应用的版本**
+  //     （`stage.mjs` 把它写进 `shell/package.json`，即操作系统「应用与功能」
+  //      里显示的那个版本；它**曾经**还决定安装包文件名，见下面的 ★）
   //   · `product/release/runtime-manifest.json` 的 → 发布**清单**
   //     `productVersion` / `legionVersion`
+  //
+  // ★ 上面第一行在 T-202 之后**不再成立**，但这一条判据仍然必要 —— 记在这里：
+  //   安装包文件名曾经是 `Legion-${version}-internal-${arch}-setup.exe`，于是
+  //   "只改一处"会让**文件名**与清单**肉眼可见地**不一致。T-202 把文件名收成了
+  //   固定的 `Legion-Setup-win-x64.exe`（版本住进 `releases/<releaseId>/` 路径里），
+  //   所以现在**文件名不再暴露**这个不一致 —— 它只剩清单里的 `productVersion`
+  //   一个可见面。
+  //
+  //   > 一处"顺带把问题显示出来"的界面，
+  //   > 与一处"把它藏起来"的界面，在判据缺席时是同一个东西——
+  //   > 只不过前者会有人在发布前发现，后者不会。
+  //
+  //   所以这条判据从"钉住一个看得见的症状"变成了"钉住唯一的那处真相"，
+  //   它比 T-197 加它时**更重要**，而不是更不重要。
   //
   // 线上实测就是这个形态（2026-10-10）：
   //
@@ -5278,7 +5294,8 @@ async function stageTest() {
   //   > `supportedFromVersions`）眼里是同一个东西——
   //   > 只不过前者会让用户装到一个他以为已经装过的版本。
   //
-  // 只改一处的**表现**是"安装包叫 0.2.0、清单里写着 0.1.0"，而两处都语法合法。
+  // 只改一处的表现：清单里写着旧版本，而发行目录（`releases/<releaseId>/`）
+  // 与产物却指向新版本；两处都语法合法。
   {
     const verdict = checkVersions({ root: ROOT })
     if (verdict.ok === true) {

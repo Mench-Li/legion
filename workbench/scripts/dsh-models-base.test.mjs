@@ -15,9 +15,16 @@
 //   · 它住在 `workbench/scripts/serve.mjs`，也就是**发这个页面的那台进程**；
 //   · 服务端强制同源（`Origin.host` 必须等于 `Host`，否则 403）；
 //   · 它只限本机（非回环 403），所以远端页面本来也用不了。
-// 同时 `apiBase()` 的默认值**也不能**改成同源：它服务的 v1 看板路由
+// 同时那条数据源地址的默认值**也不能**改成同源：它服务的 v1 看板路由
 // （`/api/config`、`/api/board`、`/api/activity`…）`serve.mjs` **一条都不提供**。
 // ⇒ 两条数据源各有各的地址，这里要守的是"**别混用**"，不是"改个默认值"。
+//
+// ★★ v1 看板取消后，apiBase 没了，这条判据改为**只守同源**（见 BUG-015）：
+//    `workbench/src/api.ts` 里再没有那条可配置的 v1 数据源地址，所以第 ③ 条不再能拿
+//    "它的默认值仍是 4820"当反向锚 —— 那条锚连同被守的对象一起消失了。现在守的是
+//    这份**语义**：这条路由的地址必须是写死的**相对路径常量**（既不走任何 base 配置，
+//    也不拼 `location.origin`），且 `apiBase` 这个名字不许以任何形式回来。
+//    第 ① ② 条（请求真的落在同源 `/api/dsh-models`、`dshModelsRpc` 不许引用它）原样保留。
 //
 // 与 BUG-001 同形（那一处修的是「桥接层 → 宿主」写死 3080，这一处是「页面 → 桥接层」
 // 用错了 base），所以判据也照它的手法写：**地址必须随部署走，连不上时必须说得清**。
@@ -57,7 +64,7 @@ const jsonResponse = (status, body) => ({
 })
 
 describe('BUG-014：「供应商与模型」必须打到本页自己的源', () => {
-  test('① 请求路径是同源相对路径，**不含** apiBase() 那个 4820', async () => {
+  test('① 请求路径是同源相对路径，**不含**那条 v1 数据源（默认 4820）', async () => {
     script = () => jsonResponse(200, { ok: true, value: { groups: [] } })
     await api.dshModelsRpc('session/modelCatalog', {})
     assert.equal(calls.length, 1)
@@ -77,16 +84,19 @@ describe('BUG-014：「供应商与模型」必须打到本页自己的源', () 
     assert.match(fn, /DSH_MODELS_PATH/, '地址必须来自那个具名常量，便于一处改、一处读')
   })
 
-  test('③ apiBase() 的默认值**仍然是 4820** —— 它服务的是另一条数据源，不许被顺手改掉', () => {
-    // 这条是**反向**的护栏：修 BUG-014 时最容易做错的事就是"把 apiBase 的默认改成同源"，
-    // 而那会把 v1 看板（/api/config、/api/board、/api/activity…）一起改坏 ——
-    // 那些路由 serve.mjs 一条都不提供。
-    assert.match(SRC, /const DEFAULT_API = 'http:\/\/127\.0\.0\.1:4820'/,
-      'apiBase() 的默认值必须仍是 4820（v1 看板的默认端口）')
-    const stored = '/x'
-    assert.equal(api.apiBase(), 'http://127.0.0.1:4820',
-      '本页 origin 已设为 5173，apiBase() 仍须回落到 4820 —— 它与本页同源与否是两件事')
-    void stored
+  test('③ 地址写死成**同源相对路径常量** —— 它不属于任何可配置的数据源', () => {
+    // ★ v1 看板取消后 `apiBase()` 没了（BUG-015），这条判据改为只守同源：
+    //   从前这里钉的是"apiBase() 的默认值仍是 4820"，而那个对象现在整条都不存在了 ——
+    //   继续钉它就等于钉一个已经删掉的符号。现在守的是同一份语义的另两个面：
+    //   地址是相对路径常量（不走任何 base、不拼 location.origin），且 `apiBase` 不许回来。
+    const constDecl = /const DSH_MODELS_PATH = '([^']+)'/.exec(SRC)
+    assert.ok(constDecl, '地址必须来自那个具名常量 DSH_MODELS_PATH，便于一处改、一处读')
+    assert.equal(constDecl[1], '/api/dsh-models',
+      '常量值必须是同源相对路径')
+    assert.equal(/^https?:\/\//.test(constDecl[1]), false,
+      '不许写成绝对地址：相对路径由浏览器按页面源解析，不会被任何 base 配置带偏')
+    assert.equal(SRC.includes('apiBase'), false,
+      'v1 看板取消后 api.ts 里不该再有 apiBase —— 它那条数据源整条删掉了，名字回来就意味着链路也在回来')
   })
 
   test('④ 连不上时不许把浏览器的 `Failed to fetch` 当结论端出去：要说地址与链路', async () => {
@@ -100,7 +110,8 @@ describe('BUG-014：「供应商与模型」必须打到本页自己的源', () 
         assert.match(e.message, /127\.0\.0\.1:5173/, '必须说出**实际用的**地址（本页源）')
         assert.match(e.message, /ECONNREFUSED/, '必须带出原因码')
         assert.match(e.message, /serve\.mjs|同源/, '必须说清这是哪条链路（发页面的那台 serve.mjs、同源）')
-        assert.match(e.message, /4820/, '必须点出它与 4820 那个 v1 看板数据源不是同一台服务 —— 那正是本 Bug 的错处')
+        assert.match(e.message, /v1 看板/,
+          '必须点出它与那条 v1 看板数据源不是同一台服务 —— 那正是本 Bug 的错处（v1 取消后仍要说清"不是它"）')
         return true
       },
     )

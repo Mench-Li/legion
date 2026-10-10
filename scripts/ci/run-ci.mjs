@@ -1878,11 +1878,20 @@ async function stageTest() {
     //   Bug #1 的真因（宿主地址写死 3080）当时也没有任何一条断言守着——正是这件事的后果。
     //   处置选**登记**而不是 `EXEMPT`：这些断言是真的、也能过，豁免等于把它们降级成声明。
     { label: 'dsh-models（模型配置桥：宿主地址随部署走、连不上时说得清、宿主鉴权与写入边界）', files: ['workbench/scripts/dsh-models-bridge.test.mjs'], cwd: ROOT },
-    // ── BUG-014：「供应商与模型」页的请求**发到了错误的数据源**（apiBase() 默认 4820 = v1 看板那条源），
-    //   而 4820 上没人监听 ⇒ 浏览器只回 `Failed to fetch` ⇒ 用户看到的就是「failed」。
+    // ── BUG-014：「供应商与模型」页的请求**发到了错误的数据源**（那条 v1 看板源的默认端口），
+    //   而那里没人监听 ⇒ 浏览器只回 `Failed to fetch` ⇒ 用户看到的就是「failed」。
     //   这一组守的是**地址选择**（必须同源，因为路由在发页面的那台 serve.mjs 上且服务端强制同源）
-    //   与**网络层文案**（不许把浏览器原话当结论），并反向钉住 apiBase() 的默认值不许被顺手改掉。
+    //   与**网络层文案**（不许把浏览器原话当结论）。
+    //   ★ BUG-015 之后这条判据改为**只守同源**：v1 看板整条取消，`apiBase()` 这个符号没了，
+    //   原来那条"它的默认值不许被改掉"的反向锚随之消失（见 workbench/scripts/dsh-models-base.test.mjs 文件头）。
     { label: 'dsh-models-base（BUG-014：面板必须打到本页自己的源，且连不上时说得清）', files: ['workbench/scripts/dsh-models-base.test.mjs'], cwd: ROOT },
+    // ── BUG-015：产品的「经典看板」（v1 看板）**早就取消了**，但入口与整条 v1 数据源还留在
+    //   指挥台里：任务中心右上角「打开经典看板 ↗」、快捷工具的「经典看板（新窗口）」、
+    //   KpiBar/WorkspaceSettings 里的数据源地址、以及"中枢探测不到就回退到 v1 只读"那条分支。
+    //   这一组是**源码级**扫描（workbench/src 下 .ts/.tsx 递归，断言前剥掉整行注释）：
+    //   上面这些字符串 0 命中，且快照组件打的是**中枢** hubBase（它本来就以 hubMode 为前置，
+    //   从前拼那条 v1 数据源地址是个**错误的落点**），中枢不可达时**不回退**、明确报错。
+    { label: 'no-classic-board（BUG-015：经典看板取消后，整条 v1 面不许再出现在指挥台里）', files: ['workbench/scripts/no-classic-board.test.mjs'], cwd: ROOT },
     // ── 最后一里：把「模型」面板接到 **Legion 自己的库**（DECISION-legion-owns-model-config）──
     //   守：面板里不再出现任何 DSH RPC 方法名与那条桥（产品的配置面不许绑在引擎的鉴权上）/
     //   四条读写都落在 /api/model-providers / **先写密钥再写供应商**（顺序反了会留下

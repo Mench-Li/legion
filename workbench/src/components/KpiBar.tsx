@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { apiBase, setApiBase, setHubBase, setToken, getToken } from '../api'
+import { setHubBase, setToken, getToken } from '../api'
 import { statusCounts } from '../missions'
 import type { BoardData } from '../types'
 import { toast } from './Toast'
@@ -54,14 +54,6 @@ export function KpiBar({ board, paused, hubMode, hubBase, staffCount }: KpiBarPr
   const counts = board ? statusCounts(board) : null
   // 中枢模式显示当前空间编队人数，而非 v1 看板静态士兵列表
   const staff = staffCount ?? (board ? board.soldiers.length : '–')
-
-  const changeApi = (): void => {
-    const next = window.prompt('数据源（serve.mjs 地址）', apiBase())
-    if (next && next.trim() && next.trim() !== apiBase()) {
-      setApiBase(next.trim())
-      window.location.reload()
-    }
-  }
 
   const changeToken = (): void => {
     const next = window.prompt('写操作令牌（serve.mjs --token）', getToken())
@@ -138,9 +130,6 @@ export function KpiBar({ board, paused, hubMode, hubBase, staffCount }: KpiBarPr
       <div className="kpi-tools">
         <button className="btn ghost" onClick={changeHub} title="team-hub v2 地址（真 scope 分区任务池）">
           🧭 中枢{hubMode ? ' ✓' : ' ✗'}
-        </button>
-        <button className="btn ghost" onClick={changeApi} title="数据源地址">
-          ⚙ {apiBase().replace(/^https?:\/\//, '')}
         </button>
         <button className="btn ghost" onClick={changeToken} title="写操作令牌">
           🔑 令牌

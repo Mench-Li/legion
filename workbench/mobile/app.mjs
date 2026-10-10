@@ -47,6 +47,7 @@ import {
   timelineEntry,
 } from './timeline.mjs'
 import { createRefresher } from './refresh-loop.mjs'
+import { popupBatch, popupText, readPopupSeq, shouldUseSystemNotify, validTaskId, writePopupSeq } from './popup.mjs'
 
 const $ = (id) => document.getElementById(id)
 const LS_REFRESH = 'legion.mobile.refresh'
@@ -54,6 +55,13 @@ const SS_ACCESS = 'legion.mobile.access'
 const LS_HUB = 'legion.mobile.hub'
 const LS_SCOPE = 'legion.mobile.scope'
 const LS_AGENT = 'legion.mobile.agent'
+
+/** 一轮最多弹几条（超过时只弹最新的几条，见 popup.mjs）。 */
+const POPUP_LIMIT = 3
+/** 首次接入这个提醒时补告的时间窗（语义是"你刚才大概不在"，不是"曾经发生过什么"）。 */
+const POPUP_REPLAY_MS = 6 * 60 * 60 * 1000
+/** 弹框停留时长：手机上读一句话比桌面慢，给足。 */
+const POPUP_TTL_MS = 9000
 
 /** Hub 地址：默认同源（部署在同一域名下），可由登录页覆盖。 */
 function hubBase() {
@@ -91,6 +99,14 @@ const state = {
   scopeGen: 0,
   /** 「追加要求」针对的任务 id；由看板卡片按钮或下拉框选择。 */
   targetTaskId: null,
+  /**
+   * 提醒弹框的游标（BUG-021）。
+   *
+   * 与看板那个「待我决定」徽标**不是**同一把尺子：徽标是"现在有几件事等你"，
+   * 游标是"哪些事我已经弹给你看过了"。混用会两头都错——用户点一次看板，
+   * 徽标清零，而"已经弹过"这件事跟看没看过毫无关系。
+   */
+  popupSeq: 0,
   /** 能力发现的结果。决定登录页显示"登录"还是"注册+登录"。 */
   identity: { bootstrapped: null, registration: 'closed' },
   /** `/api/identity/me` 的结果（「我的」那一页用）。 */
@@ -697,6 +713,12 @@ async function switchScope(scope) {
   state.cursor = null
   state.tasks = []
   state.targetTaskId = null
+  // ★ 换空间换一把弹框游标：否则新空间的第一批历史会被当成"刚发生的"弹出来。
+  state.popupSeq = readPopupSeq(scope)
+  // 上一个空间的提醒不该留在屏幕上（它属于另一个空间的任务）。
+  const host = $('popup-host')
+  host.replaceChildren()
+  host.classList.add('hidden')
   stopStream()
   $('board-views').replaceChildren()
   $('task-groups').replaceChildren()
@@ -759,6 +781,136 @@ function notice(message) {
   setTimeout(() => { box.classList.add('hidden') }, 6000)
 }
 
+// ── 提醒弹框（BUG-021 的手机一半）──────────────────────────────────────────
+//
+// ## 为什么手机端比电脑端更需要它
+//
+// 电脑端至少有侧栏徽标在视线里；手机端用户多半**不在看这个页面**——
+// 他把手机放在兜里或桌上，而"任务停下来等你验收"这件事，只有主动来点开才看得见。
+//
+//   > 一个"任务页签上有个小红点"的手机端，
+//   > 与一个"到点了会在你手机上弹一条"的手机端，
+//   > 在用户把手机放下的那段时间里，是两个东西。
+//
+// ## 判据在哪
+//
+// 弹什么/不弹什么、文案怎么写、游标怎么走，全在 `popup.mjs`（纯函数，有判据，
+// 并且与桌面端有一对一的对等判据）。这里只做三件事：取数、渲染、推进游标。
+
+/** 角色 → 中文名（编队里带 `name`；不认得就退回 role 原文，**不猜**）。 */
+function whoFor(member) {
+  const role = String(member ?? '')
+  if (role.length === 0) return null
+  const hit = state.agents.find((a) => a.role === role)
+  return hit !== undefined && typeof hit.name === 'string' && hit.name.length > 0 ? hit.name : role
+}
+
+/**
+ * 弹一条纯文本提醒（也用于"已开启系统提醒"这类回执）。
+ *
+ * ★ 不用 `notice()`：那个写的是 `#login-notice`，它活在**登录页**里——
+ *   登录之后整屏都隐藏了，于是"已开启系统提醒"这句确认会写进一个没人看得见的地方。
+ *   一个"点了按钮什么都没发生"的按钮，用户会以为它坏了。
+ */
+function showPopupText(text, onClick = null) {
+  const host = $('popup-host')
+  if (host === null) return
+  const card = document.createElement('button')
+  card.className = 'popup'
+  if (onClick === null) card.classList.add('plain')
+  card.textContent = text
+  if (onClick !== null) card.addEventListener('click', () => { card.remove(); if (host.children.length === 0) host.classList.add('hidden'); onClick() })
+  host.prepend(card)
+  host.classList.remove('hidden')
+  setTimeout(() => {
+    card.remove()
+    if (host.children.length === 0) host.classList.add('hidden')
+  }, POPUP_TTL_MS)
+}
+
+/** 弹一条任务提醒：可点（去任务详情），到时自己走。 */
+function showPopup(p) {
+  const tid = validTaskId(p.row?.taskId)
+  // 点一下就去处理它 —— 一条叫你过来的消息如果点不动，
+  // 你还得自己翻到任务页找那一条，那正是这条提醒本想省掉的一步。
+  showPopupText(
+    popupText(p.row, whoFor(p.row?.member)),
+    tid !== null ? () => { void openTask(tid) } : () => showView('tasks'),
+  )
+}
+
+/**
+ * 取一批审计事件、挑出该弹的、推进游标。
+ *
+ * ★ 数据源与桌面端**同一个**（`/api/activity`，audit 派生）：
+ *   SSE 帧只当"有动静"的信号（见 connectStream），真正的判断都走这一条，
+ *   这样"弹框"和"看板/时间线"读到的是同一份事实，不会出现
+ *   "弹了但看板上没有它"这种自相矛盾的界面。
+ */
+async function refreshPopups() {
+  if (state.scope === null) return
+  const gen = state.scopeGen
+  const rows = await api(`/api/activity?scope=${encodeURIComponent(state.scope)}&limit=200`).catch(() => null)
+  if (rows === null || gen !== state.scopeGen) return
+  const list = Array.isArray(rows) ? rows : (rows.events ?? [])
+  const { popups, lastSeq } = popupBatch(list, state.popupSeq, POPUP_LIMIT, {
+    nowMs: Date.now(),
+    replayWindowMs: POPUP_REPLAY_MS,
+  })
+  if (lastSeq !== state.popupSeq) {
+    state.popupSeq = lastSeq
+    writePopupSeq(state.scope, lastSeq)
+  }
+  for (const p of popups) {
+    showPopup(p)
+    // 页面不在前台时，页面里的弹框**看不见** —— 那是系统通知唯一能补的位。
+    // （边界：这只在页面还活着时有效；页面被彻底关掉要靠 Web Push，本次没做。）
+    notifySystem(popupText(p.row, whoFor(p.row?.member)))
+  }
+}
+
+// ── 系统通知（页面不在前台时的那一半）──────────────────────────────────────
+//
+// 决策函数在 `popup.mjs`（纯模块，能被判据钉住；app.mjs 顶层读浏览器存储，
+// 在 Node 里 import 会抛，所以不可测的东西不放这里）。这里只做副作用。
+
+function systemNotifySupported() {
+  return typeof Notification !== 'undefined'
+}
+
+function systemNotifyPermission() {
+  return systemNotifySupported() ? Notification.permission : 'unsupported'
+}
+
+/** 授权只能在**用户手势**里请求；绝不自动请求（自动弹授权框会被拒，拒一次就回不来）。 */
+async function requestSystemNotifyPermission() {
+  if (!systemNotifySupported()) return 'unsupported'
+  try {
+    return await Notification.requestPermission()
+  } catch {
+    return systemNotifyPermission()
+  }
+}
+
+function notifySystem(body) {
+  const hidden = typeof document !== 'undefined' && document.visibilityState === 'hidden'
+  if (!shouldUseSystemNotify({ hidden, permission: systemNotifyPermission() })) return false
+  try {
+    const n = new Notification('Legion 指挥台', { body, tag: 'legion-' + body.slice(0, 40) })
+    n.onclick = () => { try { window.focus() } catch { /* 某些壳里不允许 */ } n.close() }
+    return true
+  } catch {
+    return false
+  }
+}
+
+/** 头部那个「🔔」按钮：只在"支持但还没授权"时出现（已授权无需按钮，不支持就别给假希望）。 */
+function renderNotifyButton() {
+  const btn = $('btn-notify')
+  if (btn === null) return
+  btn.classList.toggle('hidden', !(systemNotifySupported() && systemNotifyPermission() === 'default'))
+}
+
 // ── 事件流 ──────────────────────────────────────────────────────────────────
 
 /**
@@ -770,6 +922,10 @@ const refreshLoop = createRefresher({
   run: async () => {
     await refreshTimeline()
     await refreshTasks()
+    // ★ 弹框挂在同一个合并刷新里，不单开计时器：
+    //   一条任务在跑时进展事件连着来，单开一个"每次事件都取一次审计"的路径
+    //   会把手机流量和电量都吃掉（而它换来的只是把同一条提醒弹三遍）。
+    await refreshPopups()
   },
 })
 
@@ -828,9 +984,12 @@ async function connectStream() {
     // ★ 事件帧只当通知：内容一律回 Hub 读。这样"事件丢了"最多是晚一会儿看到，
     //   而不是界面上一段缺失。
     //
-    // 但**不能每一帧都去读一遍**：一帧 = 4 个请求（时间线 1 + 看板 3），
+    // 但**不能每一帧都去读一遍**：一帧 = 5 个请求（时间线 1 + 看板 3 + 审计 1），
     // 而一条任务在跑时进展事件是连着来的。交给 `refreshLoop` 合并成
     // 静默期内一次，并保证**结尾那一次一定跑**。见 `refresh-loop.mjs`。
+    //
+    // ★ 提醒弹框（BUG-021）骑在同一次合并刷新里，所以它**不额外开一条取数路径**：
+    //   否则一帧一次审计请求，换来的只是把同一条提醒弹三遍。
     refreshLoop.request()
   }
   es.onerror = () => {
@@ -914,9 +1073,16 @@ async function enterApp(me) {
   // 于是"能换空间"这件事没有任何落点。
   setConnection({ hubReachable: true, nodeOnline: null })
   renderIntents()
+  renderNotifyButton()
   try {
     await refreshSpaces()
+    // 空间定下来之后才知道该读哪一把弹框游标（游标是 per scope 的）。
+    state.popupSeq = readPopupSeq(state.scope)
     await refreshTasks()
+    // ★ 提醒要**立刻**跑一次，不能等下一次刷新循环：
+    //   首次接入这个提醒的人（或刚换了手机）最需要马上知道"现在有谁在等我"——
+    //   而那一刻恰恰是"什么都还没发生、SSE 也不会来帧"的时候。
+    await refreshPopups()
     await openConversation()
   } catch (e) {
     // 空间没有 Agent 不是致命错误：界面照常显示，让用户去任务页看。
@@ -946,6 +1112,15 @@ function bind() {
     renderAuth()
   })
   $('btn-logout').addEventListener('click', doLogout)
+  // 系统提醒授权：请求必须在**用户手势**里发，所以只能挂在一个真实点击上。
+  $('btn-notify').addEventListener('click', () => {
+    void requestSystemNotifyPermission().then((p) => {
+      renderNotifyButton()
+      showPopupText(p === 'granted'
+        ? '🔔 已开启系统提醒：页面不在前台时也会通知你'
+        : '未开启系统提醒（页面内的提醒照常出现）')
+    })
+  })
   // 用户显式点：立刻跑，不走去抖（他在等结果，不该再等 400ms）。
   $('btn-refresh').addEventListener('click', () => { refreshLoop.now() })
   $('btn-send').addEventListener('click', () => { void send($('composer-input').value) })
@@ -999,6 +1174,7 @@ async function main() {
   bind()
   registerServiceWorker()
   renderIntents()
+  renderNotifyButton()
   const reachable = await refreshStatus()
   if (state.access !== null) {
     // 已有会话：直接进（令牌可能过期，`api` 会自动刷新一次）。

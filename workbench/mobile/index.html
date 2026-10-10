@@ -134,12 +134,32 @@ footer textarea { resize:none; max-height:110px; font-size:14px; }
 .notice-box { background: rgba(64,255,160,.08); border:1px solid rgba(64,255,160,.30); color:var(--green);
   padding:9px 11px; border-radius:8px; font-size:13px; }
 .hidden { display:none !important; }
+
+/* ── 提醒弹框（BUG-021）────────────────────────────────────────────────────
+ *
+ * 手机上没有"右下角"可用，所以它落在**输入区正上方**：那是拇指活动区，
+ * 也是视线落点。桌面端的弹框在右下角，手机端在底部——同一个东西按各自的
+ * 使用姿势放，而不是把桌面的位置照搬过来。
+ *
+ * 卡片是 `<button>`：整块可点（去任务详情）。触摸目标按 44px 起步，
+ * 一个"看得见但点不准"的提醒，用户点两次就不再点了。 */
+#popup-host { position:fixed; left:10px; right:10px;
+  bottom: calc(var(--safe-bottom) + 74px); display:flex; flex-direction:column; gap:8px;
+  z-index:30; pointer-events:none; }
+#popup-host .popup { pointer-events:auto; width:100%; text-align:left; min-height:44px;
+  padding:10px 13px; border-radius:10px; font-size:13.5px; line-height:1.5;
+  background:var(--panel-2); border:1px solid rgba(96,165,250,.55); color:var(--text);
+  box-shadow:0 10px 30px rgba(0,0,0,.5); animation: popup-in .18s ease; }
+#popup-host .popup.plain { border-color:var(--line-2); }
+#popup-host .popup:active { opacity:.8; }
+@keyframes popup-in { from { opacity:0; transform: translateY(8px); } to { opacity:1; transform:none; } }
 </style>
 </head>
 <body>
 <header>
   <div class="row">
     <h1 id="title">Legion</h1>
+    <button id="btn-notify" class="icon-btn hidden" title="开启系统提醒：页面不在前台时也会通知你">🔔</button>
     <button id="btn-refresh" class="icon-btn" title="刷新">刷新</button>
     <button id="btn-logout" class="icon-btn" title="退出登录">退出</button>
   </div>
@@ -189,6 +209,11 @@ footer textarea { resize:none; max-height:110px; font-size:14px; }
     <button class="primary" id="btn-send">发送</button>
   </div>
 </footer>
+
+<!-- 提醒弹框（BUG-021）。放在 body 末尾、`position:fixed`：
+     它必须**盖在输入区之上**——用户正在打字时来一条"有任务等你验收"，
+     被输入区挡住就等于没弹。 -->
+<div id="popup-host" class="hidden" role="status" aria-live="polite"></div>
 
 <script type="module" src="./app.mjs"></script>
 </body>

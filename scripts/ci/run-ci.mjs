@@ -1901,6 +1901,10 @@ async function stageTest() {
     // ★ BUG-021「Agent 状态更新不提醒我」：通知这条线从前只数未读徽标、从不弹框。
     //   本套件守的是**弹框决策与游标**（弹什么、什么时候不弹、游标只前进），不是渲染。
     { label: 'notify-popup（BUG-021 右下角弹框：只弹高优先级 + 游标不重弹/不补弹历史）', files: ['workbench/scripts/notify-popup.test.mjs'], cwd: ROOT, nodeArgs: ['--experimental-strip-types'] },
+    // ★ BUG-021 的**手机一半**：手机端零构建（不能 import `.ts`），所以判据是两份实现 ——
+    //   本套件把同一批审计行喂给两端，逐条断言"该不该弹 / 弹几条 / 文案"完全相同，
+    //   另加源码级接线判据（提醒必须骑在合并刷新上、授权只在点击时请求、宿主容器要在）。
+    { label: 'mobile-popup（BUG-021 手机端提醒 + 与桌面端的对等判据）', files: ['workbench/mobile/popup.test.mjs'], cwd: ROOT, nodeArgs: ['--experimental-strip-types'] },
     // ★ 2026-09-16（main 整合）：下面这一条**是本次合并补登记的**，不是新写的套件。
     //
     //   `reveal-open.test.mjs` 是 `main` 侧 P4-7「打开所在位置」带来的契约测试（21 例，全绿），

@@ -6,8 +6,9 @@
 // 打包时版本号住在**两个互相独立**的地方，而在本工具之前**没有任何东西强制
 // 它们相等**：
 //
-//   · `desktop/package.json` 的 `version`  → 决定安装包**文件名**
-//     （`build.mjs` 的 `artifactName: Legion-${version}-internal-${arch}-setup.exe`）
+//   · `desktop/package.json` 的 `version`  → 决定**发行目录里的位置**
+//     （`releases/<releaseId>/`；安装包文件名本身**不带**版本，见
+//      `desktop/scripts/artifact-name.mjs` —— 它曾经带过，而且带的是通道名）
 //   · `product/release/runtime-manifest.json` 的 `productVersion` / `legionVersion`
 //     → 进入发布清单（`stage.mjs` 把它读成 `release`，写进 `desktop-release.json`）
 //

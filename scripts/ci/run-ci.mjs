@@ -38,6 +38,11 @@ import { createHash } from 'node:crypto'
 // ★ DSH 检出的**唯一**一份判定（见 `stageTest` 里那段 `dshFound`）。
 import { resolveDshCheckout } from '../lib/dsh-checkout.mjs'
 import { parseSuiteCounts, countsFragment } from './parse-suite-output.mjs'
+// ★ T-197：桌面端版本号的**两处载体必须相等**。这条判据必须在这里跑，
+//   而不是只放在用例里——用例用**夹具**（临时目录），而这里读的是**真的那两个文件**。
+//   两者的差别正是"这套机制存在"与"这台仓库现在自洽"的区别：
+//   只跑夹具的话，`desktop/package.json` 与 `runtime-manifest.json` 漂开了也没人知道。
+import { checkVersions } from '../release/version.mjs'
 // ★ 阶段 3 评审闸门的退出码：**按名字**分流，不写裸数字。
 //   裸数字那版被破验证伪过一次（`scripts/probes/_mutate-r115-churn.mjs` 的 M6）：
 //   把 `3` 误写成 `2` 时没有任何判据会红，而"探针读不到"那条告警会静默变成死代码。
@@ -669,6 +674,18 @@ async function stageTest() {
         // **已知向量**，因为签名错了只会表现为服务端的 SignatureDoesNotMatch，
         // 那和"凭据不对""桶不存在"在使用时分不出来。
         'scripts/update/oss-put.test.mjs',
+        // T-197：桌面端**版本号**。它守的是一条"两处都语法合法、却各说各话"的错误：
+        // 版本号住在 `desktop/package.json`（安装包**文件名**）与
+        // `product/release/runtime-manifest.json`（发布**清单**）两个独立地方，
+        // 而此前**没有任何东西**强制它们相等。
+        //
+        //   线上实测：`r-2026-10-06_0.1.0` 与 `r-2026-10-07_0.1.0` 是两次
+        //   不同构建（字节数不同），而两次的 `productVersion` **都是 0.1.0**。
+        //
+        //   这一套里最要紧的一条是"**只改一处必须红**"——因为那正是"有人手改了
+        //   一个文件"这件事唯一的机器可读形状。另有一条守 `renderVersionManifest`
+        //   的产物必须**通过生产校验器**（渲染得回来 ≠ 装得进去）。
+        'scripts/release/version.test.mjs',
       ],
       cwd: ROOT,
     },
@@ -5189,6 +5206,38 @@ async function stageTest() {
         '        让 `test` 在 ~5 秒就退出，把产品侧那 22 条红全部挡在门外、一次都没被看到。')
     } else {
       detail.push(`  PASS 套件清单完备（${all.length} 个 *.test.mjs 全部有归属）`)
+    }
+  }
+  // ── 桌面端版本号自洽（T-197 加）────────────────────────────────────────────
+  //
+  // 版本号住在**两个互相独立**的地方，而在这一条之前**没有任何机器判据**要求它们相等：
+  //
+  //   · `desktop/package.json` 的 `version`        → 安装包**文件名**
+  //   · `product/release/runtime-manifest.json` 的 → 发布**清单**
+  //     `productVersion` / `legionVersion`
+  //
+  // 线上实测就是这个形态（2026-10-10）：
+  //
+  //     r-2026-10-06_0.1.0   装机包 204,582,159 字节
+  //     r-2026-10-07_0.1.0   装机包 204,641,180 字节   ← 不同构建、不同字节
+  //     两次的 productVersion **都是 0.1.0**
+  //
+  // 而设计稿 §4 对 `releaseId` 的要求恰是「同版本不同字节也必须使用不同 releaseId」——
+  // 说明这个形态**被设计预见过**，只是没有判据把它钉住。
+  //
+  //   > 一个"版本号没变、字节变了"的发布，
+  //   > 与一个"版本号变了"的发布，在升级判据（`upgradeWindow` /
+  //   > `supportedFromVersions`）眼里是同一个东西——
+  //   > 只不过前者会让用户装到一个他以为已经装过的版本。
+  //
+  // 只改一处的**表现**是"安装包叫 0.2.0、清单里写着 0.1.0"，而两处都语法合法。
+  {
+    const verdict = checkVersions({ root: ROOT })
+    if (verdict.ok === true) {
+      detail.push(`  PASS ${verdict.message}`)
+    } else {
+      allOk = false
+      detail.push(`  FAIL 版本号不自洽（${verdict.code}）：${verdict.message}`)
     }
   }
   for (const s of suites) {

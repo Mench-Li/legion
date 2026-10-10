@@ -107,6 +107,53 @@ test('⑫ ★★★ `/api/board` 的 status / soldier / scope 三个过滤**各�
   assert.deepEqual(combo.body.map((t) => t.id), ['b1'])
 })
 
+// ── ⑫b ★ compact：手机看板不该收到 3.5MB 的 git diff ─────────────────────
+// 实测（2026-10-10，software 162 任务）：完整响应 4071.6KB，其中 `patches` 3498KB（86%）。
+// 本机生成它只要 330ms —— 慢的从来不是中枢，而是那 4MB 本身要过隧道到手机上（15–45 秒 / 超时）。
+test('⑫b ★★ `?compact=1` 只回看板字段（patches/comments/evidence 一律不带）', async () => {
+  clear()
+  // 造一条"大任务"：patches 里塞 200KB，模拟真实空间里的 git diff
+  const bigPatch = 'x'.repeat(200 * 1024)
+  db.prepare(`INSERT INTO tasks (id, title, status, role, scope, patches, comments, evidence, description, acceptance)
+    VALUES (?,?,?,?,?,?,?,?,?,?)`)
+    .run('c1', '大任务', 'todo', 'coder', 'compact-alpha', JSON.stringify([{ diff: bigPatch }]),
+      JSON.stringify([{ text: 'y'.repeat(5000) }]), JSON.stringify({ note: 'z'.repeat(5000) }),
+      '描述', '验收口径')
+
+  const full = await get('/api/board?scope=compact-alpha')
+  assert.equal(full.status, 200)
+  const fullBytes = JSON.stringify(full.body).length
+  assert.ok(fullBytes > 200 * 1024, `完整响应应当带上 patches（实测 ${(fullBytes / 1024).toFixed(0)}KB）`)
+  assert.ok(Array.isArray(full.body[0].patches), '★ 默认（不带 compact）必须**逐字不变**：patches 还在')
+
+  const compact = await get('/api/board?scope=compact-alpha&compact=1')
+  assert.equal(compact.status, 200)
+  const compactBytes = JSON.stringify(compact.body).length
+  assert.ok(compactBytes < 1024, `compact 响应应当只有几百字节（实测 ${compactBytes}B）`)
+  assert.ok(compactBytes * 50 < fullBytes, '★ 数量级差距必须存在 —— 这就是手机能不能用的分界')
+
+  const t = compact.body[0]
+  // 白名单里该有的（手机看板要用）
+  for (const k of ['id', 'title', 'status', 'role']) {
+    assert.ok(k in t, `compact 必须保留 ${k}（手机看板要渲染它）`)
+  }
+  // 白名单外一律不带（尤其是那三个大的）
+  for (const k of ['patches', 'comments', 'evidence', 'description', 'acceptance']) {
+    assert.equal(k in t, false, `★ compact 不该带 ${k} —— 它要么很大、要么有专门的端点`)
+  }
+  assert.deepEqual(Object.keys(t).sort(), ['blockedBy', 'hold', 'id', 'priority', 'role', 'scope', 'soldier', 'status', 'title', 'version'],
+    '白名单变了就要复核手机端读的字段（workbench/mobile/board.mjs）')
+})
+
+test('⑫c ★ `compact` 与三个过滤参数**正交**（一起用仍然各自生效）', async () => {
+  clear()
+  addTask({ id: 'cx1', status: 'todo', role: 'r1', scope: 'cx' })
+  addTask({ id: 'cx2', status: 'done', role: 'r1', scope: 'cx' })
+  addTask({ id: 'cx3', status: 'todo', role: 'r1', scope: 'other' })
+  const r = await get('/api/board?scope=cx&status=todo&compact=1')
+  assert.deepEqual(r.body.map((t) => t.id), ['cx1'], '★ compact 不许把过滤丢掉')
+})
+
 // ── ⑬ task ───────────────────────────────────────────────────────────────
 test('⑬ ★★★ `GET /api/task` 缺 `id` ⇒ 400；未知 id ⇒ 404；已知 ⇒ 200 + 行视图', async () => {
   clear()

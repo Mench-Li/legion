@@ -64,18 +64,53 @@ export function createReadModelsRoutes({
     if (v === undefined || v === null) throw new TypeError(`createReadModelsRoutes 缺注入项：${k}`)
   }
 
+  /**
+   * 看板**精简视图**：只留渲染一张看板要用的字段。
+   *
+   * 实测（2026-10-10，software 162 个任务）：完整响应 4071.6KB，其中 `patches` 3498KB、
+   * `comments` 211KB；而手机看板只读下面这几个 + 由 `/api/agents` 合并进来的 `attempt`。
+   * 过隧道时那 3.7MB 就是"45 秒 / 超时"与"两秒就出来"的区别。
+   *
+   * 用**白名单**而不是黑名单：黑名单会随"哪天又加了个大字段"而静默失效，
+   * 而白名单的失效方式是"少显示一点"——那是可见的、也是可以修的。
+   */
+  const BOARD_COMPACT_FIELDS = Object.freeze([
+    'id', 'title', 'status', 'role', 'soldier', 'priority', 'scope', 'blockedBy', 'hold', 'version',
+  ])
+  function compactBoardTask(t) {
+    const out = {}
+    for (const k of BOARD_COMPACT_FIELDS) if (t[k] !== undefined) out[k] = t[k]
+    return out
+  }
+
   const routes = [
     {
       method: 'GET',
       match: 'exact',
       path: '/api/board',
       async run(req, res, { url }) {
-        json(res, 200, listTasks({
+        const rows = listTasks({
           status: url.searchParams.get('status') ?? undefined,
           soldier: url.searchParams.get('soldier') ?? undefined,
           role: url.searchParams.get('role') ?? undefined,
           scope: url.searchParams.get('scope') ?? undefined,
-        }))
+        })
+        // ★ `?compact=1`：只回看板渲染需要的那几个字段。
+        //
+        //   实测（2026-10-10，software 空间 162 个任务）：完整响应 **4071.6KB**，其中
+        //   `patches` 一项就占 **3498KB**（86%，每个任务存着完整 git diff），`comments` 211KB。
+        //   本机生成它只要 330ms —— 慢的从来不是中枢，而是**这 4MB 本身**：
+        //   手机过隧道拉一次要 15–45 秒，还可能直接超时（实测 150s 失败）。
+        //
+        //   > 一个"把 git diff 也发给手机看板"的接口，
+        //   > 与一个"看板要 45 秒才出来"，是同一件事的两面。
+        //
+        //   手机看板实际只读 `id/title/status/role/soldier/priority`（+ 由 /api/agents
+        //   合并进来的 `attempt`，见 workbench/mobile/board.mjs），所以这里用**白名单**：
+        //   宁可少给，也不要哪天又有个大字段悄悄长回来（黑名单会随字段增加而失效）。
+        //   默认（不带 compact）**逐字不变** —— 桌面与既有判据都还在用完整形状。
+        const compact = url.searchParams.get('compact') === '1' || url.searchParams.get('compact') === 'true'
+        json(res, 200, compact ? rows.map(compactBoardTask) : rows)
       },
     },
     {

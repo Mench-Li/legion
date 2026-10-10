@@ -238,3 +238,30 @@ describe('手机端：网络恢复时的读数', () => {
     assert.match(line, /hubReachable: false/)
   })
 })
+
+// ============================================================================
+// ★ 手机看板必须请求**精简**看板（2026-10-10 实测：不精简就是 4MB 过隧道）
+//
+// 实测（software 空间 162 个任务）：完整 `/api/board` 响应 **4071.6KB**，其中 `patches`
+// 一项 3498KB（86%，每个任务存着完整 git diff）。本机生成它只要 330ms —— 慢的是那 4MB
+// 要过隧道到手机上：15–45 秒，还可能直接超时（实测 150s 失败）。
+//
+//   > 一个"把 git diff 也发给手机看板"的接口，
+//   > 与一个"手机看板要 45 秒才出来"，是同一件事的两面。
+//
+// 服务端为此开了 `?compact=1`（白名单，默认行为逐字不变）。这一条守"手机真的用它"——
+// 服务端加了参数而客户端不带，等于没加。
+// ============================================================================
+describe('手机看板取数：必须带 compact=1', () => {
+  const appSrc = readFileSync(resolve(ROOT, 'workbench/mobile/app.mjs'), 'utf8')
+
+  test('★ 手机请求 `/api/board` 时带 `compact=1`', () => {
+    assert.match(appSrc, /\/api\/board\?scope=[^`]*compact=1/,
+      '★ 不带 compact ⇒ 手机要下 4MB（其中 3.5MB 是 git diff）')
+  })
+
+  test('★ 只对**看板**精简；任务详情那条路径不许被顺手改掉', () => {
+    // 详情要 patches/comments/evidence —— 那是打开某个任务时才需要的
+    assert.doesNotMatch(appSrc, /\/api\/task\?[^`]*compact=1/, '任务详情不许按精简口径取')
+  })
+})

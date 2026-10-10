@@ -103,9 +103,61 @@ Invoke-WebRequest http://127.0.0.1:8787/api/identity/bootstrap -Method POST `
 ★ 用**子域**是为了不动现有服务：`legion-si.online` 上跑着另一个中枢（那台库是空的），
 这里只是新增一条 `home.<域名>` 记录指向这台电脑。**不需要 SSH 到那台服务器。**
 
+## 4c. 本机**已经这样配好了**（2026-10-10 实际落地的形态）
+
+```
+隧道     legion-home        id de285451-cce3-4de5-a171-56c810a65e5c
+入口     https://home.legion-si.online/mobile/
+指向     http://127.0.0.1:8787（本机中枢）
+配置     C:\Users\<你>\.cloudflared\config.yml
+自启     C:\Users\<你>\AppData\Roaming\Microsoft\Windows\Start Menu\Programs\Startup\legion-home-tunnel.vbs
+```
+
+`config.yml` 的要点（照抄即可）：
+
+```yaml
+tunnel: de285451-cce3-4de5-a171-56c810a65e5c
+credentials-file: C:/Users/<你>/.cloudflared/de285451-cce3-4de5-a171-56c810a65e5c.json
+protocol: http2            # ★ 见下面"为什么不用 QUIC"
+ingress:
+  - hostname: home.legion-si.online
+    service: http://127.0.0.1:8787
+  - service: http_status:404
+```
+
+**为什么不用 QUIC**（实测，同一个 44.9KB 的精简看板）：
+QUIC 下 10.8s / 51.6s（抖动大），http2 下 1.4s / 3.3s / 4.2s。
+本机出站 QUIC（UDP 7844）探测到 region2 不通，钉 QUIC 会反复重试 ⇒ 抖动。
+**结论：这台机器上 http2 更稳**（`protocol: http2`）。
+
+**自启为什么用启动文件夹而不是服务**：`cloudflared service install` 与
+`schtasks /create /sc onlogon` 在这台机器上**都要管理员**（实测 Access is denied）；
+启动文件夹是用户级的，不需要提权。VBS 是为了**不弹黑窗口**（`Run(..., 0, False)`）。
+若想"开机即起、不依赖登录"，用管理员执行一次：
+
+```powershell
+& 'C:\Program Files (x86)\cloudflared\cloudflared.exe' service install
+```
+
+（那就该把启动文件夹里那个 .vbs 删掉，免得两份实例。）
+
+## 4d. ★ 这条路的**稳定性**要如实知道（实测）
+
+同一台机器、同一条隧道、同一个请求，实测（2026-10-10）：
+
+| 观测 | 值 |
+| --- | --- |
+| 本机中枢生成响应 | **100–213ms**（中枢一点都不慢） |
+| 隧道上的小请求 | 1.0s ~ 22s（抖动极大） |
+| 隧道上的手机首屏（页面+看板+智能体） | 15.3s / 37.5s / 71.9s，**有一轮三个请求全部 60s 超时** |
+| 隧道注册的 Cloudflare 边缘 | lax08 / lax10 / lax13（**洛杉矶**） |
+
+也就是说：**功能是通的，但这条跨境隧道的延迟很不稳定**。原因在链路，不在中枢也不在手机。
+若"手机操控"要当日常通道用，建议换**私有网**（下面第 8 节）。
+
 ## 5. 手机上怎么用
 
-1. 手机浏览器打开 `https://<入口>/mobile/`。
+1. 手机浏览器打开 `https://home.legion-si.online/mobile/`（若用私有网，换成对应地址）。
 2. 用第 3 步建的账号登录（PWA 会自动调 `/api/identity/refresh`；SSE 用一次性票据）。
 3. 选工作空间与 Agent → 在输入框里说话：
    - 想**派活** ⇒ 用「派任务」（`intent: create_task`）→ 生成一条 `todo` 任务 →
@@ -120,7 +172,8 @@ Invoke-WebRequest http://127.0.0.1:8787/api/identity/bootstrap -Method POST `
 | 关掉手机面（/mobile 变回 404） | 删掉 `teamHubIdentityKey`（或置空）→ 重启宿主 |
 | 只保留本机、不要登录门禁 | 把 `teamHubRemoteAuth` 置空 → 重启宿主 |
 | 完全回到加令牌之前 | profile 里删掉这三个键、守护 `hubToken` 置空 → 重启宿主 |
-| 关隧道 | 停掉 `cloudflared` 进程（它不写任何持久状态） |
+| 关隧道 | 停掉 `cloudflared` 进程 + 删掉启动文件夹里的 `legion-home-tunnel.vbs` |
+| 关掉固定入口（DNS 那一层） | Cloudflare 后台删掉 `home.legion-si.online` 那条 CNAME（**别动** `legion-si.online` 与 `updates.*`） |
 
 profile 每次改动前的备份在同目录 `.bak-mobile-*`。
 
@@ -129,7 +182,26 @@ profile 每次改动前的备份在同目录 `.bak-mobile-*`。
 1. **读面靠 `remoteAuth`，不靠 token**：中枢始终绑回环，`readAuthRequired()` 因此是假；
    `remoteAuth=1` 那套才要求登录。**两者一起**才是完整的。
 2. **`scope` 在 POST body 里时不做空间级授权**（门禁读不到 body）——源码里已登记为未完成的接线。
-3. **隧道是公网可达的**：`trycloudflare` 地址谁拿到谁能打开登录页（数据仍要登录）。
-   长期用建议 4b + Cloudflare Access，或改用私有网（Tailscale/WireGuard）。
+3. **隧道是公网可达的**：谁拿到地址谁能打开登录页（数据仍要登录）。
+   要更严的话，长期方案是 Cloudflare Access，或改用私有网（第 8 节）。
 4. **手机端的"派 AI 执行"按钮那条通道**（`exec_requests`）与守护**仍未接线**（见 BUG-016 §7）——
    手机派活走的是 `intent: create_task` 这条，它**是通的**。
+5. **响应体积**：完整看板响应实测 **4071.6KB**（其中 `patches` 3498KB、`comments` 211KB）。
+   手机端因此走 `?compact=1`（实测 **44.9KB**，缩小 90.8 倍，见 BUG-020）。
+   若哪天手机又变慢，先量这个体积——它是这种问题的第一嫌疑。
+
+## 8. 若要把"手机操控"当日常通道：换私有网
+
+第 4d 节的实测说明：**跨境的 Cloudflare 隧道延迟不稳定**（15s–72s，偶发 60s 超时）。
+中枢本身很快（100–213ms），所以瓶颈在链路。要稳定，换一条不依赖公共边缘的路：
+
+| 方案 | 需要什么 | 特点 |
+| --- | --- | --- |
+| **Tailscale**（推荐） | 电脑装一次（**要管理员**）、手机装 App、两边登同一账号 | 私有网；能打洞就直连（延迟接近局域网），打不通走 DERP 中继；地址固定（`https://<机器名>.<tailnet>.ts.net`） |
+| WireGuard 自建 | 一台有公网 IP 的机器 + 两边配置 | 全自控，但要自己维护 |
+| 国内中转（frp 等） | 一台**国内线路**的服务器 | 延迟最低，但要有那台机器 |
+
+Tailscale 落地到本方案的改法：把 `cloudflared` 关掉（或留着双通道），
+在中枢前面用 `tailscale serve https / http://127.0.0.1:8787`；手机访问
+`https://<机器名>.<tailnet>.ts.net/mobile/`。**其余配置（令牌/身份/门禁）一个字都不用改** ——
+因为换的只是"链路"，中枢还是那个中枢。

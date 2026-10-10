@@ -328,7 +328,14 @@ export default function App(): React.JSX.Element {
           if (cancelled) return
           // 面板打开时未读数由 NotifyView 上报；但**弹框哪一页都要**，所以它不随那个分支跳过。
           if (active !== 'notify') setNotifyUnread(countNotifyUnread(rows, scope))
-          const { popups, lastSeq } = popupBatch(rows, popupSeqRef.current, POPUP_LIMIT)
+          const { popups, lastSeq } = popupBatch(rows, popupSeqRef.current, POPUP_LIMIT, {
+            nowMs: Date.now(),
+            // 首次接入这个提醒时补告最近 6 小时内**真正需要你动手**的事。
+            // 语义是"你刚才大概不在"，不是"这台机器上曾经发生过什么"：
+            // 完全不补告 ⇒ 装上提醒的那一刻恰好什么也不说（而那时 T-196 可能正等着你）；
+            // 全量补弹 ⇒ 一打开页面就被历史糊一脸，而下一步就是把提醒关掉。
+            replayWindowMs: 6 * 60 * 60 * 1000,
+          })
           if (lastSeq !== popupSeqRef.current) {
             popupSeqRef.current = lastSeq
             writePopupSeq(scope, lastSeq)

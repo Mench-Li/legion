@@ -429,15 +429,26 @@ export interface NotifyPopup {
  *
  * - 只看 `seq > lastSeq`（游标持久化 ⇒ 刷新页面/重开浏览器不重弹）；
  * - 只弹 `shouldPopup`（高优先级）；
- * - **首次运行（`lastSeq <= 0`）只建立基线、不弹** —— 否则一打开页面就会被 200 条历史糊一脸，
- *   而"被历史通知糊脸"的用户下一步就是把这个功能关掉；
+ * - **首次运行（`lastSeq <= 0`）只建立基线**，但会**补告**最近 `replayWindowMs` 内的
+ *   （见下）——否则"刚装上这个提醒的人"看不到任何东西，而他恰好最需要知道"现在有谁在等我"；
  * - 升序返回（先发生先弹），超过 `limit` 时**只留最后 limit 条**（最新的才要紧），
  *   游标仍然推进到最新，避免下一轮把丢掉的那些又弹一遍。
+ *
+ * ## 为什么首次要补告"最近一段时间"，而不是全量历史、也不是什么都不说
+ *
+ * 两个极端都错：
+ *   - **全量补弹**：一打开页面就被 200 条历史糊一脸 —— "被历史通知糊脸"的用户下一步就是关掉提醒；
+ *   - **完全沉默**：装上提醒的那一刻恰好什么也不说，而那时 T-196 可能正停在待验收等你 ——
+ *     于是"我装了提醒"与"我还是不知道"同时成立（这正是 BUG-021 修完之后**仍然会**发生的形态）。
+ *
+ * 折中是**时间窗**：只补告最近 `replayWindowMs`（App 传 6 小时）内真正需要你动手的事。
+ * 时间窗的语义是"你刚才大概不在"，而不是"这台机器上曾经发生过什么"。
  */
 export function popupBatch(
   rows: Array<HubActivity | HubAuditEvent>,
   lastSeq: number,
   limit = 3,
+  options: { nowMs?: number; replayWindowMs?: number } = {},
 ): { popups: NotifyPopup[]; lastSeq: number } {
   const safeLast = Number.isFinite(lastSeq) && lastSeq > 0 ? Math.floor(lastSeq) : 0
   // 游标按**未过滤**的全量行推进：白名单外的行（progress/release-stale/chat:*）也在涨 seq，
@@ -447,11 +458,25 @@ export function popupBatch(
     const s = Number(r?.seq)
     if (Number.isFinite(s) && s > maxSeq) maxSeq = Math.floor(s)
   }
-  if (safeLast <= 0) return { popups: [], lastSeq: maxSeq }
+  const notable = toNotifyItems(rows, EMPTY_READ_STATE).filter(shouldPopup).sort((a, b) => a.seq - b.seq)
 
-  const fresh = toNotifyItems(rows, EMPTY_READ_STATE)
-    .filter((it) => it.seq > safeLast && shouldPopup(it))
-    .sort((a, b) => a.seq - b.seq)
+  if (safeLast <= 0) {
+    // 首次：补告最近时间窗内的高优先级事件（默认窗口 0 = 不补，"纯建立基线"的语义仍可单独验证）
+    const rawWindow = options.replayWindowMs
+    const windowMs = typeof rawWindow === 'number' && Number.isFinite(rawWindow) ? Math.max(0, rawWindow) : 0
+    const rawNow = options.nowMs
+    const nowMs = typeof rawNow === 'number' && Number.isFinite(rawNow) ? rawNow : Date.now()
+    const replay = windowMs === 0 ? [] : notable.filter((it) => {
+      const ts = Date.parse(it.ts)
+      if (!Number.isFinite(ts)) return false
+      const age = nowMs - ts
+      return age >= 0 && age <= windowMs
+    })
+    const kept = limit > 0 && replay.length > limit ? replay.slice(replay.length - limit) : replay
+    return { popups: kept.map((it) => ({ id: it.id, seq: it.seq, text: popupText(it), item: it })), lastSeq: maxSeq }
+  }
+
+  const fresh = notable.filter((it) => it.seq > safeLast)
   const kept = limit > 0 && fresh.length > limit ? fresh.slice(fresh.length - limit) : fresh
   return {
     popups: kept.map((it) => ({ id: it.id, seq: it.seq, text: popupText(it), item: it })),

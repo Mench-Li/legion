@@ -191,6 +191,57 @@ describe('BUG-021 游标持久化：与已读游标分开、只前进', () => {
   })
 })
 
+describe('BUG-021 首次补告时间窗：装上提醒的那一刻不能什么都不说', () => {
+  // 上面那条"首次只建立基线"守的是**不糊脸**；这一节守的是它的另一面：
+  // 若首次完全沉默，则"我装了提醒"与"可我还是不知道 T-196 在等我"会同时成立。
+  const NOW = Date.parse('2026-10-10T18:00:00.000Z')
+  const SIX_H = 6 * 60 * 60 * 1000
+  const at = (seq, action, taskId, detail, ts) => ({ ...row(seq, action, { taskId, detail }), ts })
+
+  test('★★ 首次运行 + 时间窗：窗内的补告，窗外的丢掉', () => {
+    const rows = [
+      at(600, 'transition', 'T-196', { to: 'in_review' }, '2026-10-10T17:20:00.000Z'), // 40 分钟前
+      at(601, 'transition', 'T-OLD', { to: 'in_review' }, '2026-10-09T02:00:00.000Z'), // 一天前
+    ]
+    const { popups, lastSeq } = popupBatch(rows, 0, 3, { nowMs: NOW, replayWindowMs: SIX_H })
+    assert.deepEqual(popups.map(p => p.item.taskId), ['T-196'], '★ 只补告窗内那件"在等你"的事')
+    assert.equal(lastSeq, 601, '游标仍建立在最新（窗外的不会再补弹）')
+  })
+
+  test('★ 窗口为 0（默认）= 纯建立基线，与老行为一致', () => {
+    const rows = [at(602, 'transition', 'T-196', { to: 'in_review' }, '2026-10-10T17:59:00.000Z')]
+    assert.deepEqual(popupBatch(rows, 0, 3).popups, [])
+    assert.deepEqual(popupBatch(rows, 0, 3, { nowMs: NOW, replayWindowMs: 0 }).popups, [])
+  })
+
+  test('★ 时间窗只对**首次**生效：游标已有之后，窗内的旧事件不许重弹', () => {
+    const rows = [at(603, 'transition', 'T-196', { to: 'in_review' }, '2026-10-10T17:50:00.000Z')]
+    const { popups } = popupBatch(rows, 603, 3, { nowMs: NOW, replayWindowMs: SIX_H })
+    assert.deepEqual(popups, [], '★ 游标已推进 ⇒ 窗内也不再补弹（只有真正新发生的才弹）')
+  })
+
+  test('★ 未来时间戳（时钟漂移/坏数据）不入窗', () => {
+    const rows = [at(604, 'transition', 'T-FUTURE', { to: 'in_review' }, '2026-10-10T20:00:00.000Z')]
+    const { popups } = popupBatch(rows, 0, 3, { nowMs: NOW, replayWindowMs: SIX_H })
+    assert.deepEqual(popups, [], 'age < 0（未来）不算"你刚才不在时发生的"')
+  })
+
+  test('★ 窗内超过上限：只补告最新的几条', () => {
+    const rows = [1, 2, 3, 4, 5].map(n => at(700 + n, 'transition', 'T-' + String(n), { to: 'in_review' }, '2026-10-10T17:5' + String(n) + ':00.000Z'))
+    const { popups } = popupBatch(rows, 0, 2, { nowMs: NOW, replayWindowMs: SIX_H })
+    assert.deepEqual(popups.map(p => p.item.taskId), ['T-4', 'T-5'])
+  })
+
+  test('★ 窗内也只看高优先级（开工/产物登记不因"首次"而混进来）', () => {
+    const rows = [
+      at(800, 'claim', 'T-A', {}, '2026-10-10T17:55:00.000Z'),
+      at(801, 'artifact', 'T-B', {}, '2026-10-10T17:56:00.000Z'),
+      at(802, 'transition', 'T-C', { to: 'in_progress' }, '2026-10-10T17:57:00.000Z'),
+    ]
+    assert.deepEqual(popupBatch(rows, 0, 3, { nowMs: NOW, replayWindowMs: SIX_H }).popups, [])
+  })
+})
+
 describe('BUG-021 系统通知（桌面端"人不在看页面"时的那一半）', () => {
   test('★★ 只在页面不可见 **且** 已授权时才发', () => {
     assert.equal(shouldUseSystemNotify({ hidden: true, permission: 'granted' }), true)

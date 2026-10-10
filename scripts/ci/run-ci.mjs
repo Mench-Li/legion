@@ -1898,6 +1898,9 @@ async function stageTest() {
     { label: 'team-hub-parity（P1-1 双形态对拍：独立服务 vs 宿主前缀外壳）', files: ['tests/contract/team-hub-parity.test.mjs'], cwd: ROOT },
     { label: 'dedupe（P2-3 前端去重纯函数）', files: ['workbench/scripts/dedupe.test.mjs'], cwd: ROOT, nodeArgs: ['--experimental-strip-types'] },
     { label: 'notify（P2-4 通知分类/优先级/批量已读/跳转/去重补齐 + P4-7 句柄泄漏自检）', files: ['workbench/scripts/notify.test.mjs', 'workbench/scripts/notify-hub-smoke.test.mjs'], cwd: ROOT, nodeArgs: ['--experimental-strip-types'] },
+    // ★ BUG-021「Agent 状态更新不提醒我」：通知这条线从前只数未读徽标、从不弹框。
+    //   本套件守的是**弹框决策与游标**（弹什么、什么时候不弹、游标只前进），不是渲染。
+    { label: 'notify-popup（BUG-021 右下角弹框：只弹高优先级 + 游标不重弹/不补弹历史）', files: ['workbench/scripts/notify-popup.test.mjs'], cwd: ROOT, nodeArgs: ['--experimental-strip-types'] },
     // ★ 2026-09-16（main 整合）：下面这一条**是本次合并补登记的**，不是新写的套件。
     //
     //   `reveal-open.test.mjs` 是 `main` 侧 P4-7「打开所在位置」带来的契约测试（21 例，全绿），

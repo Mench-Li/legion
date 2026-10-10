@@ -19,6 +19,8 @@ import {
   subscribeHubAudit,
 } from './api'
 import type { ProvisionCheck } from './api'
+import { popupBatch, popupText, readPopupSeq, writePopupSeq } from './notify'
+import { notifySystem } from './desktopNotify'
 import { createSceneController } from './scene/sceneController'
 import type { SceneCue, SceneFacts } from './scene/sceneState'
 import { buildMissions } from './missions'
@@ -54,6 +56,13 @@ import { hasSession, setSessionExpiredHandler } from './identity'
 type ConnState = 'connecting' | 'live' | 'error'
 
 const MAX_ACTIVITY = 80
+
+/**
+ * 一轮最多弹几条（BUG-021）。一轮里堆了更多高优先级事件时只弹**最新**的这几条，
+ * 游标仍推进到最新——被丢掉的那些进通知中心，不再补弹。
+ * 理由：弹框是打扰，"补弹 12 条刚才没看见的"等于把人淹没，而人淹没了就会关掉提醒。
+ */
+const POPUP_LIMIT = 3
 
 export default function App(): React.JSX.Element {
   // 账号会话的门。只在 Hub **要求**远程鉴权时才会拦（见 `useIdentityGate`）：
@@ -95,6 +104,8 @@ export default function App(): React.JSX.Element {
   const [refreshing, setRefreshing] = useState(false)
   /** 通知未读徽标（S7 ← R-B2）：通知面板打开时由 NotifyView 实时上报，否则本组件低频刷新。 */
   const [notifyUnread, setNotifyUnread] = useState(0)
+  /** 弹框游标（BUG-021）：与已读游标**分开**，只在内存里跟一轮，持久化走 localStorage。 */
+  const popupSeqRef = useRef(0)
   const labelsRef = useRef<Record<string, string>>({})
   useEffect(() => { try { localStorage.setItem('legion.workspace.page', active) } catch { /* 存储不可用不影响导航 */ } }, [active])
   useEffect(() => {
@@ -194,7 +205,16 @@ export default function App(): React.JSX.Element {
     let cancelled = false
     void fetchRoster(scope)
       .then(resp => {
-        if (!cancelled) setRoster(resp.agents)
+        if (cancelled) return
+        setRoster(resp.agents)
+        // ★ 顺手补上一个**一直空着**的表：`labelsRef` 从前**从未被赋值**（只有声明与读取），
+        //   于是 `labels` 恒为 `{}`，凡是按它取名字的地方都退回了英文 role
+        //   （任务列/智能体视图/弹框都受影响）。编队里本来就带 role + 中文 name，
+        //   用它填既不新增请求，也不用再猜。
+        labelsRef.current = Object.fromEntries(
+          resp.agents.filter(a => typeof a.role === 'string' && a.role.length > 0)
+            .map(a => [a.role, typeof a.name === 'string' && a.name.length > 0 ? a.name : a.role]),
+        )
       })
       .catch(() => {
         if (!cancelled) setRoster(null)
@@ -281,17 +301,48 @@ export default function App(): React.JSX.Element {
   // 通知未读徽标（S7 ← R-B2 / TC-S7-01/07）：有具体空间即拉 hub audit 列表按白名单 + 本地已读游标计数
   // （与 NotifyView 面板共用 countNotifyUnread 口径，数据源同为 GET /api/activity，无第三数据源）；
   // 通知面板打开时由 NotifyView 实时上报未读数，本 effect 暂停自身刷新避免重复拉取
+  //
+  // ★★ BUG-021：本 effect 从前**只数未读、从不打扰人** —— 拉到审计行后只有
+  //    `setNotifyUnread(countNotifyUnread(rows, scope))`：数一下、点亮侧栏徽标。
+  //    于是 worker 干完活停在 in_review 等将军，将军**根本不知道**，等待时间全浪费。
+  //
+  //    > 一个"有通知中心"的系统，与一个"到点了会来叫你"的系统，
+  //    > 在有人正好盯着侧栏的时候一模一样。
+  //
+  //    现在同一个 effect 顺带弹右下角弹框（只弹高优先级，见 notify.ts 的 shouldPopup）。
+  //    不新开 SSE 连接：本 effect 的 20s 轮询**本来就是**这条链路的取数点，弹框只是终于消费了它。
+  //    弹框游标与已读游标**分开**存在 localStorage（popupSeqKey）：已读是用户点出来的，
+  //    拿它当"弹过了没有"的游标会两头都错（点一次全部已读 ⇒ 新事件不再弹）。
   useEffect(() => {
     if (!hubMode || !scope) {
       setNotifyUnread(0)
+      popupSeqRef.current = 0
       return
     }
-    if (active === 'notify') return
+    // 换空间要换一把游标：否则新空间的第一批历史会被当成"新发生的"弹出来。
+    popupSeqRef.current = readPopupSeq(scope)
     let cancelled = false
     const refresh = (): void => {
       fetchHubActivity({ scope, limit: 200 })
         .then(rows => {
-          if (!cancelled) setNotifyUnread(countNotifyUnread(rows, scope))
+          if (cancelled) return
+          // 面板打开时未读数由 NotifyView 上报；但**弹框哪一页都要**，所以它不随那个分支跳过。
+          if (active !== 'notify') setNotifyUnread(countNotifyUnread(rows, scope))
+          const { popups, lastSeq } = popupBatch(rows, popupSeqRef.current, POPUP_LIMIT)
+          if (lastSeq !== popupSeqRef.current) {
+            popupSeqRef.current = lastSeq
+            writePopupSeq(scope, lastSeq)
+          }
+          for (const p of popups) {
+            const role = String(p.item.member ?? '')
+            const who = role.length > 0 ? (labelsRef.current[role] ?? role) : null
+            const text = popupText(p.item, who)
+            // 点一下就去通知中心 —— 一条叫你过来处理的消息如果点不动，
+            // 用户还得自己找那个面板，那正是这条提醒本想省掉的一步。
+            toast('info', text, () => setActive('notify'))
+            // 页面不在前台时，页面里的弹框**一个都看不见** —— 那是系统通知唯一能补的位。
+            notifySystem(text)
+          }
         })
         .catch(() => undefined)
     }

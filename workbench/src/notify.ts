@@ -347,3 +347,143 @@ export function shouldRefill(prevMaxSeq: number, incoming: Array<{ seq: number }
 export const notifyReadKey = (scope: string | null): string => 'legion.notify.read.' + (scope ?? '__all__')
 /** 显式已读集合存储键（P2-4 新增；与游标键并存，旧数据继续生效）。 */
 export const notifyReadIdsKey = (scope: string | null): string => 'legion.notify.readseq.' + (scope ?? '__all__')
+
+// ───────────────────────── 右下角弹框（BUG-021）─────────────────────────
+//
+// ## 这一节要修的是什么
+//
+// 通知这条线**从前只做了一个未读计数徽标**：`App.tsx` 那个 effect 拉到审计行之后只调
+// `setNotifyUnread(countNotifyUnread(...))`——数一下、点亮侧栏，**从来不打扰人**。
+// 于是一个 worker 干完活停在 `in_review` 等将军，将军不知道，等待时间全浪费。
+//
+//   > 一个"有通知中心"的系统，与一个"到点了会来叫你"的系统，
+//   > 在有人正好盯着侧栏的时候一模一样。
+//
+// ## 为什么不复用已读态判"新"
+//
+// 已读游标是**用户点出来的**（点开通知中心、点行、全部已读）——拿它当"弹过了没有"的游标，
+// 会得到两种都错的后果：用户点一次「全部已读」⇒ 下一条新事件不再弹（因为他把游标推到了未来）；
+// 用户从不点 ⇒ 每次刷新都把历史重弹一遍。
+// 所以弹框**自己一把游标**（`popupSeqKey`），与已读态正交。
+
+/** 状态中文（只用于弹框文案；看板列名在 `hubBoard.ts`，两处措辞不同是有意的：
+ *  看板是**列名**（待验收），弹框是**一句叫你来的话**（待你验收）。） */
+export const NOTIFY_STATUS_LABEL: Record<string, string> = {
+  backlog: '待规划',
+  todo: '待处理',
+  in_progress: '进行中',
+  in_review: '待你验收',
+  blocked: '受阻（等你处理）',
+  done: '已完成',
+  canceled: '已取消',
+}
+
+/**
+ * 该不该**弹框**：只弹高优先级（`notifyPriority` 的既有口径：拦截/转派/测试报告/目标关键节点/
+ * 进入 blocked·in_review）。
+ *
+ * 弹框是**打扰**，所以门槛必须比"进通知中心"更高：`claim`（开工）、`artifact`（产物登记）这类
+ * 进列表、进徽标，但不弹。一个什么都弹的提醒，等于没有提醒。
+ */
+export function shouldPopup(item: Pick<NotifyItem, 'priority'>): boolean {
+  return item.priority === 'high'
+}
+
+/** 弹框主文案（一句话，含任务号与"要你做什么"）。`who` 可选：角色中文名（如「方案搜索」）。 */
+export function popupText(item: NotifyItem, who?: string | null): string {
+  const tid = validTaskId(item.taskId)
+  const head = tid === null ? '' : tid + ' '
+  const tail = typeof who === 'string' && who.length > 0 ? `（${who}）` : ''
+  const detail = item.detail ?? {}
+  switch (item.action) {
+    case 'transition': {
+      const to = typeof detail.to === 'string' ? detail.to : ''
+      const state = NOTIFY_STATUS_LABEL[to] ?? (to.length > 0 ? to : '状态变更')
+      const icon = to === 'in_review' ? '⏳' : to === 'blocked' ? '⛔' : '🔄'
+      return `${icon} ${head}${state}${tail}`
+    }
+    case 'hold': return `🖐 ${head}被拦截：守护不再自动认领${tail}`
+    case 'unhold': return `🚀 ${head}已放行：守护恢复自动认领${tail}`
+    case 'reassign': return `🔁 ${head}被转派${tail}`
+    case 'test-report': return `🧪 ${head}测试报告已提交${tail}`
+    case 'evidence': return `📦 ${head}提交了证据${tail}`
+    case 'goal:publish': return '🎯 目标已发布'
+    case 'goal:done': return '✅ 目标已完成'
+    case 'goal:cancel': return '✕ 目标已取消'
+    case 'goal:pause': return '⏸ 目标已暂停'
+    default: return `${notifyLabel(item.action)} ${head}${tail}`.trim()
+  }
+}
+
+/** 一条待弹的提醒。 */
+export interface NotifyPopup {
+  /** 稳定去重键（= NotifyItem.id，`${scope}:${seq}`）。 */
+  id: string
+  seq: number
+  text: string
+  item: NotifyItem
+}
+
+/**
+ * 从审计行里挑出**这一轮该弹**的提醒。
+ *
+ * - 只看 `seq > lastSeq`（游标持久化 ⇒ 刷新页面/重开浏览器不重弹）；
+ * - 只弹 `shouldPopup`（高优先级）；
+ * - **首次运行（`lastSeq <= 0`）只建立基线、不弹** —— 否则一打开页面就会被 200 条历史糊一脸，
+ *   而"被历史通知糊脸"的用户下一步就是把这个功能关掉；
+ * - 升序返回（先发生先弹），超过 `limit` 时**只留最后 limit 条**（最新的才要紧），
+ *   游标仍然推进到最新，避免下一轮把丢掉的那些又弹一遍。
+ */
+export function popupBatch(
+  rows: Array<HubActivity | HubAuditEvent>,
+  lastSeq: number,
+  limit = 3,
+): { popups: NotifyPopup[]; lastSeq: number } {
+  const safeLast = Number.isFinite(lastSeq) && lastSeq > 0 ? Math.floor(lastSeq) : 0
+  // 游标按**未过滤**的全量行推进：白名单外的行（progress/release-stale/chat:*）也在涨 seq，
+  // 用过滤后的最大值会让游标停在原地反复重扫。
+  let maxSeq = safeLast
+  for (const r of rows) {
+    const s = Number(r?.seq)
+    if (Number.isFinite(s) && s > maxSeq) maxSeq = Math.floor(s)
+  }
+  if (safeLast <= 0) return { popups: [], lastSeq: maxSeq }
+
+  const fresh = toNotifyItems(rows, EMPTY_READ_STATE)
+    .filter((it) => it.seq > safeLast && shouldPopup(it))
+    .sort((a, b) => a.seq - b.seq)
+  const kept = limit > 0 && fresh.length > limit ? fresh.slice(fresh.length - limit) : fresh
+  return {
+    popups: kept.map((it) => ({ id: it.id, seq: it.seq, text: popupText(it), item: it })),
+    lastSeq: maxSeq,
+  }
+}
+
+/** 弹框游标存储键（per scope；与已读游标**分开**，见本节开头说明）。 */
+export const popupSeqKey = (scope: string | null): string => 'legion.notify.popupseq.' + (scope ?? '__all__')
+
+/** 读弹框游标（存储不可用/损坏 → 0 = 下次只建立基线，不炸）。 */
+export function readPopupSeq(scope: string | null, storage?: Pick<Storage, 'getItem'>): number {
+  const store = storage ?? (typeof localStorage === 'undefined' ? null : localStorage)
+  if (store === null) return 0
+  try {
+    const raw = store.getItem(popupSeqKey(scope))
+    const n = raw === null ? 0 : Number(raw)
+    return Number.isFinite(n) && n > 0 ? Math.floor(n) : 0
+  } catch {
+    return 0
+  }
+}
+
+/** 写弹框游标（**只前进**：并发标签页里落后的一方不许把游标推回去，否则会重弹）。 */
+export function writePopupSeq(scope: string | null, seq: number, storage?: Pick<Storage, 'getItem' | 'setItem'>): void {
+  const store = storage ?? (typeof localStorage === 'undefined' ? null : localStorage)
+  if (store === null) return
+  if (!Number.isFinite(seq) || seq <= 0) return
+  try {
+    if (Math.floor(seq) <= readPopupSeq(scope, store)) return
+    store.setItem(popupSeqKey(scope), String(Math.floor(seq)))
+  } catch {
+    /* 存储不可用不影响本次弹框 */
+  }
+}

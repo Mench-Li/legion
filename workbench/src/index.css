@@ -2982,6 +2982,17 @@ body {
   border-color: rgba(248, 113, 113, 0.5);
 }
 
+/* 可点提醒（BUG-021 的右下角弹框）：光标 + hover 抬一点，让"这条能点"看得出来。 */
+.toast.clickable {
+  cursor: pointer;
+  border-color: rgba(96, 165, 250, 0.55);
+}
+
+.toast.clickable:hover {
+  background: var(--panel-3, var(--panel-2));
+  transform: translateY(-1px);
+}
+
 .toast.info {
   border-color: rgba(59, 130, 246, 0.5);
 }

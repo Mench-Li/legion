@@ -524,6 +524,42 @@ if (isMain) {
     process.exit(verdict.ok ? 0 : 1)
   }
 
+  if (args.get('delete') === 'true') {
+    // 删单个对象：S3 的 DeleteObject = `DELETE /<bucket>/<key>`。
+    //
+    // ★ 为什么要**回读**一次：S3 的 DeleteObject 对**不存在的键**也返回 204
+    //   （它是幂等的，刻意不区分"删掉了"与"本来就没有"）。所以只看返回码，
+    //   "删成功"与"键名写错了"长得一模一样 —— 而后者会让人以为清理完成了。
+    //
+    //   > 一个"只看 DELETE 返回码"的清理工具，
+    //   > 与一个"真的回读确认对象没了"的清理工具，在日志里都是 204——
+    //   > 只不过前者的桶里还留着那些文件。
+    const delKey = argString(args.get('key'))
+    if (delKey === null) { process.stderr.write('oss-put --delete 需要 --key\n'); process.exit(2) }
+    const r = await ossRequest({ ...common, method: 'DELETE', key: delKey, timeoutMs: 60_000 })
+    if (!r.ok) {
+      process.stderr.write(`✖ 删除 ${delKey} → HTTP ${r.status}：${describeS3Error(r.text)}\n`)
+      process.exit(1)
+    }
+    // 匿名 GET 回读：200 = 还在（没删掉），404 = 确实没了。
+    const read = await verifyPublicRead(`${endpoint}/${bucket}/${delKey}`, { fetchImpl: fetch })
+    if (read.ok) {
+      process.stderr.write(`✖ DELETE 返回 ${r.status}，但回读仍可达（HTTP ${read.status}）——对象还在\n`)
+      process.exit(1)
+    }
+    if (read.status === 404) {
+      process.stdout.write(`✔ 已删除 ${delKey}（DELETE ${r.status}，回读 404）\n`)
+      process.exit(0)
+    }
+    // 403/其它：可能是桶不再是公开读，那"读不到"就不能证明"删掉了"。
+    // 这一步不许含糊 —— 见上面那段注释。
+    process.stderr.write(`⚠ DELETE 返回 ${r.status}，回读得到 HTTP ${read.status}`
+      + `${read.detail ? `（${read.detail}）` : ''}\n`
+      + '  回读不是 404 ⇒ **无法证明**已删除（403 通常是桶不再是公开读，而不是对象没了）。\n'
+      + '  请用 GET 手工确认，或改用厂商 CLI。\n')
+    process.exit(1)
+  }
+
   if (args.get('create-bucket') === 'true') {
     // S3 的 CreateBucket = `PUT /<bucket>`。建完**立刻回读**一次：
     // 只信 PUT 的返回码，会让"建了但不可见"与"建好了"看起来一样。

@@ -98,6 +98,18 @@ const PROBES = [
     find: `  const hasBucket = typeof bucket === 'string' && bucket.trim() !== ''`,
     replace: `  const hasBucket = true`,
   },
+  {
+    id: 'O5',
+    test: 'scripts/update/oss-put.test.mjs',
+    desc: '公开读自检恒通过（403 也当成"已生效"，要等用户点开链接才发现）',
+    file: 'scripts/update/oss-put.mjs',
+    find: `    return {
+      ok: res.ok,
+      status: res.status,
+      detail: res.ok ? '' : describeS3Error(text),
+    }`,
+    replace: `    return { ok: true, status: res.status, detail: '' }`,
+  },
 ]
 
 function patchText(original, find, replace) {

@@ -20,7 +20,7 @@ import { fileURLToPath } from 'node:url'
 
 import {
   FIXED_VECTOR, OSS_PUT_CHECKED, UNSIGNED_PAYLOAD, amzDates, argString, buildUrl,
-  describeS3Error, judgeProbe, ossRequest, selfCheckOssPut, signRequest, uriEncode,
+  describeS3Error, judgeProbe, ossRequest, selfCheckOssPut, signRequest, uriEncode, verifyPublicRead,
 } from './oss-put.mjs'
 
 const ROOT = resolve(fileURLToPath(new URL('../../', import.meta.url)))
@@ -278,5 +278,44 @@ describe('SigV4 上传器', () => {
     const illegal = [...s.authorization].filter((c) => c.charCodeAt(0) < 32 || c.charCodeAt(0) > 126)
     assert.equal(illegal.length, 0, `Authorization 里不该有控制字符：${JSON.stringify(illegal)}`)
     assert.match(s.authorization, /\/cn-north-1\/s3\/aws4_request/)
+  })
+
+  // ── 公开读必须**真的验** ────────────────────────────────────────────────
+  //
+  // ★ 真实踩到（2026-10-10 京东云 OSS）：上传时带 `x-amz-acl: public-read`、
+  //   服务端返回 **200**，而匿名读该对象仍是 **403 AccessDenied** ——
+  //   京东云**忽略对象级 ACL**，公开读只能在**建桶时**设定。
+  //   上传器当时只报"HTTP 200"就结束了，于是"没生效"要等用户点开链接才发现。
+  //
+  //   > 一个"发了个看起来对的头就认为设置成功"的工具，
+  //   > 与一个"真的验过匿名能不能读"的工具，差别在**用户点开链接的那一刻**——
+  //   > 而不是在上传返回 200 的那一刻。
+
+  test('⑲ verifyPublicRead：2xx 算生效，403 不算', async () => {
+    const at = (status) => async () => new Response('x', { status })
+    assert.equal((await verifyPublicRead('https://x/o', { fetchImpl: at(200) })).ok, true)
+    assert.equal((await verifyPublicRead('https://x/o', { fetchImpl: at(206) })).ok, true)
+
+    const denied = async () => new Response(
+      '<Error><Code>AccessDenied</Code><Message>Access Denied</Message></Error>', { status: 403 })
+    const v = await verifyPublicRead('https://x/o', { fetchImpl: denied })
+    assert.equal(v.ok, false, '403 必须判为"公开读没生效"')
+    assert.equal(v.status, 403)
+    assert.match(v.detail, /AccessDenied/, '要把服务端的原话带出来')
+  })
+
+  test('⑳ verifyPublicRead：网络异常也算失败（不能静默当成通过）', async () => {
+    const boom = async () => { throw new TypeError('fetch failed') }
+    const v = await verifyPublicRead('https://x/o', { fetchImpl: boom })
+    assert.equal(v.ok, false)
+    assert.equal(v.status, null)
+    assert.match(v.detail, /fetch failed/)
+  })
+
+  test('㉑ verifyPublicRead 用 GET（HEAD 没有响应体，读不到错误原话）', async () => {
+    let seen = null
+    const spy = async (url, init) => { seen = init; return new Response('', { status: 200 }) }
+    await verifyPublicRead('https://x/o', { fetchImpl: spy })
+    assert.equal(seen.method, 'GET', '必须用 GET：HEAD 出错时拿不到服务端原话')
   })
 })

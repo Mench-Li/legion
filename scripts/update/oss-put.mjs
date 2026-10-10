@@ -283,6 +283,34 @@ export function judgeProbe({ status, text = '' }) {
   return { ok: false, message: `HTTP ${status}：${why}`, hint: null }
 }
 
+/**
+ * 匿名读一次对象 —— **不带任何签名**，就是用户点开链接时的那个请求。
+ *
+ * 这是"公开读到底有没有生效"的**唯一**判据。上传返回 200 不算，因为
+ * 服务端会接受 `x-amz-acl: public-read` 却不执行它（实测京东云如此）。
+ *
+ * @returns {{ok: boolean, status: number|null, detail: string}}
+ */
+export async function verifyPublicRead(url, { timeoutMs = 20_000, fetchImpl = globalThis.fetch } = {}) {
+  try {
+    // 用 GET + range 而不是 HEAD：HEAD 没有响应体，出错时拿不到服务端原话
+    // （同一个教训见 `--probe` 那段注释）。
+    const res = await fetchImpl(url, {
+      method: 'GET',
+      headers: { Range: 'bytes=0-0' },
+      signal: AbortSignal.timeout(timeoutMs),
+    })
+    const text = res.ok ? '' : await res.text().catch(() => '')
+    return {
+      ok: res.ok,
+      status: res.status,
+      detail: res.ok ? '' : describeS3Error(text),
+    }
+  } catch (error) {
+    return { ok: false, status: null, detail: `${error?.name ?? 'Error'}: ${error?.message ?? error}` }
+  }
+}
+
 function parseArgs(argv) {
   const args = new Map()
   for (let i = 0; i < argv.length; i += 1) {
@@ -376,6 +404,8 @@ export function selfCheckOssPut() {
   // 路径式 URL。
   const u = buildUrl('https://s3.cn-north-1.jdcloud-oss.com/', 'b', 'releases/r/x.exe')
   if (u.url !== 'https://s3.cn-north-1.jdcloud-oss.com/b/releases/r/x.exe') problems.push(`buildUrl 不符：${u.url}`)
+  // 无桶路径：不许拼出字面量 undefined（见 buildUrl 的注释）。
+  if (buildUrl('https://e', undefined).canonicalUri !== '/') problems.push('无 bucket 时没有走无桶路径')
   return Object.freeze({ ok: problems.length === 0, problems: Object.freeze(problems) })
 }
 
@@ -429,12 +459,16 @@ if (isMain) {
   if (args.get('create-bucket') === 'true') {
     // S3 的 CreateBucket = `PUT /<bucket>`。建完**立刻回读**一次：
     // 只信 PUT 的返回码，会让"建了但不可见"与"建好了"看起来一样。
-    const created = await ossRequest({ ...common, method: 'PUT', timeoutMs: 30_000 })
+    //
+    // ★ `--public-read` 在**建桶时**才有效（实测，见 `verifyPublicRead` 的注释）。
+    const createHeaders = args.get('public-read') === 'true' ? { publicRead: true } : {}
+    const created = await ossRequest({ ...common, method: 'PUT', timeoutMs: 30_000, ...createHeaders })
     process.stdout.write(`PUT /${bucket} → HTTP ${created.status}`
       + `${created.ok ? '' : `：${describeS3Error(created.text)}`}\n`)
     const check = await ossRequest({ ...common, method: 'GET', timeoutMs: 20_000 })
     if (check.ok) {
-      process.stdout.write(`✔ 桶已就绪（回读 GET → ${check.status}）\n`)
+      process.stdout.write(`✔ 桶已就绪（回读 GET → ${check.status}）`
+        + `${args.get('public-read') === 'true' ? '，且建桶时请求了公开读' : ''}\n`)
       process.exit(0)
     }
     process.stderr.write(`✖ 回读失败（HTTP ${check.status}）：${describeS3Error(check.text)}\n`)
@@ -460,11 +494,37 @@ if (isMain) {
     timeoutMs: 30 * 60_000,
   })
   const sec = (Date.now() - started) / 1000
-  if (r.ok) {
-    process.stdout.write(`✔ HTTP ${r.status}，用时 ${sec.toFixed(1)}s`
-      + `（${(stat.size / sec / 1048576).toFixed(2)} MB/s）\n`)
-    process.exit(0)
+  if (!r.ok) {
+    process.stderr.write(`✖ HTTP ${r.status}：${describeS3Error(r.text)}\n`)
+    process.exit(1)
   }
-  process.stderr.write(`✖ HTTP ${r.status}：${describeS3Error(r.text)}\n`)
-  process.exit(1)
+  process.stdout.write(`✔ HTTP ${r.status}，用时 ${sec.toFixed(1)}s`
+    + `（${(stat.size / sec / 1048576).toFixed(2)} MB/s）\n`)
+
+  // ★ 上传返回 200 **不等于**用户能下载。
+  //
+  //   实测（2026-10-10，京东云 OSS）：上传时带 `x-amz-acl: public-read`、
+  //   服务端**返回 200**，而匿名读该对象仍然是 **403 AccessDenied**。
+  //   京东云忽略对象级 ACL —— 公开读**只能在建桶时**设定（`--create-bucket
+  //   --public-read`），建完之后再用 `PutBucketAcl` / `PutBucketPolicy` 改，
+  //   子账号会拿到 403（权限与"能不能改"是两件事）。
+  //
+  //   > 一个"发了个看起来对的头就认为设置成功"的工具，
+  //   > 与一个"真的验过匿名能不能读"的工具，差别在**用户点开链接的那一刻**——
+  //   > 而不是在上传返回 200 的那一刻。
+  if (publicRead) {
+    const v = await verifyPublicRead(`${endpoint}/${bucket}/${key}`)
+    if (v.ok) {
+      process.stdout.write(`✔ 公开读已生效（匿名 ${v.status}，实测可访问）\n`)
+      process.exit(0)
+    }
+    process.stderr.write(`✖ 上传成功，但**公开读没有生效**：匿名访问返回 ${v.status}`
+      + `${v.detail ? `（${v.detail}）` : ''}\n`)
+    process.stderr.write('  京东云**忽略对象级 ACL**：`x-amz-acl: public-read` 会被接受但不起作用。\n'
+      + '  公开读只能在**建桶时**设定： `--create-bucket --public-read`。\n'
+      + '  桶已存在时：删掉重建（`--delete-bucket` 需先清空），或在控制台把桶改为「公有读私有写」。\n'
+      + '  ⚠️ 不要选「公有读写」——那等于任何人都能往桶里传文件。\n')
+    process.exit(1)
+  }
+  process.exit(0)
 }

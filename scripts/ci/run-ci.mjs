@@ -3321,7 +3321,18 @@ async function stageTest() {
       //        新文件的 ACE 继承自目录 ⇒ 每一次写入都会重置上一次的加固；
       //     ② 全新安装上第一次写入**必然**发生在"文件还不存在 ⇒ 没加固过"之后。
       label: 'secret-admin（spec §6.7 凭证管理的写一半：新增/更新/轮换/删除、fail closed、每次写完复核 ACL）',
-      files: ['team-hub/secret-admin.test.mjs'],
+      files: [
+        'team-hub/secret-admin.test.mjs',
+        // ★ 合并 w/T-196 时补登记。`89e5b73a`（让密钥库在托管部署下真的能用）
+        //   **新增**了这个文件却没有登记任何套件 —— 正是本文件 5097 行警告的那件事：
+        //   "新写一个 `team-hub/xxx.test.mjs` 而忘记登记，它**永远不会跑**"。
+        //
+        //   它守的是一条**真实故障**的回归：托管进程解析不出产品目录 → 面板里填密钥
+        //   报 `SECRETS_LAYOUT_BLOCKED`（`INSTALL_DIR_UNRESOLVED` /
+        //   `PRODUCT_HOME_UNRESOLVED`），而桌面壳那边一直正常。
+        //   实测 5/5 通过；未登记时完备性判据在 main 上必红。
+        'team-hub/product-layout.test.mjs',
+      ],
       cwd: ROOT,
     },
   {

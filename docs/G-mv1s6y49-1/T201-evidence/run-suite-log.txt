@@ -1,0 +1,91 @@
+﻿# T-201 套件执行日志  node=v24.19.0  HEAD=c1ec9496
+===== workbench/scripts/agent-avatar.test.mjs =====
+ℹ tests 9
+ℹ suites 1
+ℹ pass 9
+ℹ fail 0
+EXIT=0
+===== team-hub/scripts/seed-roster.test.mjs =====
+ℹ tests 6
+ℹ suites 0
+ℹ pass 6
+ℹ fail 0
+EXIT=0
+===== team-hub/agent-identity-tokens.test.mjs =====
+ℹ tests 9
+ℹ suites 0
+ℹ pass 9
+ℹ fail 0
+EXIT=0
+===== workbench/scripts/agent-avatar-surfaces.test.mjs =====
+ℹ tests 5
+ℹ suites 1
+ℹ pass 5
+ℹ fail 0
+EXIT=0
+===== workbench/scripts/agent-avatar-settings.test.mjs =====
+ℹ tests 6
+ℹ suites 1
+ℹ pass 6
+ℹ fail 0
+EXIT=0
+===== workbench/mobile/avatar-parity.test.mjs =====
+ℹ tests 6
+ℹ suites 1
+ℹ pass 6
+ℹ fail 0
+EXIT=0
+===== team-hub/agent-intake-routes.test.mjs =====
+ℹ tests 21
+ℹ suites 0
+ℹ pass 21
+ℹ fail 0
+EXIT=0
+===== team-hub/team-views-routes.test.mjs =====
+ℹ tests 17
+ℹ suites 0
+ℹ pass 17
+ℹ fail 0
+EXIT=0
+===== team-hub/read-models-routes.test.mjs =====
+ℹ tests 25
+ℹ suites 0
+ℹ pass 25
+ℹ fail 0
+EXIT=0
+===== workbench/scripts/doc-render.test.mjs =====
+ℹ tests 11
+ℹ suites 4
+ℹ pass 11
+ℹ fail 0
+EXIT=0
+===== workbench/scripts/identity-gate.test.mjs =====
+ℹ tests 19
+ℹ suites 4
+ℹ pass 19
+ℹ fail 0
+EXIT=0
+===== workbench/scripts/sw-shell.test.mjs =====
+ℹ tests 7
+ℹ suites 1
+ℹ pass 7
+ℹ fail 0
+EXIT=0
+===== workbench/mobile/board.test.mjs =====
+ℹ tests 21
+ℹ suites 0
+ℹ pass 21
+ℹ fail 0
+EXIT=0
+===== workbench/mobile/timeline.test.mjs =====
+ℹ tests 16
+ℹ suites 0
+ℹ pass 16
+ℹ fail 0
+EXIT=0
+===== workbench/mobile/refresh-loop.test.mjs =====
+ℹ tests 6
+ℹ suites 0
+ℹ pass 6
+ℹ fail 0
+EXIT=0

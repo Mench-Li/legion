@@ -47,13 +47,24 @@ function jsonResponse(body) {
   return new Response(JSON.stringify(body), { status: 200, headers: { 'content-type': 'application/json' } })
 }
 
-/** 假 hub：/api/spaces + /api/pipeline?scope=…&include=active；data 可变以模拟数据面变化。 */
+/** 假 hub：/api/spaces + /api/pipeline?scope=…&include=active；data 可变以模拟数据面变化。
+ *
+ *  ★★ BUG-017（2026-10-10）：`/api/spaces` 的响应形状原来是**裸数组** `[...]`，
+ *  而真实中枢返回的是**对象** `{ spaces: [...] }`。于是这一整套端到端用例
+ *  （它本来是唯一能覆盖 `fetchSpaceViews` 的地方）一直在给错误形状放行：
+ *
+ *  > 一组夹具喂进去的是"我以为中枢会返回的形状"，
+ *  > 与一组夹具喂进去的是"中枢真的返回的形状"，在两者都绿的时候是同一个东西——
+ *  > 差别只在真机上那一次。
+ *
+ *  现在按**真实形状**喂（`{ spaces: [...] }`），与同一个仓另外两个读取者的假设一致。
+ */
 function stubHub(initial) {
   const state = { spaces: initial }
   const original = globalThis.fetch
   globalThis.fetch = async (url) => {
     const href = String(url)
-    if (href.includes('/api/spaces')) return jsonResponse(state.spaces.map(s => ({ id: s.id })))
+    if (href.includes('/api/spaces')) return jsonResponse({ spaces: state.spaces.map(s => ({ id: s.id })) })
     const m = /\/api\/pipeline\?scope=([^&]+)/.exec(href)
     if (m !== null) {
       const s = state.spaces.find(x => x.id === decodeURIComponent(m[1]))

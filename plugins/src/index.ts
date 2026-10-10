@@ -3909,16 +3909,37 @@ export function planSpaceRunners(parent: Config, spaces: SpaceRuntimeView[]): Co
   return out
 }
 
-/** 读数据面：空间清单 + 各自执行配置（hubUrl 为空 = 非 hub 模式 → 空数组）。 */
-async function fetchSpaceViews(config: Config): Promise<SpaceRuntimeView[]> {
+/** 读数据面：空间清单 + 各自执行配置（hubUrl 为空 = 非 hub 模式 → 空数组）。
+ *
+ *  ★★ BUG-017（2026-10-10 实测）：真实中枢返回的是**对象** `{ spaces: [...] }`，不是数组。
+ *
+ *  从前这里写的是 `for (const item of Array.isArray(list) ? list : [])` ——
+ *  于是循环**一次都不转**，`views` 永远是空数组 ⇒ `planSpaceRunners` 算出 0 个子实例
+ *  ⇒ **一个空间都不接管**；而且因为 `skipped` 也是空的，**一行日志都不打**。
+ *  监督者看起来"活着"（每 30s 还在跑），却什么也没做，也没有任何东西可查。
+ *
+ *  > 一个"读错了响应形状"的读取器，
+ *  > 与一个"这台机器上没有空间"的读取器，在下游是同一个东西——
+ *  > 只不过前者会在每一轮都安静地重犯一次。
+ *
+ *  同一个仓里另外两个 `/api/spaces` 的读取者（`workspace.ts` 的 `refreshSpaceBinding`、
+ *  `mediation.ts` 的 `refreshSpaceRepos`）写的都是 `data.spaces ?? []` —— **只有这一处不一致**。
+ *  两种形状都收：数组（兼容老夹具）+ `{spaces:[...]}`（真实数据面）。
+ *
+ *  导出是为了能被单测（它是这一族里唯一做 I/O 的一环，而它从前**没有**任何判据）。
+ */
+export async function fetchSpaceViews(config: Config): Promise<SpaceRuntimeView[]> {
   const hub = config.hubUrl.replace(/\/+$/, '')
   if (hub === '') return []
   const headers: Record<string, string> = config.hubToken !== '' ? { authorization: `Bearer ${config.hubToken}` } : {}
   const res = await fetch(`${hub}/api/spaces`, { headers, signal: AbortSignal.timeout(5000) })
   if (!res.ok) throw new Error(`hub /api/spaces 失败（${res.status}）`)
-  const list = await res.json() as unknown
+  const raw = await res.json() as unknown
+  const list: unknown[] = Array.isArray(raw)
+    ? raw
+    : (Array.isArray((raw as { spaces?: unknown })?.spaces) ? (raw as { spaces: unknown[] }).spaces : [])
   const out: SpaceRuntimeView[] = []
-  for (const item of Array.isArray(list) ? list : []) {
+  for (const item of list) {
     const id = typeof (item as { id?: unknown })?.id === 'string' ? (item as { id: string }).id : ''
     if (id === '') continue
     const view: SpaceRuntimeView = { id, enabled: false, stages: 0 }
@@ -3981,6 +4002,8 @@ function superviseSpaces(ctx: AppContext, config: Config): void {
   type MountedRunner = { dispose: () => void; signature: string }
   const mounted = new Map<string, MountedRunner>()
   let reconciling = false
+  /** ★ BUG-017：空视图只喊一次（每 30s 重复喊会把日志淹掉，而"喊过一次"就够定位了）。 */
+  let loggedEmptyViews = false
 
   const mountRunner = (child: Config): MountedRunner => {
     const plugin = { name: `${name}:space:${child.scope}`, inject, apply: spaceWorker }
@@ -4010,6 +4033,18 @@ function superviseSpaces(ctx: AppContext, config: Config): void {
     reconciling = true
     try {
       const views = await fetchSpaceViews(config)
+      // ★ BUG-017：**空视图必须说出来**。从前这里什么都不打，于是"读不到空间"与
+      //   "这台机器上没有空间"在日志里长得一模一样 —— 那次缺陷就是这样活了不知多久：
+      //   监督者每 30s 准时跑、准时读、准时算出 0 个执行器，而日志里一行都没有。
+      if (views.length === 0) {
+        if (!loggedEmptyViews) {
+          loggedEmptyViews = true
+          log(`数据面没有读到任何空间（hub=${config.hubUrl}）——本轮不接管任何执行器；`
+            + '检查 hubUrl / 鉴权 / 中枢是否已启动（本行只喊一次）')
+        }
+      } else {
+        loggedEmptyViews = false
+      }
       const desired = planSpaceRunners(config, views)
       const desiredScopes = new Set(desired.map(c => c.scope))
 

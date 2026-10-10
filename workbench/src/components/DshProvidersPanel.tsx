@@ -105,6 +105,8 @@ export function DshProvidersPanel(): React.JSX.Element {
 
   async function save(): Promise<void> {
     setBusy(true); setError(''); setNotice('')
+    // 服务端会告诉我们这次是"新建"还是"复活了一条同名墓碑"（见下面的 setNotice）
+    let revived = false
     try {
       const id = form.provider.trim()
       if (!/^[a-z][a-z0-9_-]*$/.test(id)) throw new Error('供应商 ID 须以小写字母开头，仅包含小写字母、数字、横线或下划线。')
@@ -130,11 +132,19 @@ export function DshProvidersPanel(): React.JSX.Element {
         credentialConfigured: Boolean(form.key) || editing?.credentialConfigured === true,
         models: ids.map(modelId => editing?.models.find(m => m.id === modelId) ?? { id: modelId }),
       }
-      if (editing) await hubRequest('POST', `/api/model-providers/${encodeURIComponent(id)}`, { actor: 'general', version: editing.version, provider })
-      else await hubRequest('POST', '/api/model-providers', { actor: 'general', provider })
+      if (editing) {
+        await hubRequest('POST', `/api/model-providers/${encodeURIComponent(id)}`, { actor: 'general', version: editing.version, provider })
+      } else {
+        // ★ 同名墓碑会**复活**（服务端返回 `revived`）。说"已恢复"而不是"已保存"：
+        //   用户刚做过一次删除，他需要知道"那条又回来了"，而不是"又新建了一条"。
+        const created = await hubRequest('POST', '/api/model-providers', { actor: 'general', provider }) as { revived?: boolean }
+        revived = created?.revived === true
+      }
 
       setForm(empty); setOpen(false); setEditing(null)
-      setNotice('供应商已保存到模型库，运行时会在下一轮同步给引擎。')
+      setNotice(revived
+        ? '已**恢复**同名供应商（它此前被删除过），运行时会在下一轮同步给引擎。'
+        : '供应商已保存到模型库，运行时会在下一轮同步给引擎。')
       await load()
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e))

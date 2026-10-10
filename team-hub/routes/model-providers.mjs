@@ -57,7 +57,14 @@ export function createModelProvidersRoutes({ json, handleRun, providerStore, dis
       async run(req, res) {
         // 建一条：面板的"保存"。`source` 固定为 `legion`（**用户表达意图**），
         // 不接受调用方指定成 `dsh-import` —— 那会把"我建的"伪装成"从 DSH 抄来的"。
-        await handleRun(req, res, (body) => providerStore.create(body.provider ?? body, { actor: body.actor }))
+        //
+        // ★ 同名墓碑会**复活**（不是 409）：删掉一个从 DSH 导入的供应商、再加回来，
+        //   是用户的正常动作；拒绝只会逼他发明 `xxx-1` 这种与 DSH 配置 id 不一致的别名。
+        //   响应里带 `revived`，好让面板说"已恢复"而不是"已创建"。
+        await handleRun(req, res, (body) => {
+          const r = providerStore.create(body.provider ?? body, { actor: body.actor })
+          return { ...r.provider, revived: r.revived }
+        })
       },
     },
     {

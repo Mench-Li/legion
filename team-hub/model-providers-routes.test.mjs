@@ -228,11 +228,53 @@ test('⑪ ★ 面板的写入路径：建 → 改（带版本）→ 删（立墓
   assert.notEqual(row.deleted_at_ms, null, '是**墓碑**，不是 DELETE 掉那一行（历史可能还记着这个引用）')
   assert.equal(Number(row.version), 3)
 
-  // 删过的 id 不许重用
+  // 删过的 id 可以**加回来**（复活，见 ⑪b）—— 这条曾经断言 409，那个断言钉的是错的行为
   const reuse = await post('/api/model-providers', {
-    actor: 'general', provider: { id: 'panel-ds', displayName: '重名', api: 'openai-completions', baseURL: 'https://p.example/v1' },
+    actor: 'general', provider: { id: 'panel-ds', displayName: '重名回来了', api: 'openai-completions', baseURL: 'https://p.example/v1', models: [{ id: 'pm1' }] },
   })
-  assert.equal(reuse.status, 409, '删过的 id 不许重用（历史里那个引用会指向另一个供应商）')
+  assert.equal(reuse.status, 200, '删过的同名必须能加回来，否则用户只能发明 panel-ds-1 这种与 DSH 配置 id 不一致的别名')
+  assert.equal(reuse.body.revived, true)
+})
+
+test('⑪b ★ 同名墓碑**复活**（且与"从 DSH 导入"那条路给出同一个答案）', async () => {
+  // 业主实测（2026-10-09）：svea-ds 从 DSH 导入 → 被删（墓碑）→ 想加回来被 409 拒
+  // ⇒ 只好建成 svea-ds-1。而**同一个文件里的导入路径对墓碑本来是复活**的。
+  //   一个"从 DSH 抄回来的同名会复活、我自己点出来的同名被拒绝"的规则，不是规则，是运气。
+  const now = Date.now()
+  mod.db.prepare(
+    `INSERT INTO model_providers (id, display_name, models_json, source, version, created_at_ms, updated_at_ms, deleted_at_ms)
+     VALUES (?,?,?,?,?,?,?,?)`,
+  ).run('revive-ds', '旧的', '[]', 'dsh-import', 2, now, now, now)
+
+  const revived = await post('/api/model-providers', {
+    actor: 'general',
+    provider: { id: 'revive-ds', displayName: '回来的', api: 'openai-completions', baseURL: 'https://r.example/v1', models: [{ id: 'rm1' }] },
+  })
+  assert.equal(revived.status, 200, JSON.stringify(revived.body))
+  assert.equal(revived.body.revived, true, '要显式告诉调用方这是**恢复**，好让它说"已恢复"而不是"已创建"')
+  assert.equal(revived.body.version, 3, '复活要推进 version（它确实变了），而不是回到 1')
+  assert.equal(revived.body.source, 'legion', '复活之后来源是**用户意图**（他刚在面板上建的）')
+  assert.equal((await get('/api/model-providers')).body.providers.some((p) => p.id === 'revive-ds'), true)
+
+  // 反向：**活着**的同名仍然是 409（那不是"想建"，是"想改"）
+  const dupLive = await post('/api/model-providers', {
+    actor: 'general', provider: { id: 'revive-ds', displayName: 'x', api: 'openai-completions', baseURL: 'https://r.example/v1' },
+  })
+  assert.equal(dupLive.status, 409, '活着的同名必须拒 —— 否则并发保存会静默覆盖')
+  assert.match(JSON.stringify(dupLive.body), /已存在/)
+
+  // 审计要能分辨"复活"与"首次创建"（审计表把这条 id 记在 `taskId` 列里）
+  const actions = mod.db.prepare("SELECT action FROM audit WHERE taskId='revive-ds' GROUP BY action").all()
+  assert.deepEqual(actions.map((a) => a.action).sort(), ['model-provider.revive'],
+    '复活要留 `revive` 这条痕（原来那条"保护历史引用"的顾虑换到审计里实现）')
+
+  // 被删的那条**不能直接编辑**，但错误信息要告诉用户怎么恢复
+  mod.db.prepare('UPDATE model_providers SET deleted_at_ms=? WHERE id=?').run(Date.now(), 'revive-ds')
+  const editDeleted = await post('/api/model-providers/revive-ds', {
+    actor: 'general', version: 3, provider: { id: 'revive-ds', displayName: 'y', api: 'openai-completions', baseURL: 'https://r.example/v1' },
+  })
+  assert.equal(editDeleted.status, 409)
+  assert.match(JSON.stringify(editDeleted.body), /恢复/)
 })
 
 test('⑫ 改/删都要 actor 与 version；缺了就具名拒绝', async () => {

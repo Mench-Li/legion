@@ -350,7 +350,27 @@ export function renderVersionManifest(result) {
   //   所以这里是"先攒成一个条目数组、再 `join(',\n')`"，
   //   而不是"逐行输出、每行带逗号"：后者一定会在最后一行留下尾逗号，
   //   而尾逗号与合法 JSON 之间差的正是**所有消费者**（不是格式美观）。
+  //
+  // ★★ 必须写 `manifestFormat` —— 少了它，这份产物**装不进去**。
+  //
+  //   第一版漏了它，理由写在下面那句"八个 spec 字段一个不少"里：
+  //   `manifestFormat` 是**格式标记**、不算 §9.1 的八个字段之一，于是渲染器
+  //   只渲染了 `fieldSources` 那八个。结果：
+
+  //     buildVersionManifest(...)  → ok = true（它自己造的清单里有 manifestFormat）
+  //     renderVersionManifest(...) → 解析得回来、注释齐全、八个字段齐全
+  //     validateManifest(那份产物) → **ok = false**
+  //       manifest-field-missing: manifestFormat —— 清单格式版本是 undefined
+
+  //   而"合法 JSON"与"能被消费的清单"是两件事：
+  //
+  //   > 一个"渲染得出来、也 JSON.parse 得回来"的清单，
+  //   > 与一个"装的时候真的会被接受"的清单，在渲染器自己的用例里是同一个东西——
+  //   > 只不过前者的绿来自只断言了"是合法 JSON"，而消费者问的是另一个问题。
+  //
+  //   所以它必须在这里、排在最前：消费者第一件事就是问"你是哪种格式"。
   const entries = [
+    `  "manifestFormat": ${JSON.stringify(MANIFEST_FORMAT)}`,
     '  "_generated": "product/launcher/runtime-manifest.mjs 生成 —— 不要手工编辑；'
       + '改了请走 buildVersionManifest() 重新生成"',
     `  "_fieldSources": ${JSON.stringify(Object.fromEntries(
@@ -361,6 +381,12 @@ export function renderVersionManifest(result) {
       const rendered = typeof v === 'string' ? JSON.stringify(v) : String(v)
       return `  ${JSON.stringify(f.field)}: ${rendered}`
     }),
+    // `releasedAt` 同样**不是**八个 spec 字段之一，但它在清单里 ——
+    // 装的时候要拿它做"这份清单是什么时候出的"。与 `buildVersionManifest`
+    // 的条件展开一致：给了才写，没给就不写（不编一个时间）。
+    ...(result.manifest.releasedAt === undefined
+      ? []
+      : [`  "releasedAt": ${JSON.stringify(result.manifest.releasedAt)}`]),
   ]
   return `{\n${entries.join(',\n')}\n}\n`
 }

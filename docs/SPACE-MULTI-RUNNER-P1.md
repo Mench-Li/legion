@@ -90,9 +90,23 @@ legion-scrum-worker (scopes: 'auto')          ← 监督者：只做编排
 
 | 阶段 | 内容 | 状态 |
 | --- | --- | --- |
-| P1-a | 监督者 + 子实例挂载/卸载/重启 diff；`scopes` 配置面；`space_runtime` 下发；per-scope 状态文件与日志；`daemon.json` 兼容归属 | ✅ 已交付（`plugins/tests/multi-space.test.mjs` 11 项 + `multi-space-supervisor.test.mjs` 7 项） |
+| P1-a | 监督者 + 子实例挂载/卸载/重启 diff；`scopes` 配置面；`space_runtime` 下发；per-scope 状态文件与日志；`daemon.json` 兼容归属 | ⚠️ **已交付但直到 2026-10-10 在真机上从未生效**，见下（`plugins/tests/multi-space.test.mjs` 17 项 + `multi-space-supervisor.test.mjs` 7 项） |
 | P1-b | 每空间 `control.json`（暂停/继续按空间）；per-scope 心跳与看板聚合（读 `daemon-<scope>.json` 汇总成一张「守护矩阵」） | 待做 |
 | P1-c | 指挥台一键开通/停用空间（写 `space_runtime.enabled`）+ 预览「谁会接管」；彻底去掉 profile 行依赖 | 待做 |
+
+### ★ P1-a 的一次重要更正（2026-10-10，BUG-017）
+
+这一项的判据（11 项单元 + 7 项端到端）**全部通过**，但它交付后第一次在真机上跑，
+结果是"一个空间都不接管、而且一行日志都不打"。根因不在监督者逻辑，而在**读取器**：
+`fetchSpaceViews` 读 `GET /api/spaces` 时只认数组，而真实中枢返回 `{ spaces: [...] }`。
+
+- 单元套件测的是纯函数 `planSpaceRunners`（喂进去的 `views` 是手工造的数组）；
+- 端到端套件的假 hub 喂的也是**裸数组**。
+
+所以这套"绿"证明的是"我以为中枢会返回什么"，而不是"中枢真的返回什么"。
+修法（形状兼容 + 空视图必须喊话 + **夹具改成真实形状**）与判据见
+[`docs/bugs/BUG-017-多空间守护一声不响地不接管.md`](./bugs/BUG-017-多空间守护一声不响地不接管.md)。
+修好之后那 7 项端到端用例才第一次真正覆盖真机形状（实测：把形状改回去，6/7 立刻红）。
 
 **P1-b 的动机**（P1-a 之后仍然存在的缺口）：暂停仍是全局的（`control.json` 一份，任一子实例读到都会停），
 看板只显示主 scope 的守护状态——多空间部署下需要「守护矩阵」才能一眼看到哪个空间在跑、并发多少、卡在哪。

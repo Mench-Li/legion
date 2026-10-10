@@ -2,7 +2,7 @@ import assert from 'node:assert/strict'
 import { join } from 'node:path'
 import test from 'node:test'
 
-import { childLogFile, isSupervisor, planSpaceRunners, statusFileNames } from '../lib/index.js'
+import { childLogFile, fetchSpaceViews, isSupervisor, planSpaceRunners, statusFileNames } from '../lib/index.js'
 
 /**
  * SP-P1 多空间编排：监督者的**决策**是纯函数，这里逐条钉住它的边界。
@@ -97,4 +97,116 @@ test('TC-SP-P1-11 监督者判定：缺省/off = 单空间（未校验的手工�
   assert.equal(isSupervisor(config({ scopes: 'off' })), false)
   assert.equal(isSupervisor(config({ scopes: 'auto' })), true)
   assert.equal(isSupervisor(config({ scopes: ['ozon'] })), true)
+})
+
+// ============================================================================
+// ★★ BUG-017：`fetchSpaceViews` 曾经读错响应形状（2026-10-10 实测）
+// ----------------------------------------------------------------------------
+// 真实中枢 `GET /api/spaces` 返回的是**对象** `{ spaces: [...] }`，而它从前写的是
+// `Array.isArray(list) ? list : []` ⇒ 循环一次都不转 ⇒ views 恒为空 ⇒
+// **一个空间都不接管**，而且 skipped 也是空的 ⇒ **一行日志都不打**。
+//
+// 上面 TC-SP-P1-01..11 全部只测纯函数 `planSpaceRunners`，逐条通过 ——
+// 因为它们喂进去的 `views` 是**手工造的数组**，而做 I/O 的那一环从来没有判据。
+//
+//   > 一组夹具喂进去的是"我以为中枢会返回的形状"，
+//   > 与一组夹具喂进去的是"中枢真的返回的形状"，在两者都绿的时候是同一个东西。
+//
+// 这一组用**替身 fetch** 喂进真实形状（照 `acceptance.test.mjs` 的 stubFetch 写法）。
+// ============================================================================
+
+/** 真实的 fetch：替身要还原到的那个（不是"上一个替身"）。 */
+const REAL_FETCH = globalThis.fetch
+
+/** 用替身 fetch 跑一次，结束后一定还原（`t.after`）。 */
+function withFetch(t, handler) {
+  globalThis.fetch = async (url, init) => handler(String(url), init)
+  t.after(() => { globalThis.fetch = REAL_FETCH })
+}
+
+const jsonResponse = (body, { ok = true, status = 200 } = {}) => ({
+  ok, status, json: async () => body,
+})
+
+/** 真实中枢的形状：**对象**，不是数组。 */
+const HUB_SPACES_PAYLOAD = {
+  spaces: [
+    { id: 'default', name: '我的空间', localDir: '', agentCount: 3 },
+    { id: 'software', name: '软件流水线', localDir: 'D:\\project\\DSH\\legion', agentCount: 8 },
+    { id: 'ozon', name: 'Ozon 跨境电商', localDir: 'D:\\project\\DSH\\shop', agentCount: 11 },
+  ],
+}
+
+test('★ TC-SP-P1-12 `fetchSpaceViews` 必须认得真实形状 `{spaces:[...]}`（BUG-017 的回归判据）', async (t) => {
+  const seen = []
+  withFetch(t, (url) => {
+    seen.push(url)
+    if (url.endsWith('/api/spaces')) return jsonResponse(HUB_SPACES_PAYLOAD)
+    if (url.includes('/api/pipeline?scope=software')) return jsonResponse({ runtime: { enabled: true, maxWorkers: 2, isolate: true }, activeRoles: ['a', 'b'] })
+    if (url.includes('/api/pipeline?scope=ozon')) return jsonResponse({ runtime: { enabled: true }, activeRoles: ['a'] })
+    return jsonResponse({ runtime: { enabled: false }, activeRoles: [] })
+  })
+
+  const views = await fetchSpaceViews(config())
+  assert.equal(views.length, 3,
+    '★ 从前这里是 0 —— 真实响应是对象，而它只认数组。0 个视图 ⇒ 不挂载任何子实例、且一行日志都不打')
+  assert.deepEqual(views.map(v => v.id), ['default', 'software', 'ozon'], '顺序按数据面返回顺序')
+  assert.equal(views.find(v => v.id === 'software').enabled, true)
+  assert.equal(views.find(v => v.id === 'software').stages, 2, 'stages 取 activeRoles 长度')
+  assert.equal(views.find(v => v.id === 'software').maxWorkers, 2, '执行配置随视图下发')
+  assert.equal(views.find(v => v.id === 'default').enabled, false)
+  assert.ok(seen.some(u => u.includes('/api/pipeline?scope=software&include=active')),
+    '每个空间都要问一次流水线（带 include=active）')
+})
+
+test('★ TC-SP-P1-13 裸数组形状仍然收（兼容老夹具/老数据面）', async (t) => {
+  withFetch(t, (url) => url.endsWith('/api/spaces')
+    ? jsonResponse(HUB_SPACES_PAYLOAD.spaces)
+    : jsonResponse({ runtime: { enabled: true }, activeRoles: ['a'] }))
+  const views = await fetchSpaceViews(config())
+  assert.deepEqual(views.map(v => v.id), ['default', 'software', 'ozon'])
+})
+
+test('★ TC-SP-P1-14 认不出的形状 → 空数组（fail closed，且不抛）', async (t) => {
+  for (const body of [{}, { spaces: null }, { spaces: 'nope' }, null, 42]) {
+    withFetch(t, () => jsonResponse(body))
+    const views = await fetchSpaceViews(config())
+    assert.deepEqual(views, [], `形状 ${JSON.stringify(body)} 应当得到空数组而不是崩掉`)
+  }
+})
+
+test('★ TC-SP-P1-15 hubUrl 为空 → 不发请求（非 hub 模式）', async (t) => {
+  let called = 0
+  withFetch(t, () => { called += 1; return jsonResponse({}) })
+  assert.deepEqual(await fetchSpaceViews(config({ hubUrl: '' })), [])
+  assert.equal(called, 0, '非 hub 模式不许打网络')
+})
+
+test('★ TC-SP-P1-16 同一仓里三个 `/api/spaces` 读取者必须认同一个形状（静态判据）', async () => {
+  // 这一条守的是"下次又有人只按数组解析"：三个读取者里任何一个读错，症状都是**静默**的。
+  const { readFileSync } = await import('node:fs')
+  const root = new URL('..', import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, '$1')
+  const files = ['index.ts', 'workspace.ts', 'mediation.ts']
+  for (const f of files) {
+    const src = readFileSync(join(root, 'src', f), 'utf8').replace(/\/\*[\s\S]*?\*\//g, '')
+    assert.equal(src.includes('Array.isArray') && /Array\.isArray\(list\)\s*\?\s*list\s*:\s*\[\]/.test(src), false,
+      `${f} 里出现了"只认数组"的解析写法 —— 真实数据面是 { spaces: [...] }`)
+  }
+  const indexSrc = readFileSync(join(root, 'src', 'index.ts'), 'utf8')
+  assert.match(indexSrc, /\.spaces/, 'index.ts 的读取器要认得 `spaces` 字段')
+  for (const f of ['workspace.ts', 'mediation.ts']) {
+    assert.match(readFileSync(join(root, 'src', f), 'utf8'), /\.spaces/, `${f} 也要认得 \`spaces\` 字段`)
+  }
+})
+
+test('★ TC-SP-P1-17 空视图必须**说出来**（"没读到空间"与"没有空间"不许长得一样）', async () => {
+  // BUG-017 之所以活了不知多久，一半是因为读错形状，另一半是因为**它一声不响**：
+  // 监督者每 30s 准时跑、准时算出 0 个执行器，而日志里一行都没有。
+  const { readFileSync } = await import('node:fs')
+  const root = new URL('..', import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, '$1')
+  const src = readFileSync(join(root, 'src', 'index.ts'), 'utf8')
+  assert.match(src, /views\.length === 0/, '要在 reconcile 里显式处理空视图')
+  assert.match(src, /数据面没有读到任何空间/, '空视图要打一句能定位的话（含 hub 地址）')
+  // 而且只喊一次：每 30s 重复喊会把日志淹掉，而"喊过一次"就够定位了
+  assert.match(src, /loggedEmptyViews/, '要有"只喊一次"的闸门')
 })

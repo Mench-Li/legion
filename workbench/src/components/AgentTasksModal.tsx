@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import { fetchAgentModels, fetchHubTasks, MODEL_OPTIONS } from '../api'
 import type { CardStatus, HubTask, RosterAgent } from '../types'
 import { tasksForRosterAgent } from '../scene/agentOwnership'
+import { AgentAvatar } from '../avatar'
 
 interface AgentTasksModalProps {
   agent: RosterAgent
@@ -92,7 +93,7 @@ export function AgentTasksModal({ agent, roster = [], onClose, onOpenTask, embed
     <div className={embedded ? 'agent-tasks-inline' : 'modal-mask'} onClick={embedded ? undefined : onClose}>
       <div className="modal agent-tasks-modal" onClick={e => e.stopPropagation()}>
         <div className="modal-head">
-          <span className="agent-avatar" style={{ fontSize: 16 }}>{agent.avatar}</span>
+          <span className="agent-avatar"><AgentAvatar token={agent.avatar} size={24} /></span>
           {agent.name} · 任务清单
           {modelLabel && (
             <span className="agent-model-badge" title="该智能体默认模型（⚙️ 模型配置可改）">⚙️ {modelLabel}</span>

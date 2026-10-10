@@ -47,6 +47,7 @@ import {
   timelineEntry,
 } from './timeline.mjs'
 import { createRefresher } from './refresh-loop.mjs'
+import { renderAvatar } from './avatar.mjs'
 
 const $ = (id) => document.getElementById(id)
 const LS_REFRESH = 'legion.mobile.refresh'
@@ -406,6 +407,25 @@ function renderTargets() {
       sel.appendChild(o)
     }
   }
+  // ★ 成员选择不能只有 <option> 纯文本：<option> 装不下图形，手机上的成员列表
+  //   会与桌面的「人形头像 + 名字」不是同一个东西——那等于「人性化头像」在手机上没做。
+  //   这里补一条头像药丸条：每个成员一个内联 SVG 人形 + 名字，点选即切换；
+  //   原生 select 仍保留做无障碍/兜底。
+  const chips = $('agent-chips')
+  if (chips !== null) {
+    chips.replaceChildren()
+    chips.classList.toggle('hidden', state.agents.length === 0)
+    for (const a of state.agents) {
+      const chip = document.createElement('button')
+      chip.type = 'button'
+      chip.className = a.agentId === state.agentId ? 'agent-chip selected' : 'agent-chip'
+      chip.title = `${a.name}（${a.role}）`
+      chip.innerHTML = renderAvatar(a.avatar, 22)
+      chip.appendChild(document.createTextNode(a.name))
+      chip.addEventListener('click', () => { void selectAgent(a.agentId) })
+      chips.appendChild(chip)
+    }
+  }
   // 聊天风格里要一眼看到**在跟谁说话**（web 的 .chat-head 就是干这个的）。
   const head = $('agent-picker')
   const cur = state.agents.find((a) => a.agentId === state.agentId) ?? null
@@ -414,7 +434,10 @@ function renderTargets() {
     head.className = 'hint'
   } else {
     head.className = 'viewtitle'
-    head.replaceChildren(document.createTextNode(`${cur.name}　`))
+    const avatar = document.createElement('span')
+    avatar.className = 'agent-picker-avatar'
+    avatar.innerHTML = renderAvatar(cur.avatar, 24)
+    head.replaceChildren(avatar, document.createTextNode(`${cur.name}　`))
     const r = document.createElement('span')
     r.className = 'tag'
     r.textContent = cur.role

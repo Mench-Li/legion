@@ -1,0 +1,10 @@
+/* workbench/src/avatar/avatar.css —— 人形头像的图形化适配。
+   旧的文本徽章（.agent-avatar 等）原本按 emoji 文本排版；这里让内联 SVG 填满徽章并裁圆。 */
+.agent-avatar-svg { display: block; width: 100%; height: 100%; border-radius: inherit; }
+.directory-avatar, .agent-avatar, .ao-avatar, .scene-agent-avatar, .agent-tag-avatar, .agent-opt-avatar { overflow: hidden; }
+.directory-avatar > .agent-avatar-svg,
+.agent-avatar > .agent-avatar-svg,
+.ao-avatar > .agent-avatar-svg,
+.scene-agent-avatar > .agent-avatar-svg,
+.agent-tag-avatar > .agent-avatar-svg { width: 100%; height: 100%; }
+.agent-opt-avatar { display: inline-flex; align-items: center; justify-content: center; width: 18px; height: 18px; border-radius: 50%; }

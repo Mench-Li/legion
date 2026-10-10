@@ -4,6 +4,7 @@ import { agentKey, groupFor, NAV_GROUPS, SUB_NAV, TASK_VIEWS } from '../navigati
 import type { TaskViewId } from '../navigation'
 import type { RosterAgent, SpaceInfo } from '../types'
 import { UiIcon } from './UiIcon'
+import { AgentAvatar } from '../avatar'
 
 interface Props {
   active: string; scope: string | null; hubMode: boolean; spaces: SpaceInfo[]
@@ -59,7 +60,7 @@ export function WorkspaceNavigation(props: Props): React.JSX.Element {
             const folded = collapsed.has(space.id)
             return <section className="directory-group" key={space.id}>
               <div className="directory-group-head"><button aria-expanded={!folded} onClick={() => setCollapsed(previous => { const next = new Set(previous); if (folded) next.delete(space.id); else next.add(space.id); return next })}><span>{folded ? '›' : '⌄'}</span>{space.name}<small>{list.length}</small></button>{onSpaceSettings && <button className="ui-icon-button" aria-label={`${space.name}设置`} onClick={() => onSpaceSettings(space)}><UiIcon name="settings" /></button>}</div>
-              {!folded && <div>{list.map(a => { const selected = selectedAgent && agentKey(selectedAgent.scope ?? '', selectedAgent.role) === agentKey(a.scope ?? '', a.role) && active === 'agents'; return <button key={agentKey(a.scope ?? '', a.role)} className={`directory-agent${selected ? ' selected' : ''}`} aria-current={selected ? 'true' : undefined} onClick={() => { onPickAgent(a); onClose() }}><span className="directory-avatar">{a.name.slice(0, 1)}</span><span className="directory-agent-meta"><strong>{a.name}</strong><small className={a.mode === 'blocked' ? 'attention' : ''}>{a.external ? '外部执行者 · 查看任务' : `${modeLabel[a.mode]} · ${a.tasks.length} 个活动任务`}</small></span></button> })}{!list.length && !loading && <div className="workspace-empty">该空间尚无 Agent。</div>}<button className="space-discussion" onClick={() => { onSelectScope(space.id); navigate('chat') }}><UiIcon name="chat" />空间会话</button></div>}
+              {!folded && <div>{list.map(a => { const selected = selectedAgent && agentKey(selectedAgent.scope ?? '', selectedAgent.role) === agentKey(a.scope ?? '', a.role) && active === 'agents'; return <button key={agentKey(a.scope ?? '', a.role)} className={`directory-agent${selected ? ' selected' : ''}`} aria-current={selected ? 'true' : undefined} onClick={() => { onPickAgent(a); onClose() }}><span className="directory-avatar"><AgentAvatar token={a.avatar} /></span><span className="directory-agent-meta"><strong>{a.name}</strong><small className={a.mode === 'blocked' ? 'attention' : ''}>{a.external ? '外部执行者 · 查看任务' : `${modeLabel[a.mode]} · ${a.tasks.length} 个活动任务`}</small></span></button> })}{!list.length && !loading && <div className="workspace-empty">该空间尚无 Agent。</div>}<button className="space-discussion" onClick={() => { onSelectScope(space.id); navigate('chat') }}><UiIcon name="chat" />空间会话</button></div>}
             </section>
           })}
           {query && !agents.some(a => `${a.name} ${a.role} ${spaces.find(s => s.id === a.scope)?.name ?? ''}`.toLowerCase().includes(query.toLowerCase()) && (!scope || a.scope === scope)) && <div className="workspace-empty">没有匹配的 Agent。</div>}

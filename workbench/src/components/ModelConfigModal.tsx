@@ -9,6 +9,7 @@ import { ModelBindingsPanel } from './ModelBindingsPanel'
 import { ModelTransferPanel } from './ModelTransferPanel'
 import { SecretVaultPanel } from './SecretVaultPanel'
 import { DshProvidersPanel } from './DshProvidersPanel'
+import { AgentAvatar } from '../avatar'
 
 interface ModelConfigModalProps {
   scope: string
@@ -119,7 +120,7 @@ function QuickAssignTab({ scope, roster }: { scope: string; roster: RosterAgent[
           return (
             <div key={role} className="mc-row">
               <div className="mc-agent">
-                <span className="agent-avatar">{avatar}</span>
+                <span className="agent-avatar"><AgentAvatar token={avatar} /></span>
                 <div>
                   <div className="mc-name">{name}</div>
                   <div className="mc-role">{role}</div>

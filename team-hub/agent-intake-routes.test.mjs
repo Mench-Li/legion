@@ -62,7 +62,7 @@ test('① ★★ 登记成功 ⇒ 200 带 `{scope,role,name,employeeManifest}`�
   const rows = roster('default')
   assert.equal(rows.length, 1)
   assert.equal(rows[0].role, 'dev'); assert.equal(rows[0].name, '开发')
-  assert.equal(rows[0].avatar, '🤖', '★ avatar 缺省是 🤖')
+  assert.equal(rows[0].avatar, 'human:s01', '★ avatar 缺省按 role 自动分配人形令牌（自建 role → 最小未占用备用 key）')
   assert.equal(rows[0].kind, '', '★ kind 缺省是空串')
 })
 
@@ -199,14 +199,14 @@ test('⑨ ★ 缺操作者身份 ⇒ 400（`handleWrite` 的第一道闸）', as
 test('⑩ ★★★ 选人入编：从**全局目录**按 role 复制进该空间', async () => {
   reset()
   // 先在别的空间建两个岗位（全局目录来源）
-  await post('/api/agents', { by: 'general', role: 'src1', name: '源一', scope: 'lib', kind: 'ai', avatar: '🅰' })
-  await post('/api/agents', { by: 'general', role: 'src2', name: '源二', scope: 'lib', kind: 'ai', avatar: '🅱' })
+  await post('/api/agents', { by: 'general', role: 'src1', name: '源一', scope: 'lib', kind: 'ai', avatar: 'human:coder' })
+  await post('/api/agents', { by: 'general', role: 'src2', name: '源二', scope: 'lib', kind: 'ai', avatar: 'human:tester' })
   const r = await post('/api/spaces/target/agents', { by: 'general', roles: ['src1', 'src2'] })
   assert.equal(r.status, 200, JSON.stringify(r.body))
   assert.deepEqual(r.body.task, { space: 'target', added: 2, roles: ['src1', 'src2'] })
   const rows = roster('target')
   assert.deepEqual(rows.map((x) => x.role), ['src1', 'src2'], '★★ 按角色的顺序放进去')
-  assert.equal(rows[0].name, '源一'); assert.equal(rows[0].avatar, '🅰', '★★ 连 name/kind/avatar 一起复制过来')
+  assert.equal(rows[0].name, '源一'); assert.equal(rows[0].avatar, 'human:coder', '★★ 连 name/kind/avatar 一起复制过来')
 })
 
 test('⑪ ★★★ 目录里**没有**的 role 静默跳过，且不计入 `added`', async () => {

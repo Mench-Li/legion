@@ -40,6 +40,8 @@
  *
  * @param {object} deps 全部由 `server.mjs` 注入
  */
+import { allocateAvatarToken, isAvatarToken } from '../agent-avatars.mjs'
+
 export function createAgentIntakeRoutes({
   json,
   db, handleWrite, withTx,
@@ -79,11 +81,15 @@ export function createAgentIntakeRoutes({
           //   > 而调用方从错误响应里看不出编队已经被改了。
           return withTx(() => {
           const sort = db.prepare('SELECT COALESCE(MAX(sort), -1) + 1 AS s FROM roster WHERE scope = ?').get(targetScope).s
+          // 头像：只接受合法令牌；未给 / 空 / 旧 emoji / 任意非法字符串都自动分配人形令牌
+          // （内置 role → human:<role>；自建 role → 该 scope 最小未占用 sNN）。绝不原样存字符串。
+          const providedAvatar = typeof body.avatar === 'string' ? body.avatar.trim() : ''
+          const avatar = isAvatarToken(providedAvatar) ? providedAvatar : allocateAvatarToken(db, targetScope, role.trim())
           db.prepare(`INSERT INTO roster (scope, role, name, kind, avatar, sort) VALUES (?, ?, ?, ?, ?, ?)
             ON CONFLICT(scope, role) DO UPDATE SET name=excluded.name, kind=excluded.kind, avatar=excluded.avatar`)
             .run(targetScope, role.trim(), name.trim(),
               typeof body.kind === 'string' ? body.kind : '',
-              typeof body.avatar === 'string' && body.avatar.trim() ? body.avatar.trim() : '🤖', sort)
+              avatar, sort)
           audit(by, targetScope, 'agent:create', null, { role: role.trim(), name: name.trim() })
 
           // ── PRT-402：编队变更时同步写一份岗位清单 ───────────────────────

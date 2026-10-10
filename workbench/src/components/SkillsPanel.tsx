@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { fetchAgents, fetchSkills, getSkillSource, grantSkill, hubBase, importSkillCandidates, registerSkill, reviewSkill, revokeSkill, saveSkillSource, scanSkillsDir, scanSkillsGithub, syncSkills, type SkillCandidate, type SkillSource, type SkillSyncReport } from '../api'
 import type { AgentCatalogItem, SkillBundle, SkillInfo, SkillPart, SpaceInfo } from '../types'
 import { toast } from './Toast'
+import { AgentAvatar } from '../avatar'
 
 const STATUS_TEXT: Record<SkillInfo['status'], string> = {
   published: '已发布',
@@ -312,10 +313,10 @@ export function SkillsPanel({ scope, hubMode, spaces = [] }: SkillsPanelProps): 
 
   /** 智能体目录查找（role 精确命中；用于把 role → 名称展示）。 */
   const agentOf = (role: string): AgentCatalogItem | undefined => catalog?.find(a => a.role === role)
-  /** 成员授权展示名：命中目录则 avatar+名称，否则原样（general/自定义 id）。 */
+  /** 成员授权展示名：命中目录则显示名称，否则原样（general/自定义 id）；头像由 <AgentAvatar> 单独渲染。 */
   const memberLabel = (m: string): string => {
     const a = agentOf(m)
-    return a ? `${a.avatar} ${a.name}` : m
+    return a ? a.name : m
   }
 
   /** 添加一个「将授权」的智能体 role（去重；与已在展示里禁选，重复提交服务端幂等）。 */
@@ -538,9 +539,11 @@ export function SkillsPanel({ scope, hubMode, spaces = [] }: SkillsPanelProps): 
                         {g.member.length > 0 && (
                           <span className="skill-grant-group">
                             <span className="skill-grant-kind">智能体</span>
-                            {g.member.map(m => (
+                            {g.member.map(m => {
+                              const a = agentOf(m)
+                              return (
                               <span key={m} className="skill-grant-tag member" title={`成员授权：${m}`}>
-                                👤 {memberLabel(m)}
+                                {a && <AgentAvatar token={a.avatar} />} {memberLabel(m)}
                                 {isOwn(s) && s.status === 'published' && (
                                   <button
                                     className="chip-x"
@@ -550,7 +553,8 @@ export function SkillsPanel({ scope, hubMode, spaces = [] }: SkillsPanelProps): 
                                   >✕</button>
                                 )}
                               </span>
-                            ))}
+                              )
+                            })}
                           </span>
                         )}
                       </>
@@ -671,9 +675,12 @@ export function SkillsPanel({ scope, hubMode, spaces = [] }: SkillsPanelProps): 
                         {alreadyScopes.map(sc => (
                           <span key={sc} className="skill-grant-tag space">🏛 {sc}</span>
                         ))}
-                        {already.member.map(m => (
-                          <span key={m} className="skill-grant-tag member" title={`成员授权：${m}`}>👤 {memberLabel(m)}</span>
-                        ))}
+                        {already.member.map(m => {
+                          const a = agentOf(m)
+                          return (
+                          <span key={m} className="skill-grant-tag member" title={`成员授权：${m}`}>{a && <AgentAvatar token={a.avatar} />} {memberLabel(m)}</span>
+                          )
+                        })}
                       </div>
                     </div>
                   )}
@@ -764,7 +771,7 @@ export function SkillsPanel({ scope, hubMode, spaces = [] }: SkillsPanelProps): 
                                           if (!picked) addMember(a.role)
                                         }}
                                       >
-                                        <span className="agent-opt-main">{a.avatar} <b>{a.name}</b> <code>{a.role}</code></span>
+                                        <span className="agent-opt-main"><AgentAvatar token={a.avatar} /> <b>{a.name}</b> <code>{a.role}</code></span>
                                         <span className="agent-opt-sub">{a.kind}{agentScope === null && scopesTxt ? ` · ${scopesTxt}` : (a.scopes.length > 1 ? ` · 亦在 ${a.scopes.filter(s => s !== agentScope).join('、')}` : '')}</span>
                                         <span className="agent-opt-act">{picked ? '✓ 已选' : '＋ 添加'}</span>
                                       </button>
@@ -783,7 +790,7 @@ export function SkillsPanel({ scope, hubMode, spaces = [] }: SkillsPanelProps): 
                           const a = agentOf(r)
                           return (
                             <span key={r} className="skill-grant-tag member">
-                              👤 {a ? `${a.avatar} ${a.name}` : r}
+                              {a && <AgentAvatar token={a.avatar} />} {a ? a.name : r}
                               {a && <code style={{ fontSize: 9, opacity: 0.75 }}>{r}</code>}
                               <button
                                 className="chip-x"

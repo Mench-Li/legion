@@ -24,7 +24,7 @@
 // 服务器对入口与脚本本来就发 `Cache-Control: no-cache`（见 `mobile-routes.test.mjs`
 // 那条"发新版后手机能拿到新代码"）。缓存优先的 SW 会把那条**抵消掉**——
 // 两处规矩各写一半，合起来正好是谁都没生效。
-const CACHE = 'legion-mobile-v2'
+const CACHE = 'legion-mobile-v3'
 // ★ 这份清单必须覆盖 `index.html` 引到的**每一个模块**。
 //
 //   实测踩过：`refresh-loop.mjs` 是后加的一个模块，而这份清单没跟着更新。
@@ -37,7 +37,7 @@ const CACHE = 'legion-mobile-v2'
 const SHELL = [
   './', './index.html', './manifest.webmanifest',
   // 入口 + 它的直接依赖（app.mjs 三个 import 都在这里）
-  './app.mjs', './board.mjs', './timeline.mjs', './refresh-loop.mjs',
+  './app.mjs', './board.mjs', './timeline.mjs', './refresh-loop.mjs', './avatar.mjs',
 ]
 const CODE_EXT = /\.(?:mjs|js|html|webmanifest)$/
 

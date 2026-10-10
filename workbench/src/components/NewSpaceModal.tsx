@@ -3,13 +3,12 @@ import { addSpaceAgents, createAgent, createSpace, fetchAgents } from '../api'
 import type { AgentCatalogItem, ScenePreset } from '../types'
 import { toast } from './Toast'
 import { FolderPickerField } from './FolderPickerField'
+import { AgentAvatar } from '../avatar'
 
 interface NewSpaceModalProps {
   onClose: () => void
   onCreated: (spaceId: string) => void
 }
-
-const AVATAR_CHOICES = ['🤖', '🧭', '🔍', '✂️', '🧪', '💻', '🔎', '🧹', '🚀', '📊', '✍️', '🎯', '📈', '💬', '🧩', '🖌️', '🎨', '🔬', '📐', '🗂️', '🎪', '🎧', '📉', '⚙️', '🎓']
 
 export function NewSpaceModal({ onClose, onCreated }: NewSpaceModalProps): React.JSX.Element {
   const [step, setStep] = useState<'form' | 'agents'>('form')
@@ -25,7 +24,7 @@ export function NewSpaceModal({ onClose, onCreated }: NewSpaceModalProps): React
   const [query, setQuery] = useState('')
   const [busy, setBusy] = useState(false)
   // 新建智能体内联表单
-  const [newAgent, setNewAgent] = useState({ role: '', name: '', kind: '', avatar: '🤖' })
+  const [newAgent, setNewAgent] = useState({ role: '', name: '', kind: '' })
 
   const loadCatalog = (): void => {
     setCatalogError('')
@@ -61,13 +60,14 @@ export function NewSpaceModal({ onClose, onCreated }: NewSpaceModalProps): React
       await createAgent({ ...newAgent, role: newAgent.role.trim(), name: newAgent.name.trim(), scope: spaceId })
       toast('ok', `已新建智能体「${newAgent.name.trim()}」（${newAgent.role.trim()}）`)
       setSelected(prev => new Set(prev).add(newAgent.role.trim()))
-      setNewAgent({ role: '', name: '', kind: '', avatar: '🤖' })
+      setNewAgent({ role: '', name: '', kind: '' })
       // 目录里补一条
       setCatalog(prev => [...prev.filter(c => c.role !== newAgent.role.trim()), {
         role: newAgent.role.trim(),
         name: newAgent.name.trim(),
         kind: newAgent.kind.trim(),
-        avatar: newAgent.avatar,
+        // 头像由服务端按 role 自动分配人形令牌（创建时自动生成，暂不需要配置）
+        avatar: '',
         scopes: [spaceId],
       }])
     } catch (e) {
@@ -179,7 +179,7 @@ export function NewSpaceModal({ onClose, onCreated }: NewSpaceModalProps): React
                 {filtered.map(c => (
                   <label key={c.role} className={`agent-option${selected.has(c.role) ? ' picked' : ''}`}>
                     <input type="checkbox" checked={selected.has(c.role)} onChange={() => toggle(c.role)} />
-                    <span className="ao-avatar">{c.avatar}</span>
+                    <span className="ao-avatar"><AgentAvatar token={c.avatar} /></span>
                     <span className="ao-name">{c.name}</span>
                     <span className="ao-role">{c.role}</span>
                     <span className="ao-scopes">{c.scopes.join(' / ')}</span>
@@ -194,9 +194,6 @@ export function NewSpaceModal({ onClose, onCreated }: NewSpaceModalProps): React
                 <input value={newAgent.role} onChange={e => setNewAgent(a => ({ ...a, role: e.target.value }))} placeholder="role：如 hr-analyst" />
                 <input value={newAgent.name} onChange={e => setNewAgent(a => ({ ...a, name: e.target.value }))} placeholder="名称：如 人事分析员" />
                 <input value={newAgent.kind} onChange={e => setNewAgent(a => ({ ...a, kind: e.target.value }))} placeholder="职责（可选）" />
-                <select value={newAgent.avatar} onChange={e => setNewAgent(a => ({ ...a, avatar: e.target.value }))}>
-                  {AVATAR_CHOICES.map(a => <option key={a} value={a}>{a}</option>)}
-                </select>
                 <button className="btn small" onClick={() => void addNewAgent()}>加入</button>
               </div>
             </div>

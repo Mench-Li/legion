@@ -9,13 +9,25 @@
  *   · 少一层依赖 = CI 里少一类「装不上/下不来浏览器」的失败面（本仓库 CI 是单命令、无网络假设）。
  *
  * 能力边界（够用即止，不做「通用自动化框架」）：
- *   导航 / 求值 / 等待 / 真实鼠标点击与拖拽 / 键盘输入 / 控制台与页面错误收集 / 截图。
- *   **不做**：多标签页编排、网络拦截、文件下载、移动端仿真、隔离世界。
+ *   导航 / 求值 / 等待 / 真实鼠标点击与拖拽 / 真实触屏轻点 / 键盘输入 /
+ *   控制台与页面错误收集 / 截图 / **移动端设备仿真**（见下）。
+ *   **不做**：多标签页编排、网络拦截、文件下载、隔离世界。
+ *
+ * 移动端仿真（T-195 补；此前本文件明写「不做」）：
+ *   `launchBrowser({ mobile: true })` 或 `newPage({ mobile: true })` 会打开
+ *   `Emulation.setDeviceMetricsOverride(mobile:true)` + `setTouchEmulationEnabled`
+ *   + 移动 UA，并提供 `page.tap()`（走 `Input.dispatchTouchEvent`，真触屏事件）。
+ *
+ *   为什么这件事值得单独写清楚：一个用**桌面视口 + 合成 click**打开的页面，
+ *   与一个用**移动视口 + 真实触屏事件**打开的页面，在断言「手机上能用」这件事上
+ *   不是同一个东西——只不过前者在一份"移动端 E2E 全绿"的报告里看起来是一样的。
+ *   ⚠️ 它仍然**不是真机**：这是桌面 Chrome 的设备仿真，触摸 / UA / 视口 / DPR 相似而非相同。
  *
  * 纪律：
  *   · 每次运行使用**临时 user-data-dir**，用后删除 —— 绝不碰用户真实浏览器配置（Cookie/登录态）；
  *   · 找不到浏览器时抛 `BrowserUnavailableError`，由测试侧转成**显式 SKIP**，绝不伪造通过；
- *   · 页面报错（未捕获异常 / console.error）默认收集，用例可断言「主路径无报错」。
+ *   · 页面报错（未捕获异常 / console.error）默认收集，用例可断言「主路径无报错」；
+ *   · `mobile` 默认 `false`：既有桌面套件的挂载参数与行为**逐字节不变**（仿真只在显式要求时开）。
  */
 import { spawn } from 'node:child_process'
 import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
@@ -29,6 +41,28 @@ export class BrowserUnavailableError extends Error {
     this.name = 'BrowserUnavailableError'
   }
 }
+
+/**
+ * 移动端仿真的默认设备档。
+ *
+ * 取值理由（不是随手挑的）：
+ *   · `390×844 / DPR 3` 是一台中端现代手机的**逻辑视口**（iPhone 12/13/14 一档），
+ *     也是本仓库 `workbench/mobile/` 布局按「一列、单手可达」设计的目标宽度；
+ *   · `maxTouchPoints: 5` 是移动 Chrome 的常见读数——多点触控能力**存在**，
+ *     免得把「只用单指」实现出来的 bug 伪装成「这台设备不支持多指」；
+ *   · UA 保留 `Mobile` 与 `Android` 两个标记：`app.mjs`/`sw.js` 若按 UA 分支，
+ *     这里必须命中手机分支，否则测的就不是手机那条路。
+ */
+export const MOBILE_DEVICE = Object.freeze({
+  width: 390,
+  height: 844,
+  deviceScaleFactor: 3,
+  mobile: true,
+  maxTouchPoints: 5,
+  userAgent:
+    'Mozilla/5.0 (Linux; Android 14; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) '
+    + 'Chrome/131.0.0.0 Mobile Safari/537.36',
+})
 
 /** 常见安装位置（可用 DSH_E2E_BROWSER / DSH_WEB_SHOT_BROWSER 覆盖）。 */
 function candidatePaths() {
@@ -142,7 +176,9 @@ class CDPSession {
 
 /**
  * 启动一个真实浏览器并连上它的 CDP。
- * @param {{ headless?: boolean, width?: number, height?: number, timeoutMs?: number, extraArgs?: string[] }} [opts]
+ * @param {{ headless?: boolean, width?: number, height?: number, timeoutMs?: number, extraArgs?: string[],
+ *           mobile?: boolean, deviceScaleFactor?: number, maxTouchPoints?: number, userAgent?: string }} [opts]
+ *   `mobile:true` 时，未显式给出的视口 / DPR / UA / 触点数取 {@link MOBILE_DEVICE} 的默认档。
  * @returns {Promise<Browser>}
  */
 export async function launchBrowser(opts = {}) {
@@ -153,8 +189,14 @@ export async function launchBrowser(opts = {}) {
     )
   }
   const headless = opts.headless !== false
-  const width = opts.width ?? 900
-  const height = opts.height ?? 640
+  // 移动仿真档：显式选项 > MOBILE_DEVICE 默认 > 桌面默认。`mobile:false` 时完全走旧路径。
+  const mobile = opts.mobile === true
+  const device = mobile ? MOBILE_DEVICE : null
+  const width = opts.width ?? device?.width ?? 900
+  const height = opts.height ?? device?.height ?? 640
+  const deviceScaleFactor = opts.deviceScaleFactor ?? device?.deviceScaleFactor ?? 1
+  const maxTouchPoints = opts.maxTouchPoints ?? device?.maxTouchPoints ?? 1
+  const userAgent = opts.userAgent ?? device?.userAgent ?? null
   const profileDir = mkdtempSync(join(tmpdir(), 'legion-e2e-profile-'))
 
   const argv = [
@@ -200,18 +242,23 @@ export async function launchBrowser(opts = {}) {
     }
   })()
 
-  const browser = new Browser({ child, wsUrl, profileDir, exe })
+  const browser = new Browser({
+    child, wsUrl, profileDir, exe,
+    defaults: { width, height, mobile, deviceScaleFactor, maxTouchPoints, userAgent },
+  })
   await browser._connect(timeoutMs)
   return browser
 }
 
 /** 浏览器：连接、开页、关闭。 */
 class Browser {
-  constructor({ child, wsUrl, profileDir, exe }) {
+  constructor({ child, wsUrl, profileDir, exe, defaults = {} }) {
     this.child = child
     this.wsUrl = wsUrl
     this.profileDir = profileDir
     this.exe = exe
+    // 每个新页都继承这一组仿真参数（`newPage()` 可逐页覆盖）。
+    this.defaults = defaults
     this.closed = false
   }
 
@@ -237,11 +284,15 @@ class Browser {
 
   /**
    * 新开一页并完成初始化（收集 console/页面错误，启用 Page/Runtime/Input）。
+   * @param {{ width?: number, height?: number, mobile?: boolean, deviceScaleFactor?: number,
+   *           maxTouchPoints?: number, userAgent?: string|null }} [opts]
+   *   不给则继承 `launchBrowser` 的仿真档。
    * @returns {Promise<Page>}
    */
-  async newPage({ width, height } = {}) {
+  async newPage(opts = {}) {
+    const spec = { ...this.defaults, ...opts }
     const { targetId } = await this.session.send('Target.createTarget', { url: 'about:blank' })
-    const page = new Page(this, targetId, { width, height })
+    const page = new Page(this, targetId, spec)
     await page._attach()
     return page
   }
@@ -260,13 +311,20 @@ class Browser {
   }
 }
 
-/** 页面：导航、求值、等待、真实输入。 */
+/** 页面：导航、求值、等待、真实输入（鼠标 / 触屏）。 */
 class Page {
-  constructor(browser, targetId, { width = 900, height = 640 } = {}) {
+  constructor(browser, targetId, {
+    width = 900, height = 640, mobile = false,
+    deviceScaleFactor = 1, maxTouchPoints = 1, userAgent = null,
+  } = {}) {
     this.browser = browser
     this.targetId = targetId
     this.width = width
     this.height = height
+    this.mobile = mobile === true
+    this.deviceScaleFactor = deviceScaleFactor
+    this.maxTouchPoints = maxTouchPoints
+    this.userAgent = userAgent
     this.consoleErrors = []
     this.pageErrors = []
     this.consoleLogs = []
@@ -284,9 +342,21 @@ class Page {
     await send('Page.enable')
     await send('Runtime.enable')
     if (this.width && this.height) {
+      // `mobile:true` 会让渲染器按移动视口处理（含 meta viewport 的解析与缩放）。
+      // 它与触摸仿真**必须成对**：只改视口的页面仍然收不到 touch 事件，
+      // 只开触摸的页面仍是桌面布局——两种半开状态都会让「手机上能用」的结论失真。
       await send('Emulation.setDeviceMetricsOverride', {
-        width: this.width, height: this.height, deviceScaleFactor: 1, mobile: false,
+        width: this.width,
+        height: this.height,
+        deviceScaleFactor: this.deviceScaleFactor,
+        mobile: this.mobile,
       })
+    }
+    if (this.mobile) {
+      await send('Emulation.setTouchEmulationEnabled', { enabled: true, maxTouchPoints: this.maxTouchPoints })
+      if (this.userAgent) await send('Emulation.setUserAgentOverride', { userAgent: this.userAgent })
+    } else if (this.userAgent) {
+      await send('Emulation.setUserAgentOverride', { userAgent: this.userAgent })
     }
     on('Runtime.consoleAPICalled', (p) => {
       const line = (p.args ?? []).map((a) => a.value ?? a.description ?? a.type).join(' ')
@@ -378,6 +448,45 @@ class Page {
     await this.mouseDown(c.x, c.y)
     await this.mouseUp(c.x, c.y)
     return c
+  }
+
+  // ---------- 真实触屏（移动仿真下用；Input.dispatchTouchEvent） ----------
+
+  /**
+   * 向某坐标发一次真实触屏轻点（`touchStart` → `touchEnd`）。
+   *
+   * 为什么不用 `click()` 冒充：在 `mobile:true` 的设备仿真下，浏览器按**触屏**规则
+   * 处理输入——`pointerdown` 的 `pointerType` 是 `touch`、`matchMedia('(pointer:coarse)')`
+   * 为真，且 `touchstart` 监听器会被触发，而合成鼠标事件**不会**触发 `touchstart`。
+   * 只测 click 的实现会在真机上第一次触摸就露馅，而仿真里始终是绿的。
+   *
+   * @param {number} x 视口坐标
+   * @param {number} y 视口坐标
+   * @param {{ touchPoints?: number, id?: number }} [opts]
+   */
+  async tapAt(x, y, { touchPoints = 1, id = 1 } = {}) {
+    const points = Array.from({ length: touchPoints }, (_, i) => ({
+      x, y, radiusX: 12, radiusY: 12, force: 0.5, id: id + i,
+    }))
+    await this.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: points })
+    await this.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] })
+  }
+
+  /** 轻点元素中心（真实触屏事件）。元素不可见即抛错，不静默点空。 */
+  async tap(selector, opts) {
+    const c = await this.centerOf(selector)
+    await this.tapAt(c.x, c.y, opts)
+    return c
+  }
+
+  /**
+   * 触屏输入文本：先轻点聚焦，再用 `Input.insertText`。
+   * 移动端软键盘不上屏，所以「聚焦 + 插字」是这条链上唯一可自动化的等价动作。
+   */
+  async tapFill(selector, text) {
+    await this.tap(selector)
+    await this.evaluate((sel) => { const el = document.querySelector(sel); if (el && el.select) el.select() }, selector)
+    await this.send('Input.insertText', { text })
   }
 
   /** 拖拽（按下 → 若干中间点 → 松开）；steps 越多越接近人手轨迹。 */

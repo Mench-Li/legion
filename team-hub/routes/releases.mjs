@@ -41,6 +41,15 @@
 import { createReadStream, existsSync, readFileSync, readdirSync, statSync } from 'node:fs'
 import { extname, join, normalize, resolve, sep } from 'node:path'
 
+// ★ T-198：缓存策略的**单一真源**。这里原本有一个本地常量 `NO_STORE_SEGMENT`
+//   与一句内联的 `'public, max-age=86400'`，而客户端（`product/update` 的
+//   transport）对每次取件都跑 `evaluateResponse()`，它要求发行文件带
+//   **`immutable`**（`RELEASE_CACHE_CONTROL = 'public, max-age=31536000, immutable'`）。
+//
+//   两处各写一份的后果：**经 Hub 托管的发布目录，客户端一份都不会接受**——
+//   检查阶段就以 `net-http-status` 失败。详见 `cacheControlFor` 的注释。
+import { expectedCacheControl } from '../../product/update/host.mjs'
+
 /** 允许发出的 MIME。**白名单**：不在表里的一律 404。 */
 const MIME = Object.freeze({
   '.json': 'application/json; charset=utf-8',
@@ -52,9 +61,6 @@ const MIME = Object.freeze({
   '.zip': 'application/zip',
   '.blockmap': 'application/octet-stream',
 })
-
-/** 通道清单必须每次回源（设计文档 §4：`Cache-Control: no-store`）。 */
-const NO_STORE_SEGMENT = 'feeds'
 
 /**
  * 发布目录里最新的一份安装包。
@@ -148,9 +154,47 @@ export function createReleaseRoutes({ root, mount = '/legion' } = {}) {
     return { abs, ext, size: st.size, mime: MIME[ext], rel: abs.slice(absRoot.length).split(sep).join('/') }
   }
 
-  /** 这一份能不能长缓存：发布目录可以，通道清单不行。 */
+  /**
+   * 这一份能不能长缓存：发布目录可以，通道清单不行。
+   *
+   * ★★ T-198：**改为用单一真源** `expectedCacheControl()`，不再自己写字面量。
+   *
+   *   这一行原本是 `'public, max-age=86400'`，而客户端（`product/update` 的
+   *   transport）对每一次取件都跑 `evaluateResponse()`，它对发行文件的判据是
+   *   `RELEASE_CACHE_CONTROL = 'public, max-age=31536000, immutable'`
+   *   —— **要求含 `immutable`**。两处各写一份，于是谁也不管谁：
+   *
+   * ```
+   * 客户端：net-http-status
+   *   releases/rel-1.1.0/manifest.json 的 Cache-Control 是
+   *   "public, max-age=86400"，发行文件应包含 immutable
+   * ```
+   *
+   *   也就是说**经 Hub 托管的发布目录，客户端一份都不会接受**——检查阶段就失败。
+   *   而 `product/update/integration.test.mjs` 看不见这件事：它的托管是内存替身，
+   *   替身返回的正是 `RELEASE_CACHE_CONTROL`（客户端想要的那个值）。
+   *
+   *   > 一个"对着自己写的静态替身验证通过的更新链路"，
+   *   > 与一个"真的能从生产托管取到更新"的链路，在测试报告上是同一个东西——
+   *   > 只不过前者在缓存头写错时照样是绿的。
+   *
+   *   由 `tests/e2e-unified/update.e2e.test.mjs`（真 Hub 托管）与
+   *   `scripts/update/verify-host.mjs`（同一个 `evaluateResponse`）共同守。
+   */
   function cacheControlFor(rel) {
-    return rel.split('/').includes(NO_STORE_SEGMENT) ? 'no-store' : 'public, max-age=86400'
+    // ★ `found.rel` 的形状是 `abs.slice(absRoot.length)`，**带前导分隔符**
+    //   （`/feeds/stable/win-x64.json`）；而 `expectedCacheControl()` 要的是
+    //   **不带前缀**的树内相对路径（`feeds/stable/win-x64.json`）。
+    //
+    //   不归一化就会**静默走错分支**：`'/feeds/…'.startsWith('feeds/')` 为 false
+    //   ⇒ 通道清单被当成发行文件 ⇒ 发 `immutable` 而客户端要求 `no-store`。
+    //   这正是 `host.mjs` 里记着的那个陷阱（"带前缀的路径喂给 `evaluateResponse`
+    //   必须得到**路径**结论，不是缓存结论"）——两个方向的错法都存在。
+    //
+    //   > 一个"两处都用了同一个判定函数"的重构，
+    //   > 与一个"两边真的算出同一个结论"的重构，在代码审阅时是同一个东西——
+    //   > 只不过前者的输入形状还没对齐，而形状不对时它俩会各答一个。
+    return expectedCacheControl(String(rel).replace(/^[\\/]+/, ''))
   }
 
   /**

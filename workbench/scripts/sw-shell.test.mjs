@@ -41,8 +41,7 @@ function moduleGraph() {
 }
 
 /** 从 `sw.js` 里取 SHELL 清单。 */
-function shellList() {
-  const src = read('sw.js')
+function shellList() {  const src = read('sw.js')
   const start = src.indexOf('const SHELL = [')
   assert.ok(start >= 0, 'sw.js 里找不到 SHELL')
   const end = src.indexOf(']', start)
@@ -50,8 +49,7 @@ function shellList() {
   return [...body.matchAll(/'\.\/([^']*)'/g)].map((m) => m[1]).filter((x) => x.length > 0)
 }
 
-describe('Service Worker 预缓存清单', () => {
-  test('★ 清单覆盖整张模块图（少一个，离线时那个模块就 404）', () => {
+describe('Service Worker 预缓存清单', () => {  test('★ 清单覆盖整张模块图（少一个，离线时那个模块就 404）', () => {
     const { all } = moduleGraph()
     const shell = new Set(shellList())
     const missing = [...all].filter((f) => !shell.has(f))
@@ -83,6 +81,47 @@ describe('Service Worker 预缓存清单', () => {
   test('代码走网络优先、图标走缓存优先（否则发新版手机永远拿不到新代码）', () => {
     const src = read('sw.js')
     assert.match(src, /CODE_EXT\.test\(url\.pathname\) \? networkFirst\(event\) : cacheFirst\(event\)/)
+  })
+
+  // ★ 一个拼错的**具名** import 会让整页在加载时炸掉（白屏），而这类错极难在开发机上发现：
+  //   手机端顶层就读 `sessionStorage`，所以 `import('./app.mjs')` 在 Node 里试不出来；
+  //   而浏览器的报错是"一个模块加载失败"，界面上只剩一片空白。
+  //
+  //   > 一个"少了一个导出"的模块，与一个"页面被写坏了"的模块，
+  //   > 在手机上看起来一样——都是一片白。
+  test('★ 整张模块图里的**具名 import 都能对上 export**（少一个就是白屏）', () => {
+    const problems = []
+    const graph = new Set([...moduleGraph().all, ...moduleGraph().entry])
+    for (const file of graph) {
+      if (!file.endsWith('.mjs') && !file.endsWith('.js')) continue
+      const src = read(file)
+      const exported = new Set()
+      for (const m of src.matchAll(/^export\s+(?:const|let|var|function|async function|class)\s+([A-Za-z0-9_$]+)/gm)) exported.add(m[1])
+      for (const m of src.matchAll(/^export\s*\{([^}]*)\}/gm)) {
+        for (const part of m[1].split(',')) {
+          const name = part.trim().split(/\s+as\s+/).pop().trim()
+          if (name.length > 0) exported.add(name)
+        }
+      }
+      for (const m of src.matchAll(/^import\s*\{([^}]*)\}\s*from\s*'\.\/([^']+)'/gm)) {
+        const target = m[2]
+        const targetSrc = read(target)
+        const targetExports = new Set()
+        for (const t of targetSrc.matchAll(/^export\s+(?:const|let|var|function|async function|class)\s+([A-Za-z0-9_$]+)/gm)) targetExports.add(t[1])
+        for (const t of targetSrc.matchAll(/^export\s*\{([^}]*)\}/gm)) {
+          for (const part of t[1].split(',')) {
+            const name = part.trim().split(/\s+as\s+/).pop().trim()
+            if (name.length > 0) targetExports.add(name)
+          }
+        }
+        for (const part of m[1].split(',')) {
+          const name = part.trim().split(/\s+as\s+/)[0].trim()
+          if (name.length === 0) continue
+          if (!targetExports.has(name)) problems.push(`${file} 从 ./${target} 取 ${name}，但那边没有导出它`)
+        }
+      }
+    }
+    assert.deepEqual(problems, [], '这些名字对不上 ⇒ 手机页面会在加载时炸掉（白屏）：\n' + problems.join('\n'))
   })
 
   test('API 与 Node 升级一律不拦（缓存住的 API 会让"离线"与"旧响应"分不开）', () => {

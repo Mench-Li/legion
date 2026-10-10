@@ -100,3 +100,12 @@ test('⑤ 摘要从 Legion 自己的数据算，不再依赖 DSH 的目录对象
   assert.match(SRC, /const modelCount = providers\.reduce/, '模型总数要从 Legion 的 providers 算')
   assert.match(SRC, /已配置 \{providers\.length\} 个供应商/, '摘要文案用 Legion 自己的读数')
 })
+
+test('⑦ ★ 同名墓碑复活时要说"已恢复"，而不是"已保存"', () => {
+  // 业主实测（2026-10-09）：删掉一个从 DSH 导入的供应商，想加回来被 409 拒
+  // ⇒ 只好建成 `xxx-1`。服务端现在**复活**它并回 `revived: true`；
+  //   面板必须把这件事说出来 —— 用户刚做过一次删除，他需要知道"那条又回来了"。
+  assert.match(SRC, /revived/, '面板要读服务端回的 revived')
+  assert.match(SRC, /已\*\*恢复\*\*同名供应商/, '要有一句"已恢复"的提示')
+  assert.equal(SRC.includes('不能重用同名'), false, '面板里不该再留"重名不许"那套说法')
+})

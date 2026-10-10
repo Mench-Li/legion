@@ -327,6 +327,30 @@ export function createProviderStore({ db, clock = () => Date.now(), writeAudit =
     return { p, dropped: Object.freeze([...dropped].sort()) }
   }
 
+  /**
+   * 新增；**同名墓碑 ⇒ 复活**（不是拒绝）。
+   *
+   * ## 为什么这里曾经是拒绝的，以及为什么那是错的（2026-10-09，业主实测）
+   *
+   * 初版对"删过的同名"一律 409 `PROFILE_DELETED`，理由是"历史里那个引用会指向另一个供应商"。
+   * 而**同一个文件里的导入路径对墓碑是复活**（`importSnapshot`：'墓碑行重见：复活并留痕'）——
+   * 同一件事，两条路给出相反答案：
+   *
+   *   > 一个"从 DSH 抄回来的同名会复活、而我自己点出来的同名被拒绝"的规则，
+   *   > 对用户来说不是规则，是运气。
+   *
+   * 实测后果（业主那台机器）：`svea-ds` 被删（墓碑）⇒ 想加回来被拒 ⇒ 只好建成 `svea-ds-1`。
+   * 于是同一台机器上出现了一个**与 DSH 配置 id 不一致的别名**，而这个名字还会被物化进 DSH
+   * —— 拒绝换来的不是安全，是一个更难收拾的状态。
+   *
+   * ## 复活仍然留痕（原来那条保护换了个地方实现）
+   *
+   * 历史引用的顾虑并没有消失，所以它不再靠"拒绝"实现，而是靠**审计说清这是复活**：
+   * `model-provider.revive` 带上 `previousVersion`。于是"它又回来了"与"它第一次出现"
+   * 在审计里是两件事，而用户不必为此发明新 id。
+   *
+   * @returns `{ provider, revived }` —— `revived` 让调用方（面板）能说"已恢复"而不是"已创建"。
+   */
   function create(input, { actor, source = 'legion' } = {}) {
     requireActor(actor)
     if (!PROVIDER_SOURCES.includes(source)) {
@@ -334,16 +358,26 @@ export function createProviderStore({ db, clock = () => Date.now(), writeAudit =
     }
     const { p, dropped } = normalizeOne(input)
     const existing = rowToProvider(db.prepare('SELECT * FROM model_providers WHERE id = ?').get(p.id))
-    if (existing !== null) {
-      // 墓碑同样挡住：删掉再建同名会让"历史里那个 id 指向的供应商"被悄悄换掉。
-      throw new ModelError(
-        existing.deletedAtMs !== null ? MODEL_ERRORS.PROFILE_DELETED : MODEL_ERRORS.PROFILE_EXISTS,
-        existing.deletedAtMs !== null
-          ? `供应商 ${p.id} 曾被删除，不能重用同名 id（它可能是 DSH 里某条配置的来源）`
-          : `供应商已存在：${p.id}；要修改请用 update（它需要 version 做并发保护）`,
+    if (existing !== null && existing.deletedAtMs === null) {
+      // 活着的同名才是真冲突：那不是"想建"，而是"想改"，两条路的修法不同。
+      throw new ModelError(MODEL_ERRORS.PROFILE_EXISTS,
+        `供应商已存在：${p.id}；要修改请从列表里编辑（更新需要 version 做并发保护）`,
         { statusCode: 409 })
     }
     const nowMs = clock()
+    if (existing !== null) {
+      // ── 墓碑 ⇒ 复活 ──
+      db.prepare(
+        `UPDATE model_providers SET display_name=?, api=?, base_url=?, secret_ref=?, credential_configured=?,
+           models_json=?, source=?, version=version+1, updated_at_ms=?, deleted_at_ms=NULL WHERE id=?`,
+      ).run(p.displayName, p.api, p.baseURL, p.secretRef, p.credentialConfigured ? 1 : 0,
+        JSON.stringify(p.models), source, nowMs, p.id)
+      audit({
+        action: 'model-provider.revive', id: p.id, actor,
+        detail: { source, previousVersion: existing.version, api: p.api, modelCount: p.models.length, hasCredential: p.secretRef !== null, droppedFields: dropped },
+      })
+      return { provider: get(p.id), revived: true }
+    }
     db.prepare(
       `INSERT INTO model_providers
          (id, display_name, api, base_url, secret_ref, credential_configured, models_json, source, version, created_at_ms, updated_at_ms, deleted_at_ms)
@@ -351,7 +385,7 @@ export function createProviderStore({ db, clock = () => Date.now(), writeAudit =
     ).run(p.id, p.displayName, p.api, p.baseURL, p.secretRef, p.credentialConfigured ? 1 : 0,
       JSON.stringify(p.models), source, nowMs, nowMs)
     audit({ action: 'model-provider.create', id: p.id, actor, detail: { source, api: p.api, modelCount: p.models.length, hasCredential: p.secretRef !== null, droppedFields: dropped } })
-    return get(p.id)
+    return { provider: get(p.id), revived: false }
   }
 
   /**
@@ -368,8 +402,15 @@ export function createProviderStore({ db, clock = () => Date.now(), writeAudit =
         '缺少 version：并发保存必须带版本，否则两个界面同时保存会静默覆盖', { statusCode: 400 })
     }
     const existing = rowToProvider(db.prepare('SELECT * FROM model_providers WHERE id = ?').get(id))
-    if (existing === null || existing.deletedAtMs !== null) {
+    if (existing === null) {
       throw new ModelError(MODEL_ERRORS.PROFILE_NOT_FOUND, `没有这个供应商：${id}`, { statusCode: 404 })
+    }
+    if (existing.deletedAtMs !== null) {
+      // ★ 与"不存在"分开报，并**告诉用户怎么恢复**：删除之后想改回来，
+      //   正确的动作是"用同名重新创建"（那会复活它），而不是"编辑一个已经不存在的东西"。
+      throw new ModelError(MODEL_ERRORS.PROFILE_DELETED,
+        `供应商 ${id} 已被删除，不能直接编辑；用同名重新创建即可**恢复**它（那份历史会留在审计里）`,
+        { statusCode: 409, deletedAtMs: existing.deletedAtMs })
     }
     if (existing.version !== version) {
       throw new ModelError(MODEL_ERRORS.VERSION_CONFLICT,

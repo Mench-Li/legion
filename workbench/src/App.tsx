@@ -6,6 +6,7 @@ import {
   fetchHubActivity,
   fetchHubMissions,
   fetchHubTasks,
+  fetchHubTask,
   fetchChatHealth,
   fetchProvision,
   fetchRoster,
@@ -19,8 +20,9 @@ import {
   subscribeHubAudit,
 } from './api'
 import type { ProvisionCheck } from './api'
-import { popupBatch, popupText, readPopupSeq, writePopupSeq } from './notify'
+import { popupBatch, popupReason, popupText, readPopupSeq, validTaskId, writePopupSeq } from './notify'
 import { notifySystem } from './desktopNotify'
+import type { NotifyItem } from './notify'
 import { createSceneController } from './scene/sceneController'
 import type { SceneCue, SceneFacts } from './scene/sceneState'
 import { buildMissions } from './missions'
@@ -63,6 +65,38 @@ const MAX_ACTIVITY = 80
  * 理由：弹框是打扰，"补弹 12 条刚才没看见的"等于把人淹没，而人淹没了就会关掉提醒。
  */
 const POPUP_LIMIT = 3
+
+/** 「提醒已就绪」这句只对每个浏览器说一次（说多了就成了噪音）。 */
+const POPUP_ARMED_KEY = 'legion.notify.popuparmed'
+function popupArmedShown(): boolean {
+  try { return localStorage.getItem(POPUP_ARMED_KEY) === '1' } catch { return true }
+}
+function markPopupArmed(): void {
+  try { localStorage.setItem(POPUP_ARMED_KEY, '1') } catch { /* 存储不可用：那就每次都说，无害 */ }
+}
+
+/**
+ * 任务的**最新一条评论**正文 —— 弹框用它说明"为什么停在这"。
+ *
+ * 取最新一条而不是找关键词：worker 的收尾评论就是它停下来的原因，而历史评论里
+ * 可能有过别的失败（翻旧账会把已经解决的问题又报一遍）。
+ */
+function latestCommentText(task: { comments?: Array<{ text?: unknown }> } | null | undefined): string | null {
+  const list = Array.isArray(task?.comments) ? task.comments : []
+  const last = list[list.length - 1]
+  return last !== undefined && typeof last.text === 'string' ? last.text : null
+}
+
+/** 为一条提醒取"为什么停在这"（没有 taskId / 取不到 / 不是"要动手"的语气 → null）。 */
+async function reasonForPopup(item: NotifyItem): Promise<string | null> {
+  const tid = validTaskId(item.taskId)
+  if (tid === null) return null
+  try {
+    return popupReason(latestCommentText(await fetchHubTask(tid)))
+  } catch {
+    return null
+  }
+}
 
 export default function App(): React.JSX.Element {
   // 账号会话的门。只在 Hub **要求**远程鉴权时才会拦（见 `useIdentityGate`）：
@@ -313,48 +347,77 @@ export default function App(): React.JSX.Element {
   //    不新开 SSE 连接：本 effect 的 20s 轮询**本来就是**这条链路的取数点，弹框只是终于消费了它。
   //    弹框游标与已读游标**分开**存在 localStorage（popupSeqKey）：已读是用户点出来的，
   //    拿它当"弹过了没有"的游标会两头都错（点一次全部已读 ⇒ 新事件不再弹）。
+  //
+  // ★★ BUG-022：这一版修的是"提醒**根本不会响**"的两种情形（将军实测 T-199 没弹）：
+  //    ① 从前的 `if (!hubMode || !scope) return` 让**"全部空间"视图一个弹框都没有** ——
+  //       而"我现在没选空间"与"我不想被提醒"毫无关系。实测将军就停在这个视图上。
+  //    ② 文案只说状态（「待你验收」），不说**为什么停在这**。T-199 的真实原因是
+  //       「自动合入失败，等待人工处理」——一个是点验收，一个是解冲突，动作完全不同。
   useEffect(() => {
-    if (!hubMode || !scope) {
+    if (!hubMode) {
       setNotifyUnread(0)
       popupSeqRef.current = 0
       return
     }
     // 换空间要换一把游标：否则新空间的第一批历史会被当成"新发生的"弹出来。
+    // `scope === null`（全部空间）用 `__all__` 那把，与具体空间的互不干扰。
     popupSeqRef.current = readPopupSeq(scope)
+    const wasFresh = popupSeqRef.current <= 0
     let cancelled = false
-    const refresh = (): void => {
-      fetchHubActivity({ scope, limit: 200 })
-        .then(rows => {
-          if (cancelled) return
-          // 面板打开时未读数由 NotifyView 上报；但**弹框哪一页都要**，所以它不随那个分支跳过。
-          if (active !== 'notify') setNotifyUnread(countNotifyUnread(rows, scope))
-          const { popups, lastSeq } = popupBatch(rows, popupSeqRef.current, POPUP_LIMIT, {
-            nowMs: Date.now(),
-            // 首次接入这个提醒时补告最近 6 小时内**真正需要你动手**的事。
-            // 语义是"你刚才大概不在"，不是"这台机器上曾经发生过什么"：
-            // 完全不补告 ⇒ 装上提醒的那一刻恰好什么也不说（而那时 T-196 可能正等着你）；
-            // 全量补弹 ⇒ 一打开页面就被历史糊一脸，而下一步就是把提醒关掉。
-            replayWindowMs: 6 * 60 * 60 * 1000,
-          })
-          if (lastSeq !== popupSeqRef.current) {
-            popupSeqRef.current = lastSeq
-            writePopupSeq(scope, lastSeq)
-          }
-          for (const p of popups) {
-            const role = String(p.item.member ?? '')
-            const who = role.length > 0 ? (labelsRef.current[role] ?? role) : null
-            const text = popupText(p.item, who)
-            // 点一下就去通知中心 —— 一条叫你过来处理的消息如果点不动，
-            // 用户还得自己找那个面板，那正是这条提醒本想省掉的一步。
-            toast('info', text, () => setActive('notify'))
-            // 页面不在前台时，页面里的弹框**一个都看不见** —— 那是系统通知唯一能补的位。
-            notifySystem(text)
-          }
+    const refresh = async (): Promise<void> => {
+      try {
+        // scope 为 null = 全部空间：**不过滤**地取，这样"没选空间"也能收到提醒。
+        const rows = await fetchHubActivity({ scope: scope ?? undefined, limit: 200 })
+        if (cancelled) return
+        // 未读徽标仍按具体空间口径（通知面板自己要求选空间）；弹框两种情形都要工作。
+        if (scope !== null && active !== 'notify') setNotifyUnread(countNotifyUnread(rows, scope))
+        const { popups, lastSeq } = popupBatch(rows, popupSeqRef.current, POPUP_LIMIT, {
+          nowMs: Date.now(),
+          // 首次接入这个提醒时补告最近 6 小时内**真正需要你动手**的事。
+          // 语义是"你刚才大概不在"，不是"这台机器上曾经发生过什么"：
+          // 完全不补告 ⇒ 装上提醒的那一刻恰好什么也不说（而那时 T-196 可能正等着你）；
+          // 全量补弹 ⇒ 一打开页面就被历史糊一脸，而下一步就是把提醒关掉。
+          replayWindowMs: 6 * 60 * 60 * 1000,
         })
-        .catch(() => undefined)
+        if (lastSeq !== popupSeqRef.current) {
+          popupSeqRef.current = lastSeq
+          writePopupSeq(scope, lastSeq)
+        }
+        if (wasFresh && popups.length === 0 && !popupArmedShown()) {
+          // 首次接入且当下无事可提醒：**明确说一句它已经武装好了**。
+          // 否则用户无法区分"它没在工作"与"确实没有事" —— 而那正是这次投诉的根源。
+          markPopupArmed()
+          toast('info', '🔔 提醒已就绪：有任务等你处理时，会在这里弹出来')
+        }
+        for (const p of popups) {
+          const role = String(p.item.member ?? '')
+          const who = role.length > 0 ? (labelsRef.current[role] ?? role) : null
+          const base = popupText(p.item, who)
+          // "为什么停在这"：只在需要人介入时才补一句（见 notify.ts 的 popupReason）。
+          // 至多 3 次 GET（弹框本来就少），换来的是把人送去**做对的事**。
+          const reason = await reasonForPopup(p.item)
+          if (cancelled) return
+          const text = reason === null ? base : `${base} —— ${reason}`
+          const itemScope = typeof p.item.scope === 'string' && p.item.scope.length > 0 ? p.item.scope : scope
+          // 点一下就去**那个空间**的通知中心 —— 一条叫你过来处理的消息如果点不动，
+          // 用户还得自己找空间再找面板，那正是这条提醒本想省掉的一步。
+          const open = (): void => {
+            if (itemScope !== null && itemScope !== scope) {
+              setScope(itemScope)
+              void loadMissions(itemScope)
+            }
+            setActive('notify')
+          }
+          toast('info', text, open)
+          // 页面不在前台时，页面里的弹框**一个都看不见** —— 那是系统通知唯一能补的位。
+          notifySystem(text)
+        }
+      } catch {
+        /* 静默：提醒失败不该影响主界面 */
+      }
     }
-    refresh()
-    const timer = window.setInterval(refresh, 20000)
+    void refresh()
+    const timer = window.setInterval(() => { void refresh() }, 20000)
     return () => {
       cancelled = true
       window.clearInterval(timer)

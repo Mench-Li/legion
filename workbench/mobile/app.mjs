@@ -47,7 +47,7 @@ import {
   timelineEntry,
 } from './timeline.mjs'
 import { createRefresher } from './refresh-loop.mjs'
-import { popupBatch, popupText, readPopupSeq, shouldUseSystemNotify, validTaskId, writePopupSeq } from './popup.mjs'
+import { popupBatch, popupText, readPopupSeq, reasonFromTask, shouldUseSystemNotify, validTaskId, writePopupSeq } from './popup.mjs'
 
 const $ = (id) => document.getElementById(id)
 const LS_REFRESH = 'legion.mobile.refresh'
@@ -62,6 +62,14 @@ const POPUP_LIMIT = 3
 const POPUP_REPLAY_MS = 6 * 60 * 60 * 1000
 /** 弹框停留时长：手机上读一句话比桌面慢，给足。 */
 const POPUP_TTL_MS = 9000
+/** 「提醒已就绪」这句只对每个浏览器说一次（说多了就成了噪音）。 */
+const LS_POPUP_ARMED = 'legion.mobile.popuparmed'
+function popupArmedShown() {
+  try { return localStorage.getItem(LS_POPUP_ARMED) === '1' } catch { return true }
+}
+function markPopupArmed() {
+  try { localStorage.setItem(LS_POPUP_ARMED, '1') } catch { /* 存储不可用：那就每次都说，无害 */ }
+}
 
 /** Hub 地址：默认同源（部署在同一域名下），可由登录页覆盖。 */
 function hubBase() {
@@ -828,15 +836,31 @@ function showPopupText(text, onClick = null) {
   }, POPUP_TTL_MS)
 }
 
-/** 弹一条任务提醒：可点（去任务详情），到时自己走。 */
-function showPopup(p) {
+/** 弹一条任务提醒：可点（去任务详情），到时自己走。`reason` 可选（"为什么停在这"）。 */
+function showPopup(p, reason = null) {
   const tid = validTaskId(p.row?.taskId)
+  const base = popupText(p.row, whoFor(p.row?.member))
+  const text = reason === null ? base : `${base} —— ${reason}`
   // 点一下就去处理它 —— 一条叫你过来的消息如果点不动，
   // 你还得自己翻到任务页找那一条，那正是这条提醒本想省掉的一步。
-  showPopupText(
-    popupText(p.row, whoFor(p.row?.member)),
-    tid !== null ? () => { void openTask(tid) } : () => showView('tasks'),
-  )
+  showPopupText(text, tid !== null ? () => { void openTask(tid) } : () => showView('tasks'))
+  return text
+}
+
+/**
+ * 取"**为什么停在这**"（最多 POPUP_LIMIT 次请求；弹框本来就少）。
+ *
+ * 实测起因：T-199 弹出来只说「待你验收」，而它真实原因是
+ * 「自动合入失败，等待人工处理」—— 一个是点验收，一个是解冲突，动作完全不同。
+ */
+async function reasonForPopupRow(row) {
+  const tid = validTaskId(row?.taskId)
+  if (tid === null) return null
+  try {
+    return reasonFromTask(await api(`/api/task?id=${encodeURIComponent(tid)}`))
+  } catch {
+    return null
+  }
 }
 
 /**
@@ -846,13 +870,19 @@ function showPopup(p) {
  *   SSE 帧只当"有动静"的信号（见 connectStream），真正的判断都走这一条，
  *   这样"弹框"和"看板/时间线"读到的是同一份事实，不会出现
  *   "弹了但看板上没有它"这种自相矛盾的界面。
+ *
+ * ★ BUG-022：从前这里 `if (state.scope === null) return`。**"还没解析出空间"**
+ *   与"我不想被提醒"是两件事——桌面端同一个空档就是将军"没看到弹框"的原因之一。
  */
 async function refreshPopups() {
-  if (state.scope === null) return
   const gen = state.scopeGen
-  const rows = await api(`/api/activity?scope=${encodeURIComponent(state.scope)}&limit=200`).catch(() => null)
+  const qs = state.scope === null
+    ? 'limit=200'
+    : `scope=${encodeURIComponent(state.scope)}&limit=200`
+  const rows = await api(`/api/activity?${qs}`).catch(() => null)
   if (rows === null || gen !== state.scopeGen) return
   const list = Array.isArray(rows) ? rows : (rows.events ?? [])
+  const wasFresh = state.popupSeq <= 0
   const { popups, lastSeq } = popupBatch(list, state.popupSeq, POPUP_LIMIT, {
     nowMs: Date.now(),
     replayWindowMs: POPUP_REPLAY_MS,
@@ -861,11 +891,18 @@ async function refreshPopups() {
     state.popupSeq = lastSeq
     writePopupSeq(state.scope, lastSeq)
   }
+  if (wasFresh && popups.length === 0 && !popupArmedShown()) {
+    // 首次接入且当下无事可提醒：说一句它已经武装好了。
+    // 否则用户分不清"它没在工作"与"确实没事" —— 那正是这次投诉的根源。
+    markPopupArmed()
+    showPopupText('🔔 提醒已就绪：有任务等你处理时会弹在这里')
+  }
   for (const p of popups) {
-    showPopup(p)
+    const reason = await reasonForPopupRow(p.row)
+    if (gen !== state.scopeGen) return
     // 页面不在前台时，页面里的弹框**看不见** —— 那是系统通知唯一能补的位。
     // （边界：这只在页面还活着时有效；页面被彻底关掉要靠 Web Push，本次没做。）
-    notifySystem(popupText(p.row, whoFor(p.row?.member)))
+    notifySystem(showPopup(p, reason))
   }
 }
 

@@ -15,11 +15,16 @@
  */
 import { describe, test } from 'node:test'
 import assert from 'node:assert/strict'
+import { readFileSync } from 'node:fs'
+import { dirname, resolve } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import {
-  EMPTY_READ_STATE, NOTIFY_STATUS_LABEL, popupBatch, popupSeqKey, popupText, readPopupSeq,
+  EMPTY_READ_STATE, NOTIFY_STATUS_LABEL, popupBatch, popupReason, popupSeqKey, popupText, readPopupSeq,
   shouldPopup, toNotifyItem, writePopupSeq,
 } from '../src/notify.ts'
 import { shouldUseSystemNotify } from '../src/desktopNotify.ts'
+
+const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..')
 
 const row = (seq, action, extra = {}) => ({
   seq, ts: '2026-10-10T09:20:' + String(seq % 60).padStart(2, '0') + '.000Z',
@@ -251,5 +256,75 @@ describe('BUG-021 系统通知（桌面端"人不在看页面"时的那一半）
       '★ 没授权不许发（也绝不自动请求——自动弹授权框会被拒，拒一次就回不来）')
     assert.equal(shouldUseSystemNotify({ hidden: true, permission: 'denied' }), false)
     assert.equal(shouldUseSystemNotify({ hidden: true, permission: 'unsupported' }), false)
+  })
+})
+
+// ============================================================================
+// BUG-022：将军实测「T-199 我没看到弹框」——两处让提醒**根本不会响**的缺陷
+//
+//   ① 桌面端那个 effect 从前的第一行是 `if (!hubMode || !scope) return`：
+//      **"全部空间"视图一个弹框都没有**。而"我现在没选空间"与"我不想被提醒"
+//      毫无关系 —— 将军当时就停在这个视图上。
+//   ② 文案只说状态（「待你验收」），不说**为什么停在这**。T-199 的真实原因是
+//      `自动合入失败，等待人工处理`，与"等你验收"是**两个不同的动作**。
+// ============================================================================
+
+describe('BUG-022 弹框必须能说明"为什么停在这"', () => {
+  test('★★ 真实那条挡住 T-199 的评论，要能被抽出来', () => {
+    const real = '⚠ 编码实现完成，但自动合入主分支失败（可能冲突），改动保留在分支 w/T-199。请人工合入并推进：git -C D:/project/DSH/legion merge --no-ff w/T-199'
+    const reason = popupReason(real)
+    assert.ok(reason !== null, '★ 这条是"要人动手"的语气，必须抽出来')
+    assert.ok(reason.includes('自动合入主分支失败'), '原因要说清是"合入失败"：' + reason)
+    assert.ok(reason.length <= 64, '弹框是一句话，不能把整段 worker 汇报糊上去：' + reason)
+  })
+
+  test('★★ 纯进展播报**不加**说明（弹框已经够吵了）', () => {
+    for (const t of [
+      '🟢 已派 AI worker 开始执行（worker=scrum:T-199，隔离 worktree=…）——进行中，完成/异常将自动更新并流转',
+      '✅ 需求澄清完成，方案文档已合入主分支。请将军人工验收',
+      '进度 50%',
+    ]) {
+      assert.equal(popupReason(t), null, '进展播报不该被当成"要你动手"：' + t.slice(0, 30))
+    }
+  })
+
+  test('★ 取**第一行**（评论第一行就是结论，后面是命令与细节）', () => {
+    const reason = popupReason('⚠ 自动合入失败，等待人工处理\n\ngit merge --no-ff w/T-199\n解决冲突后推进')
+    assert.equal(reason, '⚠ 自动合入失败，等待人工处理')
+  })
+
+  test('★ 空/非字符串/空行开头都安全（返回 null，不抛）', () => {
+    assert.equal(popupReason(null), null)
+    assert.equal(popupReason(undefined), null)
+    assert.equal(popupReason(''), null)
+    assert.equal(popupReason('\n\n  \n'), null)
+    assert.equal(popupReason(42), null)
+    assert.equal(popupReason('\n\n⛔ 冲突未解决'), '⛔ 冲突未解决')
+  })
+
+  test('★ 超长截断（带省略号，不是硬切）', () => {
+    const r = popupReason('失败：' + '很长的说明'.repeat(40))
+    assert.ok(r.endsWith('…'))
+    assert.ok(r.length <= 64)
+  })
+})
+
+describe('BUG-022 接线：不许因为"没选空间"就不提醒', () => {
+  const src = readFileSync(resolve(ROOT, 'workbench/src/App.tsx'), 'utf8')
+
+  test('★★ 桌面端：拉审计时不把 scope 当必要条件（null = 全部空间）', () => {
+    assert.match(src, /fetchHubActivity\(\{ scope: scope \?\? undefined/,
+      '★ 从前 `if (!hubMode || !scope) return` ⇒ "全部空间"视图一个弹框都没有（将军就停在那）')
+    assert.doesNotMatch(src, /if \(!hubMode \|\| !scope\) \{\n\s+setNotifyUnread\(0\)\n\s+popupSeqRef\.current = 0/,
+      '★ 那段早退必须消失，否则提醒在"没选空间"时静默失效')
+  })
+
+  test('★★ 桌面端：弹框会去取任务最新评论作为"为什么停在这"', () => {
+    assert.match(src, /reasonForPopup\(/, '弹框要带上原因（实测 T-199 的真实原因与"待你验收"完全不同）')
+    assert.match(src, /fetchHubTask\(tid\)/, '原因来自任务详情的最新评论')
+  })
+
+  test('★ 桌面端：点弹框要跳到**那条任务所在的空间**的通知中心', () => {
+    assert.match(src, /itemScope !== null && itemScope !== scope/, '跨空间提醒要先把空间切过去')
   })
 })

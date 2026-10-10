@@ -18,12 +18,13 @@ import { describe, test } from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import {
-  POPUP_STATUS_LABEL, popupBatch as mobileBatch, popupSeqKey, popupText as mobileText,
-  readPopupSeq, shouldPopup as mobileShouldPopup, shouldUseSystemNotify, writePopupSeq,
+  POPUP_STATUS_LABEL, popupBatch as mobileBatch, popupReason as mobileReason, popupSeqKey,
+  popupText as mobileText, readPopupSeq, shouldPopup as mobileShouldPopup, shouldUseSystemNotify,
+  writePopupSeq,
 } from '../mobile/popup.mjs'
 import {
-  NOTIFY_STATUS_LABEL, popupBatch as desktopBatch, popupText as desktopText, shouldPopup as desktopShouldPopup,
-  toNotifyItem,
+  NOTIFY_STATUS_LABEL, popupBatch as desktopBatch, popupReason as desktopReason,
+  popupText as desktopText, shouldPopup as desktopShouldPopup, toNotifyItem,
 } from '../src/notify.ts'
 import { shouldUseSystemNotify as desktopShouldUseSystemNotify } from '../src/desktopNotify.ts'
 
@@ -186,6 +187,42 @@ describe('BUG-021 对等判据：手机端与桌面端同一套判据', () => {
 
   test('★★ 状态中文表两端逐字一致（各写一份就是为了能被这条顶住）', () => {
     assert.deepEqual({ ...POPUP_STATUS_LABEL }, { ...NOTIFY_STATUS_LABEL })
+  })
+
+  test('★★ "为什么停在这"（popupReason）两端逐字一致（BUG-022）', () => {
+    const cases = [
+      '⚠ 编码实现完成，但自动合入主分支失败（可能冲突），改动保留在分支 w/T-199。请人工合入并推进：git merge --no-ff w/T-199',
+      '⚠ 自动合入失败，等待人工处理\n\ngit merge --no-ff w/T-199',
+      '✅ 需求澄清完成，方案文档已合入主分支。请将军人工验收',
+      '🟢 已派 AI worker 开始执行（worker=scrum:T-199，隔离 worktree=…）——进行中，完成/异常将自动更新并流转',
+      '进度 50%',
+      '\n\n⛔ 冲突未解决',
+      '',
+      null,
+      undefined,
+      42,
+      '失败：' + '很长的说明'.repeat(40),
+    ]
+    for (const c of cases) {
+      assert.equal(
+        mobileReason(c), desktopReason(c),
+        `两端对同一段评论给出的"原因"必须一致：${String(c).slice(0, 40)}`,
+      )
+    }
+  })
+
+  test('★★ 常规验收与进展播报**不**被当成"要你动手的原因"（否则是噪音）', () => {
+    for (const routine of [
+      '✅ 需求澄清完成，方案文档已合入主分支。请将军人工验收',
+      '🟢 已派 AI worker 开始执行（worker=scrum:T-199，隔离 worktree=…）——进行中，完成/异常将自动更新并流转',
+      '进度 50%',
+    ]) {
+      assert.equal(mobileReason(routine), null, '不该附在弹框上：' + routine.slice(0, 30))
+      assert.equal(desktopReason(routine), null)
+    }
+    // 而真实那条挡住 T-199 的，必须抽出来（否则用户仍然不知道该做什么）
+    const real = '⚠ 编码实现完成，但自动合入主分支失败（可能冲突），改动保留在分支 w/T-199。请人工合入并推进'
+    assert.ok((mobileReason(real) ?? '').includes('自动合入主分支失败'))
   })
 
   test('★★ 系统通知的决策两端一致（页面不在前台时才发、且要已授权）', () => {

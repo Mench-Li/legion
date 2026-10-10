@@ -204,3 +204,30 @@ export function writePopupSeq(scope, seq, storage = null) {
 export function shouldUseSystemNotify({ hidden = false, permission = 'unsupported' } = {}) {
   return hidden === true && permission === 'granted'
 }
+
+/**
+ * 从任务最新评论里抽一句"**为什么停在这**"（弹框补充说明）。
+ *
+ * 与桌面端 `src/notify.ts` 的 `popupReason` 逐字同语义（对等判据盯着）。
+ * 起因是实测：T-199 弹出来只说「待你验收」，而它真实原因是
+ * 「自动合入失败，等待人工处理」—— 一个是点验收，一个是解冲突，动作完全不同。
+ *
+ * 只认"**出了状况、要人介入**"的语气（失败/冲突/等待人工/拒绝/无法…）；纯进展播报与
+ * 常规的"请将军人工验收"都返回 null（后者是闸门的日常，弹框主文案已经说了「待你验收」）。
+ *
+ * ★ 门槛宁可紧一点：漏掉一次补充说明，用户仍然会被弹框叫到；多糊一句，用户下次就不看了。
+ */
+export function popupReason(commentText, max = 64) {
+  if (typeof commentText !== 'string') return null
+  const first = commentText.split('\n').map((s) => s.trim()).find((s) => s.length > 0) ?? ''
+  if (first.length === 0) return null
+  if (!/失败|冲突|等待人工|需人工|待人工|拒绝|无法|错误|超时|受阻|人工核对|人工处理/.test(first)) return null
+  return first.length > max ? first.slice(0, max - 1) + '…' : first
+}
+
+/** 任务对象 → 它"为什么停在这"（取**最新**一条评论；翻旧账会把已解决的又报一遍）。 */
+export function reasonFromTask(task, max = 64) {
+  const list = Array.isArray(task?.comments) ? task.comments : []
+  const last = list[list.length - 1]
+  return popupReason(last !== undefined && typeof last.text === 'string' ? last.text : null, max)
+}

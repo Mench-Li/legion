@@ -415,6 +415,38 @@ export function popupText(item: NotifyItem, who?: string | null): string {
   }
 }
 
+/**
+ * 从任务最新评论里抽一句"**为什么停在这**"，作为弹框的补充说明。
+ *
+ * ## 为什么需要它（这条是踩出来的）
+ *
+ * `transition → in_review` 的文案是「待你验收」，但**实际卡住的原因不止一种**：
+ *
+ * ```
+ * 10:01:11  T-199 → in_review（中间阶段自动合入失败，等待人工处理）
+ * ```
+ *
+ * 任务其实不是"等你验收"，而是"**合入冲突等你人工处理**"——两者的动作完全不同
+ * （一个是点验收，一个是解决冲突）。只说"待你验收"会把人送去做错的事。
+ *
+ * ## 门槛（弹框已经够吵了，这里只加"要动手"的那一类）
+ *
+ * 只认"**出了状况、要人介入**"的语气（失败/冲突/等待人工/拒绝/无法…）；**纯进展播报与
+ * 常规的"请将军人工验收"都返回 null** —— 后者是闸门的日常，而弹框主文案已经说了「待你验收」，
+ * 再糊一遍那句只是噪音。
+ *
+ * ★ 第一版我把「请将军」也算进了关键词，结果常规验收评论被当成"原因"附在弹框上 ——
+ *   判据当场变红（`notify-popup.test.mjs` 那条"纯进展播报不加说明"）。门槛宁可紧一点：
+ *   漏掉一次补充说明，用户仍然会被弹框叫到；多糊一句，用户下次就不看了。
+ */
+export function popupReason(commentText: string | null | undefined, max = 64): string | null {
+  if (typeof commentText !== 'string') return null
+  const first = commentText.split('\n').map((s) => s.trim()).find((s) => s.length > 0) ?? ''
+  if (first.length === 0) return null
+  if (!/失败|冲突|等待人工|需人工|待人工|拒绝|无法|错误|超时|受阻|人工核对|人工处理/.test(first)) return null
+  return first.length > max ? first.slice(0, max - 1) + '…' : first
+}
+
 /** 一条待弹的提醒。 */
 export interface NotifyPopup {
   /** 稳定去重键（= NotifyItem.id，`${scope}:${seq}`）。 */

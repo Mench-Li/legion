@@ -27,6 +27,8 @@
 > 本地直跑读数：9 / 6 / 9 / 5 / 6 / 6 例，全部 exit 0；**上面的 headline 基线（195 套件 / 5712 用例）保持不变**
 > ——全量 `run-ci` 由 devops（T-202）在有完整沙箱权限的环境重跑后再更新本行。
 
+> **T-202（devops）复跑结论（2026-10-10，w/T-202 开工基线 `cd569616`）**：本会话沙箱内**无法直跑**真实 `run-ci`（piped stdio `spawn EPERM`）与 `node --test` 聚合器（内部 runner 绕过 stdio 补丁，实测栈 `node:internal/test_runner/runner:517`）。已实跑：`run-ci` 静态阶段 `syntax / env / boundary / deps / doc` **5/5 PASS**；6 支新套件 **41/41**；whiteboard `build` 与 workbench `tsc --noEmit` **exit 0**。**headline 基线（195 套件 / 5712 用例）保持不变**——全量 `test` 阶段需在有完整沙箱权限且配 `DSH_CHECKOUT` 的环境重跑。放行门禁：M1/M2 未清（见 `docs/G-mv1s6y49-1/DEPLOY.md` §7.1 与 `docs/DEPLOY.md` §12.5），**不建议验收放行**。
+
 > #### ✅ 一处授权缺口：**发现 → 已修**（PRT-612 期间发现，PRT-611 补记修掉）
 >
 > spec line 470 要求审批的授权主体含 `toolName` 与 `callId`，而 Legion 侧的

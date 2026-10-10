@@ -1,0 +1,10 @@
+{
+  "format": "legion/update-trust@1",
+  "sequence": 1,
+  "keys": [
+    {
+      "keyId": "release-2026-a",
+      "publicKeyPem": "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEAShIPBr2fchUjhswrH7FnMnpZBFvS+ZwJHG9FQ4Ox9Eo=\n-----END PUBLIC KEY-----\n"
+    }
+  ]
+}

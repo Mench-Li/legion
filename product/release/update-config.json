@@ -1,0 +1,42 @@
+{
+  "_comment": [
+    "Legion 更新地址配置（设计 §4/§11 的「部署时填写」）。",
+    "",
+    "本文件在**打包时**随产品树进入 installRoot/product/release/update-config.json，",
+    "客户端只读它。旁边必须有 update-trust.json（发布公钥）——两者缺一，",
+    "「检查更新」都不可用（`update-config-missing` / `update-config-no-trust`），",
+    "而那是**刻意的**：没有公钥就跳过验签，与「暂时没有更新」在平时看起来一样，",
+    "只在托管被改写的那一天分开。",
+    "",
+    "★ 生产托管（2026-10-10 实测确认）：",
+    "    https://updates.legion-si.online  →  nginx root /srv/legion-updates/production",
+    "    只放行 `^/legion/feeds/` 与 `^/legion/releases/`，其余一律 404（刻意白名单）。",
+    "    入口是 Cloudflare（DNS 解析到 Cloudflare 地址），不是源站直连——",
+    "    境内源站按 SNI 做 ICP 备案校验，未备案域名直连必然被 reset。",
+    "",
+    "★ 通道各自写 origin/prefix，而不是一个全局开关：",
+    "    一个全局的 allowInsecureHttp 会在某次为 internal 打开它时让 stable 也走 HTTP。",
+    "    stable 上的 HTTP 意味着中间人可以把清单换成任意内容——而签名能挡住伪造，",
+    "    挡不住'把客户端引到一个只提供旧版清单的托管'这种降级。",
+    "",
+    "★ 测试托管是**明文 HTTP**（裸 IP + `/test/legion`），所以 internal 通道显式",
+    "    声明 allowInsecureHttp。生产通道必须是 https。"
+  ],
+  "channels": {
+    "stable": {
+      "origin": "https://updates.legion-si.online",
+      "prefix": "/legion"
+    },
+    "canary": {
+      "origin": "https://updates.legion-si.online",
+      "prefix": "/legion"
+    },
+    "internal": {
+      "origin": "http://117.72.146.36",
+      "prefix": "/test/legion",
+      "allowInsecureHttp": true
+    }
+  },
+  "defaultChannel": "stable",
+  "checkOnStartup": true
+}

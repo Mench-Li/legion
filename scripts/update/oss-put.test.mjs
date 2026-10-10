@@ -420,4 +420,57 @@ describe('SigV4 上传器', () => {
     assert.equal(FEED_CACHE_CONTROL, 'no-store')
     assert.ok(FEED_CACHE_CONTROL.length <= 30)
   })
+
+  // ── 删对象：必须**回读**确认，不能只看 DELETE 的返回码 ──────────────────
+  //
+  // ★ S3 的 DeleteObject 对**不存在的键**也返回 204（幂等，刻意不区分
+  //   "删掉了"与"本来就没有"）。所以只看返回码，"删成功"与"键名写错了"
+  //   长得一模一样 —— 而后者会让人以为清理完成了。
+  //
+  //   > 一个"只看 DELETE 返回码"的清理工具，
+  //   > 与一个"真的回读确认对象没了"的清理工具，在日志里都是 204——
+  //   > 只不过前者的桶里还留着那些文件。
+
+  test('㉗ --delete 走 DELETE 方法，并在删后回读', async () => {
+    const realFetch = globalThis.fetch
+    const calls = []
+    globalThis.fetch = async (url, init) => {
+      calls.push({ url, method: init?.method })
+      if (init?.method === 'DELETE') return new Response(null, { status: 204 })
+      return new Response('NoSuchKey', { status: 404 })
+    }
+    try {
+      const del = await ossRequest({
+        method: 'DELETE', endpoint: 'https://s3.cn-north-1.jdcloud-oss.com', bucket: 'b', key: 'legion/_probe/x.txt',
+        region: 'cn-north-1', accessKey: 'AKID', secretKey: 'SECRET',
+        date: new Date(Date.UTC(2026, 9, 9, 12, 0, 0)),
+      })
+      assert.equal(del.status, 204)
+      // 回读用 GET（`verifyPublicRead` 的理由：HEAD 出错时拿不到服务端原话）
+      const read = await verifyPublicRead('https://s3.cn-north-1.jdcloud-oss.com/b/legion/_probe/x.txt')
+      assert.equal(read.status, 404)
+    } finally { globalThis.fetch = realFetch }
+
+    // DELETE 与随后的回读都发生了，且方法分别是 DELETE / GET。
+    assert.deepEqual(calls.map((c) => c.method), ['DELETE', 'GET'])
+  })
+
+  test('㉘ 删后回读仍可达 ⇒ 不能算成功（只看返回码会漏）', async () => {
+    const realFetch = globalThis.fetch
+    globalThis.fetch = async (url, init) => {
+      // DELETE 报 204（S3 对不存在的键也这样），而对象**其实还在**。
+      if (init?.method === 'DELETE') return new Response(null, { status: 204 })
+      return new Response('still here', { status: 200 })
+    }
+    try {
+      const del = await ossRequest({
+        method: 'DELETE', endpoint: 'https://s3.cn-north-1.jdcloud-oss.com', bucket: 'b', key: 'k',
+        region: 'cn-north-1', accessKey: 'AKID', secretKey: 'SECRET',
+        date: new Date(Date.UTC(2026, 9, 9, 12, 0, 0)),
+      })
+      assert.equal(del.status, 204, 'DELETE 本身会返回 204 —— 所以它不足以作为判据')
+      const read = await verifyPublicRead('https://s3.cn-north-1.jdcloud-oss.com/b/k')
+      assert.equal(read.ok, true, '回读仍可达 ⇒ 必须判失败')
+    } finally { globalThis.fetch = realFetch }
+  })
 })

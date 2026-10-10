@@ -7702,6 +7702,9 @@ import { createMobileRoutes } from './routes/mobile.mjs'
 import { createPortalRoutes } from './routes/portal.mjs'
 import { createReleaseRoutes, latestInstaller, readReleaseManifest } from './routes/releases.mjs'
 import { createSiteRoutes } from './routes/site.mjs'
+// T-196：安装包的**多线路**下载。线路表从文件读（配置系统没有 JSON 类型，
+// 而下载地址里天然带 `?`/`&`/`=`，用 csv 表达会歧义），按访客地区选一条。
+import { formatDownloadLineProblems, loadDownloadLines, selectDownloadLine } from './download-lines.mjs'
 import { createUserStore } from './user-store.mjs'
 import { createDeviceStore } from './device-store.mjs'
 import { createNodeGateway } from './node-gateway.mjs'
@@ -7971,24 +7974,62 @@ if (REMOTE_AGENT_ENABLED) {
   // 门口页与官网共用**这一个**取法：两处各算一次，就有两处算出不同答案的余地。
   const explicitDownload = String(CFG.values.downloadUrl ?? '').trim()
   const desktopVersion = CFG.values.desktopVersion ?? ''
-  function describeDownload() {
-    if (explicitDownload.length > 0) {
-      return { url: explicitDownload, sizeBytes: null, at: null, version: desktopVersion, sha256: '' }
+  // ── 多线路（T-196）────────────────────────────────────────────────────────
+  //
+  // 启动时读一次并**把问题打出来**。为什么必须打出来：线路表配错时唯一的外部
+  // 表现是"首页还是只有一条线路"——而那与"根本没配多线路"长得一模一样。
+  //   > 一个"配错了但静默退回单线路"的功能，
+  //   > 与一个"没配"的功能，在页面上是同一个东西——只不过前者的运营者
+  //   > 会一直在查 CDN 为什么没生效。
+  const downloadLinesConfig = loadDownloadLines(CFG.values.downloadLines ?? '')
+  for (const line of formatDownloadLineProblems(downloadLinesConfig.problems)) console.error(line)
+  if (downloadLinesConfig.lines.length > 0) {
+    console.log(`[download-lines] 已启用 ${downloadLinesConfig.lines.length} 条线路（${downloadLinesConfig.source}）：`
+      + downloadLinesConfig.lines.map((l) => `${l.id}${l.countries.length > 0 ? `(${l.countries.join('/')})` : '(默认)'}`).join('、'))
+  }
+  /**
+   * 当次发布信息。
+   *
+   * @param {{country?: string|null}} [visitor] 访客地区（来自 Cloudflare 的
+   *        `CF-IPCountry`，由 `routes/site.mjs` 从请求头读出后传进来）。
+   *        读不到就回退到默认线路——**不做前端探测**：那段 JS 本身要经同一条
+   *        慢路送达，而"探测超时就选默认"在探测必然慢的那一侧总是选错。
+   */
+  function describeDownload(visitor = {}) {
+    const base = (() => {
+      if (explicitDownload.length > 0) {
+        return { url: explicitDownload, sizeBytes: null, at: null, version: desktopVersion, sha256: '' }
+      }
+      const found = releasesDir.length > 0 ? latestInstaller(releasesDir) : null
+      if (found === null) {
+        return { url: '', sizeBytes: null, at: null, version: desktopVersion, sha256: '' }
+      }
+      // 清单里带着**这份发布自己**说的版本。它随安装包一起走，
+      // 所以比运营者在环境变量里填的版本更权威——两者不一致时以清单为准，
+      // 配置只作为清单缺席时的兜底。读不到清单就少显示一行，不编。
+      const manifest = readReleaseManifest(releasesDir, found.releaseId)
+      const manifestVersion = typeof manifest?.productVersion === 'string' ? manifest.productVersion : ''
+      return {
+        url: `/legion/releases/${encodeURIComponent(found.releaseId)}/Legion-Setup-win-x64.exe`,
+        sizeBytes: found.sizeBytes,
+        at: found.mtimeMs,
+        version: manifestVersion.length > 0 ? manifestVersion : desktopVersion,
+      }
+    })()
+
+    // 没配线路表 → 逐字保持原有行为（含 url / sizeBytes / at / version / sha256）。
+    if (downloadLinesConfig.lines.length === 0) {
+      return { ...base, lines: [], featured: null, others: [] }
     }
-    const found = releasesDir.length > 0 ? latestInstaller(releasesDir) : null
-    if (found === null) {
-      return { url: '', sizeBytes: null, at: null, version: desktopVersion, sha256: '' }
-    }
-    // 清单里带着**这份发布自己**说的版本。它随安装包一起走，
-    // 所以比运营者在环境变量里填的版本更权威——两者不一致时以清单为准，
-    // 配置只作为清单缺席时的兜底。读不到清单就少显示一行，不编。
-    const manifest = readReleaseManifest(releasesDir, found.releaseId)
-    const manifestVersion = typeof manifest?.productVersion === 'string' ? manifest.productVersion : ''
+    const selection = selectDownloadLine(downloadLinesConfig.lines, { country: visitor?.country ?? null })
     return {
-      url: `/legion/releases/${encodeURIComponent(found.releaseId)}/Legion-Setup-win-x64.exe`,
-      sizeBytes: found.sizeBytes,
-      at: found.mtimeMs,
-      version: manifestVersion.length > 0 ? manifestVersion : desktopVersion,
+      ...base,
+      // ★ 选中的线路**取代**主按钮的地址；`base.url` 只在"一条线路都没选中"时兜底
+      //   （线路表非空时它不会发生，但兜底留着，免得将来改动把首页变成没有下载链接）。
+      url: selection.featured?.url ?? base.url,
+      lines: [...downloadLinesConfig.lines],
+      featured: selection.featured,
+      others: [...selection.others],
     }
   }
   router.families.unshift(createPortalRoutes({

@@ -658,6 +658,17 @@ async function stageTest() {
         //     ③ `publish.immutable` 的大产物是 `{ bytes: null, localPath }`
         //        ——假定每个条目都带字节的替身，会恰好在那三个产物上取到 null。
         'scripts/update/verify-host.test.mjs',
+        // T-196：多线路下载的**镜像校验**。它守的是一条发布时才该发现的错误
+        // ——镜像上的字节与原站不同（能下完，但下到的是另一份二进制）。
+        // 客户端有签名清单兜底，所以坏镜像不会变成坏安装；但它会变成一次
+        // 100% 失败率的下载，而那时用户已经等了十分钟。
+        'scripts/update/verify-mirrors.test.mjs',
+        // T-196：SigV4 上传器。仓库一直没有上传工具（设计 §9 把上传留给调用方），
+        // 而"多线路下载"必须有上传这一步，否则线路表里填不出地址。
+        // 用 `node:crypto` 做签名、不装任何 CLI——判据里放了 AWS SigV4 的
+        // **已知向量**，因为签名错了只会表现为服务端的 SignatureDoesNotMatch，
+        // 那和"凭据不对""桶不存在"在使用时分不出来。
+        'scripts/update/oss-put.test.mjs',
       ],
       cwd: ROOT,
     },
@@ -878,14 +889,24 @@ async function stageTest() {
       cwd: ROOT,
     },
     {
-      // 账号体系：注册（含限流）、用户存储、门户与版本下载。
-      label: 'team-hub-account（注册/限流/用户存储/门户/版本下载/工作流包路由）',
+      // 账号体系：注册（含限流）、用户存储、门户与版本下载、官网、多线路下载。
+      label: 'team-hub-account（注册/限流/用户存储/门户/官网/版本下载/多线路下载/工作流包路由）',
       files: [
         'team-hub/identity-registration.test.mjs',
         'team-hub/identity-registration-limit.test.mjs',
         'team-hub/user-store.test.mjs',
         'team-hub/portal-routes.test.mjs',
         'team-hub/releases-routes.test.mjs',
+        // ★ T-196 补登记。这个文件一直**被跟踪却没人跑**：`run-ci.mjs` 里搜不到它，
+        //   也不在两个条件目录、条件文件清单与 EXEMPT 表里 —— 于是完备性判据在
+        //   main 上必然报它未登记，而这 47 条断言**一次都没执行过**。
+        //
+        //   按判据自己的话：未登记 = 不存在的断言。它与 T-195 发现的
+        //   `desktop/scripts/payload-filter.test.mjs` 是同一形状（两处都是
+        //   "文件在、没人跑"），只是发现得晚一轮。
+        'team-hub/site-routes.test.mjs',
+        // T-196：安装包的**多线路**下载（按 CF-IPCountry 选线路 + 备选线路进页面）。
+        'team-hub/download-lines.test.mjs',
         'team-hub/workflow-packs-routes.test.mjs',
       ],
       cwd: ROOT,

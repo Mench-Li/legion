@@ -284,6 +284,43 @@ cloudflared service uninstall
   「只链接确实存在的文件」换成了「希望他填对了」。
   `LEGION_DOWNLOAD_URL` 仍然存在，用于把下载指向**别的**主机（对象存储/CDN），
   显式配置优先。
+- **多线路下载**（`LEGION_DOWNLOAD_LINES`）：把安装包同时放到多条线路上，
+  按访客地区自动选一条，其余作为「其他线路」显示在下载按钮下面。
+
+  起因是一次实测：站点只经 Cloudflare 隧道对外，境内访客被分配到**洛杉矶**边缘，
+  195MB 安装包只有约 **1.8 KB/s**（`cf-cache-status: HIT`，所以不是回源慢），
+  而源站直连 connect 仅 **0.06s**。而「两边都有人下」意味着单线路必然亏待一边。
+
+  ```
+  LEGION_DOWNLOAD_LINES=/etc/legion-download-lines.json
+  ```
+
+  线路表的格式是 `legion/download-lines@1`，样例见
+  [`product/release/download-lines.example.json`](../release/download-lines.example.json)：
+  每条线路要 `id` / `label` / `url`（**必须是绝对地址**），可选 `countries`
+  （Cloudflare `CF-IPCountry` 口径，ISO 3166-1 alpha-2）。
+
+  三条要点：
+
+  - **境内线路在备案完成前只能用云厂商分配的默认域名**。别写裸 IP 或自签证书：
+    境内源站按 SNI 做备案校验，未备案域名直连必然被 reset
+    （同 [`update-config.example.json`](../release/update-config.example.json) 里那句提醒）。
+  - `countries` 为空的线路是**默认线路，最多一条**。读不到 `CF-IPCountry` 时
+    （本地开发、直连、非 Cloudflare 前置）就回退到它。
+  - 线路表**配错就整体不生效**（fail closed），并把问题逐条打进启动日志。
+    半生效更坏：一部分用户静默拿到慢线路，而没有任何地方说明为什么。
+
+  配完**必须**校验镜像与原站同字节（客户端有签名清单兜底，所以坏镜像不会变成
+  坏安装——但它会变成一次 100% 失败率的下载，而那时用户已经等了十分钟）：
+
+  ```bash
+  node scripts/update/verify-mirrors.mjs --lines /etc/legion-download-lines.json \
+    --manifest /var/lib/legion-hub/releases/releases/<releaseId>/manifest.json --full
+  ```
+
+  不加 `--full` 时只抽样，能证明**可达性、总长度、Range 支持与实测速率**；
+  **不能**证明字节一致——所以摘要那一列写的是「未验」而不是「通过」。
+  ⚠️ 速率是在跑脚本那台机器上量的，不代表其他地区。
 - 官网：仓库根的 `site/` 由 Hub 直接托管，`GET /` 是**中文官网**、`GET /en` 是英文官网
   （同一页的语言切换，路径式），静态资源在 `GET /site/*`。免鉴权。
   - 下载区、手机端入口与注册说明都由服务端**按当次请求**注入，所以

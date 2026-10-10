@@ -1,0 +1,44 @@
+{
+  "_comment": [
+    "Legion 安装包的**多线路**下载表（格式 legion/download-lines@1）。",
+    "",
+    "为什么需要它（2026-10-09 实测）：站点只经 Cloudflare 隧道对外，境内访客被",
+    "分配到**洛杉矶**边缘，195MB 安装包只有约 **1.8 KB/s**，连 34 KB 的 app.mjs",
+    "都 30 秒超时；而源站直连 connect 仅 0.06s。而「两边都有人下」意味着",
+    "**单一线路必然亏待一边**：指到国内 CDN 则境外变慢，留在 Cloudflare 则境内下不动。",
+    "",
+    "★ 境内线路在**备案完成前**只能用云厂商分配的默认域名。不要写裸 IP 或自签证书：",
+    "  境内源站按 SNI 做备案校验，未备案域名直连必然被 reset",
+    "  （见 update-config.example.json 的同一句提醒）。",
+    "",
+    "★ countries 用的是 Cloudflare 的 CF-IPCountry 口径（ISO 3166-1 alpha-2）。",
+    "  读不到该头时（本地开发、直连、非 Cloudflare 前置）回退到**没有 countries 的那条**",
+    "  ——所以「默认线路」最多留一条。",
+    "",
+    "★ 这份文件在服务端由 LEGION_DOWNLOAD_LINES 指过来（例如",
+    "  /etc/legion-download-lines.json）。留空 = 维持原来的单线路行为。",
+    "",
+    "★ 配好之后**必须**跑一次：",
+    "    node scripts/update/verify-mirrors.mjs --lines <本文件> --manifest <该发布的 manifest.json> --full",
+    "  它证明每条线路与原站**同字节**。抽样模式只能证明可达性与速率，验不了字节一致。",
+    "",
+    "★ 速度是在跑脚本那台机器上量的。境内镜像对境内用户快、对境外用户可能很慢——",
+    "  要判断真实体验，请分别在境内与境外的机器上各跑一次。"
+  ],
+  "format": "legion/download-lines@1",
+  "lines": [
+    {
+      "id": "cn",
+      "label": "国内线路（推荐国内用户）",
+      "labelEn": "China mirror",
+      "url": "https://<你的Bucket>.s3.cn-north-1.jdcloud-oss.com/legion/releases/r-2026-10-07_0.1.0/Legion-Setup-win-x64.exe",
+      "countries": ["CN"]
+    },
+    {
+      "id": "global",
+      "label": "国际线路",
+      "labelEn": "Global",
+      "url": "https://legion-si.online/legion/releases/r-2026-10-07_0.1.0/Legion-Setup-win-x64.exe"
+    }
+  ]
+}

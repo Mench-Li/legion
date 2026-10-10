@@ -1,12 +1,14 @@
 {
   "manifestFormat": "legion/version-manifest@1",
-  "productVersion": "0.1.0",
-  "legionVersion": "0.1.0",
-  "dshVersion": "0.1.5-rc.2",
+  "_generated": "product/launcher/runtime-manifest.mjs 生成 —— 不要手工编辑；改了请走 buildVersionManifest() 重新生成",
+  "_fieldSources": {"dshCompositionPatchVersion":"runtime/dsh-composition/patch-layer.mjs → DSH_COMPOSITION_PATCH_VERSION","runtimeContractVersion":"runtime/contracts/adapter.mjs → RUNTIME_CONTRACT_VERSION","packProtocolVersion":"runtime/packs/manifest.mjs → PACK_PROTOCOL_VERSION","schemaVersion":"release-decision","dshVersion":"release-decision","productVersion":"release-decision","legionVersion":"release-decision","channel":"release-decision"},
   "dshCompositionPatchVersion": 1,
   "runtimeContractVersion": 1,
   "packProtocolVersion": 1,
   "schemaVersion": 1,
+  "dshVersion": "0.1.5-rc.2",
+  "productVersion": "0.1.1",
+  "legionVersion": "0.1.1",
   "channel": "internal",
   "releasedAt": "2026-09-16T00:00:00.000Z"
 }

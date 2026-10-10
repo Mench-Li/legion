@@ -62,19 +62,26 @@ after(() => {
 })
 
 // ── 读开关 ────────────────────────────────────────────────────────────────
-test('① 读开关：不带 scope ⇒ 200 `{scope:"", enabled:false, updatedAt:null}`', async () => {
+// ★ 2026-10-10（BUG-016）：开关改读**守护真正读的那张表**（space_runtime），
+//   回执多了 `maxWorkers`/`isolate`/`source` —— 多出来的这三格是**故意**的：
+//   `source` 说清读的是哪张表，另外两格让界面能说清"这个空间会以什么形态跑"。
+test('① 读开关：不带 scope ⇒ 200，`enabled:false` 且点明读的是 `space_runtime`', async () => {
   const r = await get('/api/exec')
   assert.equal(r.status, 200)
-  assert.deepEqual(Object.keys(r.body).sort(), ['enabled', 'scope', 'updatedAt'])
+  assert.deepEqual(Object.keys(r.body).sort(), ['enabled', 'isolate', 'maxWorkers', 'scope', 'source', 'updatedAt'])
   assert.equal(r.body.scope, '')
   assert.equal(r.body.enabled, false)
   assert.equal(r.body.updatedAt, null)
+  assert.equal(r.body.source, 'space_runtime', '★★ 读的必须是守护读的那张表 —— 回执自己说出来，好让下一个读代码的人不必追')
 })
 
 test('② 读开关：**没有这个空间也 200**（不是 404 —— 没开过与关着是同一件事）', async () => {
   const r = await get('/api/exec?scope=never-existed')
   assert.equal(r.status, 200, '★ 404 的话前端就得把"没开过"和"空间不存在"分开处理')
-  assert.deepEqual(r.body, { scope: 'never-existed', enabled: false, updatedAt: null })
+  assert.equal(r.body.scope, 'never-existed')
+  assert.equal(r.body.enabled, false)
+  assert.equal(r.body.updatedAt, null)
+  assert.equal(r.body.isolate, null, '没这一行 ⇒ 隔离形态也就没有答案（不编一个默认值出来）')
 })
 
 // ── 写开关 ────────────────────────────────────────────────────────────────
@@ -91,9 +98,10 @@ test('④ 写开关：回执的信封是 `{ok:true, task:{…}}`（与 `handleRu
   const w = await post('/api/exec', W({ scope: 's4', enabled: true }))
   assert.equal(w.status, 200)
   assert.equal(w.body.ok, true)
-  assert.deepEqual(w.body.task, { scope: 's4', enabled: true },
+  assert.deepEqual(w.body.task, { scope: 's4', enabled: true, maxWorkers: 1, isolate: true },
     '★ `handleWrite` 把结果**裹在 `task` 里**；`handleRun` 那条是摊开的（`{ok:true, ...result}`）——' +
-    '两个写门面的信封不同，不分别打出来就会照一个去解另一个')
+    '两个写门面的信封不同，不分别打出来就会照一个去解另一个。' +
+    '回执里的 maxWorkers/isolate 是该空间**这次生效的**形态（没这一行时是新行的默认 1/true）')
 })
 
 test('⑤ 写开关：写完再读，`enabled` 为 true 且 `updatedAt` 变成时间戳', async () => {
@@ -246,4 +254,65 @@ test('㉑ 方法位：每条路径只认自己那个方法', async () => {
   for (const [m, p] of cases) {
     assert.equal((await call(m, p)).status, 404, `${m} ${p} 应当 404`)
   }
+})
+
+// ============================================================================
+// ★★ BUG-016：这个开关必须写在**守护真正读的那张表**上
+// ============================================================================
+//
+// 原来它读写 `exec_state`，而守护读的是 `space_runtime.enabled`（经 `/api/pipeline`）。
+// 于是将军打开开关、界面显示「已开启」，守护照样跳过这个空间 —— 目标链静默停在 todo。
+//
+//   > 判据不能只问"开关存下来了吗"，要问"**守护会因此改变行为吗**"。
+//   > 前者在这条缺口存在的几个月里一直是绿的。
+
+test('㉒ ★★ 开关写的是 `space_runtime`（守护读的那张表），不是 `exec_state`', async () => {
+  await post('/api/exec', W({ scope: 'wire-1', enabled: true }))
+
+  const rt = mod.db.prepare('SELECT * FROM space_runtime WHERE scope = ?').get('wire-1')
+  assert.ok(rt, '★ space_runtime 必须有这一行 —— 守护的 planSpaceRunners 只认它')
+  assert.equal(rt.enabled, 1, '★ enabled=1 才会被守护接管')
+
+  const legacy = mod.db.prepare('SELECT * FROM exec_state WHERE scope = ?').get('wire-1')
+  assert.equal(legacy, undefined,
+    '★★ 不许再往 `exec_state` 写：那张表守护一行都不读，写进去就是"将军以为开好了、实际没有"')
+})
+
+test('㉓ ★★ 拨开关**不能顺手重置**并发/隔离/审查工作流', async () => {
+  // 先造一个"已经调过并发、关过隔离、挂了审查工作流"的空间
+  mod.db.prepare(`INSERT INTO space_runtime (scope, enabled, maxWorkers, isolate, review_workflow, updatedAt)
+    VALUES (?, 0, 3, 0, ?, ?)`)
+    .run('wire-2', '{"id":"wf-1","version":2}', '2026-01-01T00:00:00.000Z')
+
+  await post('/api/exec', W({ scope: 'wire-2', enabled: true }))
+  const rt = mod.db.prepare('SELECT * FROM space_runtime WHERE scope = ?').get('wire-2')
+  assert.equal(rt.enabled, 1, '开关打开')
+  assert.equal(rt.maxWorkers, 3, '★ 并发要原样留着 —— upsert 顺手写默认值会把"跑法"换掉')
+  assert.equal(rt.isolate, 0, '★ 隔离要原样留着')
+  assert.equal(rt.review_workflow, '{"id":"wf-1","version":2}', '★ 审查工作流要原样留着')
+
+  // 关掉也一样只动 enabled
+  await post('/api/exec', W({ scope: 'wire-2', enabled: false }))
+  const off = mod.db.prepare('SELECT * FROM space_runtime WHERE scope = ?').get('wire-2')
+  assert.equal(off.enabled, 0)
+  assert.equal(off.maxWorkers, 3)
+  assert.equal(off.isolate, 0)
+})
+
+test('㉔ 读回来的形态与开关写的是同一行（读写同源，不是两张表各说一半）', async () => {
+  await post('/api/exec', W({ scope: 'wire-3', enabled: true }))
+  const r = await get('/api/exec?scope=wire-3')
+  const rt = mod.db.prepare('SELECT * FROM space_runtime WHERE scope = ?').get('wire-3')
+  assert.equal(r.body.enabled, rt.enabled === 1)
+  assert.equal(r.body.maxWorkers, rt.maxWorkers)
+  assert.equal(r.body.isolate, rt.isolate !== 0)
+  assert.equal(r.body.updatedAt, rt.updatedAt)
+})
+
+test('㉕ ★ 审计记的是哪张表（好让后来者不必再追一次"到底写哪儿了"）', async () => {
+  await post('/api/exec', W({ scope: 'wire-4', enabled: true }))
+  // 审计行的定位列是 `scope`（`/api/exec` 没有任务号，第四条参数是 null ⇒ taskId 列是 NULL）
+  const row = mod.db.prepare("SELECT detail FROM audit WHERE scope = 'wire-4' AND action = 'exec:toggle' ORDER BY seq DESC").get()
+  assert.ok(row, '必须留审计痕（写操作一律留痕）')
+  assert.match(String(row.detail), /space_runtime/, '★ 审计里点名写进了 space_runtime')
 })

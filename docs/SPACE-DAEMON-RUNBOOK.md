@@ -114,7 +114,7 @@ git -C <repo> worktree list
 | --- | --- | --- | --- |
 | 1 | 两个 worker 实例抢写同一个 `scrum/daemon.json`，看板/健康页显示的守护身份会跳变 | 状态文件名只有 worker/mediator 两级（mediator 才分文件） | 按 scope 命名 `daemon-<scope>.json`，读端聚合 |
 | 2 | 「⏸ 全局暂停」会同时停掉所有空间 | `control.json` 全局共享，被所有实例读 | per-scope 控制文件 + 指挥台按空间暂停 |
-| 3 | 「⚡ 持续执行编排」开关与「🤖 派 AI 执行」按钮无实际消费者 | 只写 hub `exec_state` / `exec_requests`，守护侧从不读 | 接线到守护（按 scope 开关派工）或下线该控件 |
+| 3 | 「⚡ 持续执行编排」开关与「🤖 派 AI 执行」按钮无实际消费者 | 只写 hub `exec_state` / `exec_requests`，守护侧从不读 | 【**BUG-016 已修一半**】开关改读写 `space_runtime.enabled`（守护真正读的那张表）：拨动后监督者下一轮（≤30s）即挂载该空间，**不必重启宿主**；`exec_state` 不再参与判定（表保留供历史行与空间删除级联）。**「🤖 派 AI 执行」那条（`exec_requests` / `/api/exec/queue`）仍未接线** —— 与开关是两件事，见 `docs/bugs/BUG-016-开通执行开关是骗人的.md` §未做 |
 | 4 | 业务空间目标链标题出现「代码开发/代码审查」 | `GOAL_STAGE_LABELS` 按位置套 | 【SP-P0 已缓解】配了数据面流水线的空间改用流水线 `label`；未配置空间仍走回退 |
 | 5 | 技能桥共享 `~/.dsh/skills`：同名技能 id 会被后同步的空间覆盖 | marker + tombstone 机制按 id 收敛 | 约定全局唯一 id，或按空间分目录 |
 | 6 | 「模型配置」里给空间/岗位选的模型对派工不生效（worker 走宿主默认模型） | `ensureForeman` 用 `agentDefaultModel.currentSelection()`；只有 chat-responder 读 `/api/models` | 派工时按 `agent_models(scope, role)` 选模型 |

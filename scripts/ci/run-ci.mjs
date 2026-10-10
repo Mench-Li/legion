@@ -1930,6 +1930,11 @@ async function stageTest() {
     //   上面这些字符串 0 命中，且快照组件打的是**中枢** hubBase（它本来就以 hubMode 为前置，
     //   从前拼那条 v1 数据源地址是个**错误的落点**），中枢不可达时**不回退**、明确报错。
     { label: 'no-classic-board（BUG-015：经典看板取消后，整条 v1 面不许再出现在指挥台里）', files: ['workbench/scripts/no-classic-board.test.mjs'], cwd: ROOT },
+    // ── BUG-016：发布目标之后，界面要立刻说清「这个空间现在会不会自动开工」──
+    //   守：判定来自服务端的开通预检（不在这里另写一套）/ 有 error 级阻塞项时说的话**不是**
+    //   "已发布目标"（那句必须排在阻塞提示之后并 return）/ 说清"链任务已建好、不必重发" /
+    //   预检拿不到时不吓唬人 / 开关的读数就是守护的读数（space_runtime）。
+    { label: 'goal-stall-warning（BUG-016/A：发布目标后不许只说"已发布"）', files: ['workbench/scripts/goal-stall-warning.test.mjs'], cwd: ROOT },
     // ── 最后一里：把「模型」面板接到 **Legion 自己的库**（DECISION-legion-owns-model-config）──
     //   守：面板里不再出现任何 DSH RPC 方法名与那条桥（产品的配置面不许绑在引擎的鉴权上）/
     //   四条读写都落在 /api/model-providers / **先写密钥再写供应商**（顺序反了会留下

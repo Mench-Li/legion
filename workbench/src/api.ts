@@ -546,10 +546,30 @@ export async function fetchHubDocContent(taskId: string, index?: number): Promis
   return body as HubDocContent
 }
 
-/** team-hub v2：持续执行编排开关状态。 */
-export async function fetchExec(scope: string | null): Promise<{ scope: string; enabled: boolean }> {
+/** team-hub v2：持续执行编排开关状态。
+ *  ★ BUG-016：服务端读的是 `space_runtime`（守护经 `/api/pipeline` 读的同一张表），
+ *  所以这个读数就是"守护会不会服务这个空间"，不再是另一张没人读的表。 */
+export async function fetchExec(scope: string | null): Promise<{ scope: string; enabled: boolean; maxWorkers?: number | null; isolate?: boolean | null }> {
   const qs = scope ? `?scope=${encodeURIComponent(scope)}` : ''
-  return readJson<{ scope: string; enabled: boolean }>(await hubGet(`/api/exec${qs}`))
+  return readJson<{ scope: string; enabled: boolean; maxWorkers?: number | null; isolate?: boolean | null }>(await hubGet(`/api/exec${qs}`))
+}
+
+/** 开通预检的一条检查项（`GET /api/spaces/provision`）。 */
+export interface ProvisionCheck {
+  level: 'ok' | 'warn' | 'error'
+  code: string
+  message: string
+  fix?: string | null
+}
+
+/** team-hub v2：空间开通预检（只读）。
+ *
+ *  ★ BUG-016/A：这是"这个空间现在跑不跑得起来"的**权威判定**（流水线/执行开关/守护在线/工作区/队列停滞）。
+ *  界面上要提示"目标不会被认领"，就用它 —— 不在这里另写一套判定，
+ *  否则两处判定迟早会给出不同答案，而将军只能看到其中一个。 */
+export async function fetchProvision(scope: string): Promise<{ id: string; ok: boolean; checks: ProvisionCheck[] }> {
+  return readJson<{ id: string; ok: boolean; checks: ProvisionCheck[] }>(
+    await hubGet(`/api/spaces/provision?id=${encodeURIComponent(scope)}`))
 }
 
 /** team-hub v2：开/关该空间持续执行编排。 */

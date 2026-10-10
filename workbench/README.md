@@ -185,7 +185,14 @@ node scripts/serve.mjs --port 5173   # 独立静态服务 → http://127.0.0.1:5
 
 - **自动交接是默认行为（含写码）**：守护（scrum-worker）扫单后自动认领「依赖已解、未被拦截」的流水线任务并按岗位派 AI 执行；上一环验收 done 自动解锁下一环——需求→方案→拆解→用例→编码→审查→测试→部署整链无人值守流转。编码在隔离 worktree（`w/<id>`，pre-push 拦 push）进行，验收通过才合回主分支；每个任务停在 🟡 待验收等你对照 🎯 验收标准 + 📦 证据验收。
 - **将军干预**：任务详情 / 调度台新增「🖐 拦截自动 / 🚀 放行」（`POST /api/hold {id, hold}`：拦截后守护不再认领/执行，直到放行）；「转派」同步 soldier 与 role 到目标岗位（流水线外岗位 = 人工托管）；↩ 打回重做附原因；CommandBar「⏸ 全部暂停」随时停。
-- 侧栏「⚡ 持续执行编排」与「🤖 派 AI 执行」是另一条**执行守护（将军 agent 侧）**通道：`POST /api/exec` 开关按空间持久化；`GET /api/exec/queue?scope=` 列自动队列（`[auto-goal]` 链、非写码角色）；`POST /api/exec/request` 手动派活；`GET /api/exec/requests` 待消费请求。后台表：`exec_state`、`exec_requests`。
+- 侧栏「⚡ 持续执行编排」是**守护的按空间执行开关**：`GET/POST /api/exec` 读写的是 `space_runtime.enabled`
+  —— 也就是守护经 `GET /api/pipeline` 读的**同一张表**（BUG-016：从前它写的是 `exec_state`，
+  而守护一行都不读那张表，于是这个开关是骗人的：界面显示「已开启」，守护照样跳过这个空间）。
+  拨一下开关只改 `enabled`，**不会**动该空间的 `maxWorkers`/`isolate`/`review_workflow`；
+  监督者每 30s 对齐一次，所以开通后**不必重启宿主**即可开始派工。
+  `GET /api/exec/queue?scope=` 列自动队列（`[auto-goal]` 链、非写码角色）；`POST /api/exec/request`
+  手动派活；`GET /api/exec/requests` 待消费请求。⚠️ **后三条（「🤖 派 AI 执行」那条通道）仍然没有消费者**
+  —— 它们写 `exec_requests`，守护侧不读；这与 BUG-016 是**两件事**，本次只接了开关那一条。
 
 ## 模型 × 智能体配置（底部「⚙️ 模型配置」）
 

@@ -7,6 +7,7 @@ import {
   fetchHubMissions,
   fetchHubTasks,
   fetchChatHealth,
+  fetchProvision,
   fetchRoster,
   fetchSpaces,
   hubBase,
@@ -17,6 +18,7 @@ import {
   setGoalStatus,
   subscribeHubAudit,
 } from './api'
+import type { ProvisionCheck } from './api'
 import { createSceneController } from './scene/sceneController'
 import type { SceneCue, SceneFacts } from './scene/sceneState'
 import { buildMissions } from './missions'
@@ -391,6 +393,31 @@ export default function App(): React.JSX.Element {
     } catch {
       // 目标其实已发布，仅刷新失败：不阻塞关闭，提示手动刷新
       toast('info', '目标已发布，但刷新目标列表失败，请手动刷新页面')
+    }
+
+    // ★ BUG-016/A：发布之后**立刻**说清"这个空间现在到底会不会自动开工"。
+    //
+    //   实测（业主那台机器）：目标发布成功、8 条链任务也建对了，却因为
+    //   「空间未开通执行 / 没有守护实例服务这个空间」静默停在 todo 十几个小时，
+    //   而界面只说了一句「已发布目标」。将军能看到的只有"发布成功了"。
+    //
+    //   判定用服务端的**开通预检**（`GET /api/spaces/provision`）—— 那是权威口径，
+    //   不在这里另写一套；两套判定迟早会给出不同答案，而将军只能看到其中一个。
+    let blocked: ProvisionCheck[] = []
+    try {
+      const p = await fetchProvision(scopeValue)
+      blocked = (p.checks ?? []).filter(c => c.level === 'error')
+    } catch {
+      // 预检拿不到**不吓唬人**：目标确实已经发布成功，这两件事要分开说。
+      blocked = []
+    }
+    if (blocked.length > 0) {
+      const first = blocked[0]
+      const more = blocked.length > 1 ? `（另有 ${blocked.length - 1} 项）` : ''
+      toast('info', `⚠ 目标已发布，但**这个空间现在不会自动开工**：${first.message}${more}`
+        + (first.fix ? ` → 修复：${first.fix}` : '')
+        + '（链任务已建好，开通执行 / 守护上线后会自动认领，不必重发）')
+      return
     }
     toast('ok', '🎯 已发布目标（与既有目标并存，自动生成独立任务链）')
   }, [])

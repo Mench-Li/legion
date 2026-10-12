@@ -530,7 +530,7 @@ test('⑤b ★★ 不可达名单只含被跟踪的文件；未跟踪的另列�
 // ⑥ ★★ `evidenceFrom:` **不是**入口声明 —— 别"顺手"把它加进去
 // ══════════════════════════════════════════════════════════════════════════
 
-test('⑥ ★★ `evidenceFrom:` 只是存在性断言，不是加载指令（加进去会假报 8 个可达）', () => {
+test('⑥ ★★ `evidenceFrom:` 只是存在性断言，不是加载指令（钉在探针源码与 entries 上）', () => {
   // 背景：探针支持两种"按字符串加载"的清单写法（`module:` / `runtimeModule:` /
   // `path:` / `entryFile:`），所以很自然会有人看到
   // `product/release/checklist.mjs` 里的
@@ -544,13 +544,27 @@ test('⑥ ★★ `evidenceFrom:` 只是存在性断言，不是加载指令（�
   //     const sourceExists = deps.sourceExists ?? ((p) => existsSync(join(REPO, p)))
   //
   // 它是"**这个文件必须存在**"的断言，不是"这个文件会被加载"。
-  // 加进去会让 8 个模块**假**报成可达（实测），而每一个都是"存在但没人跑"。
   //
   //   > 一个「把它当成入口声明」的探针，
   //   > 与一个「那些模块真的被用上了」的探针，在输出上是同一个东西——
   //   > 只不过前者会把"存在"读成"在用"。
   //
   // 存在性与可达性是**两条不同的契约**，本用例把它们钉开。
+  //
+  // ★★★ 2026-10-12：**判据换锚点了**（这一次的换法本身就是本条最好的注脚）。
+  //
+  //   它原先的写法是"这些 evidenceFrom 目标里**仍有 ≥4 个不可达**"——
+  //   用一个**会随时间消失的读数**（哪些模块还没被接上）来表达一条**永久的纪律**
+  //   （不要把存在性读成在用）。2026-10-12 补扫 `desktop/` 之后，
+  //   `product/upgrade/*` 一整族经由 `product/update/*` 真的可达了 ⇒ 那个读数变成 **0**，
+  //   于是本用例报"只有 0 个"——而**纪律一个字都没被违反**。
+  //
+  //   > 一条用"现在还有几条没接上"来表达"不许把存在读成在用"的判据，
+  //   > 会在东西都被接上的那一天开始喊狼来了。
+  //
+  //   所以改成钉**两处不随时间漂移的事实**：
+  //     ① 探针源码里**一次都没有** `evidenceFrom`（它压根不是探针认识的机制）；
+  //     ② 没有任何模块是**因为** evidenceFrom 而进了 `entries`。
   const withEvidence = new Set()
   for (const f of a.files) {
     const text = readFileSync(join(REPO, f), 'utf8')
@@ -566,35 +580,22 @@ test('⑥ ★★ `evidenceFrom:` 只是存在性断言，不是加载指令（�
     assert.equal(existsSync(join(REPO, p)), true, `${p} 被 evidenceFrom 指着却不存在`)
   }
 
-  // ★ 反方向：它们**不在**基线里被当成入口，且仍有 4 个是不可达的。
-  //   如果哪天有人把 evidenceFrom 加进 MANIFEST_PATTERNS，这些会突然变可达 ⇒ 本用例红。
-  //
-  // ★★★ 第 118 轮第十六轮：阈值从 `>= 5` 改成 `>= 4`，而**这一次的下降本身就是本条的最好证据**。
-  //
-  //   掉出去的那一个是 `product/lifecycle/retention.mjs` —— `product/release/checklist.mjs:174`
-  //   一直用 `evidenceFrom:` 指着它，而它**从来不可达**（那正是本条要证明的：
-  //   这条声明**不加载**任何东西）。
-  //
-  //   本轮它变成可达，**走的是一条真实 import**：`--retention-plan` ⇒
-  //   `product/lifecycle/plan-cli.mjs` ⇒ `./retention.mjs`。
-  //   ⇒ "被 evidenceFrom 指着的模块，最后由一条**真的 import** 接上" ——
-  //     这正是本条与它上面那段注释想钉的那件事，只不过这次是从**结果那一侧**看到的。
-  //
-  //   > 一个"存在性声明"要在一年后变成"在用"，唯一的途径是有人真的去 import 它。
-  const wouldFlip = [...withEvidence].filter((f) => a.unreachable.includes(f))
-  assert.ok(wouldFlip.length >= 4,
-    `★ 只有 ${wouldFlip.length} 个 evidenceFrom 目标当前不可达（期望 ≥4）。\n` +
-    '  要么是有人把 `evidenceFrom` 当成了入口声明（把"存在"读成了"在用"），\n' +
-    '  要么是这些模块真的被接上了——两种都必须先看清再改本用例。\n' +
-    `  目标：${[...withEvidence].join(', ')}`)
+  // ① 探针源码里不许出现它（直接钉住那一次"顺手加进去"的动作）
+  const probeSrc = readFileSync(join(REPO, 'scripts/prt/reachability.mjs'), 'utf8')
+  assert.equal(/evidenceFrom/.test(probeSrc), false,
+    '探针源码里出现了 evidenceFrom ⇒ 有人把它当成了入口机制（存在性 ≠ 会加载）')
 
-  // 而且证据里**不许**出现"它被 import 了"这种混淆：
-  //   evidenceFrom 的每一个目标，都不该因此出现在 entries 里
+  // ② 没有任何目标**因为** evidenceFrom 而进 entries
   for (const p of withEvidence) {
     const why = a.entries.get(p)
     assert.equal(why === undefined || !String(why).includes('evidenceFrom'), true,
       `${p} 被当成入口了（${why}）——evidenceFrom 是存在性断言，不是加载指令`)
   }
+
+  // 读数（**不再是阈值**）：还有几个目标不可达。它随时间下降是对的，
+  // 而"下降到 0"只说明这些模块都被真的接上了 —— 那正是这条纪律希望发生的事。
+  const wouldFlip = [...withEvidence].filter((f) => a.unreachable.includes(f))
+  assert.ok(wouldFlip.length >= 0)
 })
 
 // ══════════════════════════════════════════════════════════════════════════
@@ -802,11 +803,22 @@ test('★★★ 真基线：**一条位置指称都没有**（第 49 轮 21 条 
 
 test('★ 严格规则确实**能**报出旧的写法（把第 49 轮修掉的一条放回去）', () => {
   // ★ 这条是**正对照**：证明上面那条"真基线 0 条"**不是因为它恒绿**。
-  const withOld = baseline.unreachable.map((e) => (e.file === 'product/upgrade/backup.mjs'
+  //
+  // ★★ 2026-10-12：锚点从写死的 `product/upgrade/backup.mjs` 换成**基线里实际存在的一条**。
+  //   写死文件名时，那条一旦变成可达（本次补扫 `desktop/` 之后它**真的**可达了，
+  //   于是被 --record 从基线里清掉），这条正对照就**悄悄失效**：
+  //   变异打在一条不存在的条目上，`positionalReasonViolations()` 当然报不出东西，
+  //   而报出的失败信息是"本规则测不出旧的写法"——**看起来像规则坏了，其实是夹具没了**。
+  //
+  //   > 一条把夹具写死成"当时那个文件名"的正对照，
+  //   > 在那个文件被接上之后，与"规则失效"报的是同一句话。
+  const anchor = baseline.unreachable[0]?.file
+  assert.ok(typeof anchor === 'string' && anchor !== '', '基线里一条都没有 ⇒ 这条正对照没东西可变')
+  const withOld = baseline.unreachable.map((e) => (e.file === anchor
     ? { ...e, reason: '同上（升级链的一环）' }
     : e))
-  assert.equal(positionalReasonViolations(withOld).some((b) => b.file === 'product/upgrade/backup.mjs'),
-    true, '把"同上"放回去之后仍不被报 ⇒ 本规则测不出旧的写法')
+  assert.equal(positionalReasonViolations(withOld).some((b) => b.file === anchor),
+    true, `把"同上"放回去之后仍不被报 ⇒ 本规则测不出旧的写法（锚点 ${anchor}）`)
 })
 
 // ── 第 55 轮：§5 决策表的**状态索引** ──────────────────────────────────

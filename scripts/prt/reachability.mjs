@@ -94,6 +94,21 @@ export const MATRIX_PATH = join(REPO, 'docs', 'MULTI-AGENT-FEATURE-STATUS.md')
  */
 export const SCAN_DIRS = Object.freeze([
   'runtime', 'team-hub', 'orchestrator', 'product', 'security', 'scripts', 'packages', 'scrum',
+  // ★★ 2026-10-12：补 `desktop/` —— 它此前**整个目录不在扫描面里**。
+  //
+  //   这正是本文件开头点名的那种"最容易被信以为真的结论"（`:85-89`：把在跑的东西报成死的）：
+  //   `desktop/` 是**随发布物出厂的桌面壳**（Electron 主进程，壳文件清单在
+  //   `desktop/scripts/shell-files.mjs`），它 import 了 `product/update/*` 一整族
+  //   ⇒ 那 10 个模块被判"不可达"（当时在基线里被记成 by-design）。
+  //
+  //   实测补进来的代价（先试算过再改）：扫描 1068 → 1102 个文件，不可达 **54 → 45**
+  //   （9 条从假的"不可达"变成真的可达），代价是新增 5 条待分类的 `desktop/*`。
+  //   一个让 9 条在跑的东西不再被记成死代码、只需多分 5 条的改动，没有不做的理由。
+  //
+  //   ★ 与 `workbench/` 的区别要写清（本文件 `:91-93` 那段的纪律）：
+  //   `workbench/` 是**被明确排除的旧 GUI**（"不该收"），而 `desktop/` 是现行发布面
+  //   （"没收"）。"没收"与"不该收"不能共用一条理由 —— 前者是缺陷，后者是裁决。
+  'desktop',
 ])
 
 /** 不进去的目录。`node_modules` 与产物目录都不算源码面。 */
@@ -134,6 +149,23 @@ export const PROCESS_ENTRIES = Object.freeze([
   'product/launcher/wizard-cli.mjs',
   'product/launcher/log-policy-cli.mjs',
   'scrum/serve.mjs',
+  // ★★ 2026-10-12：`product/node/entry.mjs` —— **节点侧长驻 agent 的进程入口**。
+  //
+  //   与上面几个是同一个形状（"不可能出现在 import 图里，而它确实在跑"），
+  //   证据是**按路径启动**：
+  //     · `product/server/verify-domain.sh:32` 与 `verify-final.sh:40` 在后台起它；
+  //     · `product/server/smoke.sh:30`、`verify-experience.sh:17` 同样按路径跑；
+  //     · `product/server/README.md:155-158` 把"⑤ 电脑配对"这一步写成命令。
+  //
+  //   漏登记它的后果正是本表存在的理由：`product/node/{agent,egress,executor,ledger}.mjs`
+  //   与 `packages/shared/src/ws-client.mjs` **5 条**被报成"不可达"
+  //   （它们的唯一非测试消费者链就通向这个入口）。实测：登记它之后这 5 条全部变成可达。
+  //
+  //   ⚠ 同时留一条**存疑**（不藏起来）：这条链的运行引用目前只在**研发工作树的路径**里
+  //   （那些 `.sh` 里写的是 `.claude/worktrees/…`），没有 systemd 单元、也不在打包清单与
+  //   `product/process-manifest.mjs` 里 ⇒ "它是一个入口"成立，而"它在生产上真的被拉起"
+  //   是另一件事，后者需要一次部署侧的核对（见 `docs/bugs/BUG-030`）。
+  'product/node/entry.mjs',
   // 后两个由 `scrum/serve.mjs` **按路径 spawn** 起来
   //（`:153` `spawn(process.execPath, [TASKCTL, ...argv])`、
   //  `:176` 同一个写法跑 RENDER）——与"人工按路径启动"是同一个判据：

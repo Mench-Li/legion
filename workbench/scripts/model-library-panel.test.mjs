@@ -12,7 +12,7 @@
 //
 //   ① 不再出现任何 DSH RPC 方法名与那条桥
 //   ② 四条读写都落在 Legion 自己的端点上
-//   ③ 密钥走 `/api/secrets`，而且**先写密钥再写供应商**（顺序是语义，见下）
+//   ③ 密钥**随供应商那次写一起**交给服务端（2026-10-12 起：客户端不再知道槽位名）
 //   ④ 删除带 `version`（并发保护）；文档串里没有把用户推向引擎的字样
 // ============================================================================
 import test from 'node:test'
@@ -62,15 +62,33 @@ test('② 四条读写都落在 Legion 自己的端点上', () => {
   assert.match(SRC, /'\/api\/model-providers\/discover'/, '读模型目录也由 Legion 自己问（不绕道引擎）')
 })
 
-test('③ ★ 先写密钥、再写供应商 —— 顺序不能反', () => {
-  const keyAt = SRC.indexOf("hubRequest('POST', '/api/secrets'")
-  const createAt = SRC.indexOf("hubRequest('POST', '/api/model-providers', { actor: 'general', provider })")
-  assert.ok(keyAt > 0, '密钥要走 Legion 的 /api/secrets')
-  assert.ok(createAt > 0, '要能建供应商')
-  assert.ok(keyAt < createAt,
-    '反过来（先写供应商）会留下一条**声称有密钥、其实没有**的配置 —— 旧实现只能在界面上补一句"凭证写入失败"')
+test('③ ★ 密钥**随供应商那次写一起交给服务端**（不再由客户端分两步）', () => {
+  // ★★ 2026-10-12（BUG-028）：这一条原本断言"面板先调 `/api/secrets`、再调供应商"，
+  //   而那个顺序**现在不存在了，也不该存在**。
+  //
+  //   原因：读侧不再把引用名发给客户端（引用名是可枚举的攻击面）。面板因此**没有名字**
+  //   可用来调 `/api/secrets` —— 而它也不该有：槽位名可能是从 DSH 导进来的 `apiKeyEnv`，
+  //   客户端**算不出**它（自己算派生名的话，新钥匙会写进另一个槽位、这一行仍指旧槽位，
+  //   表现成"保存成功但认证失败"）。
+  //
+  //   所以现在把**值**（`credentialValue`）随供应商那次写一起发给服务端，
+  //   由它决定槽位并落库。这一步比原来更强：整个动作在**一个请求**里完成，
+  //   "密钥写成功、供应商写失败"这个中间态在结构上不可能出现（不是靠顺序避免）。
+  const code = codeOnly(SRC)
+  assert.equal(code.includes("hubRequest('POST', '/api/secrets'"), false,
+    '面板不该再自己调 /api/secrets：它拿不到槽位名（那正是被藏起来的东西）')
+  assert.match(code, /credentialValue/,
+    '新密钥要以 `credentialValue` 交给服务端（由它落槽位）')
+  // 新密钥与供应商那次写在**同一个请求**里：两者必须在同一个 hubRequest 的 body 里
+  assert.match(code, /hubRequest\('POST',\s*`\/api\/model-providers\/\$\{encodeURIComponent\(id\)\}`[\s\S]{0,240}?credentialValue/,
+    '改一条时：值要与 provider 一起进同一个请求')
+  assert.match(code, /hubRequest\('POST',\s*'\/api\/model-providers'[\s\S]{0,240}?credentialValue/,
+    '建一条时：同上')
+  // ⚠ 没填密钥时**不带**这个字段（"没给" = 保留原值，不是"清掉"）
+  assert.match(code, /credentialValue === null \? \{\} : \{ credentialValue \}/,
+    '没填密钥就不该带这个字段 —— 服务端把"没给"当成保留，而带上一个空值会变成"清掉凭证"')
   // 而且失败时不许留下"部分成功"：catch 里只报错，不该有"已保存但…"这种话术
-  assert.equal(SRC.includes('但凭证写入失败'), false, '不许再有"部分成功"的状态：先写密钥就不会有')
+  assert.equal(SRC.includes('但凭证写入失败'), false, '不许再有"部分成功"的状态：现在是一整个请求')
 })
 
 test('④ 删除带 version（并发保护），且不给用户任何"去登引擎"的出路', () => {

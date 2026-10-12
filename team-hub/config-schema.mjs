@@ -77,6 +77,39 @@ export const SCHEMA = defineSchema({
       default: 20, min: 0, max: 10000,
       doc: '自助注册速率上限（每小时新开账号数）；0 = 关掉闸门。仅对 open 策略生效',
     },
+    // ── 可信代理（按来源限速的前提）────────────────────────────────────────────
+    //
+    // 部署形态是"Hub 绑回环 + 反代"，于是 `req.socket.remoteAddress` 恒为
+    // 反代自己。真实来源只在 `X-Forwarded-For` 里，而那是**调用方可以随便写**的头：
+    //
+    //   > 一个"信一个没人验证过的 X-Forwarded-For"的按 IP 限速，
+    //   > 与一个完全不限速的端点，在攻击者面前是同一个东西——
+    //   > 只不过前者多了一行看起来很安全的代码。
+    //
+    // 所以这里要求把"谁是可信代理"**配置出来**。默认空 = 一个头都不信，
+    // 按来源限速因此**不生效**（如实报在 `/api/identity/rate-limits` 里）。
+    //
+    // Cloudflare Tunnel + Hub 绑回环的部署填 `127.0.0.1/32,::1/128`。
+    // 前面还有 nginx 就把它那一跳的地址也加上。
+    {
+      key: 'trustedProxies', env: 'LEGION_TRUSTED_PROXIES', type: 'string', default: '',
+      doc: '可信反向代理的地址/CIDR（逗号分隔，如 127.0.0.1/32,::1/128）。留空 = 不信任何 X-Forwarded-For，按来源限速不生效',
+    },
+    {
+      key: 'rateLimitLogin', env: 'LEGION_RATE_LIMIT_LOGIN', type: 'int',
+      default: 30, min: 0, max: 100000,
+      doc: '同一来源 15 分钟内允许的登录尝试次数；0 = 关掉这一层',
+    },
+    {
+      key: 'rateLimitRegister', env: 'LEGION_RATE_LIMIT_REGISTER', type: 'int',
+      default: 10, min: 0, max: 100000,
+      doc: '同一来源 15 分钟内允许的注册尝试次数；0 = 关掉这一层',
+    },
+    {
+      key: 'rateLimitPasswordReset', env: 'LEGION_RATE_LIMIT_PASSWORD_RESET', type: 'int',
+      default: 10, min: 0, max: 100000,
+      doc: '同一来源 15 分钟内允许的口令重置尝试次数；0 = 关掉这一层。重置码是短字符串，这一层挡的是枚举',
+    },
     {
       key: 'downloadUrl', env: 'LEGION_DOWNLOAD_URL', type: 'string', default: '',
       doc: '桌面版安装包的下载地址（显示在 Hub 首页）；留空 = 首页如实显示"尚未发布"',
@@ -804,6 +837,11 @@ export const SCHEMA = defineSchema({
     //   · BAD_RECOVERY_STATES —— run-store.recoverExpired 的状态收窄入参非法
     //     （空数组在 SQLite 里 `IN ()` 恒为假，那会伪装成"成功地什么都没做"）。
     'IDENTITY_INVITE_REQUIRED', 'IDENTITY_REGISTRATION_CLOSED', 'IDENTITY_REGISTRATION_RATE_LIMITED',
+    // 按来源限速被触发时的错误码。与上面那条**不同**：
+    //   · `IDENTITY_REGISTRATION_RATE_LIMITED` = 全局窗口（"这台 Hub 这一小时开够号了"）
+    //   · `IDENTITY_RATE_LIMITED`              = 来源窗口（"这个来源试得太频了"）
+    // 分开是刻意的：前端与运维要采取的动作不同（前者找管理员，后者等一下或换网络）。
+    'IDENTITY_RATE_LIMITED',
     'IDENTITY_RESET_CONSUMED', 'IDENTITY_RESET_EXPIRED', 'IDENTITY_RESET_NOT_FOUND',
     'IDENTITY_SPACE_NOT_FOUND', 'IDENTITY_SPACE_REQUIRED', 'IDENTITY_WRONG_PASSWORD',
     'SPACE_FORBIDDEN', 'BAD_RECOVERY_STATES',

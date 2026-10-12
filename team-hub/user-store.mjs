@@ -31,6 +31,9 @@
 // ============================================================================
 import { createHmac, randomBytes, scrypt as scryptCb, timingSafeEqual, createHash } from 'node:crypto'
 import { promisify } from 'node:util'
+// 按来源（IP）限速的**纯决策**。窗口边界与 `Retry-After` 的算法在那边，
+// 这里只负责存与取 —— 那样边界逻辑可以在没有 SQLite 的情况下被逐条钉住。
+import { limitDecision } from './rate-limit.mjs'
 
 const scrypt = promisify(scryptCb)
 
@@ -223,8 +226,7 @@ const DUMMY_HASH = `scrypt$${SCRYPT_PARAMS.N}$${SCRYPT_PARAMS.r}$${SCRYPT_PARAMS
  *   而"没有签名的令牌"与"任何人都能伪造的令牌"是同一个东西。
  * @param {Function} [deps.audit] `(actor, scope, action, taskId, detail)`，可缺省
  */
-export function createUserStore({ db, withTx, clock = Date.now, key = '', audit = null, registrationMax = REGISTRATION_MAX_PER_WINDOW } = {}) {
-  if (db === undefined || db === null) throw new TypeError('createUserStore 需要 db')
+export function createUserStore({ db, withTx, clock = Date.now, key = '', audit = null, registrationMax = REGISTRATION_MAX_PER_WINDOW } = {}) {  if (db === undefined || db === null) throw new TypeError('createUserStore 需要 db')
   if (typeof withTx !== 'function') throw new TypeError('createUserStore 需要 withTx')
   if (typeof key !== 'string' || key.length < 16) {
     // 允许空 key 会让 createUserStore 在配置漏项时"看起来能用"。宁可在这里拒绝。
@@ -266,6 +268,32 @@ export function createUserStore({ db, withTx, clock = Date.now, key = '', audit 
     CREATE TABLE IF NOT EXISTS hub_registrations (
       id TEXT PRIMARY KEY, user_id TEXT, space TEXT NOT NULL, at_ms INTEGER NOT NULL);
     CREATE INDEX IF NOT EXISTS idx_hub_registrations_at ON hub_registrations(at_ms);
+    -- ── 按来源（IP）的限速流水 ────────────────────────────────────────────────
+    --
+    -- 这一张与上面两张**都不同**，差别是刻意的：
+    --
+    --   · 「hub_login_failures」：按**用户名**归并、**失败**才写、成功就清。
+    --     它问的是"这个账号是不是正在被猜"。它挡不住 credential stuffing ——
+    --     每个用户名只试几次就换下一个，那张表对那种攻击恒为 1。
+    --     它还有一个副作用：攻击者可以故意失败几次**把某个用户锁在门外**。
+    --
+    --   · 「hub_registrations」：只记**注册**，且是全局窗口（因为当时没有办法
+    --     证明谁是可信代理，见 「client-ip.mjs」 文件头）。
+    --
+    --   · 这一张：按**来源键**归并，记**每一次尝试**（成功也记），
+    --     窗口由 「limitDecision」 在**读**的时候算。
+    --
+    -- ★ "成功也记、且不清零"是本表的要点。一个在成功时清零的来源限速，
+    --   对"已经有一个有效账号的攻击者"完全无效：他交替"成功一次 / 猜十次"
+    --   就能把配额刷回来。
+    --
+    -- ★ 键里带 bucket（login / register / …）：不同端点配额互不干扰，
+    --   否则"注册被限"会顺带把登录也限掉，而那两件事的正当频率差得很远。
+    --   ⚠️ 本段在 SQL 模板字面量里，所以**不能出现反引号** —— 我已经在这里
+    --   踩过一次：反引号会提前结束模板字符串，报成 "missing ) after argument list"。
+    CREATE TABLE IF NOT EXISTS hub_rate_events (
+      bucket TEXT NOT NULL, key TEXT NOT NULL, at_ms INTEGER NOT NULL);
+    CREATE INDEX IF NOT EXISTS idx_hub_rate_events ON hub_rate_events(bucket, key, at_ms);
     -- 一次性事件订阅票据（SSE 用）。见 redeemEventTicket 里"为什么不用 ?token="那段。
     CREATE TABLE IF NOT EXISTS hub_event_tickets (
       id TEXT PRIMARY KEY, code_hash TEXT NOT NULL UNIQUE, user_id TEXT NOT NULL,
@@ -596,6 +624,87 @@ export function createUserStore({ db, withTx, clock = Date.now, key = '', audit 
 
   function clearFailures(nameKeyValue) {
     db.prepare('DELETE FROM hub_login_failures WHERE name_key=?').run(nameKeyValue)
+  }
+
+  // ── 按来源（IP）限速 ──────────────────────────────────────────────────────
+  //
+  // 与上面按用户名那一套的关系：**并存，互不替代**。
+  //
+  //   · 按用户名：挡"反复猜**同一个**账号"，且成功即清零（问的是账号是否在被猜）；
+  //   · 按来源：  挡"每个账号只猜几次、换着来"（credential stuffing），
+  //              **成功也计数、从不清零**（问的是这个来源发了多少次）。
+  //
+  // 只有前者的话：攻击者拿一份"用户名 + 常见口令"的表，每个名字试三次就换下一个，
+  // 按用户名那张表永远停在 1，而他能试完全部名字。
+  //
+  //   > 一个"按账号限速"的登录端点，与一个"完全不限速"的端点，
+  //   > 在 credential stuffing 面前是同一个东西——
+  //   > 因为那种攻击从来不重复用同一个账号。
+
+  /**
+   * 读一个来源键在窗口内的尝试时间戳。
+   *
+   * 表可能还不存在（老库升级、或建表失败）——那时返回空数组并**照常放行**，
+   * 因为"限速读不出来"绝不该变成"谁都登不上"。
+   */
+  function rateTimes(bucket, keyValue, windowMs) {
+    if (typeof bucket !== 'string' || bucket.length === 0) return []
+    if (typeof keyValue !== 'string' || keyValue.length === 0) return []
+    try {
+      const rows = db.prepare('SELECT at_ms FROM hub_rate_events WHERE bucket=? AND key=? AND at_ms > ?')
+        .all(bucket, keyValue, now() - windowMs)
+      return rows.map((r) => Number(r.at_ms)).filter((n) => Number.isFinite(n))
+    } catch {
+      return []
+    }
+  }
+
+  /** 记一次尝试。**成功也要记**（见上面那段）。 */
+  function noteRate(bucket, keyValue, atMs = now()) {
+    if (typeof bucket !== 'string' || bucket.length === 0) return
+    if (typeof keyValue !== 'string' || keyValue.length === 0) return
+    try {
+      db.prepare('INSERT INTO hub_rate_events VALUES(?,?,?)').run(bucket, keyValue, atMs)
+    } catch {
+      // 记不上就算了：宁可漏记一次（少限一次），也不要让请求 500。
+      // 这条与"读不出来就放行"是同一个方向的取舍。
+    }
+  }
+
+  /**
+   * 判断一个来源还能不能继续，**并顺手记下这一次**。
+   *
+   * ★ "判断"与"记账"必须是**一步**：分成两次调用的话，调用方可能忘了记，
+   *   于是限速永远看不到任何事件、永远放行 —— 一个"看起来接好了但从不生效"的
+   *   限速，比没有限速更糟（它会让人以为已经防住了）。
+   *
+   * ★ 被拒时**不记**：否则攻击者持续请求会让窗口无限延长，
+   *   变成"只要一直打，受害者永远解不开"。记的是**被允许的尝试**。
+   *
+   * @param {{bucket: string, key: string, max: number, windowMs: number}} input
+   * @returns {{allowed: boolean, count: number, max: number, retryAfterSec: number, disabled: boolean, effective: boolean}}
+   */
+  function rateLimit({ bucket, key: keyValue, max, windowMs, effective = true } = {}) {
+    // `effective: false` = 这个键代表不了"一个客户端"（回环/CGNAT/没配可信代理）。
+    // 此时**不启用**按来源限速，并且如实把这件事报出去 —— 见 client-ip.mjs 里
+    // `isLoopbackOrPrivate` 那段：拿一个所有人共用的键去限速，会把"限制一个攻击者"
+    // 变成"限制你的全部用户"，攻击者失败几次就能把所有人挡在门外。
+    if (effective !== true) {
+      return { allowed: true, count: 0, max, retryAfterSec: 0, disabled: false, effective: false }
+    }
+    const decision = limitDecision({ times: rateTimes(bucket, keyValue, windowMs), atMs: now(), max, windowMs })
+    if (decision.allowed) noteRate(bucket, keyValue)
+    return { ...decision, effective: true }
+  }
+
+  /** 清掉窗口外的旧流水（避免这张表无限增长）。返回删掉的条数。 */
+  function sweepRateEvents(olderThanMs) {
+    const cutoff = now() - Math.max(0, Number(olderThanMs) || 0)
+    try {
+      return Number(db.prepare('DELETE FROM hub_rate_events WHERE at_ms <= ?').run(cutoff).changes)
+    } catch {
+      return 0
+    }
   }
 
   // ── 会话与令牌 ────────────────────────────────────────────────────────────
@@ -1091,6 +1200,8 @@ export function createUserStore({ db, withTx, clock = Date.now, key = '', audit 
     createEventTicket, redeemEventTicket, sweepExpiredCredentials,
     // 诊断与用例用：闸门当前读数（不写、不需要就能读）。
     registrationGate: () => registrationAllowed(),
+    // 按来源（IP）限速：判断+记账是一步；诊断与用例也用它。
+    rateLimit, rateTimes, noteRate, sweepRateEvents,
     login, refresh, upgradePassword,
     verifyAccessToken, touchSession,
     revokeSession, revokeAllSessions, listSessions,

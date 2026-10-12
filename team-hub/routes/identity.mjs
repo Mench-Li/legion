@@ -20,6 +20,9 @@
 // 只给中文消息的话，前端只能做字符串匹配——那是一种会在文案改动时静默失效的耦合。
 // ============================================================================
 
+import { clientIpFrom, isLoopbackOrPrivate } from '../client-ip.mjs'
+import { limitMessage, RATE_LIMIT_CODE, RATE_LIMIT_STATUS } from '../rate-limit.mjs'
+
 /** 把仓储抛出的具名错误映射成 HTTP。 */
 function errorResponse(store, e) {
   const status = Number(e?.status) || 400
@@ -31,7 +34,14 @@ export function createIdentityRoutes({
   json, readBody, authorized, requireString,
   userStore, deviceStore, remoteAuthEnabled = false, gateway = undefined,
   registration = 'closed',
-}) {
+  // ── 按来源（IP）限速 ──────────────────────────────────────────────────────
+  // `trustedProxies` 是 `parseTrustedProxies` 的结果。**默认不信任何人** ——
+  // 一个"没配就信 X-Forwarded-For"的默认值会让每个请求自带一个 IP，
+  // 于是限速在攻击者面前等于不存在（见 `client-ip.mjs` 文件头）。
+  trustedProxies = { rules: [], invalid: [] },
+  // 上限。`<= 0` = 显式关掉。窗口统一 15 分钟（与按用户名的登录锁定同量级）。
+  limits = {},
+} = {}) {
   for (const [name, fn] of Object.entries({ json, readBody, authorized, requireString })) {
     if (typeof fn !== 'function') throw new TypeError(`createIdentityRoutes 缺注入项：${name}`)
   }
@@ -42,6 +52,81 @@ export function createIdentityRoutes({
   // 一个"忘了注入"与一个"确实没有网关"在运行时长得一样，而前者会让诊断端点
   // 永远报 `enabled:false`，把一次接线遗漏伪装成一次正常读数。
   if (gateway === undefined) throw new TypeError('createIdentityRoutes 缺注入项：gateway（允许 null，但不能不传）')
+
+  const RATE_WINDOW_MS = 15 * 60 * 1000
+  const rateMax = (name) => {
+    const v = Number(limits?.[name])
+    return Number.isFinite(v) ? v : 0
+  }
+
+  /** 这次请求的"来源"长什么样，以及它能不能用来按来源限速。 */
+  function sourceOf(req) {
+    return clientIpFrom({
+      peerAddress: req?.socket?.remoteAddress ?? null,
+      // 重复头在 Node 里会变成数组；`clientIpFrom` 两种形状都吃。
+      forwardedFor: req?.headers?.['x-forwarded-for'] ?? null,
+      trustedProxies,
+    })
+  }
+
+  /**
+   * 在一次**免鉴权**的尝试上应用来源限速。
+   *
+   * 返回 `null` = 放行；否则已经把 429 写出去。
+   *
+   * ★ 这条判断发生在**读用户名之前**，所以它的结果与"那个用户名存不存在"无关 ——
+   *   一个与账号相关的限速消息会成为用户名探测接口，那比限速本身更值钱。
+   */
+  function rateGuard(req, res, bucket) {
+    const max = rateMax(bucket)
+    if (max <= 0) return null
+    const src = sourceOf(req)
+    // ★ `effective` 为假时**跳过**这层，而不是把所有人算成同一个键。
+    //   拿一个所有人共用的键去限速，会把"限制一个攻击者"变成"限制你的全部用户"：
+    //   攻击者只要失败几次，就能把所有人挡在门外（对自己用户的 DoS）。
+    //   这个取舍与注册闸门**相反**（那里全局计数是对的，因为注册限的是"新建资源"，
+    //   而登录限的是"某个来源的行为"—— 前者被耗尽的代价远小于后者被误锁）。
+    const decision = userStore.rateLimit({
+      bucket,
+      key: src.ip ?? '(unknown)',
+      max,
+      windowMs: RATE_WINDOW_MS,
+      effective: src.effective === true,
+    })
+    if (decision.allowed !== false) return null
+    // ★ `Retry-After` 是 HTTP 语义的一部分：客户端（含我们自己的手机端）
+    //   应当照它退避，而不是自己猜一个间隔重试。
+    try { res.setHeader('retry-after', String(decision.retryAfterSec)) } catch { /* 有的适配层没有 setHeader */ }
+    json(res, RATE_LIMIT_STATUS, {
+      ok: false,
+      code: RATE_LIMIT_CODE,
+      error: limitMessage({ retryAfterSec: decision.retryAfterSec }),
+      // 只回**计数与上限**，不回键本身 —— 那会把来源 IP 回显给调用方。
+      retryAfterSec: decision.retryAfterSec,
+      windowSec: Math.round(RATE_WINDOW_MS / 1000),
+    })
+    return { status: RATE_LIMIT_STATUS, limited: true }
+  }
+
+  /** 给诊断端点用：限速到底有没有真正生效（以及为什么没有）。 */
+  function rateReport(req) {
+    const src = sourceOf(req)
+    return {
+      reason: src.reason,
+      // `effective:false` 是**如实报出来**，不是错误：它意味着这台 Hub 的部署形态
+      // 让"按来源"这一层无从下手，运维该去配 `LEGION_TRUSTED_PROXIES`。
+      effective: src.effective === true,
+      loopbackOrPrivate: src.ip === null ? true : isLoopbackOrPrivate(src.ip),
+      max: {
+        login: rateMax('login'),
+        register: rateMax('register'),
+        'password-reset': rateMax('password-reset'),
+      },
+      windowSec: Math.round(RATE_WINDOW_MS / 1000),
+      trustedProxyRules: Array.isArray(trustedProxies?.rules) ? trustedProxies.rules.length : 0,
+      trustedProxiesInvalid: Array.isArray(trustedProxies?.invalid) ? trustedProxies.invalid : [],
+    }
+  }
 
   /** 取用户令牌并校验。返回 `{ ok, ... }`，不抛。 */
   function currentUser(req, url) {
@@ -103,6 +188,36 @@ export function createIdentityRoutes({
       },
     },
     {
+      method: 'GET',
+      path: '/api/identity/rate-limits',
+      async run(req, res, { url }) {
+        // ★ 这个端点存在的理由：一台"以为自己在限速、其实没有"的 Hub，
+        //   与一台真的在限速的 Hub，在被攻击之前**没有任何区别**。
+        //
+        //   按来源限速在不配 `LEGION_TRUSTED_PROXIES` 时**必然**失效
+        //   （Hub 绑回环 → 推出来的来源永远是 127.0.0.1 → `effective:false`
+        //   → 整层被跳过）。那是一个**配置事实**，不是 bug，而它必须能被读出来。
+        //
+        // ★ 但它**刻意不放在公开名单里**：一个匿名可读的"我有没有在限速"
+        //   等于告诉攻击者该不该放手打。运维要看它，就该先有凭据。
+        //   要求**机器令牌或系统管理员**——两者都是运维身份。
+        if (!authorized(req)) {
+          const me = currentUser(req, url)
+          if (me.ok !== true) { json(res, 401, { ok: false, code: 'HUB_TOKEN_REQUIRED', error: '查看限速状态需要 Hub 管理令牌或系统管理员账号' }); return }
+          try {
+            userStore.requireSystemAdmin(me.userId)
+          } catch (e) {
+            const { status, body } = errorResponse(userStore, e)
+            json(res, status, body)
+            return
+          }
+        }
+        // 只回形状与计数，**不回**任何地址：把来源 IP 回显给调用方会让这个
+        // 端点本身变成信息泄露（"你们从哪个 IP 访问我"）。
+        json(res, 200, { ok: true, rateLimit: rateReport(req) })
+      },
+    },
+    {
       method: 'POST',
       path: '/api/identity/bootstrap',
       async run(req, res) {
@@ -117,7 +232,13 @@ export function createIdentityRoutes({
     {
       method: 'POST',
       path: '/api/identity/login',
-      async run(req, res) { await withoutUser(req, res, (body) => userStore.login(body)) },
+      async run(req, res) {
+        // ★ 来源限速在**最前面**：在解析 body、查库、跑 scrypt 之前。
+        //   放在后面的话，被限的请求仍然会付出一次 scrypt（~100ms CPU）——
+        //   于是限速挡不住"用计算量打死服务器"这一路。
+        if (rateGuard(req, res, 'login') !== null) return
+        await withoutUser(req, res, (body) => userStore.login(body))
+      },
     },
     {
       method: 'POST',
@@ -140,6 +261,11 @@ export function createIdentityRoutes({
       method: 'POST',
       path: '/api/identity/register',
       async run(req, res) {
+        // 注册也按来源限速。它**不替代** `registrationAllowed` 的全局窗口 ——
+        // 两者问的不是同一件事：全局窗口问"这台 Hub 这一小时开了几个号"，
+        // 来源限速问"这个来源发了多少次注册尝试"。前者防资源被灌满，
+        // 后者防止一个来源高速试探（比如试邀请码）。
+        if (rateGuard(req, res, 'register') !== null) return
         // ★ 策略从**注入的配置**来，不从请求体来。
         //   一个"由调用方声明这次注册适用哪条策略"的接口，等于没有策略——
         //   攻击者只要在请求里写 `registration: 'open'`。
@@ -249,6 +375,9 @@ export function createIdentityRoutes({
       path: '/api/identity/password/reset',
       async run(req, res) {
         // 免登录：进不来的人正是要用它的人（与接受邀请同一个道理）。
+        // ★ 正因为免登录，它是最该限速的一类：**重置码是短字符串**，
+        //   不限速的话它可以被暴力枚举，而枚举成功等于账号被接管。
+        if (rateGuard(req, res, 'password-reset') !== null) return
         await withoutUser(req, res, (body) => userStore.redeemPasswordReset({
           name: body?.name, code: body?.code, newPassword: body?.newPassword, label: body?.label ?? '',
         }))

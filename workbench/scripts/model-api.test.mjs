@@ -130,89 +130,18 @@ describe('① 每条客户端调用都打到正确的 method + 路径（错法�
   //   而"配置能不能搬"现在由**备份/恢复**负责。理由与它那条不可替代的判据去哪了，
   //   见 `workbench/src/api.ts` 里那一节留下的说明。
 
-  test('凭证：状态 / 列表 / 新增 / 轮换 / 删除（方法 + 路径逐字对上）', async () => {
-    await api.fetchSecretStatus()
-    assert.equal(lastCall().method, 'GET')
-    assert.match(lastCall().url, /\/api\/secrets\/status$/)
-
-    await api.fetchSecrets()
-    assert.equal(lastCall().method, 'GET')
-    assert.match(lastCall().url, /\/api\/secrets$/)
-
-    await api.putSecret({ ref: 'OPENAI_KEY', value: 'v1', purpose: 'probe', actor: 'general' })
-    assert.equal(lastCall().method, 'POST')
-    assert.match(lastCall().url, /\/api\/secrets$/)
-    assert.equal(lastCall().body.ref, 'OPENAI_KEY')
-    assert.equal(lastCall().body.purpose, 'probe')
-    assert.equal(lastCall().body.actor, 'general')
-
-    // 轮换的路径**必须**带 `/rotate` 后缀：少了它就是一个打到 `/api/secrets/<ref>`
-    // 的 POST（那条路由根本不存在 → 404），而 404 看起来只是"这个引用没有"。
-    // 引用名同样要编码：`r/1` 不编码会变成两段路径。
-    await api.rotateSecret('r/1', { value: 'v2', actor: 'general' })
-    assert.equal(lastCall().method, 'POST')
-    assert.match(lastCall().url, /\/api\/secrets\/r%2F1\/rotate$/)
-    assert.equal(lastCall().body.value, 'v2')
-
-    await api.deleteSecret('OLD_KEY', 'general')
-    assert.equal(lastCall().method, 'DELETE')
-    assert.match(lastCall().url, /\/api\/secrets\/OLD_KEY$/)
-    assert.equal(lastCall().body.actor, 'general')
-    // 删除**不需要**值：请求体里不许出现 value 字段。
-    assert.equal(lastCall().body.value, undefined)
-  })
-
-  test('**值只走请求体，绝不进 URL**（本族最硬的一条纪律）', async () => {
-    const secret = 'sk-live-DO-NOT-LEAK-0123456789'
-    await api.putSecret({ ref: 'K', value: secret, actor: 'g' })
-    assert.equal(lastCall().body.value, secret, '值必须在请求体里')
-    assert.equal(lastCall().url.includes(secret), false, `值漏进了 URL：${lastCall().url}`)
-
-    await api.rotateSecret('K', { value: secret, actor: 'g' })
-    assert.equal(lastCall().body.value, secret)
-    assert.equal(lastCall().url.includes(secret), false, `值漏进了 URL：${lastCall().url}`)
-
-    // 引用名是引用名，不是密钥：它出现在路径里是设计如此。
-    assert.match(lastCall().url, /\/api\/secrets\/K\/rotate$/)
-  })
-
-  test('密钥库的失败必须带**结构化码**（这条链路以前会把码压成一句字符串）', async () => {
-    nextResponse = {
-      status: 503,
-      body: { ok: false, code: 'SECRET_ADMIN_STORE_UNAVAILABLE', error: '无法管理凭证：产品目录布局未确定' },
-    }
-    await assert.rejects(() => api.fetchSecrets(), (e) => {
-      assert.equal(e.name, 'HubError')
-      assert.equal(e.status, 503)
-      assert.equal(e.code, 'SECRET_ADMIN_STORE_UNAVAILABLE', '码到不了界面，"打不开"就会被渲染成"你没有"')
-      return true
-    })
-  })
-
-  test('自检失败是 **HTTP 200 + ok:false**，客户端不把它当异常、也不编造一份健康的自检', async () => {
-    nextResponse = {
-      status: 200,
-      body: { ok: true, status: { ok: false, code: 'SECRET_ADMIN_STORE_UNAVAILABLE', message: '密钥库不可用', aclVerified: false, aclExists: false, count: null } },
-    }
-    const s = await api.fetchSecretStatus()
-    assert.equal(s.ok, false, '这是"报告说打不开"，不是一次失败请求')
-    assert.equal(s.code, 'SECRET_ADMIN_STORE_UNAVAILABLE')
-
-    // 响应里**根本没有** status 字段（中枢版本不对/代理截断）：不许补一份
-    // `ok:true` 的自检结果——那正是"读不出来"伪装成"没问题"。
-    nextResponse = { status: 200, body: { ok: true } }
-    const missing = await api.fetchSecretStatus()
-    assert.equal(missing.ok, false)
-    assert.equal(missing.code, null, '不知道就是 null，不发明一个码')
-    assert.equal(missing.count, null)
-  })
-
-  test('列表响应的形状被显式收窄（不是数组时给空数组，不是 boolean 时给 false）', async () => {
-    nextResponse = { status: 200, body: { ok: true, secrets: 'nope', aclVerified: 'yes' } }
-    const r = await api.fetchSecrets()
-    assert.deepEqual(r.secrets, [])
-    assert.equal(r.aclVerified, false)
-  })
+  // ★★ 2026-10-12：这里原有「凭证：状态 / 列表 / 新增 / 轮换 / 删除（方法 + 路径逐字对上）」、
+  //   「**值只走请求体，绝不进 URL**（本族最硬的一条纪律）」、「密钥库的失败必须带**结构化码**」、
+  //   「自检失败是 HTTP 200 + ok:false…」、「列表响应的形状被显式收窄」五条 —— 随
+  //   「🔑 凭证库」页签（`SecretVaultPanel.tsx`）一起删掉了：那五个客户端函数
+  //   （`fetchSecretStatus` / `fetchSecrets` / `putSecret` / `rotateSecret` / `deleteSecret`）
+  //   只被那一页用，`api.ts` 里已经不存在。
+  //
+  //   为什么拆：钥匙由用户在「供应商与模型」页**填一次**，客户端把值随**供应商那次写**
+  //   一起交给服务端（`credentialValue`），由服务端落库并写进 DSH（运行时）——
+  //   客户端不再分两步管钥匙。后端五条路由与存储**原样保留**（写入要用），
+  //   所以「方法 + 路径」「值不进 URL」「结构化码」这些判据没有变，只是照着**服务端**测：
+  //   见 `team-hub/secret-routes.test.mjs`（含 `BUG-029`）与 `team-hub/secret-admin.test.mjs`。
 })
 
 describe('② 结构化错误必须真的到达调用方（这正是此前断掉的那一环）', () => {
@@ -368,17 +297,28 @@ describe('③ 每条路径都必须在平台契约里真实存在（交叉校验
     // 本轮新增的那一族**必须**在集合里——否则上面的阈值可能被既有调用凑够，
     // 而新写的路径一条都没被检查到。
     // ★ 2026-10-12：名单里的 `/api/config-bundle/plan` 已随「配置包」删除（那条路径不再存在）。
-    for (const p of ['/api/model-profiles', '/api/model-bindings',
-      '/api/secrets', '/api/secrets/status']) {
+    //
+    // ★★ 2026-10-12：名单里原有的 `/api/secrets` 与 `/api/secrets/status` 也去掉了 ——
+    //   「🔑 凭证库」页签拆除后，那五条路由在 `api.ts` 里**一个客户端函数都没有了**
+    //   （顶层的那族函数整段删除），这个抽取器只读 `api.ts`，所以它**抓不到**那两条路径。
+    //   ⚠ 这意味着那两条路径**不再被这条交叉校验覆盖**：留着它们在这里只会让用例必红，
+    //     而删掉是**如实**的——覆盖范围真的变小了。客户端唯一剩下调用它们的地方是
+    //     `DshProvidersPanel.tsx` 里那条裸的 `/api/secrets/status`（不在本抽取器的范围里）；
+    //     路由本身存在与否由 `team-hub` 自己的套件守着（`secret-routes.test.mjs`）。
+    for (const p of ['/api/model-profiles', '/api/model-bindings']) {
       assert.ok(found.some((f) => f.path === p || f.path.startsWith(p + '/')), `抽取结果里缺少 ${p}`)
     }
 
     // 抽取器的覆盖边界（写在这里，以免日后被当成"已经校验过"）：
     //   · 从前那两处盲区（轮换路径与 DELETE 路径在模板段处被截断）**已经不存在**：
-    //     归一规则把 `${…}/rotate` 落成 `/:param/rotate`、把末尾的模板段丢弃，
-    //     于是 `/api/secrets/:param/rotate` 与 `/api/secrets/:param` 都被逐条校验了。
+    //     归一规则把 `${…}/probe` 落成 `/:param/probe`、把末尾的模板段丢弃，
+    //     于是 `/api/model-profiles/:param` 与 `/api/model-profiles/:param/probe` 都被逐条校验了。
+    //     （那两处盲区最初正是拿 `/api/secrets/${ref}/rotate` 与 `DELETE /api/secrets/${ref}`
+    //     量出来的；那一族客户端函数已随凭证库页签删除，但归一规则照旧。）
     //   · 本抽取器**不**负责查询串里的语义：`?taskId=` 这类参数名不属于路径，
     //     这里只校验路径本身（查询串在切分时就丢掉了）。
+    //   · 本抽取器**只读 `workbench/src/api.ts`**：别的文件里裸写的 `hubRequest(...)`
+    //     （例如 `DshProvidersPanel.tsx` 的 `/api/secrets/status`）不在覆盖范围内。
 
     const bad = found.filter((f) => !exists(f.method, f.path))
     assert.deepEqual(

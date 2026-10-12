@@ -81,6 +81,21 @@ export async function readDshProviderSnapshot(ctx) {
       baseURL: typeof profile.baseURL === 'string' && profile.baseURL !== '' ? profile.baseURL : null,
       secretRef: apiKeyEnv,
       credentialConfigured,
+      /**
+       * ★★ 2026-10-12：这条供应商在 DSH 的**配置里有没有一节点名它**。
+       *
+       * `false` 的含义很具体：它的 `api`/`baseURL` **来自某个内置插件的默认值**
+       * （实测：`deepseek-official` 来自 `llm-deepseek`、`deepseek-account` 来自账号平台插件），
+       * 而不是用户写在 `cordis.patch.yml` 里的声明。于是上面那两个字段读到的是 `null`
+       * —— 而 `null` 在这里**同时**意味着"确实没配"与"端点由引擎内置、我读不到"。
+       *
+       *   > 一个"确实没配地址"的供应商，与一个"地址在引擎里、我没读到"的供应商，
+       *   > 在快照里长得一模一样 —— 而下游对它们的处置必须相反：
+       *   > 前者要用户去补，后者**任何东西都不该去写**（写进去就是把内置默认值改成空）。
+       *
+       * 消费它的是 `materialize-plan.mjs` 的"不接管"那一类。
+       */
+      declaredInSettings: declared.some((d) => d?.provider === p.id),
       models: models.map((m) => ({
         id: m?.id,
         ...(typeof m?.name === 'string' && m.name !== '' ? { name: m.name } : {}),

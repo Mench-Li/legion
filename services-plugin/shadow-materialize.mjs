@@ -83,3 +83,41 @@ export async function runShadowMaterialization({ ctx, hubUpstream, teamHubToken 
     actualReadOk,
   }
 }
+
+/**
+ * ★★ 2026-10-12：把这轮对账的**读数**上报给中枢（只读方向：中枢是收方，DSH 一点没动）。
+ *
+ * ## 为什么需要它
+ *
+ * 计划里那几处差异此前**只活在这一行日志里**（而且实测那份日志是乱码），
+ * 于是"打开写入会改什么"这件事**没有任何人能看见** —— 包括要按它做决定的人。
+ * 而决策文档 P2→P3 的放行条件恰恰是"连续几轮 diff 为空"，那要求**看得见** diff。
+ *
+ * ## 纪律
+ *
+ *   · 上报的是**计数与改了哪几个字段**，**不含任何值**（`plan` 里本来就只有 id 与字段名）；
+ *   · **失败只记日志**：中枢没起来/网络抖动都不该影响对账本身，
+ *     更不该把宿主的启动路径拖坏（与 `maybeBootstrapProviderImport` 同一条纪律）；
+ *   · 读不出来（`actualReadOk:false` 或 `legionReadOk:false`）时**照样上报**：
+ *     "这次没读到"本身就是要让面板看见的读数 —— 不上报会让人以为"没有差异"。
+ */
+export async function reportMaterializationReading({
+  hubUpstream, teamHubToken = '', reading, fetchImpl = fetch, log = () => {},
+} = {}) {
+  const qs = teamHubToken ? '?token=' + encodeURIComponent(teamHubToken) : ''
+  try {
+    const res = await fetchImpl(`${hubUpstream}/api/model-materialization/reading${qs}`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', ...(teamHubToken ? { authorization: `Bearer ${teamHubToken}` } : {}) },
+      body: JSON.stringify(reading),
+    })
+    if (res.status !== 200) {
+      log(`模型配置读数上报失败：中枢返回 HTTP ${res.status}（**不影响对账本身**）`)
+      return { ok: false, status: res.status }
+    }
+    return { ok: true, status: 200 }
+  } catch (e) {
+    log(`模型配置读数上报失败：${e instanceof Error ? e.message : String(e)}（**不影响对账本身**）`)
+    return { ok: false, status: 0 }
+  }
+}

@@ -221,7 +221,7 @@ export function ModelProfilesPanel(): React.JSX.Element {
     <div className="set-panel">
       <div className="mc-tip">
         💡 模型档案是**岗位绑定**与**连通性探测**的共同底色：先有一条档案，才谈得上"这个岗位用它"和"它现在能不能用"。
-        凭证**不存在档案里**，档案只保存 `secretRef`（引用名）——真正的钥匙在「凭证库」页录入。
+        凭证**不存在档案里**，档案只保存 `secretRef`（引用名）——真正的钥匙在「供应商与模型」页填一次，存进本机密钥库并写进 DSH。
       </div>
 
       <div className="set-row-space">

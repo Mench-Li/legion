@@ -296,6 +296,10 @@ SOURCES.routesContextSnapshots = join(ROOT, 'team-hub', 'routes', 'context-snaps
 //   > 一份"我登记了哪些源文件"的清单，与一份"那些源文件都还在"的事实，
 //   > 只在有人删文件的那一天分叉；而分叉的表现是**别人的**用例红。
 SOURCES.routesPriceTables = join(ROOT, 'team-hub', 'routes', 'price-tables.mjs')
+// ★★ 2026-10-12：物化读数那一族（`GET /api/model-materialization` +
+//   `POST /api/model-materialization/reading`）。它是"打开写入会改 DSH 的什么"
+//   那一份读数的入口 —— 决策文档 P2→P3 的放行读数。
+SOURCES.routesModelMaterialization = join(ROOT, 'team-hub', 'routes', 'model-materialization.mjs')
 // ★ 切片 19（config）：第一族走**活绑定** —— 它读的 `deliveryBookkeepingFailures`
 //   在宿主里是 `let` 且三处 `+= 1`，按值注入会永久陈旧。
 SOURCES.routesConfig = join(ROOT, 'team-hub', 'routes', 'config.mjs')
@@ -382,6 +386,9 @@ export const ROUTE_FAMILY_SOURCES = Object.freeze([
   { module: 'routesUsage', family: 'usage', factory: 'createUsageRoutes' },
   { module: 'routesContextSnapshots', family: 'context-snapshots', factory: 'createContextSnapshotsRoutes' },
   // ★ 2026-10-12：`routesConfigBundle` 已删（配置包拆除，见 SOURCES 里那段说明）。
+  // ⚠ 这一行的**次序**必须与 `server.mjs` 装配处的次序逐字一致（判据 ⑩ 直接比这两个序列）。
+  //   第一版我把它放在 `routesPriceTables` **之后**，而装配处在它**之前** ⇒ 当场红。
+  { module: 'routesModelMaterialization', family: 'model-materialization', factory: 'createModelMaterializationRoutes' },
   { module: 'routesPriceTables', family: 'price-tables', factory: 'createPriceTablesRoutes' },
   { module: 'routesConfig', family: 'config', factory: 'createConfigRoutes' },
   { module: 'routesCreate', family: 'create', factory: 'createCreateRoutes' },

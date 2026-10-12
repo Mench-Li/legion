@@ -23,7 +23,7 @@ import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 // P2：影子对账。单独成文件是为了让"只读"这件事**在一个文件里可以被扫**——
 // `shadow-materialize.mjs` 里一次都不出现 mutate/set/unset（有用例钉住）。
-import { runShadowMaterialization } from './shadow-materialize.mjs'
+import { runShadowMaterialization, reportMaterializationReading } from './shadow-materialize.mjs'
 import { readDshProviderSnapshot } from './dsh-snapshot.mjs'
 // P3：接管写入 + 从 Legion 的受保护库取值。
 import { runMaterialization } from './materializer.mjs'
@@ -420,6 +420,21 @@ export function apply(ctx, rawConfig = {}) {
   async function runOneReconcileRound() {
     const shadow = await runShadowMaterialization({ ctx, hubUpstream, teamHubToken, log })
     const cleanAtStart = shadow.ok === true && shadow.plan?.clean === true
+    // ★★ 2026-10-12：把这一轮的读数**上报中枢**（只读方向：中枢是收方，DSH 一点没动）。
+    //   理由：计划里那几处差异此前只活在一行日志里，于是"打开写入会改什么"
+    //   没有任何人看得见 —— 包括要按它做决定的人。失败**只记日志**（见该函数的纪律）。
+    await reportMaterializationReading({
+      hubUpstream, teamHubToken, log,
+      reading: {
+        at: new Date().toISOString(),
+        legionReadOk: shadow.legionReadOk === true,
+        actualReadOk: shadow.actualReadOk === true,
+        plan: shadow.plan,
+        line: shadow.line,
+        // 门的状态一起报：面板要能说清"现在填了密钥会不会真的写进 DSH"。
+        gate: { applyModelConfig, applyModelConfigDeletes },
+      },
+    })
     await runMaterialization({
       ctx, hubUpstream, teamHubToken, log,
       enabled: applyModelConfig,

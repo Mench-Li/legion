@@ -59,6 +59,68 @@ test('③ 真差异要**指明是哪个字段**，不是只说"这条变了"', (
   assert.equal(changedFields(normalizeForCompare(changed[0]), normalizeForCompare(LEGION[0])).join(','), 'displayName,baseURL')
 })
 
+// ══════════════════════════════════════════════════════════════════════════
+// ③b ★★ "不接管"那一类（2026-10-12，打开写入之前算差异时抓到的）
+//
+// 实测：影子对账每一轮都报 `修改 3`，而其中 **2 处是幻影** ——
+// `deepseek-official` / `deepseek-account` 的 `api`/`baseURL` 在 DSH 那边来自
+// **内置插件的默认值**（不在 `settings` 里），Legion 侧只能读到 `null`。
+// 两边一对比就是"差异"，而真相是：**那个值 Legion 读不到，也不该去写**
+// （写进去等于把内置默认值改成空）。
+//
+//   > 一处"我读不到它"的缺口，与一处"它真的不一样"的差异，在对比表上是同一行 ——
+//   > 而处置正好相反：前者什么都不该做，后者要写。
+//
+// 判据是 DSH 侧给的 `declaredInSettings === false`。
+// ══════════════════════════════════════════════════════════════════════════
+
+test('③b ★★★ `declaredInSettings:false` 的条目**既不算差异也不算未变**，而是"不接管"', () => {
+  // Legion 侧有它（导入时建过），DSH 侧是引擎内置 ⇒ 从前会被算成"修改"（幻影差异）。
+  const engineInternal = [{
+    id: 'deepseek-official', displayName: 'deepseek-official', api: null, baseURL: null,
+    apiKeyEnv: 'DEEPSEEK_API_KEY', credentialConfigured: true, declaredInSettings: false,
+    models: [{ id: 'deepseek-v4-pro' }],
+  }]
+  const desired = [{
+    id: 'deepseek-official', displayName: 'deepseek-official', api: null, baseURL: null,
+    secretRef: 'DEEPSEEK_API_KEY', models: [{ id: 'deepseek-v4-pro' }],
+  }]
+  const plan = planMaterialization({ desired, actual: engineInternal })
+  assert.deepEqual(plan.engineInternal, ['deepseek-official'])
+  assert.equal(plan.counts.update, 0, '这是幻影差异，不许算成"要改"')
+  assert.equal(plan.counts.create, 0)
+  assert.equal(plan.counts.unchanged, 0, '也不许算进"未变" —— 它不在接管的范围内')
+  assert.equal(plan.clean, true, '★ 幻影差异清掉之后必须是 clean，否则写入会每轮重写一遍')
+})
+
+test('③b ★★ 它**不进删除候选**：对一个读不全的条目下"接管会删掉"是危险的', () => {
+  // Legion 里没有它、DSH 里有，且是引擎内置 ⇒ 从前会进 `delete` 候选。
+  const plan = planMaterialization({
+    desired: [],
+    actual: [{ id: 'x', displayName: 'X', declaredInSettings: false }],
+  })
+  assert.deepEqual(plan.delete, [], '引擎内置的条目不许进删除候选（我们读不全它，删了就是删一个正常工作的供应商）')
+  assert.deepEqual(plan.engineInternal, ['x'])
+})
+
+test('③b ★ 声明在 settings 里的仍照常比较（`declaredInSettings:true` 不走那一类）', () => {
+  const withTrue = [{ ...DSH[0], declaredInSettings: true }]
+  const plan = planMaterialization({ desired: LEGION, actual: withTrue })
+  assert.deepEqual(plan.engineInternal, [])
+  assert.equal(plan.counts.unchanged, 1)
+})
+
+test('③b ★★ 读数里要**说明**这一类（否则「未变 1」会让人以为另外两条丢了）', () => {
+  const plan = planMaterialization({
+    desired: LEGION,
+    actual: [...DSH, { id: 'eng', displayName: 'eng', declaredInSettings: false }],
+  })
+  const line = describeMaterializationPlan(plan)
+  assert.match(line, /不接管/)
+  assert.match(line, /eng/)
+  assert.match(line, /任何东西都不许写它们/)
+})
+
 test('④ ★ 要删的那几条必须被点名（P2 存在的唯一理由）', () => {
   const extra = [...DSH, { id: 'svea-ds', displayName: 'SVEA', api: 'openai-completions', apiKeyEnv: 'SVEA_DS_API_KEY', credentialConfigured: true, models: [{ id: 'm9' }] }]
   // Legion 里**没有** svea-ds ⇒ 接管会把它 unset 掉

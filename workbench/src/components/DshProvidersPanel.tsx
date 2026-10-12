@@ -510,7 +510,7 @@ export function DshProvidersPanel(): React.JSX.Element {
         <input type="checkbox" checked={deleteKeyWithProvider} disabled={busy} onChange={e => setDeleteKeyWithProvider(e.target.checked)} />
         <span>同时删掉它的钥匙（不可撤销）</span>
       </label>}
-      {removing.credentialRequired === true && <p className="set-notice muted">不勾选时，钥匙会留在「凭证库」里 —— 如果这个供应商是最后一个用它的，它就成了一个**没有任何供应商指向它**的孤儿。那边可以随时删。</p>}
+      {removing.credentialRequired === true && <p className="set-notice muted">不勾选时，钥匙会留在本机密钥库里 —— 如果这个供应商是最后一个用它的，它就成了一个**没有任何供应商指向它**的孤儿（界面上不再有单独管这个库的入口，所以想清掉它就在这一格勾上）。</p>}
       <button className="btn provider-delete" disabled={busy} onClick={() => void remove()}>确认删除</button><button className="btn" disabled={busy} onClick={() => { setRemoving(null); setDeleteKeyWithProvider(false) }}>取消</button></div></div>}
     {open && <div className="provider-editor-mask"><form role="dialog" aria-modal="true" aria-label={editing ? `编辑 ${editing.displayName}` : '添加模型供应商'} className="set-form model-provider-form" onSubmit={e => { e.preventDefault(); void save() }}><h3>{editing ? `编辑 ${editing.displayName}` : '添加自定义供应商'}</h3>{error && <div className="set-notice bad" role="alert">{error}</div>}{notice && <div className="set-notice ok" role="status">{notice}</div>}<div className="set-grid">
       <label className="field"><span>供应商 ID</span><input className="set-input" value={form.provider} disabled={!!editing || busy} onChange={e => set('provider', e.target.value)} required placeholder="例如 company-gateway" /></label>

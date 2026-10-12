@@ -17,9 +17,8 @@ import assert from 'node:assert/strict'
 import { hubErrorFromBody } from '../src/hub-errors.ts'
 import { chainView } from '../src/modelSettings.ts'
 import {
-  aclView, collectionView, failedState, loadingState,
-  panelErrorFrom, probeViewFrom, readyState, resolutionView, secretDeleteResultView, secretErrorView,
-  secretRefEditView, secretRowView, secretStatusView, secretWriteResultView,
+  collectionView, failedState, loadingState,
+  panelErrorFrom, probeViewFrom, readyState, resolutionView,
 } from '../src/modelSettingsUi.ts'
 
 /** 造一个与 `api.ts` 里**同一个来源**的中枢错误（`hubErrorFromBody`，不是手写的替身）。 */
@@ -179,218 +178,27 @@ describe('② 探测：503 是「这次没探测过」，不是一次判定', ()
   })
 })
 
-// ─────────────────────────────────────── ③ 凭证行：只有元数据
+// ★★ 2026-10-12：这里原本是「③ 凭证行：值不可能出现在视图里」（3 条）与
+//   「③b 文件权限：aclExists 的两种 false 不是一回事」（4 条）两块 —— 它们测的
+//   `secretRowView` / `aclView` 只被「🔑 凭证库」面板（`SecretVaultPanel.tsx`）用，
+//   那个页签拆了，两个视图与这 7 条用例一起删除。
+//
+//   为什么拆：架构决定变了 —— 钥匙由用户在「供应商与模型」页**填一次**，Legion 存下来后
+//   写进 DSH（运行时），用户**不需要再看见**那个库；凭证库那一页是"写进 DSH"还没接通时
+//   的脚手架。底层存储与后端路由**原样保留**（写入要用），所以那两块钉住的**后端语义**
+//   （`aclExists` 的两种 false）仍然成立 —— 它们现在由 `team-hub/secret-routes.test.mjs`
+//   （含 `BUG-029` 的判据）守着，而不是由这一层界面守着。
 
-describe('③ 凭证行：值不可能出现在视图里', () => {
-  test('喂一条带 value/blob/token 的输入，整个视图里不含那个值', () => {
-    const secret = 'sk-live-DEADBEEF'
-    const view = secretRowView({
-      ref: 'OPENAI_KEY', purpose: '探针', scheme: 'dpapi-user',
-      createdAt: '2026-09-11T00:00:00.000Z', updatedAt: null, rotatedAt: null,
-      value: secret, blob: secret, token: secret, plaintext: secret,
-    })
-    const dump = JSON.stringify(view)
-    assert.ok(!dump.includes(secret), `值漏进了视图：${dump}`)
-    assert.equal(view.ref, 'OPENAI_KEY')
-    assert.equal(view.purposeText, '探针')
-    assert.equal(view.schemeText, 'dpapi-user')
-  })
-
-  test('rotatedAt 为 null = **从未轮换**（不是"轮换失败"，也不是空白）', () => {
-    const never = secretRowView({ ref: 'A', rotatedAt: null })
-    const rotated = secretRowView({ ref: 'A', rotatedAt: '2026-09-12T03:04:05.000Z' })
-    assert.equal(never.rotatedText, null)
-    assert.equal(rotated.rotatedText, '最近轮换：2026-09-12 03:04')
-    assert.notEqual(never.rotatedText, rotated.rotatedText)
-  })
-
-  test('缺字段不崩，且显式说"没有"（不显示空白）', () => {
-    const v = secretRowView({})
-    assert.equal(v.refText, '（响应里没有引用名）')
-    assert.equal(v.purposeText, '（没有用途说明）')
-    assert.equal(v.schemeText, '（没有保护方案信息）')
-    assert.equal(v.timesText, '（没有时间戳）')
-    for (const bad of [null, undefined, 'x', 42, []]) {
-      assert.equal(secretRowView(bad).ref, '', `${String(bad)} 不该被当成一条凭证`)
-    }
-  })
-})
-
-describe('③b 文件权限：aclExists 的两种 false 不是一回事', () => {
-  test('核验通过 → ok', () => {
-    assert.equal(aclView({ aclVerified: true, aclExists: true }).tone, 'ok')
-  })
-
-  test('**全新安装（文件还不存在）不是告警**', () => {
-    const v = aclView({ aclVerified: false, aclExists: false })
-    assert.equal(v.tone, 'muted')
-    assert.match(v.text, /全新安装/)
-  })
-
-  test('文件在但没能确认权限 → 黄色，且必须与"文件不存在"不同', () => {
-    const warn = aclView({ aclVerified: false, aclExists: true, aclNote: '写完之后无法重新核验文件权限：X' })
-    const muted = aclView({ aclVerified: false, aclExists: false })
-    assert.equal(warn.tone, 'warn')
-    assert.notEqual(warn.tone, muted.tone)
-    assert.match(warn.text, /没能确认/)
-    assert.match(warn.text, /写完之后无法重新核验/)
-  })
-
-  test('两个字段都没有 → 不静默：说清"不知道"', () => {
-    const v = aclView({})
-    assert.equal(v.tone, 'warn')
-    assert.match(v.text, /没有说文件是否存在/)
-  })
-})
-
-// ─────────────────────────────────────── ④ 写回执
-
-describe('④ 写回执：轮换的后果必须说出来', () => {
-  test('put 与 rotate 是两种回执', () => {
-    const put = secretWriteResultView('put', { secret: { ref: 'K1' }, aclVerified: true, aclExists: true })
-    const rot = secretWriteResultView('rotate', { secret: { ref: 'K1' }, aclVerified: true, aclExists: true })
-    assert.equal(put.kind, 'written')
-    assert.equal(rot.kind, 'rotated')
-    assert.notEqual(put.headline, rot.headline)
-    // 轮换的语义是"只影响之后创建的运行"——不说这句，用户会以为在跑的那次也换了钥匙
-    assert.match(rot.detail, /只影响轮换之后创建的运行/)
-  })
-
-  test('写成功但没核验权限 → 仍然算成功，但**必须**带出那条提醒', () => {
-    const v = secretWriteResultView('put', {
-      secret: { ref: 'K1' }, aclVerified: false, aclExists: true, aclNote: '凭证已写入，但之后无法重新核验文件权限：X',
-    })
-    assert.equal(v.kind, 'written')
-    assert.equal(v.acl.tone, 'warn')
-    assert.match(v.acl.text, /无法重新核验/)
-  })
-})
-
-describe('④b 删除回执：幂等不是失败，但"不知道"也不许并进"本来就不存在"', () => {
-  test('removed:true → removed', () => {
-    const v = secretDeleteResultView({ removed: true, aclVerified: true, aclExists: true })
-    assert.equal(v.kind, 'removed')
-  })
-
-  test('removed:false → already-absent，且**不是**失败', () => {
-    const v = secretDeleteResultView({ removed: false, aclVerified: true, aclExists: true })
-    assert.equal(v.kind, 'already-absent')
-    assert.match(v.headline, /本来就不存在/)
-    assert.match(v.detail, /幂等/)
-    assert.ok(!/删除失败/.test(v.headline), `幂等被说成了失败：${v.headline}`)
-  })
-
-  test('**响应里没有 removed 字段时不许并进"本来就不存在"**', () => {
-    const absent = secretDeleteResultView({ removed: false })
-    const unknown = secretDeleteResultView({})
-    assert.equal(unknown.kind, 'already-absent', '既没有删掉也没有"本来就不存在"，但形状上是同一个非失败分支')
-    assert.notEqual(unknown.headline, absent.headline, '「不知道」与「本来就不存在」必须能被读出来')
-    assert.match(unknown.headline, /没有说/)
-  })
-})
-
-// ─────────────────────────────────────── ⑤ 凭证错误：码决定下一步
-
-describe('⑤ 凭证错误：每个后端码都有可区分、可行动的文案', () => {
-  const cases = [
-    ['SECRET_ADMIN_STORE_UNAVAILABLE', 'store-unavailable'],
-    ['SECRET_NOT_FOUND', 'not-found'],
-    ['SECRET_REF_INVALID', 'bad-request'],
-    ['SECRET_VALUE_EMPTY', 'bad-request'],
-    ['SECRET_STORE_WRITE_FAILED', 'write-failed'],
-  ]
-
-  test('五个真实码 → 各自的 kind、原码与状态码都保留', () => {
-    for (const [code, kind] of cases) {
-      const v = secretErrorView(hubErr(400, { ok: false, code, error: `错误：${code}`, hint: '看这里' }))
-      assert.equal(v.code, code, `${code} 的码必须原样保留`)
-      assert.equal(v.kind, kind, `${code} 的 kind`)
-      assert.ok(v.detail.includes(code), `详情里要看得到码：${v.detail}`)
-      assert.ok(v.detail.includes('看这里'), `hint 必须到达界面：${v.detail}`)
-      assert.ok(v.action.length > 0)
-    }
-  })
-
-  test('**「密钥库打不开」与「引用不存在」的下一步动作完全相反**', () => {
-    const store = secretErrorView(hubErr(503, { ok: false, code: 'SECRET_ADMIN_STORE_UNAVAILABLE', error: '密钥库不可用' }))
-    const absent = secretErrorView(hubErr(404, { ok: false, code: 'SECRET_NOT_FOUND', error: '没有这个凭证引用：K1' }))
-    assert.notEqual(store.kind, absent.kind)
-    assert.notEqual(store.action, absent.action)
-    // 打不开时**不许**引导用户去重新录入（录入会同样失败）
-    assert.match(store.action, /不要重新录入/)
-    assert.match(store.headline, /不是「这个引用不存在」/)
-    // 而真的不存在时，要指到"新增凭证"这条路
-    assert.match(absent.action, /新增凭证/)
-    assert.ok(!/不要重新录入/.test(absent.action))
-  })
-
-  test('非中枢错误落进 unclassified，且**不写死**一个业务码', () => {
-    const v = secretErrorView(new Error('ECONNREFUSED'))
-    assert.equal(v.code, null)
-    assert.equal(v.status, null)
-    assert.equal(v.kind, 'unclassified')
-    assert.match(v.headline, /未归类/)
-  })
-
-  test('没见过的码走 unclassified 并说出来（不假装认识它）', () => {
-    const v = secretErrorView(hubErr(409, { ok: false, code: 'SOME_FUTURE_CODE', error: 'x' }))
-    assert.equal(v.code, 'SOME_FUTURE_CODE')
-    assert.equal(v.kind, 'unclassified')
-    assert.match(v.action, /不猜/)
-  })
-
-  test('field 从结构化响应体里带出来（该落到哪个输入框）', () => {
-    const v = secretErrorView(hubErr(400, { ok: false, code: 'SECRET_REF_INVALID', error: 'x', field: 'ref' }))
-    assert.equal(v.field, 'ref')
-  })
-})
-
-// ─────────────────────────────────────── ⑥ 密钥库自检
-
-describe('⑥ 自检：ok:false 走 HTTP 200，它不是「没有凭证」', () => {
-  test('ok:false → unavailable，且带上后端原码', () => {
-    const v = secretStatusView({ ok: false, code: 'SECRET_ADMIN_STORE_UNAVAILABLE', message: '密钥库不可用' })
-    assert.equal(v.kind, 'unavailable')
-    assert.equal(v.available, false)
-    assert.equal(v.code, 'SECRET_ADMIN_STORE_UNAVAILABLE')
-    assert.ok(v.detail.includes('SECRET_ADMIN_STORE_UNAVAILABLE'))
-    assert.match(v.headline, /不是「没有凭证」/)
-  })
-
-  test('**「打不开」与「一条都没有」必须不同**', () => {
-    const dead = secretStatusView({ ok: false, code: 'SECRET_ADMIN_STORE_UNAVAILABLE', message: 'x' })
-    const empty = secretStatusView({ ok: true, protection: { scheme: 'dpapi-user' }, count: 0, aclVerified: true, aclExists: true })
-    assert.equal(empty.kind, 'available')
-    assert.notEqual(dead.kind, empty.kind)
-    assert.notEqual(dead.countText, empty.countText)
-  })
-
-  test('count:null 与 count:0 的文案不同（"没给计数"不是"零条"）', () => {
-    const zero = secretStatusView({ ok: true, count: 0, protection: { scheme: 'dpapi-user' }, aclVerified: true, aclExists: true })
-    const unknown = secretStatusView({ ok: true, count: null, protection: { scheme: 'dpapi-user' }, aclVerified: true, aclExists: true })
-    assert.equal(zero.countText, '已录入 0 条')
-    assert.notEqual(zero.countText, unknown.countText)
-    assert.match(unknown.countText, /未知/)
-  })
-
-  test('没有自检结果 → unknown（第三种状态，不许并进前两种）', () => {
-    const v = secretStatusView(null)
-    assert.equal(v.kind, 'unknown')
-    assert.match(v.detail, /不等于/)
-    const kinds = new Set([
-      v.kind,
-      secretStatusView({ ok: false, code: 'X', message: 'm' }).kind,
-      secretStatusView({ ok: true, count: 1, aclVerified: true, aclExists: true }).kind,
-    ])
-    assert.equal(kinds.size, 3, '三种自检状态必须互不相同')
-  })
-
-  test('可用时把保护方案与权限核验结果一起报出来', () => {
-    const v = secretStatusView({ ok: true, count: 2, protection: { scheme: 'dpapi-user' }, aclVerified: true, aclExists: true })
-    assert.match(v.detail, /dpapi-user/)
-    assert.match(v.detail, /已核验/)
-  })
-})
+// ★★ 2026-10-12：这里原本是「④ 写回执：轮换的后果必须说出来」（2 条）、
+//   「④b 删除回执：幂等不是失败…」（3 条）、「⑤ 凭证错误：每个后端码都有可区分、
+//   可行动的文案」（5 条）、「⑥ 自检：ok:false 走 HTTP 200…」（5 条）四块，共 15 条 ——
+//   它们测的 `secretWriteResultView` / `secretDeleteResultView` / `secretErrorView` /
+//   `secretStatusView` 只被「🔑 凭证库」面板（`SecretVaultPanel.tsx`）用，
+//   那个页签拆了，四个视图与这 15 条用例一起删除。
+//
+//   这四块钉的**后端语义**一条都没有变（删除幂等、`SECRET_*` 码决定下一步、
+//   自检失败是 HTTP 200 + `ok:false`）——判据现在在 `team-hub/secret-routes.test.mjs`
+//   （含 `BUG-029`）与 `team-hub/secret-admin.test.mjs` 里。
 
 // ★★ 2026-10-12：这里原本是「⑦ 配置包导入计划」整块（7 条用例，测 `bundlePlanView`）——
 //   随「配置包」（PRT-508）整体删除。理由不是"没人用"，而是**它在单机部署里没有用**：
@@ -409,36 +217,12 @@ describe('⑥ 自检：ok:false 走 HTTP 200，它不是「没有凭证」', () 
 //   一起删掉了（`migrationPlanView` 与它复用的 `importPlanView` 都已移除）。
 //   理由见 `docs/bugs/BUG-026` / `BUG-027`。
 
-// ─────────────────────────────────────── ⑧ 凭证库里的"孤儿"标记
+// ★★ 2026-10-12：这里原本是上一轮加的「⑧ 凭证库：**没有任何供应商指向它**的条目要标出来」
+//   整块（4 条用例，测 `secretRowView` 的孤儿标记 `orphanText` / `isOrphan`）——
+//   它随「🔑 凭证库」页签（`SecretVaultPanel.tsx`）一起拆除：那个视图只被那一页用。
+//
+//   孤儿这件事**本身没有消失**：删供应商默认不动密钥（服务端语义一个字没改），
+//   所以库里仍然会有"没有任何供应商指向它"的条目。变的是**它不再需要被渲染成一栏**——
+//   那一页已经没有了。想清掉孤儿的出口留在删供应商那一格（`DshProvidersPanel.tsx`
+//   的「同时删掉它的钥匙」），后端判据见 `team-hub/secret-routes.test.mjs`。
 
-describe('⑧ 凭证库：**没有任何供应商指向它**的条目要标出来', () => {
-  test('服务端说 `claimedByProvider:false` ⇒ 标成孤儿，并说清"也可能有别的东西在用"', () => {
-    const v = secretRowView({ ref: 'ORPHAN_REF', claimedByProvider: false })
-    assert.equal(v.isOrphan, true)
-    assert.match(v.orphanText, /没有任何供应商指向它/)
-    // ★ 措辞不许越权说成"没人在用"：那把钥匙也可能正被手工脚本或 DSH 自己的配置用着，
-    //   而那两处 Legion 看不到。
-    assert.match(v.orphanText, /可能有别的东西在用/)
-  })
-
-  test('`claimedByProvider:true` ⇒ 不是孤儿，且照实说"有供应商指向它"', () => {
-    const v = secretRowView({ ref: 'USED_REF', claimedByProvider: true })
-    assert.equal(v.isOrphan, false)
-    assert.match(v.orphanText, /有供应商指向它/)
-  })
-
-  test('★ 服务端没给这一格（老 hub）⇒ `null`：**不猜**，界面就不显示那一栏', () => {
-    const v = secretRowView({ ref: 'X' })
-    assert.equal(v.orphanText, null)
-    assert.equal(v.isOrphan, false)
-  })
-
-  test('★★ 引用名缺失与孤儿标记是两件事，不许混', () => {
-    // 引用名缺失时那一格仍然是 `''`（不编一个名字），而孤儿标记独立成立：
-    // "它叫什么"与"有没有人指着它"是两个读数。
-    const v = secretRowView({ claimedByProvider: false })
-    assert.equal(v.ref, '')
-    assert.equal(v.refText, '（响应里没有引用名）')
-    assert.equal(v.isOrphan, true)
-  })
-})

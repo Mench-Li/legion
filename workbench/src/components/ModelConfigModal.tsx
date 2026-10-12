@@ -6,7 +6,6 @@ import type { AgentModelCfg, RosterAgent } from '../types'
 import { toast } from './Toast'
 import { ModelProfilesPanel } from './ModelProfilesPanel'
 import { ModelBindingsPanel } from './ModelBindingsPanel'
-import { SecretVaultPanel } from './SecretVaultPanel'
 import { DshProvidersPanel } from './DshProvidersPanel'
 import { AgentAvatar } from '../avatar'
 
@@ -17,7 +16,7 @@ interface ModelConfigModalProps {
   embedded?: boolean
 }
 
-type Tab = 'providers' | 'quick' | 'profiles' | 'bindings' | 'secrets'
+type Tab = 'providers' | 'quick' | 'profiles' | 'bindings'
 
 const TABS: Array<{ id: Tab; label: string }> = [
   { id: 'providers', label: '供应商与模型' },
@@ -32,14 +31,24 @@ const TABS: Array<{ id: Tab; label: string }> = [
   //       而凭证值从来不在包里（在本机 DPAPI 密钥库），换机器无论如何都要重填。
   //   现在"配置能不能搬"由**备份/恢复**负责（`product/server/backup.mjs`）。
   //   ⇒ 这个弹窗只剩四件事，每件都是这台机器上真实要做的。
-  { id: 'secrets', label: '🔑 凭证库' },
+  //
+  // ★★ 2026-10-12（同上一条的历史之后）：这里最后一个「🔑 凭证库」页签也拆了
+  //   （面板文件 `SecretVaultPanel.tsx` 一并删除）。它是 P1 时期的脚手架：
+  //   那时「把钥匙写进 DSH」这条线还没接通，钥匙只能在 Legion 里存着、只能让人**看着**，
+  //   所以必须先有一页能录入、能看见。
+  //   架构决定现在变了 —— 钥匙由用户在**上面第一个「供应商与模型」页填一次**，
+  //   Legion 存下来后**写进 DSH（运行时）**，用户**不需要再看见**那个库
+  //   （一页看得见却什么也决定不了的凭证列表，只会让人以为钥匙还得自己管）。
+  //   ⚠ 删的只是**这一页**，底层存储与后端路由**原样保留**（写入正要用它，
+  //     而且 `BUG-029` 的判据住在 `team-hub/secret-routes.test.mjs` 里）。
+  //     「密钥库暂时存不进来」这件事仍然要在**填钥匙的那一页**说清（`DshProvidersPanel` 的 `keyStore`）。
 ]
 
 /** ① 快速分配：原有的 per-agent 角色→模型选择（**行为不变**）。
  *
  *  唯一改动是失败/成功仍然走原有的 `toast` —— 因为这一页的写路径
  *  （`POST /api/models`）返回的就是一句错误，没有结构化字段可渲染。
- *  其余四个面板一律就地渲染具体失败。 */
+ *  其余三个面板一律就地渲染具体失败。 */
 function QuickAssignTab({ scope, roster }: { scope: string; roster: RosterAgent[] | null }): React.JSX.Element {
   const [cfgs, setCfgs] = useState<Record<string, AgentModelCfg>>({})
   const [busyRole, setBusyRole] = useState<string | null>(null)
@@ -185,7 +194,6 @@ export function ModelConfigModal({ scope, roster, onClose, embedded = false }: M
           {tab === 'quick' && (scope ? <QuickAssignTab scope={scope} roster={roster} /> : <div className="set-notice muted">请在左侧选择具体工作空间，再分配岗位模型。</div>)}
           {tab === 'profiles' && <ModelProfilesPanel />}
           {tab === 'bindings' && (scope ? <ModelBindingsPanel scope={scope} rosterRoles={roles} /> : <div className="set-notice muted">请在左侧选择具体工作空间，再配置岗位绑定。</div>)}
-          {tab === 'secrets' && <SecretVaultPanel />}
         </div>
       </div>
     </div>

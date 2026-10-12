@@ -269,3 +269,51 @@ test('⑪ 请求带令牌，且**不**把密钥值放进任何请求体（影子
   assert.match(seen[0].url, /token=T0K/)
   assert.equal(seen[0].init.body, undefined, 'GET 不许带体：影子模式没有任何东西要写')
 })
+
+// ══════════════════════════════════════════════════════════════════════════
+// ⑪b ★★★ 读 Legion 目录**必须带 `includeSecretRefs=1`**
+//
+// 这一条是 P2→P3 那扇门的**真根因**（2026-10-12，用新加的"物化读数"读出来的）：
+//
+//   实测读数：`修改 3`，而 update 的三个字段全是 `apiKeyEnv` ——
+//   而 `fjd-ds` 两侧明明都是 `FJD_DS_API_KEY`。
+//   原因就是这里少了参数：hub 的默认读法**不含引用名** ⇒ Legion 侧归一化成 `null`
+//   ⇒ 凡是配了凭证的供应商**永久**报一处幻影差异 ⇒ 这道门**永远到不了 clean**。
+//
+//   ⚠ 同一个参数在 **P3 写路径**（`materializer.mjs`）里早就加了、还配了判据 ⑲；
+//     而这里是 **P2 读路径** —— 同一条规则写成两处、只修了一处：
+//
+//     > 一处"我读了另一份"的缺口，与一处"它真的不一样"的差异，
+//     > 在同一行 `修改 N` 里长得一模一样 ——
+//     > 只不过前者永远不会消失，而门禁的放行条件正是"它消失"。
+//
+//   ⇒ 所以两条路径**各钉一条**（`materializer.test.mjs` 的 ⑲ 与本条）。
+//     只钉一处的话，下一次还是会漏另一侧。
+// ══════════════════════════════════════════════════════════════════════════
+
+test('⑪b ★★★ 读 Legion 目录必须带 `includeSecretRefs=1`（否则对账永远报差异）', async () => {
+  const urls = []
+  const hub = async (url) => {
+    urls.push(String(url))
+    return { status: 200, text: async () => JSON.stringify({ ok: true, providers: LEGION, empty: false }) }
+  }
+  await runShadowMaterialization({ ctx: fakeCtx({ providers: DSH }), hubUpstream: 'http://hub.test', teamHubToken: 'T0K', fetchImpl: hub, log: () => {} })
+  const asked = urls.find((u) => u.includes('/api/model-providers'))
+  assert.ok(asked !== undefined, `这一层根本没去读 Legion 的目录：${JSON.stringify(urls)}`)
+  assert.match(asked, /includeSecretRefs=1/,
+    '不带这个参数就会拿到"没有引用名"的那一份，而对账需要它 ⇒ 每轮报差异、门永远到不了 clean')
+})
+
+test('⑪b ★★ 反向锚：**不带参数**那一份真的会让对账报差异（所以这个参数不是装饰）', () => {
+  // Legion 侧少了引用名（= 不带那个参数时的读数）与 DSH 侧对齐不了。
+  // 夹具除引用名外**逐字段相同** —— 否则差异里会混进别的东西，这条锚就不干净了。
+  const noRef = [{ id: 'fjd-ds', displayName: 'FJD', api: 'openai-responses', baseURL: 'https://a.example/v1', models: [{ id: 'm1', name: 'M1' }, { id: 'm2', name: 'M2' }] }]
+  const plan = planMaterialization({ desired: noRef, actual: DSH })
+  assert.equal(plan.clean, false)
+  assert.deepEqual(plan.update, [{ id: 'fjd-ds', fields: ['apiKeyEnv'] }],
+    '恰好是 `apiKeyEnv` 一处 —— 与真机读数逐字一致（那就是这条判据守的东西）')
+  // 带上引用名之后必须**立刻**变干净（否则这条判据测的不是那个参数）
+  const withRef = [{ ...noRef[0], secretRef: 'FJD_DS_API_KEY' }]
+  assert.equal(planMaterialization({ desired: withRef, actual: DSH }).clean, true,
+    '带上引用名后必须 clean：这就是"一处参数 = 门能不能开"的完整因果')
+})

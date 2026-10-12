@@ -32,7 +32,30 @@ import { planMaterialization, describeMaterializationPlan } from './materialize-
  * 失败返回 null，由调用方按"读不到"处置（**不许当成空目录**）。
  */
 async function fetchLegionProviders({ hubUpstream, teamHubToken, fetchImpl }) {
-  const qs = teamHubToken ? '?token=' + encodeURIComponent(teamHubToken) : ''
+  // ★★★ 2026-10-12：**必须带 `includeSecretRefs=1`** —— 这一条是 P2→P3 那扇门的真根因。
+  //
+  //   实测（将军重启后，用新加的"物化读数"读出来的）：
+  //
+  //     新增 0 / 修改 3 / 删除 0 / 未变 1（clean=false）
+  //     update = [{deepseek-official,[apiKeyEnv]}, {fjd-ds,[apiKeyEnv]}, {svea-ds,[apiKeyEnv,models]}]
+  //
+  //   而 `fjd-ds` 两侧明明都是 `FJD_DS_API_KEY`。原因就是这一行少了参数：
+  //   hub 的默认读法**不含引用名**（那是密钥库的槽位清单，不该跟着读路径公开），
+  //   于是 Legion 侧归一化后 `apiKeyEnv: null`，与 DSH 侧的真名字比**永远不等**
+  //   ⇒ 凡是配了凭证的供应商都永久报一处幻影差异 ⇒ **这道门永远到不了 clean**。
+  //
+  //   ⚠ 同一个参数在 `materializer.mjs`（P3 写路径）里**早就加了**，还配了判据 ⑲；
+  //     而这里是 P2 读路径 —— 同一个规则写成两处，只修了一处，于是：
+  //
+  //     > 一处"我读了另一份"的缺口，与一处"它真的不一样"的差异，
+  //     > 在同一行 `修改 N` 里长得一模一样 ——
+  //     > 只不过前者永远不会消失，而门禁的放行条件正是"它消失"。
+  //
+  //   现在两处都带，且由 `shadow-materialize.test.mjs` 的 ⑲ 与 `materializer.test.mjs`
+  //   的 ⑲ 各钉一条（**同一个参数的验证也必须有两处**，否则下一次还是会漏一侧）。
+  const qs = teamHubToken
+    ? '?token=' + encodeURIComponent(teamHubToken) + '&includeSecretRefs=1'
+    : '?includeSecretRefs=1'
   let res
   try {
     res = await fetchImpl(`${hubUpstream}/api/model-providers${qs}`, {

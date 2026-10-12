@@ -77,8 +77,70 @@ export function normalizeForCompare(entry) {
   }
 }
 
-function fingerprint(n) {
-  return JSON.stringify([n.displayName, n.api, n.baseURL, n.apiKeyEnv, n.models])
+/**
+ * 单个模型项的逐字段比较。
+ *
+ * ★★★ 2026-10-12（实测抓到的第三处差异）：**Legion 侧未声明（`null`）的字段不参与比较。**
+ *
+ * 真机读数：修掉 `includeSecretRefs` 之后，只剩一处差异 —— `svea-ds` 的 `models`。
+ * 因果链是确定的（读 DSH 源码得出，不是猜）：
+ *
+ *   `svea-ds` 的 patch 里模型**没声明 `input`** ⇒ DSH 的模型 schema 里 `input` 没有默认值
+ *   （注释明说"缺席 ⇒ `[]` ⇒ 回落到路线级"）⇒ 解析落到 `defaultInput = ['text']`
+ *   ⇒ `listModels()` **总是**报 `inputModalities: ['text']`
+ *   ⇒ 快照带上 `input`，而 Legion 侧没有 ⇒ 归一化成 `null` ⇒ **永远报一处差异**。
+ *
+ * 而这处差异**写进去也不改变任何东西**：物化把 Legion 的 models（无 `input`）写进 DSH，
+ * DSH 照样落 `defaultInput`。于是它的唯一效果是**每 5 分钟重写一次、永不收敛** ——
+ * 而门禁的放行条件恰恰是"连续几轮 diff 为空"。
+ *
+ *   > 一处"它会自己补上"的默认值，与一处"它真的不一样"的差异，
+ *   > 在 `models` 这一格上是同一行；
+ *   > 而前者永远消不掉 —— 于是那道门永远开不了。
+ *
+ * ## 为什么"未声明 ⇒ 不比较"是对的（而不是把差异藏起来）
+ *
+ * 这与 `provider-store` 的更新语义**同一条**：**留空即继承，不覆盖**。
+ * 用户没在 Legion 里声明 `input`，不等于"他要一个没有输入能力的模型"——
+ * 那只是"他没表态，让它继承引擎的默认"。
+ *
+ * ⚠ 而**显式声明空数组仍然是差异**：`normalizeInput([])` 返回 `[]`（不是 `null`），
+ *   所以"我要清空输入模态"这个意图不会被我这条规则吞掉。
+ *   两个值可分辨，是这条规则能成立的前提（用例 ⑫ 系列把两个方向都钉住）。
+ *
+ * @param before DSH 侧那一格（`have`）
+ * @param after  Legion 侧那一格（`want`）
+ */
+function modelDiffers(before, after) {
+  if (before.name !== after.name) return true
+  for (const key of ['contextWindow', 'maxTokens', 'input']) {
+    if (after[key] === null) continue                       // ★ 未声明 ⇒ 不覆盖
+    if (JSON.stringify(before[key]) !== JSON.stringify(after[key])) return true
+  }
+  return false
+}
+
+/**
+ * 两侧的 models 是不是同一件事。断言的是**同一件事实**，所以"未变"判定与
+ * `changedFields` **共用这一个函数** —— 写成两份的话，迟早只修一处
+ * （`includeSecretRefs` 那个缺陷就是这么来的，见 BUG-033）。
+ */
+function modelsEqual(have, want) {
+  if (have.length !== want.length) return false
+  for (let i = 0; i < have.length; i += 1) {
+    // 两侧都已按 id 排序（见 `normalizeForCompare` 的尾部）。
+    if (have[i].id !== want[i].id) return false
+    if (modelDiffers(have[i], want[i])) return false
+  }
+  return true
+}
+
+/** 整条供应商是不是同一件事（四个标量字段 + models）。 */
+function sameAs(have, want) {
+  for (const key of ['displayName', 'api', 'baseURL', 'apiKeyEnv']) {
+    if (have[key] !== want[key]) return false
+  }
+  return modelsEqual(have.models, want.models)
 }
 
 /** 逐字段说清"哪几个字段不一样"—— 光说"这条变了"会让人去肉眼比对整个对象。 */
@@ -87,7 +149,7 @@ export function changedFields(before, after) {
   for (const key of ['displayName', 'api', 'baseURL', 'apiKeyEnv']) {
     if (before[key] !== after[key]) out.push(key)
   }
-  if (JSON.stringify(before.models) !== JSON.stringify(after.models)) out.push('models')
+  if (!modelsEqual(before.models, after.models)) out.push('models')
   return out
 }
 
@@ -150,7 +212,11 @@ export function planMaterialization({ desired = [], actual = [], actualCredentia
     if (engineInternalSet.has(id)) continue   // 不接管：任何动作都不做（连"未变"也不算）
     const have = a.get(id)
     if (have === undefined) { create.push(id); continue }
-    if (fingerprint(have) === fingerprint(want)) { unchanged.push(id); continue }
+    // ★ 用 `sameAs()` 而不是指纹：**未声明（null）的字段不参与比较**
+    //   （理由见 `modelDiffers` 的文件内注释：那是"它会自己补上"的默认值，
+    //   与"它真的不一样"不同 —— 前者写进去也不改变任何东西，却永远消不掉）。
+    //   ⚠ `sameAs` 与 `changedFields` 共用同一条判定，两处不会分叉（BUG-033 的教训）。
+    if (sameAs(have, want)) { unchanged.push(id); continue }
     update.push({ id, fields: changedFields(have, want) })
   }
   // ★ 这一行是 P2 的全部重点：**Legion 里没有、而 DSH 里活着的**会被删。

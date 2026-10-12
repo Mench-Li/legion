@@ -237,12 +237,22 @@ export function createModelProbe({
       } catch (err) {
         // 注意这里**不把 err.message 原样带出来**：解析异常里可能带着密钥库
         // 的实现细节甚至片段。给一条可操作的话，原始诊断留给密钥库自己。
+        //
+        // ★ 2026-10-10（BUG-023 的收敛）：`SECRET_NOT_FOUND` 与"打不开库"**必须分开说**。
+        //   实测那条：三条 fjd 档案引用的 `FJD_DS_API_KEY` 根本不在库里，而统一文案说的是
+        //   「无法访问或解密本机凭证库：请检查密钥库与当前 Windows 账户作用域」——
+        //   用户会去查账户/DPAPI，而真动作是"补这把钥匙"或"把档案指向已有的引用"。
+        //
+        //   > 一句"请检查密钥库作用域"，
+        //   > 在**库好好的、就是没有这个引用**的那次失败上，
+        //   > 与一个指向供应商控制台的错误一样，都是把人送去错误的地方。
+        const code = err !== null && typeof err === 'object' && typeof err.code === 'string' ? err.code : null
+        const message = code === 'SECRET_NOT_FOUND'
+          ? '该档案引用的凭证**不在本机密钥库里**（不是供应商的问题，也不必去供应商控制台）：' +
+            '请补上这把钥匙（面板「模型」页重新填一次密钥），或把档案指向一个已经存在的引用'
+          : `${defaultProbeMessage('SECRET_UNAVAILABLE')}（解析器报告：${safeReason(err)}）`
         return {
-          observed: {
-            ok: false,
-            code: 'SECRET_UNAVAILABLE',
-            message: `${defaultProbeMessage('SECRET_UNAVAILABLE')}（解析器报告：${safeReason(err)}）`,
-          },
+          observed: { ok: false, code: 'SECRET_UNAVAILABLE', message },
           attempted: false,
         }
       }

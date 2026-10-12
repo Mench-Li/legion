@@ -398,7 +398,7 @@ test('⑦ 缝上：probe 的 force 默认 true、requiredCapabilities 透传、p
   //   > 是唯一一种连变异测试都很难发现的盲点：改哪一边都还是绿的。
   const live = { id: 'live-13', displayName: 'x', provider: 'deepseek', model: 'm', secretRef: 'DEEPSEEK_API_KEY', deletedAtMs: null }
 
-  const build = (verdict) => {
+  const build = (verdict, { live: liveOverride = live, provider = null } = {}) => {
     const calls = []
     let body = {}
     const family = createModelProfilesRoutes({
@@ -409,7 +409,9 @@ test('⑦ 缝上：probe 的 force 默认 true、requiredCapabilities 透传、p
           res.body = { ok: false, code: e.code, error: e.message }
         }
       },
-      modelStore: { internalGet: () => live, resolveForHistory: () => null },
+      modelStore: { internalGet: () => liveOverride, resolveForHistory: () => null },
+      // `providerStore` 可省；给了就能验"留空继承供应商"（BUG-023 的收敛）。
+      ...(provider === null ? {} : { providerStore: { get: () => provider } }),
       probeService: () => ({ probeModelProfile: async (profile, opts) => { calls.push({ profile, opts }); return verdict } }),
       MODEL_ERRORS: { PROFILE_DELETED: 'PROFILE_DELETED', PROFILE_NOT_FOUND: 'PROFILE_NOT_FOUND' },
     })
@@ -432,6 +434,32 @@ test('⑦ 缝上：probe 的 force 默认 true、requiredCapabilities 透传、p
     //    401 还会被写成"凭证已成功解析，但供应商拒绝"——一句假话。
     assert.equal(calls[0].profile.secretRef, 'DEEPSEEK_API_KEY',
       '★ 探针拿到的档案必须含 secretRef（路由要读内部口 requireLive，不是脱敏口 get）')
+  }
+  // ①b ★★ 档案留空 `endpoint` / `secretRef` ⇒ 从它点名的供应商继承（BUG-023 的收敛）
+  //
+  //   这一条守的是 `docs/DECISION-legion-owns-model-config.md` §6 那句的下半句
+  //   （"`base_url` 从'每行都有'上移到'每个供应商一份'"）。上移之后档案那份是
+  //   **可选覆盖**；下游不认这个可选时，"留空"会变成"没填 endpoint"——
+  //   而那会把人送去填地址，真正该做的是补供应商。
+  {
+    const bare = { id: 'live-13', displayName: 'x', provider: 'fjd-ds', model: 'm', endpoint: null, secretRef: null, deletedAtMs: null }
+    const provider = { id: 'fjd-ds', baseURL: 'https://fjbigmodel.fjdac.cn/v1', secretRef: 'FJD_DS_API_KEY' }
+    const { calls, family } = build({ verdict: 'ok' }, { live: bare, provider })
+    const res = {}
+    await family.dispatch({ method: 'POST' }, res, { path: '/api/model-profiles/live-13/probe' })
+    assert.equal(calls[0].profile.endpoint, 'https://fjbigmodel.fjdac.cn/v1',
+      '★ 留空的 endpoint 必须从供应商补上（否则探针会判"这个档案没有填 endpoint"）')
+    assert.equal(calls[0].profile.secretRef, 'FJD_DS_API_KEY', '留空的 secretRef 同理')
+  }
+  // ①c ★ 档案自己写了 ⇒ **逐字用它**，不被供应商覆盖（真实偏离必须活下来）
+  {
+    const own = { id: 'live-13', displayName: 'x', provider: 'fjd-ds', model: 'm', endpoint: 'https://mine.example/v1', secretRef: 'MINE_KEY', deletedAtMs: null }
+    const provider = { id: 'fjd-ds', baseURL: 'https://fjbigmodel.fjdac.cn/v1', secretRef: 'FJD_DS_API_KEY' }
+    const { calls, family } = build({ verdict: 'ok' }, { live: own, provider })
+    const res = {}
+    await family.dispatch({ method: 'POST' }, res, { path: '/api/model-profiles/live-13/probe' })
+    assert.equal(calls[0].profile.endpoint, 'https://mine.example/v1')
+    assert.equal(calls[0].profile.secretRef, 'MINE_KEY')
   }
   // ② 显式 force:false 要**如实**传下去
   {

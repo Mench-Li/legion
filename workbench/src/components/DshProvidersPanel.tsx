@@ -16,11 +16,51 @@ interface Provider {
   api: string | null
   baseURL: string | null
   secretRef: string | null
+  /**
+   * ⚠ **这是 P1 从 DSH 导入的标记**，记的是"DSH 那边说它配过"，
+   *  **不是**"本机密钥库里有这把钥匙"。界面不许用它下结论（BUG-023）。
+   */
   credentialConfigured: boolean
+  /**
+   * ★ hub **核验过**的凭证状态：`none | ready | missing | unavailable`。
+   *   `unavailable` 是"读不到密钥库，因此无法判断"，**不是**"没有"。
+   *   老 hub（没这个字段）时保持 `undefined` ⇒ 界面说"无法核验"，也不猜。
+   */
+  credential?: { state?: string; ref?: string | null; detail?: string | null }
   models: { id: string; name?: string }[]
   source: string
   version: number
 }
+
+/** 凭证状态 → 界面读法（与 `team-hub/credential-status.mjs` 同口径）。 */
+function credentialView(p: Provider): { cls: string; label: string; title: string; ready: boolean } {
+  const state = p.credential?.state
+  const ref = p.credential?.ref ?? p.secretRef
+  if (state === 'ready') {
+    return { cls: ' ready', label: '密钥已核验', title: `本机密钥库里已有 ${String(ref)} · ${p.models.length} 个模型`, ready: true }
+  }
+  if (state === 'missing') {
+    return {
+      cls: ' missing', label: '密钥不在库里', ready: false,
+      title: `引用了 ${String(ref)}，但本机密钥库里**没有**它：钥匙从未存进来，或者它被删掉了（面板会显示"已配置"是另一件事，那是从运行环境导入的标记）`,
+    }
+  }
+  if (state === 'unavailable') {
+    return {
+      cls: ' unknown', label: '无法核验', ready: false,
+      title: `读不到本机密钥库，因此**无法判断** ${String(ref)} 在不在（这不等于"没有"）`,
+    }
+  }
+  if (state === 'none') {
+    return { cls: ' ready', label: '无需密钥', title: `${p.models.length} 个模型 · 这个供应商没有配置凭证引用`, ready: p.models.length > 0 }
+  }
+  // 没有核验结果（老 hub / 请求失败）：**不猜**。
+  return {
+    cls: ' unknown', label: '未核验', ready: false,
+    title: p.secretRef ? `引用了 ${p.secretRef}，但这次没有核验它是否在库里` : '还没有填密钥',
+  }
+}
+
 interface Form { provider: string; name: string; endpoint: string; protocol: string; models: string; key: string }
 const empty: Form = { provider: '', name: '', endpoint: '', protocol: 'openai-completions', models: '', key: '' }
 
@@ -152,7 +192,15 @@ export function DshProvidersPanel(): React.JSX.Element {
   }
 
   const modelCount = providers.reduce((sum, p) => sum + p.models.length, 0)
-  const readyCount = providers.filter(p => p.credentialConfigured).length
+  // ★ 从前这里是 `providers.filter(p => p.credentialConfigured).length` ——
+  //   那个字段是**从运行环境导入的标记**，实测在一把钥匙都不在库里的机器上仍然为真，
+  //   于是界面说"已填密钥"。现在只数**核验通过**的（`ready`；`none` = 本就不需要密钥）。
+  const readyCount = providers.filter(p => {
+    const v = credentialView(p)
+    return v.ready
+  }).length
+  const missingCount = providers.filter(p => p.credential?.state === 'missing').length
+  const unknownCount = providers.filter(p => p.credential?.state === 'unavailable').length
 
   return <div className="set-panel dsh-providers-panel">
     <div className="model-config-intro"><div><h2>模型</h2><p>填入模型供应商的 API 密钥即可使用其模型。配置适用于所有空间。</p></div><button className="btn" disabled={loading || busy} onClick={() => void load()}>刷新配置</button></div>
@@ -164,17 +212,22 @@ export function DshProvidersPanel(): React.JSX.Element {
       <p>{keyStore.message || '密钥库的存放位置还没有确定。'}</p>
       <p>供应商的名称、地址与模型列表**不受影响**，可以正常保存；等密钥库就绪后再回来补密钥即可。</p>
     </div>}
-    {!loading && !error && <p className="model-catalog-summary">已配置 {providers.length} 个供应商 · {modelCount} 个模型 · {readyCount} 个已填密钥</p>}
+    {!loading && !error && <p className="model-catalog-summary">
+      已配置 {providers.length} 个供应商 · {modelCount} 个模型 · 密钥已核验 {readyCount} 个
+      {missingCount > 0 && <span className="provider-cred-warn"> · {missingCount} 个引用的钥匙不在库里</span>}
+      {unknownCount > 0 && <span className="provider-cred-unknown"> · {unknownCount} 个无法核验（读不到密钥库）</span>}
+    </p>}
     <div className="provider-settings-list">
-      {!loading && providers.map(p => <div className="provider-settings-row" key={p.id}>
+      {!loading && providers.map(p => {
+        const cred = credentialView(p)
+        return <div className="provider-settings-row" key={p.id}>
         <strong>{p.displayName}</strong>
         {p.source === 'dsh-import' && <span className="provider-custom-badge">自运行环境导入</span>}
-        <span className={`provider-state-dot${p.credentialConfigured && p.models.length > 0 ? ' ready' : ''}`} role="img"
-          aria-label={p.credentialConfigured && p.models.length > 0 ? '模型已就绪' : '待配置'}
-          title={p.credentialConfigured ? `${p.models.length} 个模型 · 密钥已配置` : '还没有填密钥'} />
+        <span className={`provider-state-dot${cred.cls}`} role="img" aria-label={cred.label} title={cred.title} />
+        <span className="provider-cred-label" title={cred.title}>{cred.label}</span>
         <button className="btn" disabled={busy} onClick={() => edit(p)}>编辑</button>
         <button className="btn provider-delete" disabled={busy} onClick={() => setRemoving(p)}>删除</button>
-      </div>)}
+      </div>})}
       <button className="provider-add" disabled={busy} onClick={() => { setEditing(null); setForm(empty); setOpen(true); setNotice(''); setError('') }}>＋ 添加模型供应商</button>
     </div>
     {removing && <div className="provider-editor-mask"><div className="provider-editor-dialog" role="alertdialog" aria-label="删除供应商"><h3>删除 {removing.displayName}？</h3><p>删除后，使用该供应商的岗位需要重新选择模型。已存储的密钥不会被删除。</p><button className="btn provider-delete" disabled={busy} onClick={() => void remove()}>确认删除</button><button className="btn" disabled={busy} onClick={() => setRemoving(null)}>取消</button></div></div>}

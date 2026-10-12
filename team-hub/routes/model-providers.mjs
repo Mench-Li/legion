@@ -40,14 +40,32 @@ import { ModelError, MODEL_ERRORS } from '../model-store.mjs'
  * @param providerStore `createProviderStore(...)` 的返回值
  * @param discoverModels `({baseURL, apiKey}) => Promise<string[]>`（可注入；见 `discoverProviderModels`）
  */
-export function createModelProvidersRoutes({ json, handleRun, providerStore, discoverModels = discoverProviderModels }) {
+export function createModelProvidersRoutes({
+  json, handleRun, providerStore, discoverModels = discoverProviderModels,
+  // ★ 真实凭证核验（BUG-023 的收敛）：`credentialStatus` 由 server.mjs 注入
+  //   （它问的是**本机密钥库**，不是 `credential_configured` 那个从 DSH 导入的标记）。
+  //   省略时行为与从前逐字相同（响应里没有 `credential` 字段）——但那会让面板
+  //   重新有资格说"已配置凭证"。
+  credentialStatus = null,
+}) {
   const routes = [
     {
       method: 'GET',
       match: 'exact',
       path: '/api/model-providers',
       async run(req, res) {
-        json(res, 200, { ok: true, providers: providerStore.list(), empty: providerStore.isEmpty() })
+        const providers = providerStore.list()
+        // ★ 一次列表只问密钥库**一遍**（20 个供应商不该产生 20 次 DPAPI 打开）。
+        let snapshot = null
+        if (credentialStatus !== null && typeof credentialStatus.snapshot === 'function') {
+          snapshot = await credentialStatus.snapshot()
+        }
+        // `credential` 是**核验结果**；`credentialConfigured` 保留原样（它是 P1 导入的标记，
+        // 别的消费者还在用）。界面必须读前者 —— 两者在"钥匙其实不在库里"时说的不是一回事。
+        const enriched = snapshot === null
+          ? providers
+          : providers.map((p) => ({ ...p, credential: snapshot.of(p.secretRef) }))
+        json(res, 200, { ok: true, providers: enriched, empty: providerStore.isEmpty() })
       },
     },
     {

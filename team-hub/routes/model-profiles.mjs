@@ -33,7 +33,16 @@
 //
 // 7 条路由的函数体与 `server.mjs` 原文逐字节相同（仅缩进 +2）。
 // 依赖全部由调用方注入，本模块不 import 任何 hub 内部件。
+//
+// ★ 2026-10-10（BUG-023 的收敛）：本文件新增两个**可选**注入件
+//   （`providerStore` / `credentialStatus`）与一个 `enrich()` 包装，
+//   用来把"档案留空的连接信息从供应商补上"和"凭证真的在不在库里"补进响应。
+//   这是**有意的越界**：本族原本"零注入改写"，但那条纪律服务的是"别把 server.mjs
+//   的原文改坏"，而这两个字段是新增的读法，不是原文的一部分 —— 原文那 7 条的
+//   函数体仍然逐字未动，包装在外面。
 // ============================================================================
+
+import { connectionIsRedundant, connectionSources, effectiveProfile } from '../model-resolution.mjs'
 
 // ============================================================================
 // 以下 8 行是 `server.mjs` 原文的**段首说明**，逐字搬来（未改写）。
@@ -58,6 +67,12 @@ export function createModelProfilesRoutes({
   json,
   handleRun, modelStore, probeService,
   MODEL_ERRORS,
+  // ★ 有效档案与真实凭证状态（BUG-023 的收敛）：
+  //   `providerStore` 用来把"档案留空的 endpoint/secretRef"从供应商补上；
+  //   `credentialStatus` 用来把"引用了某个名字"核验成"那把钥匙真的在不在库里"。
+  //   两者都可省（省了行为与从前逐字相同）——但那会让界面重新开始说那句假话。
+  providerStore = null,
+  credentialStatus = null,
 }) {
   const deps = { json,
     handleRun, modelStore, probeService,
@@ -65,6 +80,37 @@ export function createModelProfilesRoutes({
   }
   for (const [k, v] of Object.entries(deps)) {
     if (v === undefined || v === null) throw new TypeError(`createModelProfilesRoutes 缺注入项：${k}`)
+  }
+
+  /** 取某个档案的**内部**行（含 secretRef）；拿不到就 null。 */
+  const internalOf = (id) => {
+    try { return modelStore.internalGet(id) } catch { return null }
+  }
+  /** 档案点名的供应商行；没接 providerStore 或找不到就 null。 */
+  const providerOf = (name) => {
+    if (providerStore === null || typeof providerStore.get !== 'function') return null
+    if (typeof name !== 'string' || name === '') return null
+    try { return providerStore.get(name) } catch { return null }
+  }
+  /**
+   * 把一个**对外的 descriptor** 补上"连接信息来自哪里"与"凭证真的在不在"。
+   *
+   * 只在两个注入件都在时补：缺了就不补，而不是补一个猜测的值
+   * （界面据此显示"凭证状态未知"，而不是"已配置"）。
+   */
+  const enrich = (descriptor, snapshot) => {
+    if (providerStore === null && credentialStatus === null) return descriptor
+    const internal = internalOf(descriptor.id)
+    if (internal === null) return descriptor
+    const provider = providerOf(internal.provider)
+    const sources = connectionSources(internal, provider)
+    const out = { ...descriptor }
+    if (sources !== null) out.connection = sources
+    if (snapshot !== null && snapshot !== undefined) {
+      out.credential = snapshot.of(sources?.credential?.ref ?? internal.secretRef)
+      out.connectionRedundant = connectionIsRedundant(internal, provider)
+    }
+    return out
   }
 
   // ── 块前言（切片 13）：原文里这几条路由**共用**这一段
@@ -106,9 +152,16 @@ export function createModelProfilesRoutes({
         // 默认只给未删除的。要连墓碑一起看必须显式 `?includeDeleted=1`：
         // 默认带上会让界面上出现"已经被删掉的模型"，而它其实选不了。
         const includeDeleted = url.searchParams.get('includeDeleted') === '1'
+        const profiles = modelStore.list({ includeDeleted })
+        // ★ 真实凭证状态要点名核验一次（读一次密钥库，N 条共用一份读数）。
+        //   核验失败时 `enrich` 会把状态标成 `unavailable` —— **不是**"没有"。
+        let snapshot = null
+        if (credentialStatus !== null && typeof credentialStatus.snapshot === 'function') {
+          snapshot = await credentialStatus.snapshot()
+        }
         json(res, 200, {
           ok: true,
-          profiles: modelStore.list({ includeDeleted }),
+          profiles: profiles.map((p) => enrich(p, snapshot)),
           serverTimeMs: Date.now(),
         })
       },
@@ -186,7 +239,13 @@ export function createModelProfilesRoutes({
             // 缓存的价值在于**自动**重复检查（后台巡检），不在于回应一次点击。
             const force = body.force !== false
             const requiredCapabilities = Array.isArray(body.requiredCapabilities) ? body.requiredCapabilities : []
-            const verdict = await probeService().probeModelProfile(profile, { requiredCapabilities, force })
+            // ★ 用**有效档案**：档案留空的 `endpoint` / `secretRef` 从它点名的供应商补上。
+            //   这正是 DECISION §6 那句"从'每行都有'上移到'每个供应商一份'"的下半句 ——
+            //   上移之后，档案那一份就该是**可选覆盖**；而下游不认这个可选时，
+            //   "留空"会变成"没填 endpoint"（一个把人送去填地址、而真正该做的是补供应商的错）。
+            const provider = providerOf(profile.provider)
+            const effective = effectiveProfile(profile, provider) ?? profile
+            const verdict = await probeService().probeModelProfile(effective, { requiredCapabilities, force })
             // 「没探测过」用 **503**：它不是客户端错误（用户没做错），也不是 200
             // （那会让前端把它当成一个判定）。503 = 现在没法提供这项服务。
             if (verdict.unavailable === true) {

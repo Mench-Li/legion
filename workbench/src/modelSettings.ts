@@ -166,6 +166,19 @@ export function probeBadge(verdict: ProbeVerdictLike | null | undefined): ProbeB
 
 // ------------------------------------------------------------------ 档案行
 
+export interface ProfileSourceLike {
+  endpoint?: { value?: string | null; from?: 'profile' | 'provider' | null }
+  credential?: { ref?: string | null; from?: 'profile' | 'provider' | null }
+  providerMissing?: boolean
+}
+
+/** hub 核验过的凭证状态（`team-hub/credential-status.mjs` 的 `state`）。 */
+export interface VerifiedCredentialLike {
+  state?: string
+  ref?: string | null
+  detail?: string | null
+}
+
 export interface ProfileLike {
   id?: string
   displayName?: string
@@ -177,6 +190,12 @@ export interface ProfileLike {
   hasCredential?: boolean
   enabled?: boolean
   status?: string
+  /** ★ hub 核验过的真实凭证状态（优先于 `hasCredential` 那个"引用了名字"的判断）。 */
+  credential?: VerifiedCredentialLike
+  /** ★ 连接信息来自哪里（档案自己写的，还是继承供应商）。 */
+  connection?: ProfileSourceLike
+  /** ★ 与供应商逐字相同的字段（可以留空）。 */
+  connectionRedundant?: { endpoint?: boolean; credential?: boolean }
 }
 
 export interface ProfileRowView {
@@ -185,7 +204,19 @@ export interface ProfileRowView {
   subtitle: string
   credential: { tone: ProbeTone; text: string }
   endpointText: string
+  /** 连接信息的来源说明（"继承自 X" / "本档案自带"）；无信息时为空串。 */
+  sourceText: string
+  /** 提示"这两项与供应商完全相同，可以留空"；不需要提示时为空串。 */
+  redundantHint: string
   disabled: boolean
+}
+
+/** 凭证状态文本（与 `team-hub/credential-status.mjs` 的 `CREDENTIAL_STATE_TEXT` 同口径）。 */
+const VERIFIED_CREDENTIAL_TEXT: Record<string, { tone: ProbeTone; text: string }> = {
+  none: { tone: 'muted', text: '无需凭证' },
+  ready: { tone: 'ok', text: '凭证已核验：钥匙在库里' },
+  missing: { tone: 'bad', text: '凭证缺失：引用了名字，但钥匙**不在**本机密钥库里' },
+  unavailable: { tone: 'warn', text: '凭证无法核验（读不到密钥库）——这不等于"没有"' },
 }
 
 /**
@@ -193,6 +224,17 @@ export interface ProfileRowView {
  *
  * 凭证状态**必须显式**：`hasCredential === false` 与"字段缺失"是两件事，
  * 后者我们**不知道**——而猜"没有"会显示一条永远不对的提示。
+ *
+ * ★★ 2026-10-10（BUG-023 的收敛）：**优先用 hub 核验过的 `credential.state`**。
+ *    从前这里读的是 `hasCredential`，而它只表示 `secret_ref` 非空 ——
+ *    于是"引用了某个名字"被显示成「已配置凭证」，而实测那台机器上
+ *    那句话是假的（`FJD_DS_API_KEY` 根本不在库里）。
+ *
+ *    > 一个"引用了某个名字"的档案，
+ *    > 与一个"那把钥匙真的在库里"的档案，在界面上说的是同一句话——
+ *    > 而它们的修法完全不同（一个要补钥匙，一个什么也不用做）。
+ *
+ *    没有 `credential`（老响应/离线夹具）时退回原来的判断，行为逐字不变。
  */
 export function profileRowView(profile: ProfileLike | null | undefined): ProfileRowView {
   const p = profile ?? {}
@@ -202,21 +244,45 @@ export function profileRowView(profile: ProfileLike | null | undefined): Profile
   const model = typeof p.model === 'string' ? p.model : ''
 
   let credential: ProfileRowView['credential']
-  const known = typeof p.hasCredential === 'boolean' || 'secretRef' in p
-  if (typeof p.hasCredential === 'boolean') {
+  const verified = typeof p.credential?.state === 'string' ? VERIFIED_CREDENTIAL_TEXT[p.credential.state] : undefined
+  if (verified !== undefined) {
+    credential = verified
+  } else if (typeof p.hasCredential === 'boolean') {
     credential = p.hasCredential
-      ? { tone: 'ok', text: '已配置凭证' }
+      ? { tone: 'ok', text: '引用了凭证名（是否有效要看测试结果）' }
       : { tone: 'warn', text: '没有凭证 —— 保存可以，运行会失败' }
   } else if (typeof p.secretRef === 'string' && p.secretRef !== '') {
     // 有引用名**不等于**那把钥匙有效：这里只报"引用了哪个名字"这件事。
     credential = { tone: 'ok', text: '引用了凭证名（是否有效要看测试结果）' }
-  } else if (known) {
-    credential = { tone: 'warn', text: '没有凭证 —— 保存可以，运行会失败' }
   } else {
     credential = { tone: 'muted', text: '凭证状态未知' }
   }
 
-  const endpointText = typeof p.endpoint === 'string' && p.endpoint !== '' ? p.endpoint : '（未填地址）'
+  // 来源说明：说清"这个地址/凭证是档案自己写的，还是从供应商继承的"。
+  const src = p.connection
+  let sourceText = ''
+  if (src !== undefined && src !== null) {
+    const parts: string[] = []
+    if (src.endpoint?.from === 'provider') parts.push('地址')
+    if (src.credential?.from === 'provider') parts.push('凭证')
+    if (parts.length > 0) sourceText = `（${parts.join('与')}继承自供应商 ${provider || '——'}）`
+    else if (src.endpoint?.from === 'profile' || src.credential?.from === 'profile') sourceText = '（地址/凭证由本档案自带）'
+    if (src.providerMissing === true) sourceText += `；⚠ 供应商 ${provider || '——'} 在目录里不存在`
+  }
+
+  const redundant = p.connectionRedundant
+  const duplicated: string[] = []
+  if (redundant?.endpoint === true) duplicated.push('地址')
+  if (redundant?.credential === true) duplicated.push('凭证引用')
+  const redundantHint = duplicated.length === 0
+    ? ''
+    : `${duplicated.join('与')}与供应商逐字相同 —— 可以留空（留空即继承），留空后供应商改地址不用再来改这里`
+
+  const endpointText = typeof p.endpoint === 'string' && p.endpoint !== ''
+    ? p.endpoint
+    : (src?.endpoint?.value ?? null) !== null && src?.endpoint?.value !== undefined && src.endpoint.value !== ''
+      ? `${src.endpoint.value}（继承）`
+      : '（未填地址）'
   const disabled = p.enabled === false || p.status === 'disabled'
 
   return {
@@ -225,6 +291,8 @@ export function profileRowView(profile: ProfileLike | null | undefined): Profile
     subtitle: `${provider || '（未填供应商）'} / ${model || '（未填模型）'}`,
     credential,
     endpointText,
+    sourceText,
+    redundantHint,
     disabled,
   }
 }

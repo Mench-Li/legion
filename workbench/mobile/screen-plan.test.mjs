@@ -18,7 +18,7 @@ import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { dirname, join } from 'node:path'
 
-import { SCREENS, isScreen, screenAfterProbe, chromeVisible, SKELETON_ROWS } from './screen-plan.mjs'
+import { SCREENS, isScreen, screenAfterProbe, SKELETON_ROWS } from './screen-plan.mjs'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const APP = readFileSync(join(HERE, 'app.mjs'), 'utf8')
@@ -72,12 +72,6 @@ test('★★ `isScreen` 只认三块屏（写错值会让三块都不显示）',
     assert.equal(isScreen(bad), false, `${JSON.stringify(bad)} 不该被判为合法屏`)
   }
   assert.equal(SCREENS.length, 3)
-})
-
-test('★★ 头部动作只在主界面出现（登录页上画着它们是"看得见、点不动"）', () => {
-  assert.equal(chromeVisible('app'), true)
-  assert.equal(chromeVisible('login'), false)
-  assert.equal(chromeVisible('boot'), false)
 })
 
 test('★ 骨架行是常量且形状合理', () => {
@@ -161,7 +155,29 @@ test('★★ 切回登录屏也走 setScreen（会话中途失效那条路径）
   assert.match(functionBody(APP, 'showLoginScreen'), /setScreen\('login'\)/)
 })
 
-test('★ 头部动作的可见性由 chromeVisible 决定，而不是散在模板里', () => {
-  assert.match(APP, /chromeVisible/, 'app.mjs 必须用到 chromeVisible')
-  assert.match(HTML, /body:not\(\[data-screen="app"\]\)\s*#tabs/, 'CSS 里要按 data-screen 收起页签')
+test('★★ 头部动作按屏收起，由 CSS 一条规则负责（不是第二份 JS 判据）', () => {
+  // 曾经这里断言"app.mjs 必须用到 chromeVisible"，那逼出了一个**多余的真源**：
+  // 三个控件的可见性由 `body:not([data-screen="app"]) …{display:none}` 负责，
+  // 而那条规则在脚本跑起来**之前**就生效 —— 那正是它该在的层。
+  // 再写一个 JS 判据就是同一件事的第二份真源。
+  assert.match(HTML, /body:not\(\[data-screen="app"\]\)\s*#tabs/,
+    'CSS 里要按 data-screen 收起页签')
+  assert.match(HTML, /body:not\(\[data-screen="app"\]\)\s*#btn-logout/,
+    '退出按钮同理')
+  // 而 `chromeVisible` 不该再存在（删掉它是对的，不是遗漏）。
+  assert.doesNotMatch(APP, /chromeVisible/, 'chromeVisible 已删除 —— 不该有人再引用它')
 })
+
+test('★★★ 🔔 按钮**不**按屏收起（授权要在用户手势里、越早越好）', () => {
+  // ★ 本任务里我曾把 🔔 改成"只在主界面出现"，去给 chromeVisible 找调用者 ——
+  //   那是**越界改动**，而且被第 211 轮的活体检查当场抓住：
+  //   `#btn-notify` 在登录页上消失了。
+  //
+  //   正确的理由：授权**必须**在用户手势里请求。收起它只是把这件事推后，
+  //   并让用户在登录后多一步 —— 而第 211 轮的判据明写着
+  //   "被拒之后就消失 = 用户失去线索"。
+  const body = functionBody(APP, 'renderNotifyButton')
+  assert.doesNotMatch(body, /chromeVisible|currentScreen\(\)/,
+    'renderNotifyButton 不许按屏收起 —— 那是越界，也让第 211 轮的判据失效')
+})
+

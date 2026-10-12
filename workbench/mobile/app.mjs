@@ -58,7 +58,7 @@ import {
 // 本文件在 Node 里不可 import，而这三个判断都不需要 DOM。
 import { notifyMechanism, notificationTag, notifyButtonPlan } from './notify-plan.mjs'
 // 首屏该显示哪一块。三块由 `body[data-screen]` 单点切换，见 `screen-plan.mjs` 文件头。
-import { isScreen, screenAfterProbe, chromeVisible } from './screen-plan.mjs'
+import { isScreen, screenAfterProbe } from './screen-plan.mjs'
 
 const $ = (id) => document.getElementById(id)
 const LS_REFRESH = 'legion.mobile.refresh'
@@ -1121,11 +1121,10 @@ async function readyServiceWorker(timeoutMs = 1500) {
 function renderNotifyButton() {
   const btn = $('btn-notify')
   if (btn === null) return
-  // ★ 只在主界面出现：登录页上它能做的最多是"为还没登录的状态开启提醒"，
-  //   而提醒只在登录后才会响 —— 那是一组看得见、点不出效果的控件。
-  //   （`body:not([data-screen=app])` 那几条 CSS 管着页签/刷新/退出；
-  //     这一个归脚本管，所以两处都要认 `chromeVisible` 这同一个判据。）
-  if (!chromeVisible(currentScreen())) { btn.classList.add('hidden'); return }
+  // ★ 刻意**不**按屏收起它。本任务里曾试过让它只在主界面出现（与页签/刷新/退出一致），
+  //   但那是错的：授权**必须**在用户手势里请求，而"还没登录时先开好"是最自然的时机
+  //   —— 收起它只是把这件事推后，并让用户登录后多一步。
+  //   （第 211 轮那条判据也立过："被拒之后就消失 = 用户失去线索"。）
   const plan = notifyButtonPlan({
     supported: systemNotifySupported(),
     permission: systemNotifyPermission(),
@@ -1308,10 +1307,6 @@ function setScreen(screen) {
     throw new TypeError(`setScreen 收到未知的屏：${JSON.stringify(screen)}`)
   }
   document.body.dataset.screen = screen
-  // 头部那几个动作的可见性跟着屏走。页签/刷新/退出由 CSS 按 `data-screen` 收
-  // （见 index.html），而「🔔」是**脚本**控制的，所以这里要重画一次 ——
-  // 否则登录页上会挂着一个点不出任何效果的提醒按钮。
-  renderNotifyButton()
 }
 
 /** 当前是哪一块屏（读 `data-screen`，不另存一份状态）。 */

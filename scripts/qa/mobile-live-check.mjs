@@ -313,6 +313,28 @@ try {
     emptySnap.present && emptySnap.hidden === true && emptySnap.text === '',
     JSON.stringify(emptySnap))
 
+  // ★ 主界面那套横幅的**元素**也必须都在。
+  //
+  //   这一条盯的是"部署对不上"这一类故障：`app.mjs` 是**新**的（它去取
+  //   `#outbox-text` / `#outbox-retry` / `#outbox-list`），而 `index.html`
+  //   如果还是旧的（没有这些 id），取到的是 `null` ——
+  //   而这里恰好有一层防御：`renderOutbox` 在 `$('outbox') === null` 时早退。
+  //   于是**页面完全不报错、也没有任何待发提示**，看起来像"队列是空的"。
+  //
+  //   > 一个"取不到元素所以静默什么都不画"的界面，
+  //   > 与一个"队列真的是空的"界面，在用户眼里是同一个东西。
+  //
+  //   登录屏上看不到 `#main`（它被 `data-screen` 藏着），但元素**在不在**能读。
+  const outboxDom = await page.evaluate(() => {
+    const ids = ['outbox', 'outbox-text', 'outbox-detail-text', 'outbox-list', 'outbox-retry', 'outbox-detail', 'outbox-login']
+    return { checked: ids.length, missing: ids.filter((id) => document.getElementById(id) === null) }
+  })
+  check('★★★ 待发横幅的元素在部署的 index.html 里都在（缺一个就是静默不画）',
+    // ★ `checked > 0` 不是多余的：一个空的 id 列表会让"没有缺失"**恒真** ——
+    //   而那种判据在列表被误删之后仍然是绿的。
+    outboxDom.checked > 0 && outboxDom.missing.length === 0,
+    `查了 ${outboxDom.checked} 个 id，缺：${JSON.stringify(outboxDom.missing)}`)
+
   // 收尾：把我的探针痕跡全部抹掉，并把语言恢复成访客默认。
   await page.evaluate(([k, prev]) => {
     try {

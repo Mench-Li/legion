@@ -648,6 +648,12 @@ export const SCHEMA = defineSchema({
     //     · SECRET_REF_UNRESOLVED     — id 为空且那一行本来也没有引用名，定不出槽位名
     //     · SECRET_REFS_REQUIRE_TOKEN — `?includeSecretRefs=1` 没过令牌校验（引用名不是公开只读数据）
     'SECRET_STORE_NOT_WIRED', 'SECRET_REF_UNRESOLVED', 'SECRET_REFS_REQUIRE_TOKEN',
+    // ★★ 2026-10-12（"凭证库是干嘛的"追问出来的孤儿清理）两个码：
+    //     · CREDENTIAL_STILL_REFERENCED — 要连钥匙一起删，但**别的供应商还指着它**
+    //       ⇒ 报 false + 点名是谁，而不是"顺手也删了"（那会让它们在下次运行才失败）
+    //     · CREDENTIAL_DELETE_FAILED    — 供应商删掉了、钥匙没删掉（表没登记的内部码收敛到这里）
+    //   两个都是"动作成功了一半"的具名结果：删除那条路**不允许**出现含糊的失败。
+    'CREDENTIAL_STILL_REFERENCED', 'CREDENTIAL_DELETE_FAILED',
     // PRT-212 审批端口（team-hub/approval-port.mjs）的失败码。
     //
     // 它们是**这个端口**对外可见的名字，而端口要回答的问题恰恰是

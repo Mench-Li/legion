@@ -79,6 +79,23 @@ export function mayReadSecretRefs({ wantRefs, authorized = null, req = null } = 
 }
 
 /**
+ * 供应商响应里那一格「**运行侧**有没有这把钥匙」的形状。
+ *
+ * 抽成模块级导出函数（与 `mayReadSecretRefs` 同一个理由）：它是一条**判定**，
+ * 必须能在不起 hub 的情况下逐种输入测到。
+ *
+ * ★ 只给**结论、来源与说明**，**不给引用名**（BUG-028 的规矩：引用名不出站）。
+ *   `state` 自身也不含名字 —— 想看"缺的是哪一个"的人，看到的是那一行供应商。
+ *
+ * `snapshot === null` ⇒ `null`（调用方不注入这一格时，响应与从前逐字相同）。
+ */
+export function runtimeCredentialField(secretRef, snapshot) {
+  if (snapshot === null || snapshot === undefined || typeof snapshot.of !== 'function') return null
+  const rt = snapshot.of(secretRef)
+  return { state: rt.state, layer: rt.layer, detail: rt.detail }
+}
+
+/**
  * @param json         写 JSON 响应的注入件（属于 server.mjs）
  * @param handleRun    带鉴权与错误映射的写包装（属于 server.mjs）
  * @param providerStore `createProviderStore(...)` 的返回值
@@ -91,6 +108,16 @@ export function createModelProvidersRoutes({
   //   省略时行为与从前逐字相同（响应里没有 `credential` 字段）——但那会让面板
   //   重新有资格说"已配置凭证"。
   credentialStatus = null,
+  // ★★ 2026-10-12（"凭证库是干嘛的"追问出来的）：**运行侧**有没有这把钥匙。
+  //
+  //   上面那个 `credentialStatus` 问的是 Legion **自己的**库；这一条问的是
+  //   **运行 agent 的那个进程（DSH）**能不能取到这把钥匙。
+  //   两者是**两件不同的事**，而在此之前界面上只有前者的读数 ⇒
+  //   用户会以为"配在这里就够了"，而运行时读的是 DSH 那份
+  //   （派工只传 `agentOptions: { provider, model }`，一个凭证字段都没有）。
+  //
+  //   省略时这一格不出现（行为与从前逐字相同）。
+  runtimeCredentialStatus = null,
   // ★ 从供应商派生档案（"我还有必要新建档案嘛"）：需要读档案表以判断
   //   "哪些模型还没有档案"。省略时那一列不出现、派生端点回 503（**不猜**）。
   modelStore = null,
@@ -281,6 +308,11 @@ export function createModelProvidersRoutes({
         if (credentialStatus !== null && typeof credentialStatus.snapshot === 'function') {
           snapshot = await credentialStatus.snapshot()
         }
+        // ★ 运行侧那一份同理：**一次列表读一遍** DSH 的凭证文件与宿主环境。
+        let runtimeSnapshot = null
+        if (runtimeCredentialStatus !== null && typeof runtimeCredentialStatus.snapshot === 'function') {
+          runtimeSnapshot = await runtimeCredentialStatus.snapshot()
+        }
         // 档案对账也**只读一遍**，然后每个供应商各算各的。
         // 读不出来时**不给这一列**：一个"还有 0 个模型没有档案"的读数会让用户
         // 以为都已经建好了，而真相是我们没读到档案表。
@@ -292,6 +324,13 @@ export function createModelProvidersRoutes({
           if (snapshot !== null) {
             const verified = snapshot.of(p.secretRef)
             out.credential = { state: verified.state, hasRef: verified.ref !== null, detail: verified.detail }
+          }
+          // ★★ 运行侧那一格。**只给结论与"查了哪两层"，不给名字**（BUG-028 的规矩）。
+          //   它与上面那一格**并列**，因为它们回答的是不同的问题：
+          //   "Legion 的库里有吗" vs "跑起来的那个进程取得到吗"。
+          if (runtimeSnapshot !== null) {
+            const field = runtimeCredentialField(p.secretRef, runtimeSnapshot)
+            if (field !== null) out.credential = { ...(out.credential ?? {}), runtime: field }
           }
           if (profiles !== null) {
             const m = matchProviderModels({ provider: p, profiles })
@@ -519,7 +558,58 @@ export function createModelProvidersRoutes({
       async run(req, res, { path }) {
         const id = decodeURIComponent(path.slice('/api/model-providers/'.length))
         if (id === '') { json(res, 400, { ok: false, error: '缺少供应商 id', code: 'MISSING_PARAM' }); return }
-        await handleRun(req, res, (body) => providerStore.remove(id, { actor: body.actor, version: body.version }))
+        await handleRun(req, res, async (body) => {
+          // ★★ 2026-10-12：删供应商时**可以**连它的钥匙一起删 —— 但只在明确要求时。
+          //
+          //   背景（实测）：`DELETE /api/model-providers/<id>` 从前只删那一行、**完全不碰密钥**，
+          //   于是这台机器的库里留下了一条 `SVEA_DS_1_API_KEY`：**没有任何供应商指向它**，
+          //   而 DSH 那边也没有 —— 一把谁也用不上的钥匙静静躺在库里（可枚举的攻击面）。
+          //
+          //   两条纪律：
+          //     ① **默认不删**。删钥匙不可逆，而且"我删了这个供应商"不等于"我要毁掉那把钥匙"
+          //        （同一个引用可能正被别的东西指着）。
+          //     ② **共享引用要拦住**。别的供应商还指着同一个引用时，删掉钥匙会**悄悄弄坏它**
+          //        —— 那是最坏的一种：动作成功、后果在下次运行才出现。
+          //        ⇒ 报 `false` + 具名原因，而不是"顺手也删了"。
+          const before = providerStore.get(id)
+          const removed = providerStore.remove(id, { actor: body.actor, version: body.version })
+          let credential = null
+          if (body.deleteCredential === true && before !== null && typeof before.secretRef === 'string' && before.secretRef !== '') {
+            const ref = before.secretRef
+            // 还有谁指着它？（墓碑行不算 —— 它们已经不在目录里了）
+            const sharers = providerStore.list().filter((p) => p.secretRef === ref).map((p) => p.id)
+            if (sharers.length > 0) {
+              credential = {
+                requested: true, deleted: false, code: 'CREDENTIAL_STILL_REFERENCED',
+                message: `这把钥匙还指着别的供应商（${sharers.join('、')}），因此**没有删** —— `
+                  + '删了会让它们在下次运行时才失败。要先删那几个供应商，或者保持共享。',
+                sharedWith: sharers,
+              }
+            } else if (secretAdmin === null || typeof secretAdmin !== 'function') {
+              credential = {
+                requested: true, deleted: false, code: 'SECRET_STORE_NOT_WIRED',
+                message: '这个部署没有接密钥库，因此那把钥匙没有被删（请求里的 deleteCredential 没有被忽略）',
+              }
+            } else {
+              try {
+                const r = await secretAdmin().remove(ref)
+                credential = {
+                  requested: true, deleted: r?.removed === true,
+                  // `removed:false` **不是失败**（幂等，与 `secret-admin.mjs` 同一条口径）：
+                  // 删除的意图是"让它不存在"，而它已经不存在了。
+                  message: r?.removed === true ? '那把钥匙已经一起删掉了' : '那把钥匙本来就不在库里（无需再删）',
+                }
+              } catch (e) {
+                // 供应商已经删掉了，这时报错不该让用户以为整个动作失败 —— 说清"哪一半成了"。
+                credential = {
+                  requested: true, deleted: false, code: e?.code ?? 'CREDENTIAL_DELETE_FAILED',
+                  message: `供应商已删除，但**那把钥匙没删掉**（${e?.code ?? '未知原因'}）。它还在密钥库里，可以到「凭证库」页删。`,
+                }
+              }
+            }
+          }
+          return { ...removed, ...(credential === null ? {} : { credential }) }
+        })
       },
     },
   ]

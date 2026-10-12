@@ -654,3 +654,110 @@ test('㉘ ★★ 列表带 `runtimeTypes`（面板的下拉从这里取，不写
   assert.ok(Array.isArray(r.body.runtimeTypes), '没有它面板只能自己写死，而写死的那份会在加第二个适配器时静默落后')
   assert.ok(r.body.runtimeTypes.some((t) => t.id === 'dsh'))
 })
+
+// ============================================================================
+// ㉙ ★★★ 「运行侧有没有这把钥匙」那一格（2026-10-12，将军问"凭证库又是干嘛的"）
+//
+// 这一格存在的理由：`credential.state` 问的是 Legion **自己的**库，
+// 而真正让 agent 跑起来的钥匙来自 **DSH 自己的**凭证文件（派工只传
+// `agentOptions: { provider, model }`，一个凭证字段都没有；物化的门也是关的）。
+// 只有前一格时，用户会以为"配在这里就够了"。
+//
+// ⚠ 这一组**故意不去断言"这台机器上 FJD 是 present"**：那会让用例依赖开发机的
+//   DSH 状态。这里只断言**不随机器变的性质**（形状、词表、不泄漏），
+//   三值判定本身由 `runtime-credential.test.mjs` 的 14 条逐种输入覆盖。
+// ============================================================================
+
+test('㉙a ★★ 纯函数：有引用就给出那一格，没有引用给 `not-needed`，快照缺席给 null', async () => {
+  const { runtimeCredentialField } = await import('./routes/model-providers.mjs')
+  const snap = { of: (ref) => (ref === null ? { state: 'not-needed', layer: null, detail: 'd' } : { state: 'present', layer: '宿主环境变量', detail: 'd2' }) }
+  assert.deepEqual(runtimeCredentialField('K', snap), { state: 'present', layer: '宿主环境变量', detail: 'd2' })
+  assert.equal(runtimeCredentialField(null, snap).state, 'not-needed')
+  assert.equal(runtimeCredentialField('K', null), null, '不注入时行为与从前逐字相同')
+  assert.equal(runtimeCredentialField('K', {}), null)
+})
+
+test('㉙b ★★★ 列表里每个带引用的供应商都有这一格，且**状态在封闭词表里**', async () => {
+  const { RUNTIME_KEY_STATES } = await import('./runtime-credential.mjs')
+  const r = await get('/api/model-providers')
+  const withRef = r.body.providers.filter((p) => p.credentialRequired === true)
+  assert.ok(withRef.length > 0, '夹具里应当有带引用的供应商')
+  for (const p of withRef) {
+    assert.ok(p.credential?.runtime, `${p.id} 缺"运行侧"那一格 —— 于是面板又会以为"配在这里就够了"`)
+    assert.ok(RUNTIME_KEY_STATES.includes(p.credential.runtime.state),
+      `状态不在词表里：${p.credential.runtime.state}`)
+    assert.equal(typeof p.credential.runtime.detail, 'string')
+  }
+  // 没有引用的供应商：`not-needed`（不该报"缺钥匙"）
+  const noRef = r.body.providers.filter((p) => p.credentialRequired === false)
+  for (const p of noRef) assert.equal(p.credential?.runtime?.state, 'not-needed')
+})
+
+test('㉙c ★★★ 这一格**不许把引用名带出去**（BUG-028 的规矩，逐字节验）', async () => {
+  const r = await get('/api/model-providers')
+  const raw = JSON.stringify(r.body)
+  for (const p of r.body.providers) {
+    // 夹具里的引用名形态；真机上也是这一族命名。
+    if (p.secretRef !== undefined) assert.fail('列表里不该有 secretRef 键')
+  }
+  assert.equal(/FJD_DS_API_KEY|LEGION_[A-Z_]+_KEY/.test(raw), false,
+    `运行侧那一格把引用名带出去了：${raw.slice(0, 200)}`)
+  // 但它必须**说得清**为什么（否则用户只看到一个孤零零的状态）
+  const one = r.body.providers.find((p) => p.credential?.runtime?.detail)
+  assert.ok(one.credential.runtime.detail.length > 10)
+})
+
+// ============================================================================
+// ㉚ ★★ 删供应商时的**孤儿钥匙**（2026-10-12）
+//
+// 从前 `DELETE /api/model-providers/<id>` 只删那一行、**完全不碰密钥**，于是这台机器的
+// 库里留下了一条没有任何供应商指向它的 `SVEA_DS_1_API_KEY`。
+// 现在多一个**显式**的出口（`deleteCredential: true`），三条纪律各一条判据：
+//   ① **默认不删**（不提这个字段时，响应里连那一格都没有）；
+//   ② **共享引用要拦住**（别的供应商还指着它 ⇒ 不删 + 点名，而不是"顺手也删了"）；
+//   ③ 删不掉时**说清哪一半成了**（供应商已删、钥匙没删），而不是笼统报失败。
+// ============================================================================
+
+const mkProvider = async (id, secretRef) => post('/api/model-providers', {
+  actor: 'general',
+  provider: { id, displayName: id, api: 'openai-responses', baseURL: `https://${id}.example/v1`, secretRef },
+})
+const providerRow = async (id) => (await get('/api/model-providers')).body.providers.find((p) => p.id === id)
+
+test('㉚a ★★ 默认（不提 `deleteCredential`）⇒ 响应里**没有那一格**，密钥一个字节都不动', async () => {
+  await mkProvider('orphan-a', 'ORPHAN_SHARED_REF')
+  const row = await providerRow('orphan-a')
+  const del = await call('DELETE', '/api/model-providers/orphan-a', { actor: 'general', version: row.version })
+  assert.equal(del.status, 200)
+  assert.equal('credential' in del.body, false, '没要求删钥匙时不该多出这一格')
+})
+
+test('㉚b ★★★ 共享引用 ⇒ **拦住**并点名是谁（"顺手也删了"会让别人下次运行才失败）', async () => {
+  await mkProvider('shared-1', 'SHARED_KEEP_REF')
+  await mkProvider('shared-2', 'SHARED_KEEP_REF')
+  const row = await providerRow('shared-1')
+  const del = await call('DELETE', '/api/model-providers/shared-1', {
+    actor: 'general', version: row.version, deleteCredential: true,
+  })
+  assert.equal(del.status, 200)
+  assert.equal(del.body.credential.deleted, false)
+  assert.equal(del.body.credential.code, 'CREDENTIAL_STILL_REFERENCED')
+  assert.deepEqual(del.body.credential.sharedWith, ['shared-2'], '要点名留着的那一个')
+  assert.match(del.body.credential.message, /shared-2/)
+})
+
+test('㉚c ★★★ 最后一个引用 ⇒ 真的去删；删不掉时说清"供应商已删、钥匙没删"', async () => {
+  const row = await providerRow('shared-2')
+  const del = await call('DELETE', '/api/model-providers/shared-2', {
+    actor: 'general', version: row.version, deleteCredential: true,
+  })
+  assert.equal(del.status, 200, '供应商这一半必须成功')
+  assert.equal(del.body.credential.requested, true)
+  // 这个测试环境里密钥库打不开（产品目录布局未定）⇒ 删不掉，但**必须具名**，
+  // 而且文案要说明"哪一半成了"（否则用户以为整个动作失败、再删一次）。
+  if (del.body.credential.deleted !== true) {
+    assert.ok(typeof del.body.credential.code === 'string' && del.body.credential.code !== '',
+      `删不掉时必须具名：${JSON.stringify(del.body.credential)}`)
+    assert.match(del.body.credential.message, /供应商已删除/)
+  }
+})

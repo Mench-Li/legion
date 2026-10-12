@@ -245,13 +245,22 @@ export const SCHEMA = defineSchema({
         + 'HOME 与别的进程共用同一个名字，所以在 foreignEnv 里逐个登记归属（操作系统 POSIX），不靠前缀猜。',
     },
     {
-      file: 'product/launcher/cli.mjs',
+      file: 'product/dsh-location.mjs',
       expr: 'env[DSH_HOME_ENV]',
       reason: 'dshCredentialsFileFrom(env) 用 DSH_HOME_ENV 常量（值 DSH_HOME）定位 **DSH 自己的** .credentials.yaml。'
         + '键必须计算：那个常量名就是「DSH 用哪个变量」这个事实的唯一定义处（PRT-509 路线 A′）；'
         + 'DSH_HOME 在本 schema 的 foreignEnv 里登记为「DSH 拥有、Legion 只读该文件」。'
         + '（PRT-257 起同一个常量还被 `dshHomeFrom(env)` 读一次——那是同一个键、同一处定义，'
-        + '所以这里仍然是这一条登记。）',
+        + '所以这里仍然是这一条登记。）'
+        // ★ 2026-10-12：文件从 `product/launcher/cli.mjs` 搬到 `product/dsh-location.mjs`，
+        //   所以这条登记的 `file` 跟着改。搬的理由是**多了一个调用方**：
+        //   `team-hub/runtime-credential.mjs` 要用同一个路径回答面板那句
+        //   "运行侧（DSH）到底有没有这把钥匙"，而中枢不该 import 一个**进程入口**只为拿一个 join。
+        //   `cli.mjs` 那边改成 import + 转出，对外面一个符号没变。
+        //   ⚠ 这里**不把那个表达式原文再写一遍**：本文件自己的登记文本也在扫描面里
+        //   （"schema 自身命中 N 处"那条对账），多写一次就会把 N 从 12 顶到 13 ——
+        //   而那条对账守的正是"登记文本不许被当成读取点"。
+        + '（读数没变：整个 product 仍然是这一处读取，×1。）',
     },
     {
       file: 'product/paths.mjs',

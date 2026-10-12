@@ -121,6 +121,15 @@ import { modelConfigErrorFor, validateAgentModelSelection } from '../runtime/con
 import { createProbeService } from './probe-service.mjs'
 // ★ BUG-023 的收敛：真实凭证核验（问密钥库）与有效档案（留空即继承供应商）。
 import { createCredentialStatus } from './credential-status.mjs'
+// ★★ 2026-10-12：**运行侧**（DSH）有没有这把钥匙 —— 与上面那格并列的第二读口径。
+//   理由见下面 `runtimeCredentialStatus` 的说明（一句话：运行时读的是 DSH 那份）。
+import { createRuntimeCredentialProbe } from './runtime-credential.mjs'
+// 路径的唯一来源。**不自己拼** `join(home, '.credentials.yaml')`：那条决策
+// （要不要读别人家的明文文件、要不要回落到 `~/.dsh`）只在 `product/dsh-location.mjs` 里定义一次。
+//   · `dshCredentialsFileFrom` —— **只认 DSH_HOME**（读值那条路用）
+//   · `dshCredentialsFileForStatus` —— 允许回落到 DSH 的默认 `~/.dsh`（回答状态用）
+import { dshCredentialsFileForStatus } from '../product/dsh-location.mjs'
+import { osHomeFacts } from '../product/paths.mjs'
 // spec §6.7 的写一半：凭证的新增/更新/轮换/删除。读路径早已接上
 // （`runtime/probe/secret-resolver.mjs`），写路径此前**零调用方**。
 import { createSecretAdmin } from './secret-admin.mjs'
@@ -926,6 +935,43 @@ const credentialStatus = createCredentialStatus({
     const r = await secretAdmin().list()
     return (r?.entries ?? []).map((e) => e?.ref).filter((ref) => typeof ref === 'string' && ref !== '')
   },
+})
+
+/**
+ * ★★ 2026-10-12：**运行侧**（DSH）有没有这把钥匙 —— 与上面那一格并列的第二读口径。
+ *
+ * ## 为什么必须有这一格（将军问"凭证库又是干嘛的"追问出来的）
+ *
+ * 上面那个 `credentialStatus` 问的是 Legion **自己的**库。而真正让 agent 跑起来的
+ * 钥匙来自 **DSH 自己的** `$DSH_HOME/.credentials.yaml`：
+ *
+ *   · 派工那条路只传 `agentOptions: { provider, model }`（`plugins/src/index.ts`），
+ *     **一个凭证字段都没有**；
+ *   · Legion → DSH 的那条写路径（物化）**门是关的**（`LEGION_APPLY_MODEL_CONFIG` 默认 false）。
+ *
+ * ⇒ 同一把钥匙在两处各存一份，而界面上只有"Legion 这边有"的读数。于是有一个具体的陷阱：
+ * 往 Legion 里录一把 DSH 没有的钥匙，面板说"已配置凭证"、"测试连接"也可能过
+ * （它读 Legion 的库），**而任务跑不起来**。
+ *
+ * ## 为什么这里能给出**精确**答案（而不是猜一个近似）
+ *
+ * DSH 自己的凭证分层是四层（见它源码 `credentials-local/src/index.ts` 的模块头）：
+ * 宿主环境 > `$DSH_HOME/.credentials.yaml` > `<启动目录>/.env` > `$DSH_HOME/.env`。
+ * 中枢是**由宿主带着 `{...process.env}` 拉起的**（见 `services-plugin/config-schema.mjs`
+ * 的 notes），所以第一层与第二层都能逐一复现 —— 这不是近似，是同一组输入。
+ * **第三层（DSH 进程的 cwd）查不了**，所以 `absent` 的措辞是"**这两处**都没找到"，
+ * 并把没查的那一层写进 detail（`runtime-credential.mjs` 的文件头有完整理由）。
+ */
+const runtimeCredentialStatus = createRuntimeCredentialProbe({
+  env: process.env,
+  // ★ 用**允许回落到 `~/.dsh`** 的那一个（`...ForStatus`），而不是 `dshCredentialsFileFrom`：
+  //   后者刻意"只认 DSH_HOME、不猜路径"——那条口径服务的是**读值**（别把别人的钥匙拿来用）。
+  //   这里回答的是状态，而要复现的是 **DSH 自己的解析**（`显式 > $DSH_HOME > ~/.dsh`）。
+  //   实测：这个部署里宿主环境**没有** `DSH_HOME`（用户直接开 DeepSeek Harness.exe），
+  //   只认它就等于永远回"不知道"。两个函数的分工写在 `product/dsh-location.mjs` 里。
+  dshCredentialsFileForStatus,
+  // 操作系统家目录：与 `probe-service.mjs` 用 `osHomeFacts` 的做法同一处来源。
+  osHome: osHomeFacts(process.env).homeDir,
 })
 
 /**
@@ -7013,6 +7059,10 @@ const router = createRouter([
     json,
     secretAdmin, handleRun, audit,
     readScope,
+    // ★★ 2026-10-12：哪些引用名**真的被某个供应商指着**（用来在凭证库列表上标出孤儿）。
+    //   读的是供应商目录，不是密钥库 —— 所以它回答的是"有没有人指着它"，
+    //   而不是"能不能删"（那把钥匙也可能正被别的东西用着）。文案见路由那边。
+    claimedRefs: () => new Set(providerStore.list().map((p) => p.secretRef).filter((r) => typeof r === 'string' && r !== '')),
   }),
   createAutomationRoutes({
     json,
@@ -7067,7 +7117,16 @@ const router = createRouter([
   //   写进哪个槽位"只能由服务端决定 —— 见 `model-providers.mjs` 的 `credentialIntent`。
   // ★ `authorized` 一起注入：`?includeSecretRefs=1` 那一条参数要**单独**过令牌校验
   //   （引用名是密钥库的槽位清单，不该跟着读路径公开）。没注入时那条参数被拒。
-  createModelProvidersRoutes({ json, handleRun, providerStore, credentialStatus, modelStore, secretAdmin, authorized }),  createUsageRoutes({
+  // ★★ 2026-10-12：`runtimeCredentialStatus` 是**这一族**要的（供应商列表那张表
+  //   每一行都要标"运行侧有没有这把钥匙"）。
+  //   ⚠ 它**不是** `createModelProfilesRoutes` 的参数 —— 第一版注到了那边，
+  //   于是档案那一族的响应里多一个没人读的注入项，而供应商那一族**照旧缺那一格**，
+  //   表现出来就是判据 ㉙b 报"fjd-ds 缺运行侧那一格"。两个工厂的注入项有一部分同名，
+  //   所以"注错厂"不会报错，只会安静地不生效。
+  createModelProvidersRoutes({
+    json, handleRun, providerStore, credentialStatus, runtimeCredentialStatus, modelStore, secretAdmin, authorized,
+  }),
+  createUsageRoutes({
     json,
     authorized, usageRollup, optionalIntParam,
     db, ROLLUP_DIMENSIONS, evaluateBudgetAlert,

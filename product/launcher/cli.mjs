@@ -333,71 +333,28 @@ export const LEGION_READINESS_TIMEOUT_ENV = 'LEGION_READINESS_TIMEOUT_MS'
 export { OS_HOME_ENV, osHomeFacts }
 
 /**
- * DSH 的家目录变量名。**DSH 自己**用它定位 `.credentials.yaml`。
+ * ★ 2026-10-12：`DSH_HOME_ENV` / `dshHomeFrom` / `dshCredentialsFileFrom` **搬到了**
+ * `product/dsh-location.mjs`，这里只**转出**（本模块的对外面一个符号都没变）。
  *
- * 它登记在 `product/config-schema.mjs` 的 `CHILD_ENV_NAMES` 里——原本只是
- * 「注入给 Runtime 子进程的变量名」。PRT-509 路线 A′ 之后它**也**是本进程的
- * 读取点，所以那份登记的理由跟着改了一句（`scan --check` 只看字面量是否
- * 登记过，有没有被读它管不着——登记理由漂了它不会报，只能靠这句话守着）。
+ * 搬的理由：从这一天起读它们的**不止 Launcher 一个进程**了 ——
+ * `team-hub/runtime-credential.mjs` 要用同一个路径去回答面板那句
+ * "运行侧（DSH）到底有没有这把钥匙"。而 `cli.mjs` 是**进程入口**：
+ * 让中枢 import 一个入口模块只为拿一个 `join`，是把依赖方向搞反了。
+ *
+ *   > 两个调用方分别 import 一个入口模块里的同一个函数，
+ *   > 与它们各自抄一份 `join(home, '.credentials.yaml')`，
+ *   > 在**今天**是同一个读数 —— 差别在有人搬动入口模块的那一天。
+ *
+ * ⚠ 必须 `import` 之后再 `export`，**不能**写成 `export { … } from '…'`：
+ *   后一种**不产生本地绑定**，而本文件内部还有两处调用它们
+ *   （`:516` 的 `dshCredentialsFileFrom(env)`、`:816` 的 `dshHomeFrom(env)`）——
+ *   于是那些路径会以 `ReferenceError: dshCredentialsFileFrom is not defined` 崩掉。
+ *   实测踩过：`cli.test.mjs` 里**凡是真的起进程的那一批**一起红，
+ *   而报错只指到调用点，不指到那行转出。
  */
-export const DSH_HOME_ENV = 'DSH_HOME'
+import { DSH_HOME_ENV, dshHomeFrom, dshCredentialsFileFrom } from '../dsh-location.mjs'
 
-/**
- * 从进程环境推出**DSH 凭证文件的路径**（PRT-509 路线 A′）。
- *
- * ## 为什么只有一句 `join`，却值得单独一个函数
- *
- * 因为"要不要读一个**别人**拥有的、里面全是明文的文件"是一个**决策**，
- * 而决策必须有唯一一个能被引用、被测试、被讨论的位置。散落在两个
- * `openProductSecrets` 调用点里的路径拼接，事后没人说得清"产品到底会不会
- * 去读 DSH 的文件"。
- *
- * ## 三条边界
- *
- *   ① **只认 `DSH_HOME`**，不猜路径。用户为 DSH 设了哪个目录，就读那个目录
- *      ——不去翻 `%USERPROFILE%\.dsh` 之类的候选位置。猜路径会读到
- *      "另一个账户留下的、当前用户并不知道存在的"凭证文件。
- *   ② **`DSH_HOME` 没设就没有回退来源**（返回 `null`）。这与"设了但文件不在"
- *      是两个不同的读数，由读取器自己的 `inspect()` 分开报。
- *   ③ **它只给出路径**，读取与拒绝全在 `security/secrets/dsh-credentials.mjs`。
- *      这一层不解析、不校验、不碰文件内容。
- *
- * @param {object} env 进程环境。
- * @returns {string|null} `.credentials.yaml` 的绝对路径；`DSH_HOME` 未设时为 `null`。
- */
-export function dshCredentialsFileFrom(env = {}) {
-  const home = dshHomeFrom(env)
-  if (home === null) return null
-  return join(home, DSH_CREDENTIALS_FILENAME)
-}
-
-/**
- * DSH 的家目录**本身**（不是它下面某个文件的路径）。
- *
- * 与 `dshCredentialsFileFrom` 同一个来源、同一个键、同一个"没设就是 `null`"。
- * 运行时安装器需要它，但理由**不是**"要去读它的东西"——恰恰相反：
- * 它是被拒绝写入的那棵树。`$DSH_HOME` 是**另一个程序**的地盘，
- * 它的 clean / 升级会把整棵树换掉，把 Legion 的运行时装进去等于把
- * 一个版本的字节放在别人随时会删的位置上（见 `runtime-install.mjs` 的
- * `TARGET_INSIDE_DSH_HOME`）。
- *
- * ★ 它**不猜路径**：没设 `DSH_HOME` 就是 `null`，不会去回落
- * `%USERPROFILE%\.dsh`。猜出来的家目录会把"守卫一个不存在的禁区"
- * 伪装成"守卫过了"。
- *
- * ★ 它也是**这一条唯一的读取点**：`dshCredentialsFileFrom` 反过来调它。
- *
- *   两个函数各自读一次 `env[DSH_HOME_ENV]` 也能跑，而且行为一模一样——
- *   差别在 `scan --check` 那边：动态下标是**按出现次数**逐处对账的
- *   （`scripts/config/config.test.mjs` 里"product 有几处动态下标"那条），
- *   于是同一次读取写成两处，会让那份对账必须跟着动一次。
- *   为了一次读取去改那份"重数一遍再改 schema"的对账，等于把守卫
- *   从一个稳定的数字变成了每次加一个调用方就要动的东西。
- */
-export function dshHomeFrom(env = {}) {
-  const home = env[DSH_HOME_ENV]
-  return typeof home === 'string' && home.trim() !== '' ? home : null
-}
+export { DSH_HOME_ENV, dshHomeFrom, dshCredentialsFileFrom }
 
 /**
  * 组装 Launcher 选项（把 CLI、环境与产品配置文件合成**一份显式输入**）。

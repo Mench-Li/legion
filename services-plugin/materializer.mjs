@@ -65,7 +65,21 @@ export async function runMaterialization({
   const credentials = ctx?.get?.('credentials') ?? null
 
   // ── 读 Legion 的目录（经中枢自己的 API，与 P1 导入同一条路，不直连 team.db）──
-  const qs = teamHubToken ? '?token=' + encodeURIComponent(teamHubToken) : ''
+  //
+  // ★★ 2026-10-12（BUG-028）：**必须带 `includeSecretRefs=1`**。
+  //
+  //   hub 的默认读响应**不含引用名**了（那是密钥库的槽位清单，不该公开）。
+  //   而这一层**需要**它：下面 `planMaterialization()` 要把 Legion 的 `secretRef` 与
+  //   DSH 的 `apiKeyEnv` 归一化成同一个东西来比（`materialize-plan.mjs` 的
+  //   `entry.apiKeyEnv ?? entry.secretRef`）。少了它，Legion 侧会读成"没有引用名"，
+  //   于是每一轮对账都报差异 —— 而"每一轮都报差异"会让人把这道读数关掉，
+  //   那才是真正丢掉的东西。
+  //
+  //   这条参数**单独要求令牌**（`mayReadSecretRefs`）：下面这两行本来就带着 token，
+  //   所以对这条内部消费者没有任何额外动作；而没带令牌的读法拿不到名字。
+  const qs = teamHubToken
+    ? '?token=' + encodeURIComponent(teamHubToken) + '&includeSecretRefs=1'
+    : '?includeSecretRefs=1'
   let legion = null
   try {
     const res = await fetchImpl(`${hubUpstream}/api/model-providers${qs}`, {

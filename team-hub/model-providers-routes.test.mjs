@@ -31,6 +31,9 @@ const dir = mkdtempSync(join(tmpdir(), 'legion-provstore-'))
 process.env.TEAM_HUB_DB = join(dir, 'team.db')
 process.env.TEAM_HUB_TOKEN = ''
 const mod = await import('./server.mjs')
+// ★ 纯函数从**路由模块**直接取：`mayReadSecretRefs` 是本族的判定，
+//   它必须能在不起 hub 的情况下被测（见 ⑱ 那几条）。
+const { mayReadSecretRefs } = await import('./routes/model-providers.mjs')
 await new Promise((r) => mod.server.listen(0, '127.0.0.1', r))
 const base = 'http://127.0.0.1:' + mod.server.address().port
 
@@ -352,14 +355,19 @@ test('⑮ ★★ 列表里每一行都带 `credential`（核验结果），且�
       ['none', 'ready', 'missing', 'unavailable'].includes(p.credential.state),
       `${p.id} 的状态不认识：${p.credential.state}`,
     )
-    // ★★ 2026-10-12：核验结果里**不再有引用名**（`ref` → `hasRef`）。
-    //   这一条原先写 `assert.equal(p.credential.ref, p.secretRef ?? null, '核验的必须是这一行自己的引用名')`，
-    //   而那句话把"核验了这一行的凭证"与"把这一行的引用名发出去"当成了同一件事。
-    //   引用名是可枚举的攻击面（`model-store.mjs` 文件头 ②），所以改成断言**有没有**
-    //   引用（`hasRef`）与**是不是这一行自己的那个**（用 `secretRef` 在测试进程里比对 ——
-    //   测试能看到库里的值，客户端不该看到）。
-    assert.equal(p.credential.hasRef, typeof p.secretRef === 'string' && p.secretRef !== '',
-      '核验的必须是这一行自己的引用名（说"有没有"，不说"叫什么"）')
+    // ★★ 2026-10-12（BUG-028 收口）：核验结果里**没有引用名**，响应里也没有 `secretRef`。
+    //   上一版这一条写 `p.credential.hasRef === (p.secretRef 非空)` —— 它当时还能成立，
+    //   因为 `secretRef` 就在同一个响应里。现在那两样都被抹掉了，于是改成断言**三**件事：
+    //     ① 响应里**根本没有** `secretRef` 这个键（"引用名不出站"的直接读数）；
+    //     ② 用 `credentialRequired` 表达"这条需要凭证"，且它与 `hasRef` 同口径；
+    //     ③ 夹具里那两条**确实带着**引用名 —— 否则下面全是"库里本来就没有它"的假绿。
+    assert.equal('secretRef' in p, false, `${p.id} 的响应里出现了 secretRef（引用名不该出站）`)
+    assert.equal(typeof p.credentialRequired, 'boolean', '要用 credentialRequired 表达"这条需要凭证"')
+    assert.equal(p.credentialRequired, p.credential.hasRef,
+      '`credentialRequired` 与 `credential.hasRef` 说的是同一件事，不该各说各的')
+    if (p.id === 'fjd-ds' || p.id === 'svea-ds') {
+      assert.equal(p.credential.hasRef, true, `${p.id} 这一行在库里是有引用名的（夹具前提）`)
+    }
     // 兼容：原来的标记原样保留（别的消费者还在用）
     assert.equal(typeof p.credentialConfigured, 'boolean')
   }
@@ -369,8 +377,11 @@ test('⑯ ★★★ 本环境读不到密钥库 ⇒ 必须是 `unavailable`，**
   // 这一条是入口级的"读不出来 ≠ 没有"：测试进程没有 LEGION_* 布局，
   // 密钥库必然打不开。把它报成 `missing` 会让用户去补一把**他可能早就存过**的钥匙，
   // 而真因是"这次没核验成"。
+  //
+  // ★ 2026-10-12：选择的依据从 `p.secretRef` 换成 `p.credential.hasRef`
+  //   （前者已经不出站了）。**同一件事**：`hasRef` 就是"这一行有没有引用名"。
   const r = await get('/api/model-providers')
-  const withRef = r.body.providers.filter((p) => typeof p.secretRef === 'string' && p.secretRef !== '')
+  const withRef = r.body.providers.filter((p) => p.credential?.hasRef === true)
   assert.ok(withRef.length > 0, '夹具里应当有带引用名的供应商')
   for (const p of withRef) {
     assert.equal(p.credential.state, 'unavailable',
@@ -389,6 +400,62 @@ test('⑰ ★ 没有引用名的供应商 ⇒ `none`（不是错误，也不需�
   assert.equal(p.credential.state, 'none')
   // ★ 2026-10-12：`state: 'none'` 与 `hasRef: false` 是同一件事的两种说法（原来断言的是 `ref: null`）。
   assert.equal(p.credential.hasRef, false)
+})
+
+// ============================================================================
+// ⑱ 引用名的**两读口径**（BUG-028 的收口）
+//
+//   · 默认那一份：**没有引用名**（谁都能读的读路径，不该顺带给出槽位清单）；
+//   · `?includeSecretRefs=1`：给名字，但要过令牌校验 —— 唯一的内部消费者是
+//     物化 / 影子对账（它要拿 Legion 的 `secretRef` 与 DSH 的 `apiKeyEnv` 对齐）。
+//
+// 这与 `model-store.mjs` 的 `get` / `internalGet` 是同一个形状，只是跨了进程。
+//
+// ★ 本测试的 hub 是 `TEAM_HUB_TOKEN = ''` 起的 ⇒ `authorized()` 恒真，
+//   所以这里能验"带参数就看得见名字"；而"没令牌 ⇒ 403"那一支由**纯函数**判据覆盖
+//   （`mayReadSecretRefs` 的三种输入），因为再起一个带令牌的 hub 不值得。
+// ============================================================================
+
+test('⑱ ★★ 默认读**不给**引用名；带 `?includeSecretRefs=1`（已过令牌）才给', async () => {
+  const plain = await get('/api/model-providers')
+  const withRefs = await get('/api/model-providers?includeSecretRefs=1')
+  assert.equal(plain.status, 200)
+  assert.equal(withRefs.status, 200, `带参数的读失败了：${JSON.stringify(withRefs.body).slice(0, 200)}`)
+
+  const p1 = plain.body.providers.find((x) => x.id === 'fjd-ds')
+  const p2 = withRefs.body.providers.find((x) => x.id === 'fjd-ds')
+  assert.equal('secretRef' in p1, false, '默认那一份不该有引用名')
+  assert.equal(p2.secretRef, 'FJD_DS_API_KEY', '内部消费者要能拿到名字（物化靠它与 DSH 的 apiKeyEnv 对齐）')
+  // 两份说的是**同一条**供应商（不是"内部那一份多了一条"）
+  assert.equal(p1.id, p2.id)
+  assert.equal(p1.displayName, p2.displayName)
+  assert.equal(p1.credential.hasRef, p2.credential.hasRef)
+})
+
+test('⑱ ★★★ `mayReadSecretRefs`：没带参数就给"没有名字"的那份（默认安全）', () => {
+  const r = mayReadSecretRefs({ wantRefs: false })
+  assert.equal(r.ok, true)
+  assert.equal(r.include, false)
+})
+
+test('⑱ ★★★ `mayReadSecretRefs`：没注入 authorized ⇒ **拒绝**（不是放行）', () => {
+  const r = mayReadSecretRefs({ wantRefs: true, authorized: undefined })
+  assert.equal(r.ok, false)
+  assert.equal(r.code, 'SECRET_REFS_REQUIRE_TOKEN')
+  assert.match(r.message, /没有可用的鉴权注入/)
+})
+
+test('⑱ ★★★ `mayReadSecretRefs`：令牌没过 ⇒ **拒绝**（引用名不是公开只读数据）', () => {
+  const r = mayReadSecretRefs({ wantRefs: true, authorized: () => false })
+  assert.equal(r.ok, false)
+  assert.equal(r.code, 'SECRET_REFS_REQUIRE_TOKEN')
+  assert.match(r.message, /需要令牌/)
+})
+
+test('⑱ ★ 令牌过了 ⇒ 允许，且把 `include` 带出去（调用方不必再判一次）', () => {
+  const r = mayReadSecretRefs({ wantRefs: true, authorized: () => true })
+  assert.equal(r.ok, true)
+  assert.equal(r.include, true)
 })
 
 // ============================================================================

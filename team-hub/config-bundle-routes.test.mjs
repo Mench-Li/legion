@@ -367,27 +367,114 @@ test('④ 整条链路上**任何响应体**都不含密钥字面量（在原始
   assert.ok(mine.credential !== undefined, '核验结果被整段删掉了 —— 那是把仪表盘拆了来修漏水')
   assert.equal(mine.credential.hasRef, true, '要能表达"引用了某把钥匙"，只是不说它叫什么')
 
-  // ★★ 已知偏离（BUG-028，**不是**这次改出来的）：供应商这一族**仍然**把 `secretRef`
-  //   的原名发出去，而档案那一族已经改成只发 `credential.hasRef`。
+  // ★★ 2026-10-12（BUG-028 **已修**，这条断言随之翻转）：供应商这一族**也不再**发引用名。
   //
-  //   这里**显式断言现在的行为**，而不是把这一条删掉：
-  //   删掉的话，"这一行还在泄漏"与"这一行已经不泄漏"在这条用例眼里是同一个东西，
-  //   而修 BUG-028 的人也会失去一个必须翻转的信号。
-  //   （本仓的老规矩：**显式豁免，而不是让门禁看不见**。）
-  assert.equal(mine.secretRef, PV_REF,
-    '★ 如果你正在修 BUG-028：这条断言要跟着翻转成 `assert.equal(mine.secretRef ?? null, null)`，'
-    + '并且要同时确认面板的编辑态不再依赖它（`DshProvidersPanel.tsx` 的 keyRef 保留逻辑）')
+  //   上一版这里写的是 `assert.equal(mine.secretRef, PV_REF)` 并附了一句
+  //   "修 BUG-028 时这条要翻转成 `?? null`" —— 那个"必须翻转的信号"就在下面。
+  //   现在两件事一起验：
+  //     ① 那个键**根本不在**（不是"值是 null"：一个 `secretRef: null` 的字段仍然在
+  //        教客户端"这里有个叫 secretRef 的东西"，而它不该参与客户端的心智模型）；
+  //     ② 同一行**仍然说得清**"我引用了凭证"（`credentialRequired` / `credential.hasRef`）——
+  //        否则修法就成了"把仪表盘拆了来修漏水"。
+  assert.equal('secretRef' in mine, false,
+    `供应商那一行不该再有 secretRef 键（实际：${JSON.stringify(mine.secretRef)}）`)
+  assert.equal(mine.credentialRequired, true, '抹掉名字之后仍要能表达"这条引用了凭证"')
 
   for (const r of responses) {
     const text = JSON.stringify(r.body)
     assert.ok(!text.includes(SECRET), `响应体里出现了密钥：${text}`)
     assert.ok(!text.includes('legion/leak'), `响应体里出现了档案的引用名：${text}`)
-    // 供应商的引用名**暂时**还会出现在 `/api/model-providers` 的响应里（BUG-028），
-    // 所以这一条只对**其它**响应生效 —— 把它写出来，好过让整段断言悄悄变弱。
-    if (!text.includes(`"id":"${pv}"`)) {
-      assert.ok(!text.includes(PV_REF), `这个响应体里出现了供应商的引用名：${text.slice(0, 200)}`)
-    }
+    // ★ BUG-028 修好之后这条不再需要豁免：**所有**响应都不许出现供应商的引用名。
+    assert.ok(!text.includes(PV_REF), `这个响应体里出现了供应商的引用名：${text.slice(0, 200)}`)
   }
+})
+
+// ============================================================================
+// ④b 写凭证：客户端**不需要引用名**（BUG-028 的另一半）
+//
+// 抹掉读侧的引用名有个直接后果：面板**没有名字**能拿去调 `POST /api/secrets` 了。
+// 于是"用户填的那把新钥匙写进哪个槽位"必须由**服务端**决定 —— 请求带 `credentialValue`，
+// 服务端用那一行**已有的**名字（可能是 DSH 导进来的 `apiKeyEnv`，两侧靠它对齐），
+// 没有才用派生名。
+//
+// 为什么不能"让客户端自己算派生名"：从 DSH 导入的行，其引用名是 DSH 侧的键名，
+// 派生名与它**不一定相同**。客户端算错的表现是"新钥匙写进了另一个槽位、行仍指旧槽位"
+// ⇒ 界面说保存成功、跑起来仍然认证失败。
+// ============================================================================
+
+test('④b ★★ 带 `credentialValue` 的更新 ⇒ 服务端按**已有**引用名去写（客户端全程不知道名字）', async () => {
+  const pv = uniq('credwrite')
+  const REF = 'LEGION_CRED_WRITE_REF'
+  await call('POST', '/api/model-providers', {
+    provider: { id: pv, displayName: '写凭证', api: 'openai-responses', baseURL: 'https://x.example/v1', secretRef: REF },
+    actor: 'test',
+  })
+  const before = await call('GET', '/api/model-providers')
+  const row = (before.body?.providers ?? []).find((p) => p.id === pv)
+  assert.equal(row?.credential?.hasRef, true, '前提：这条在库里确实有引用名')
+  assert.equal('secretRef' in row, false, '前提：读侧不给名字（否则下面的断言测不到东西）')
+
+  // 这次请求**只带值**，不带名字
+  const updated = await call('POST', `/api/model-providers/${encodeURIComponent(pv)}`, {
+    actor: 'test', version: row.version,
+    provider: {
+      id: pv, displayName: '写凭证', api: 'openai-responses', baseURL: 'https://x.example/v1',
+      runtimeType: 'dsh', models: [{ id: 'm1' }],
+    },
+    credentialValue: 'sk-live-SHOULD-NOT-ECHO-BACK-0123456789',
+  })
+  // 一个没接密钥库 / 密钥库打不开的部署必须**具名失败**，而不是静默忽略 ——
+  // 静默忽略的表现正是"面板说保存成功、钥匙其实没进去"。
+  // 两种具名结果都算通过（400 = 这个部署没接密钥库；503 = 接了但本测试环境的产品目录布局未定），
+  // 但**必须带 code**，而且**不许回显值**。
+  assert.ok(updated.status === 200 || updated.status === 400 || updated.status === 503,
+    `意外的状态：${updated.status} ${JSON.stringify(updated.body).slice(0, 200)}`)
+  const text = JSON.stringify(updated.body)
+  assert.ok(!text.includes('sk-live-SHOULD-NOT-ECHO-BACK'), '写进去的值不许回显')
+  assert.ok(!text.includes(REF), '响应里不许出现引用名')
+  if (updated.status !== 200) {
+    assert.ok(typeof updated.body?.code === 'string' && updated.body.code !== '',
+      `失败必须是具名的（实际：${JSON.stringify(updated.body).slice(0, 200)}）`)
+    assert.equal('secretRef' in (updated.body ?? {}), false, '失败的响应里也不许出现引用名')
+    return
+  }
+  // 接了密钥库时：这一行仍然引着**原来那个名字**（派生名不该把它换掉）
+  const after = await call('GET', '/api/model-providers')
+  const row2 = (after.body?.providers ?? []).find((p) => p.id === pv)
+  assert.equal(row2.credential.hasRef, true, '写过凭证之后仍应有引用')
+  assert.equal('secretRef' in row2, false, '仍然不发名字')
+})
+
+test('④b ★ 显式 `clearCredential` ⇒ 引用被撤掉（"没给"与"要清掉"分开）', async () => {
+  const pv = uniq('credclear')
+  await call('POST', '/api/model-providers', {
+    provider: { id: pv, displayName: '清凭证', api: 'openai-responses', baseURL: 'https://x.example/v1', secretRef: 'LEGION_CLEAR_REF' },
+    actor: 'test',
+  })
+  const before = await call('GET', '/api/model-providers')
+  const row = (before.body?.providers ?? []).find((p) => p.id === pv)
+
+  // ① 只改显示名（**不带任何凭证意图**）⇒ 引用必须留着
+  const keep = await call('POST', `/api/model-providers/${encodeURIComponent(pv)}`, {
+    actor: 'test', version: row.version,
+    provider: { id: pv, displayName: '改名不改凭证', api: 'openai-responses', baseURL: 'https://x.example/v1', runtimeType: 'dsh', models: [{ id: 'm1' }] },
+  })
+  assert.equal(keep.status, 200, `改名失败：${JSON.stringify(keep.body).slice(0, 200)}`)
+  const mid = await call('GET', '/api/model-providers')
+  const rowMid = (mid.body?.providers ?? []).find((p) => p.id === pv)
+  assert.equal(rowMid.credentialRequired, true, '★ 只改显示名**不许**把凭证引用清掉（BUG-028 的读侧改动带来的坑）')
+
+  // ② 显式清掉
+  const cleared = await call('POST', `/api/model-providers/${encodeURIComponent(pv)}`, {
+    actor: 'test', version: rowMid.version,
+    provider: { id: pv, displayName: '改名不改凭证', api: 'openai-responses', baseURL: 'https://x.example/v1', runtimeType: 'dsh', models: [{ id: 'm1' }] },
+    clearCredential: true,
+  })
+  assert.equal(cleared.status, 200, `清凭证失败：${JSON.stringify(cleared.body).slice(0, 200)}`)
+  const after = await call('GET', '/api/model-providers')
+  const rowAfter = (after.body?.providers ?? []).find((p) => p.id === pv)
+  assert.equal(rowAfter.credentialRequired, false, '显式清掉之后就不该再说"引用了凭证"')
+  assert.equal(rowAfter.credential.hasRef, false)
 })
 
 // ============================================================================

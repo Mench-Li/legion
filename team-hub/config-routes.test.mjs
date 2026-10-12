@@ -54,7 +54,12 @@ test('② 每一栏都在，且 `auth` 是布尔而不是 token 本身', async (
   const r = await call('GET', '/api/config')
   assert.equal(typeof r.body.auth, 'boolean', 'auth 必须是布尔 —— 它一旦泄漏成字符串就是凭据泄漏')
   assert.equal(r.body.auth, true, '这一轮设了 token，所以 auth 应为 true')
-  assert.equal(typeof r.body.db, 'string')
+  // ★ 2026-10-12：`db`（绝对路径）→ `dbFingerprint`（路径的 sha256 前 16 位）。
+  //   这一栏的用途是**实例识别**（免鉴权时回答"我连到的是不是我自己的实例"），
+  //   指纹一样答得出，而部署布局不再外泄。详见本文件末尾那三条判据与
+  //   `routes/config.mjs` 的文件头。
+  assert.equal(typeof r.body.dbFingerprint, 'string')
+  assert.equal('db' in r.body, false, '旧的绝对路径字段不该再出现')
   assert.equal(typeof r.body.port, 'number')
   assert.equal(r.body.runPlane, true, 'runPlane 是 PRT-301 起的能力发现位：没有它，升级了一半的部署会让 worker 收到无法归因的 404')
 })
@@ -212,4 +217,70 @@ test('⑪ ★★★ 结构不变式：同步必须排在**任何读取之前**�
   await built.dispatch({ method: 'GET' }, {}, { path: '/api/config', url: new URL('http://127.0.0.1/api/config') })
   assert.equal(seen.at(-1).eventDelivery.bookkeepingFailures, 43,
     '第一次请求必须读**现场值**（43），不是构造时的 42')
+})
+
+// ════════════════════════════════════════════════════════════════════════════
+// ★★★ 免鉴权端点**不许泄露部署布局**
+//
+// 这个端点任何人都能读（它是能力发现 —— 探测发生在拿到令牌**之前**，所以它必须
+// 免鉴权）。它原先回的是数据库的**绝对路径**（`/var/lib/legion-hub/team.db` 这样），
+// 等于把部署布局与运行账户名告诉任何能发 HTTP 的人。
+//
+//   > 一个"任何人都能读、而且顺手告诉你文件住哪"的端点，
+//   > 与一个"只回答能力问题"的端点，在功能上完全一样——
+//   > 只不过前者把服务器的目录结构当成了公开信息。
+//
+// 但那个字段**有真实用途**：多个脚本用它做实例识别 ——
+// `(await r.json()).db === dbFile` 回答的是"我连到的是不是我自己刚起的那个实例，
+// 而不是随机端口上恰好占着的别的服务"。所以修法是**换值**而不是**删掉能力**。
+//
+// ⚠️ 不能用 Host 头区分"公开请求 / 本地探测"：Host 是**攻击者可控**的，
+//   伪造 `Host: 127.0.0.1` 就能把这个端点重新变成泄露源。所以只能换值，不能加条件。
+// ════════════════════════════════════════════════════════════════════════════
+
+test('★★★ /api/config 不泄露绝对路径，但保留实例识别能力', async () => {
+  const { dbFingerprintOf } = await import('./routes/config.mjs')
+  const r = await call('GET', '/api/config')
+  assert.equal(r.status, 200)
+
+  // ① 旧的泄漏字段必须消失。
+  assert.equal('db' in r.body, false, '`db`（数据库绝对路径）不该再出现在免鉴权响应里')
+
+  // ② 整个响应体里**不许**出现绝对路径形状的字符串（含 Windows 与 POSIX）。
+  //    这一条比"检查某个字段名"强：将来有人加回一个 `dbPath` / `dataDir` 也会被抓住。
+  const raw = JSON.stringify(r.body)
+  assert.doesNotMatch(raw, /"[A-Za-z]:[\\/]/, `响应里出现了 Windows 绝对路径：${raw.slice(0, 200)}`)
+  assert.doesNotMatch(raw, /"\/(?:var|etc|home|root|srv|tmp|usr|opt)\//,
+    `响应里出现了 POSIX 绝对路径：${raw.slice(0, 200)}`)
+
+  // ③ 实例识别能力必须**仍在**。
+  assert.match(String(r.body.dbFingerprint), /^[0-9a-f]{16}$/,
+    `dbFingerprint 形状不对：${JSON.stringify(r.body.dbFingerprint)}`)
+  assert.equal(r.body.dbFingerprint, dbFingerprintOf(process.env.TEAM_HUB_DB),
+    'dbFingerprint 必须由**本实例的** db 路径算出（否则实例识别会给出错误答案）')
+})
+
+test('★★ 指纹：同路径稳定、不同路径不同、且不可反推路径', async () => {
+  const { dbFingerprintOf } = await import('./routes/config.mjs')
+  const a = dbFingerprintOf('/srv/a/team.db')
+  const b = dbFingerprintOf('/srv/a/team.db')
+  const c = dbFingerprintOf('/srv/b/team.db')
+
+  assert.equal(a, b, '同一个路径必须算出同一个指纹（否则实例识别会随机失败）')
+  assert.notEqual(a, c, '不同路径必须算出不同指纹（否则"这到底是不是我的实例"答不出来）')
+  assert.match(a, /^[0-9a-f]{16}$/)
+  assert.equal(a.includes('srv'), false, '指纹里不许含有原路径的片段')
+  assert.equal(a.includes('team'), false)
+  // 空串/null 是硬错误：放行空串会让两个"没配 db"的实例看起来是同一个。
+  assert.throws(() => dbFingerprintOf(''), TypeError)
+  assert.throws(() => dbFingerprintOf(null), TypeError)
+})
+
+test('★ 反例守卫：上面那两条路径判据真的能发现泄漏', () => {
+  // 证明第 ② 条不是恒真 —— 否则它什么都没在测。
+  const win = JSON.stringify({ auth: true, db: 'D:\\project\\DSH\\legion\\team-hub\\team.db', port: 8787 })
+  assert.match(win, /"[A-Za-z]:[\\/]/, '反例本身应当被 Windows 路径判据抓住')
+  const posix = JSON.stringify({ auth: true, db: '/var/lib/legion-hub/team.db', port: 8787 })
+  assert.match(posix, /"\/(?:var|etc|home|root|srv|tmp|usr|opt)\//,
+    '反例本身应当被 POSIX 路径判据抓住')
 })

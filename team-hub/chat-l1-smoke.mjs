@@ -26,6 +26,8 @@ import * as httpMod from 'node:http'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+// 实例识别用指纹（不再是 db 绝对路径）：见 routes/config.mjs 文件头 2026-10-12 那段。
+import { dbFingerprintOf } from './routes/config.mjs'
 
 const tmpRoot = mkdtempSync(join(tmpdir(), 'legion-chat-l1-'))
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
@@ -58,7 +60,7 @@ async function startServer(token, extraEnv = {}) {
     for (let i = 0; i < 100; i += 1) {
       try {
         const r = await fetch(base + '/api/config')
-        if (r.ok && (await r.json()).db === dbFile) return { child, base }
+        if (r.ok && (await r.json()).dbFingerprint === dbFingerprintOf(dbFile)) return { child, base }
       } catch { /* 未就绪 */ }
       await sleep(100)
     }

@@ -80,6 +80,9 @@ import { decideIntegrationPath, resolveIntegrationMode } from './legacyConvergen
 import { createReclamation, type BootReconcileState } from './reclamation.js'
 import { createStateMachine } from './stateMachine.js'
 import { createWorkspace, type SpaceBinding } from './workspace.js'
+// ★ BUG-027：派工用哪个模型 —— 判定是纯函数（`plugins/tests/dispatch-model.test.mjs` 守着），
+//   这里只负责取数与落读数（日志 / 派工活动）。
+import { decideDispatchModel, parseBindingResolution, type BindingReading } from './dispatchModel.js'
 import { createAcceptance } from './acceptance.js'
 import { createHandoff, isSliceTesterTask } from './handoff.js'
 import { createSliceOrchestration } from './sliceOrchestration.js'
@@ -723,6 +726,35 @@ function spaceWorker(ctx: AppContext, config: Config): void {
     const res = await fetch(`${hubUrl}/api/board?scope=${encodeURIComponent(scopeFor)}`, { headers: hubHeaders() })
     if (!res.ok) throw new Error(`hub board 失败（${res.status}）`)
     return res.json() as Promise<Task[]>
+  }
+
+  /**
+   * 读一个岗位的**模型绑定解析**（BUG-027）。
+   *
+   * 这是"按岗位选模型"这条链在**在跑的那个派工引擎**里的入口：
+   *   · Legion orchestrator worker 走的是 `employee_model_bindings`（它读同一条解析路由），
+   *     但它没在跑（`run_attempts` 0 行）；
+   *   · 本守护在跑，而它此前**从来没问过**这件事 —— 于是 17 行岗位意图（`agent_models`）
+   *     一直没生效，所有岗位用同一个默认模型。
+   *
+   * **本函数不抛**：派工不该因为"问不到绑定"而失败。回落与措辞由
+   * `decideDispatchModel()` 决定，并**必须**留痕（它返回的 `note`）。
+   */
+  async function readRoleBinding(scopeFor: string, employeeRole: string): Promise<BindingReading> {
+    if (!useHub) {
+      return { kind: 'hub-off', primary: null, detail: '这个守护没有可用的中枢地址（useHub=false）' }
+    }
+    try {
+      const res = await fetch(
+        `${hubUrl}/api/model-bindings/resolve?scope=${encodeURIComponent(scopeFor)}&role=${encodeURIComponent(employeeRole)}`,
+        { headers: hubHeaders() },
+      )
+      const data = await res.json().catch(() => null)
+      return parseBindingResolution(res.status, data)
+    } catch (error) {
+      // 网络层异常原样归一化成读数：一次"问不到中枢"不该把这次派工打断。
+      return { kind: 'unreachable', primary: null, detail: `请求中枢失败：${String(error).slice(0, 160)}` }
+    }
   }
 
   /** 团队共享技能：从 hub 拉取本 scope + 授权给本角色的技能（缓存在内存，随 sweep 刷新）。 */
@@ -2440,6 +2472,28 @@ function spaceWorker(ctx: AppContext, config: Config): void {
           } catch (error) {
             throw new Error(`冻结模型配置不可用于 provider ${selectedProvider}：${String(error)}`)
           }
+          // ★★ BUG-027：没有冻结模型时，按 **(空间, 岗位)** 去中枢读绑定。
+          //
+          //    判定的顺序与措辞**全在纯模块里**（`dispatchModel.ts`）：冻结优先、
+          //    绑定命中就用主档案、其余回落平台默认并说清是哪一种。
+          //    这里只做两件事：取数（`readRoleBinding`）与落读数（`log` + 派工活动）。
+          //
+          //    ⚠ 回落是**用户裁决的**（2026-10-12：缺绑定回落默认模型，不拒跑），
+          //      所以"不静默"是这一段的全部意义：`note` 会进日志与活动流。
+          const dispatchScope = typeof t.scope === 'string' && t.scope !== '' ? t.scope : scope
+          const dispatchRole = typeof t.role === 'string' && t.role !== '' ? t.role : config.role
+          // 能力表：冻结那条路已经查过一次（`nativeProviderCapabilities`）；没有冻结时现查。
+          // 类型上两种 capability 形状并存（一个是宿主给的、一个是本仓的窄形状），
+          // 所以这里按字段取（`agentOptions`），不做整体断言。
+          const providerCaps = (nativeProviderCapabilities ?? subagentProviderCapabilities(ctx, selectedProvider)) as
+            { agentOptions?: boolean } | null
+          const dispatchModel = decideDispatchModel({
+            frozen: modelAgentOptions,
+            reading: modelAgentOptions === null ? await readRoleBinding(dispatchScope, dispatchRole) : null,
+            scope: dispatchScope,
+            role: dispatchRole,
+            agentOptionsSupported: modelAgentOptions !== null || providerCaps?.agentOptions === true,
+          })
           await beginWorkflowStageAttempt(selectedProvider)
           started = await ctx.subagents.start(selectedProvider, {
             label: `scrum:${t.id}`,
@@ -2447,9 +2501,15 @@ function spaceWorker(ctx: AppContext, config: Config): void {
             parent,
             signal: controller.signal,
             outputSchema: WORKER_SCHEMA,
-            ...(modelAgentOptions === null ? {} : { agentOptions: modelAgentOptions }),
+            // ★ 用的是**判定结果**（绑定 / 冻结 / 回落），不是裸的冻结值。
+            ...(dispatchModel.agentOptions === null ? {} : { agentOptions: dispatchModel.agentOptions }),
             ...(config.denyTools.length > 0 ? { toolFilter: { deny: config.denyTools } } : {}),
           })
+          // ★ 派工模型**每次都留痕**（含回落）：日志一行 + 派工活动一条。
+          //   "用了默认模型"与"用了默认模型而没人知道"在账单上是同一件事，
+          //   在排障时是两件完全不同的事。
+          log(`${t.id} 派工模型（${dispatchScope}/${dispatchRole}）：${dispatchModel.note}`)
+          activity('dispatch', t.id, dispatchModel.note)
           providerRunId = started.id ?? null
         }
         if (workflowStageAttemptId !== null) {

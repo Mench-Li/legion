@@ -2058,6 +2058,14 @@ async function stageTest() {
     //   b staleMinutes 必须 > workerTimeoutMs/60000（原先只是注释，不满足会出现两个写者）；
     //   c 进 in_review 释放写入预约（T-184 曾被一个**已交付**的任务挡在 waiting-file 40 分钟）。
     { label: 'config-sanity（BUG-009-b：staleMinutes 与 workerTimeoutMs 的硬关系，启动时校正）', files: ['plugins/tests/config-sanity.test.mjs'], cwd: ROOT, nodeArgs: ['--experimental-strip-types'] },
+    // ★ BUG-027：让**在跑的**那个派工引擎（DSH 插件守护）按 (空间, 岗位) 取模型。
+    //   守三件在别处会被读成"没事"的事：
+    //     ① 冻结快照优先（拿实时绑定覆盖它会让同一份审批过的任务两次重试用不同模型）；
+    //     ② 回落默认模型时**必须说清是哪一种**（没绑定 / 绑定坏了 / 中枢没起 / 没配 hubUrl
+    //        —— 四者修法不同，压成一句话就会修错地方）；
+    //     ③ provider 不支持 agentOptions 时，回落也要说"本来该用哪个"
+    //        （否则"绑定了却没生效"看起来像"没建绑定"）。
+    { label: 'dispatch-model（BUG-027：派工模型 = 冻结优先 / 绑定其次 / 回落必须留痕）', files: ['plugins/tests/dispatch-model.test.mjs'], cwd: ROOT, nodeArgs: ['--experimental-strip-types'] },
     { label: 'file-domain-guard（BUG-009-a：声明域全是 gitignored ⇒ 拒绝建任务；探测不可知则放行）', files: ['team-hub/file-domain-guard.test.mjs'], cwd: ROOT },
     { label: 'in-review-releases-reservation（BUG-009-c：进 in_review 释放写入预约，且不放松"未确认停止"）', files: ['team-hub/in-review-releases-reservation.test.mjs'], cwd: ROOT },
     // BUG-010：异常路径（文件域拦截）停在 in_review 之后，**只有推进 done 才会被"4. 流水线 done 补流转"

@@ -1742,27 +1742,23 @@ export function deleteModelBinding(scope: string, role: string, actor: string): 
   return hubRequest('DELETE', `/api/model-bindings/${encodeURIComponent(scope)}/${encodeURIComponent(role)}`, { actor })
 }
 
-// ── 配置导入导出（PRT-508）────────────────────────────────────────────────
+// ★★ 2026-10-12：这一节原本是「配置导入导出（PRT-508）」的三个函数
+//   （`fetchConfigBundle` / `planConfigBundle` / `applyConfigBundle`），**已整体删除**。
 //
-// ★ 2026-10-12：这一节上面原本还有「迁移老配置（PRT-506）」的两个函数
-//   （`fetchMigrationPlan` / `applyMigration`）。那个功能连同它的后端一起删了：
-//   它把 `agent_models` 搬成岗位绑定，而绑定当时没有活的消费者；
-//   那批意图已用一次迁移搬完，消费者也已接上（`plugins/src/dispatchModel.ts`）。
-//   详见 `docs/bugs/BUG-026` / `BUG-027`。
-
-export async function fetchConfigBundle(kind: 'full' | 'model-profiles' | 'model-bindings' = 'full'): Promise<unknown> {
-  const qs = kind === 'full' ? '' : `?kind=${encodeURIComponent(kind)}`
-  return hubGet(`/api/config-bundle${qs}`).then((r) => readJson<unknown>(r))
-}
-
-/** 计划导入。只读地算出"会发生什么"，**不写库**。 */
-export function planConfigBundle(bundle: unknown, conflictPolicy: 'fail' | 'skip' | 'overwrite', actor: string): Promise<unknown> {
-  return hubPost('/api/config-bundle/plan', { bundle, conflictPolicy, actor })
-}
-
-export function applyConfigBundle(bundle: unknown, conflictPolicy: 'fail' | 'skip' | 'overwrite', actor: string): Promise<unknown> {
-  return hubPost('/api/config-bundle/apply', { bundle, conflictPolicy, actor })
-}
+//   删除的理由（不是"没人用"，而是"它在单机部署里没有用"）：
+//     · 包里装的是模型档案与岗位绑定，而那 27 行本来就在 `team.db` 里
+//       ⇒ **每一次整库备份**（`product/server/backup.mjs`，另有每日异地）都已经带着它们；
+//     · 包**永远不含凭证值**（那是契约层的硬规矩，对），而凭证值在本机 DPAPI 密钥库里
+//       ⇒ 换机器无论如何都要重填钥匙 —— 包并没有省下这一步。
+//     ⇒ "配置能不能搬"这件事由**备份/恢复**负责，而不是由一份功能更少的副本负责。
+//
+//   它唯一不可替代的东西是那条判据：**读模型配置的端点不吐凭证引用名**
+//   （那条当场抓出过 BUG-028）。它搬到了 `team-hub/model-secret-leak.test.mjs`。
+//
+//   上游还有一段「迁移老配置（PRT-506）」也在这附近删过（`fetchMigrationPlan` /
+//   `applyMigration`）：它把 `agent_models` 搬成岗位绑定，而绑定当时没有活的消费者；
+//   那批意图已用一次迁移搬完，消费者也接上了（`plugins/src/dispatchModel.ts`）。
+//   详见 `docs/bugs/BUG-026` / `BUG-027` / `BUG-028`。
 
 // ── 凭证管理（spec §6.7 的**写**一半，PRT-507 的界面入口）─────────────────
 //

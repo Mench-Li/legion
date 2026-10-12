@@ -509,85 +509,16 @@ export function secretStatusView(status: unknown): SecretStatusView {
   }
 }
 
-// ────────────────────────────────────────── ④ 配置包导入计划
+// ★★ 2026-10-12：这一节原本是「④ 配置包导入计划」（`BundlePlanView` / `bundlePlanView`），
+//   随「配置包」（PRT-508）整体删除。理由不是"没人用"，而是**它在单机部署里没有用**：
+//   包里那 27 行（模型档案 + 岗位绑定）本来就在 `team.db` 里 ⇒ 每一次整库备份都已经带着它们；
+//   而凭证值从来不在包里（在本机 DPAPI 密钥库）⇒ 换机器无论如何都要重填。
+//   现在"配置能不能搬"由**备份/恢复**负责（`product/server/backup.mjs`）。
+//
+//   上一轮这里还删过一个 `migrationPlanView`（「配置迁移」PRT-506 的视图）：
+//   它把 `agent_models` 搬成岗位绑定，而绑定当时没有活的消费者。
+//   两份视图的删除是同一件事的两半，理由见 `docs/bugs/BUG-026` / `BUG-027`。
 
-/**
- * `POST /api/config-bundle/plan` 的计划视图。
- *
- * 它读的是 `runtime/contracts/config-bundle.mjs` 的 `actions/summary`。
- * （这里原本还有一句"与 `modelSettings.ts` 的 `importPlanView` 不是同一份计划"——
- * 那个函数服务的是「配置迁移」，2026-10-12 随它一起删了，见 `docs/bugs/BUG-026`。）
- *
- * 两个容易漏的点：
- *   · `keptLocal`（策略 `keep` 下因为内容不同被跳过）与 `conflicts` 相加
- *     才是"包里有但没进去"的总数。只报 `conflicts` 时，`keep` 策略看起来
- *     是"零冲突、全成功"，而实际一条都没导入。
- *   · `applicable` 由服务端算（`assertApplicable`）——界面不重算一遍
- *     "有没有冲突/悬空引用"，两份判定必然漂移。
- */
-export interface BundlePlanView {
-  applicable: boolean
-  headline: string
-  lines: string[]
-  blocked: string | null
-}
-
-export function bundlePlanView(plan: unknown, applicable: unknown): BundlePlanView {
-  const p = obj(plan)
-  if (p === null) {
-    return { applicable: false, headline: '没有导入计划', lines: [], blocked: '先粘贴或选择一个配置文件，然后点「预演导入」。' }
-  }
-  if (p.ok !== true) {
-    const errors = Array.isArray(p.errors)
-      ? p.errors.filter((x): x is string => typeof x === 'string' && x !== '')
-      : []
-    return {
-      applicable: false,
-      headline: '这个包不能导入',
-      lines: [],
-      blocked: errors.length > 0 ? errors.join('；') : (str(p.message) ?? '包的内容不适用。'),
-    }
-  }
-
-  const summary = obj(p.summary) ?? {}
-  const num = (v: unknown): number => (typeof v === 'number' && Number.isFinite(v) ? v : 0)
-  const willWrite = num(summary.willWrite)
-  const conflicts = num(summary.conflicts)
-  const keptLocal = num(summary.keptLocal)
-  const needsCredential = num(summary.needsCredential)
-  const dangling = Array.isArray(summary.danglingRefs) ? summary.danglingRefs.length : 0
-
-  const lines: string[] = []
-  if (willWrite > 0) lines.push(`将写入 ${willWrite} 条（新建 + 更新）`)
-  if (conflicts > 0) lines.push(`有 ${conflicts} 处冲突未决`)
-  if (keptLocal > 0) lines.push(`包里有 ${keptLocal} 条与本机不同、**不会导入**（保留本机现有设置）`)
-  if (needsCredential > 0) lines.push(`其中 ${needsCredential} 条档案需要凭证：导入之后要在「凭证」页录入对应引用，否则它们跑不起来`)
-  if (dangling > 0) lines.push(`有 ${dangling} 条绑定引用了不存在的档案`)
-  if (lines.length === 0) lines.push('包里没有需要变更的内容')
-
-  const gate = obj(applicable)
-  if (gate === null || gate.ok !== true) {
-    return {
-      applicable: false,
-      headline: '这份计划还不能执行',
-      lines,
-      blocked: (gate === null ? null : (str(gate.reason) ?? str(gate.code))) ?? '服务端没有说明为什么不能执行。',
-    }
-  }
-
-  return {
-    applicable: true,
-    // 有可写入项才是"可以导入"；一条都不写时**不能**说可以导入——
-    // 那会让用户以为这份包带来了什么。
-    headline: willWrite > 0 ? '可以导入' : '包里没有要写入的内容',
-    lines,
-    blocked: null,
-  }
-}
-
-// ★ 2026-10-12：`migrationPlanView` 已删除 —— 「配置迁移」整个功能被拆掉了
-//   （它把 `agent_models` 搬成岗位绑定，而绑定当时没有活的消费者；那批意图已用一次迁移
-//   搬完，消费者也接上了 `plugins/src/dispatchModel.ts`）。理由见 `docs/bugs/BUG-026`/`BUG-027`。
 
 // ────────────────────────── ⑤ 改档案时「留空 secretRef」到底意味着什么
 

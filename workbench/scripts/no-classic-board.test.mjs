@@ -18,10 +18,11 @@
 //   这个字符串"的判据**永远为假**。剥注释之后，文件头还能放心地讲清楚这段历史。
 //   注意只剥整行注释：行尾注释里可能还有真代码，宁可少剥，不要剥错。
 //
-// 名单里唯一需要解释的例外是 `fetchConfig`：`fetchConfigBundle`（PRT-508 的配置导入导出，
-// 走中枢、有生产调用方与 model-api.test.mjs 守着）**保留**，它是另一个函数，不是被
-// 取消的 v1 `/api/config`。所以这一条用**词边界**匹配：`\bfetchConfig\b` 不会命中
-// `fetchConfigBundle`，而 v1 的 `fetchConfig()` 一定命中。
+// ★ 2026-10-12：这里原本有一段解释"唯一需要解释的例外是 `fetchConfig`"——
+//   因为 v2 的 `fetchConfigBundle`（配置导入导出）与它只差一个词，所以名单里那条
+//   用**词边界**匹配（`\bfetchConfig\b`）。
+//   现在 `fetchConfigBundle` 已随「配置包」（PRT-508）整体删除 ⇒ **例外不存在了**。
+//   留着那段说明会让人以为 v2 还有那个函数；删掉它，规矩就回到最简单的那一版。
 // ============================================================================
 import test from 'node:test'
 import assert from 'node:assert/strict'
@@ -86,7 +87,7 @@ const BANNED = [
   [/\bopenKanban\b/, '「打开经典看板 ↗」的入口函数已删除：它是那条被取消链路的入口'],
   [/\bsubscribeBoard\b/, 'v1 看板 SSE 订阅已删除：数据面只剩中枢，这条流没有生产方'],
   [/\bsubscribeActivity\b/, 'v1 动态 SSE 订阅已删除：同上，中枢侧走 subscribeHubAudit'],
-  [/\bfetchConfig\b/, 'v1 `/api/config` 读取已删除（注意：v2 的 fetchConfigBundle 是配置导入导出，不在名单里）'],
+  [/\bfetchConfig\b/, 'v1 `/api/config` 读取已删除（v2 那个 `fetchConfigBundle` 也已随「配置包」删除）'],
   [/fetchBoard\(/, 'v1 `/api/board` 读取已删除：中枢侧是 fetchHubTasks'],
   [/fetchActivity\(/, 'v1 `/api/activity` 读取已删除：中枢侧是 fetchHubActivity'],
   [/fetchMissions\(/, 'v1 `/api/missions` 读取已删除：中枢侧是 fetchHubMissions'],

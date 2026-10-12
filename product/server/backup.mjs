@@ -36,12 +36,67 @@ import { basename, dirname, join, resolve } from 'node:path'
 import { spawnSync } from 'node:child_process'
 import { DatabaseSync } from 'node:sqlite'
 
-/** 备份要证明"拿得回来"的表。缺一张就说明备份不完整。 */
+/**
+ * 备份要证明"拿得回来"的表 —— **只收"中枢启动就会建的"那些**。缺一张就说明备份不完整。
+ *
+ * ## 为什么必须按"建表时机"分成两组（2026-10-12 实测抓出来的）
+ *
+ * 这份清单原先混着两种表，而**验证要求全部存在** ⇒ 在一个**全新部署**上，
+ * 每一次夜间备份都会失败、并把快照删掉（"不通过就把文件删掉"那条纪律）。
+ * 实测（空库起一次中枢，再数它建了哪些表）：
+ *
+ *     期望的 12 张里，**4 张在全新中枢上根本不存在**：
+ *       run_context_snapshots（team-hub/context-store.mjs）、
+ *       hub_users / hub_user_sessions（team-hub/user-store.mjs）、
+ *       hub_devices（team-hub/device-store.mjs）
+ *     —— 它们的 schema 是**懒建**的：存在 `createXStore()` 里，客户从没碰过那个功能就不建。
+ *
+ *   > 一条"缺一张就判备份不完整"的规则，
+ *   > 与一条"把懒建的表也算进去"的规则，在**用过的机器**上是同一个东西 ——
+ *   > 只在全新部署上分叉，而那时它把每一份备份都删掉了。
+ *
+ * 所以分成两组，各有各的判据：
+ *   · `EXPECTED_TABLES`（恒建表）—— **缺一张即失败**。它们由中枢的启动期 `ensure*Schema()` 建，
+ *     与"有没有人用过某个功能"无关，所以"不存在"必定意味着**库坏了或备份不完整**。
+ *   · `LAZY_TABLES`（懒建表）—— **存在就必须能读回来**；不存在只作为读数报出，不判红。
+ *     懒建表不存在**等于那个功能从没被用过**，没有数据可丢。
+ *
+ *   ⚠ 前提由判据钉住（`product/server/backup.test.mjs` ⑥）：**`EXPECTED_TABLES` 里的每一张，
+ *     在全新中枢上都必须真的存在**。往严格那组里加一张懒建表 = 重新引入上面那个失败 ——
+ *     而那一步看起来只是"多加一行"。
+ *
+ * ★ 同一天补进来的模型配置三张表**属于严格那组**（实测全新中枢就会建它们）。
+ *   补的经过：将军问"配置包有啥用"，查完结论是它在该部署里没用（那 27 行本来就在每次整库备份里），
+ *   于是配置包被删掉了 —— 而**删掉之后**，这份备份成了那 27 行唯一的保护，
+ *   这才有人去读这份清单，发现它列了 12 张、模型表一张都不在里面：
+ *
+ *   > 一个"我一直以为另一条路在照看它"的东西，
+ *   > 在另一条路被拆掉的那一天，才会要求你回答"那你自己验过它吗"。
+ *
+ * ⚠ 凭证**值**不在这些表里（在 DPAPI 密钥库，绑机器绑用户）⇒ 恢复之后仍要重新录入钥匙。
+ *   清单保证的是"表在、能读回来"，不是"钥匙还在"。
+ */
 export const EXPECTED_TABLES = Object.freeze([
   'tasks', 'messages', 'conversations', 'audit',
-  'run_attempts', 'run_events', 'run_context_snapshots',
+  'run_attempts', 'run_events',
   'agent_registry', 'agent_conversation_bindings',
-  'hub_users', 'hub_user_sessions', 'hub_devices',
+  // 模型配置（见上面那段：配置包拆掉之后，这里是它唯一的保护）
+  'model_providers', 'model_profiles', 'employee_model_bindings',
+])
+
+/**
+ * **懒建**的表：schema 存在 `createXStore()` 里，那个功能没被用过就不存在。
+ *
+ * 它们同样必须"拿得回来"（有数据却读不回来是最坏的），但**不能要求它们存在** ——
+ * 见 `EXPECTED_TABLES` 上面那段实测。判据：存在则行数必须读得出来（读不出来即失败）。
+ */
+export const LAZY_TABLES = Object.freeze([
+  // 上下文快照：team-hub/context-store.mjs（`createContextStore()` 里建）
+  'run_context_snapshots',
+  // 远程账号体系：team-hub/user-store.mjs（`hub_users` / `hub_user_sessions`）
+  'hub_users', 'hub_user_sessions',
+  // 设备令牌：team-hub/device-store.mjs
+  'hub_devices',
 ])
 
 const log = (...a) => console.log(...a)
@@ -76,7 +131,14 @@ export function snapshotInto(dbFile, outFile) {
   return outFile
 }
 
-/** 读回来验一遍：能不能打开、完整性、关键表、行数。 */
+/**
+ * 读回来验一遍：能不能打开、完整性、关键表、行数。
+ *
+ * 两类表分开报（见 `EXPECTED_TABLES` / `LAZY_TABLES` 上面那两段）：
+ *   · `missing`    —— 恒建表缺了哪几张 ⇒ **判红**（库坏了或备份不完整）
+ *   · `lazyAbsent` —— 懒建表不在（那个功能从没用过）⇒ **读数，不判红**
+ *   · `lazyUnreadable` —— 懒建表在、但行数读不出来 ⇒ **判红**（有数据却读不回来是最坏的）
+ */
 export function inspectSnapshot(file) {
   const db = new DatabaseSync(file, { readOnly: true })
   try {
@@ -89,7 +151,21 @@ export function inspectSnapshot(file) {
       if (!tables.has(t)) continue
       counts[t] = Number(db.prepare(`SELECT COUNT(*) AS n FROM ${t}`).get().n)
     }
-    return { ok: integrityValue === 'ok' && missing.length === 0, integrity: integrityValue, missing, counts, tables: [...tables].sort() }
+    const lazyAbsent = []
+    const lazyUnreadable = []
+    for (const t of LAZY_TABLES) {
+      if (!tables.has(t)) { lazyAbsent.push(t); continue }
+      try { counts[t] = Number(db.prepare(`SELECT COUNT(*) AS n FROM ${t}`).get().n) } catch { lazyUnreadable.push(t) }
+    }
+    return {
+      ok: integrityValue === 'ok' && missing.length === 0 && lazyUnreadable.length === 0,
+      integrity: integrityValue,
+      missing,
+      lazyAbsent,
+      lazyUnreadable,
+      counts,
+      tables: [...tables].sort(),
+    }
   } finally {
     db.close()
   }
@@ -143,8 +219,14 @@ function main() {
     try {
       const info = inspectSnapshot(target)
       log(JSON.stringify({ file: basename(src), ...info }, null, 2))
-      if (!info.ok) { warn('备份**不可用**：完整性或关键表缺失'); return 1 }
-      log(`✔ 备份可用：integrity=${info.integrity}，${EXPECTED_TABLES.length} 张关键表都在`)
+      if (!info.ok) {
+        warn(`备份**不可用**：完整性=${info.integrity}，恒建表缺失=${JSON.stringify(info.missing)}`
+          + `${info.lazyUnreadable.length > 0 ? `，懒建表读不出来=${JSON.stringify(info.lazyUnreadable)}` : ''}`)
+        return 1
+      }
+      log(`✔ 备份可用：integrity=${info.integrity}，${EXPECTED_TABLES.length} 张恒建表都在`
+        + `（另有 ${LAZY_TABLES.length} 张懒建表：在场 ${LAZY_TABLES.length - info.lazyAbsent.length} 张`
+        + `${info.lazyAbsent.length > 0 ? `，未启用 ${info.lazyAbsent.length} 张=那个功能没用过，不算缺失` : ''}）`)
       return 0
     } finally {
       if (tmp !== null && existsSync(tmp)) unlinkSync(tmp)
@@ -191,11 +273,18 @@ function main() {
   log('② 读回来验证（写出来但读不回去的备份等于没有备份）')
   const info = inspectSnapshot(rawPath)
   if (!info.ok) {
-    warn(`快照**未通过验证**：integrity=${info.integrity}，缺表=${info.missing.join(',') || '无'}`)
+    warn(`快照**未通过验证**：integrity=${info.integrity}，`
+      + `缺表=${info.missing.join(',') || '无'}`
+      + `${info.lazyUnreadable.length > 0 ? `，懒建表读不出来=${info.lazyUnreadable.join(',')}` : ''}`)
     rmSync(rawPath, { force: true })
     return 1
   }
   log(`   integrity=ok；行数：${EXPECTED_TABLES.map((t) => `${t}=${info.counts[t] ?? '-'}`).join(' ')}`)
+  // ★ 懒建表：在场就把行数报出来（运维要知道"那份数据在不在"），
+  //   不在场也说一句"哪几张没启用"——**只是读数，不判红**（理由见 `EXPECTED_TABLES` 上面那段）。
+  if (info.lazyAbsent.length > 0) {
+    log(`   懒建表未启用（那个功能从没用过，不是缺失）：${info.lazyAbsent.join(' ')}`)
+  }
 
   let finalPath = rawPath
   if (o.passphraseFile !== null) {

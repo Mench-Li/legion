@@ -212,7 +212,8 @@ export function createModelProvidersRoutes({
    * "每个端点各自记得抹掉"与"有一个统一的出口"不是同一件事 ——
    * 前者在**新加一个端点**的那天就失效了，而失效的表现是"引用名悄悄又发出去了"。
    *
-   *   实测抓到它的那条判据（`config-bundle-routes.test.mjs` 用例 ④）在**原始字节**上
+   *   实测抓到它的那条判据（原 `config-bundle-routes.test.mjs` ④，配置包拆除后搬到
+   *   `model-secret-leak.test.mjs` ①）在**原始字节**上
    *   找引用名：档案那一族曾把 `credential.ref` 一并发出，供应商这一族则一直整行原样返回。
    *   两处的规矩都写在 `model-store.mjs` 的文件头：
    *   **读出去的东西不含 `secretRef`；引用名也是可枚举的攻击面。**

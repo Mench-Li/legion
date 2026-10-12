@@ -139,22 +139,21 @@ export const NON_ENV_LITERALS = Object.freeze([
   'TOKENIZER_BAD_ARTIFACT', // runtime/context/tokenizer-registry.mjs
   'TOKENIZER_BAD_JSON', // runtime/context/tokenizer-registry.mjs
   'TOKENIZER_DUPLICATE_MODEL', // runtime/context/tokenizer-registry.mjs
-  // ── runtime/contracts/config-bundle.mjs（15 条）
-  'ACTOR_REQUIRED', // runtime/contracts/config-bundle.mjs
-  'BUNDLE_BINDING_INVALID', // runtime/contracts/config-bundle.mjs
-  'BUNDLE_BINDINGS_NOT_ARRAY', // runtime/contracts/config-bundle.mjs
-  'BUNDLE_CONTAINS_SECRET', // runtime/contracts/config-bundle.mjs
-  'BUNDLE_KIND_INVALID', // runtime/contracts/config-bundle.mjs
-  'BUNDLE_NOT_OBJECT', // runtime/contracts/config-bundle.mjs
-  'BUNDLE_PROFILE_INVALID', // runtime/contracts/config-bundle.mjs
-  'BUNDLE_PROFILES_NOT_ARRAY', // runtime/contracts/config-bundle.mjs
-  'BUNDLE_SECRET_REF_PRESENT', // runtime/contracts/config-bundle.mjs
-  'BUNDLE_UNKNOWN_FIELD', // runtime/contracts/config-bundle.mjs
-  'BUNDLE_VERSION_UNSUPPORTED', // runtime/contracts/config-bundle.mjs
-  'CONFLICT_POLICY_INVALID', // runtime/contracts/config-bundle.mjs
-  'IMPORT_DANGLING_PROFILE_REF', // runtime/contracts/config-bundle.mjs
-  'IMPORT_HAS_CONFLICTS', // runtime/contracts/config-bundle.mjs
-  'PLAN_INVALID', // runtime/contracts/config-bundle.mjs
+  // ★★ 2026-10-12：这里原有 `runtime/contracts/config-bundle.mjs` 那 15 条字面量。
+  //   配置包（PRT-508）整体拆除，那个契约文件不再存在 ⇒ 它独有的 12 条随之删除：
+  //     BUNDLE_{BINDING_INVALID,BINDINGS_NOT_ARRAY,CONTAINS_SECRET,KIND_INVALID,NOT_OBJECT,
+  //             PROFILE_INVALID,PROFILES_NOT_ARRAY,SECRET_REF_PRESENT,UNKNOWN_FIELD,
+  //             VERSION_UNSUPPORTED}、CONFLICT_POLICY_INVALID、IMPORT_{DANGLING_PROFILE_REF,HAS_CONFLICTS}
+  //
+  //   ★ 另外三条**没有删**，因为它们不是它独有的（实测：`ACTOR_REQUIRED` 出现在 42 处、
+  //     `PLAN_INVALID` 22 处，各自还有别的生产者）：`ACTOR_REQUIRED` 与 `PLAN_INVALID`
+  //     在别的族里活着，`BUNDLE_*` 里 `BUNDLE_ARCHIVE_*` / `BUNDLE_COPY_FAILED` 等
+  //     一大族属于**桌面发布包**（`product/launcher/*`、`product/release/*`），
+  //     与配置包只是名字像。
+  //
+  //   > 一张"按文件登记的码表"，在文件被删之后有两种错法：
+  //   > 留着它（码表说有个不存在的生产者），或者照文件删干净（连带删掉**同名**的活码）。
+  //   > 只有逐个回查"还有谁在产生它"才能分清。
   // ── runtime/contracts/index.d.mts（11 条）
   'BAD_RESPONSE', // runtime/contracts/index.d.mts、runtime/contracts/model-probe.mjs
   'CAPABILITY_MISSING', // runtime/contracts/index.d.mts、runtime/contracts/model-probe.mjs

@@ -160,11 +160,13 @@ import { createLazyTokenizerRegistry } from '../runtime/context/tokenizer-regist
 // 而"装配器能装配"与"系统里的东西真的装配得进来"是两件事。
 import { SourceError, collectCandidates } from '../runtime/context/sources.mjs'
 import { createContextSource, SOURCE_TRUST } from '../runtime/contracts/context.mjs'
-// 配置导入导出（PRT-508）：**导出永远不含密钥**。契约层负责"包里有没有
-// 密钥"与"这包能不能导"，路由层只负责读写与把拒绝翻成状态码。
-import {
-  BUNDLE_ERRORS, BundleError, assertApplicable, buildBundle, planImport, validateBundle,
-} from '../runtime/contracts/config-bundle.mjs'
+// ★ 2026-10-12：「配置包」（导出/导入模型档案与岗位绑定，PRT-508）**已整体删除**。
+//   拆它的理由与它那条判据去哪了，见 `docs/superpowers/prt/PRT-508-config-import-export.md`
+//   顶部那段；一句话：在单机部署里它没有任何用处（那些行本来就在每一次整库备份里），
+//   而"配置能不能搬"这件事现在由**备份/恢复**负责（`product/server/backup.mjs`）。
+//   它唯一不可替代的那条判据（读模型配置的端点不吐凭证引用名，抓出过 BUG-028）
+//   搬到了 `team-hub/model-secret-leak.test.mjs`。
+//   ⚠ 这一段里**不写那个路由工厂的函数名**：基线生成器读源码文本、分不清注释与代码。
 // `/api/runtime/next-post` 用「这条任务后面还有没有岗位」这个判定。
 // 与运行仓储里用的是**同一个**函数：两处各写一遍判定，迟早会出现
 // "接口说有下一岗位、交接时却按链尾收口"这种不一致。
@@ -283,7 +285,10 @@ import { createSkillSourceRoutes } from './routes/skill-source.mjs'
 import { createEmployeeManifestsRoutes } from './routes/employee-manifests.mjs'
 import { createTeamPlansRoutes } from './routes/team-plans.mjs'
 import { createPriceTablesRoutes } from './routes/price-tables.mjs'
-import { createConfigBundleRoutes } from './routes/config-bundle.mjs'
+// ★ 2026-10-12：配置包那个路由工厂的 import 已随「配置包」整体删除（见文件头那段的说明）。
+//   ⚠ 这里**不写它的函数名**：基线生成器读的是**源码文本**、分不清注释与代码
+//   （`scripts/prt/baseline-snapshot.mjs` 自己就记着这个坑：`MANIFEST_PATTERNS` 曾把注释里的
+//   例子当成真声明）⇒ 注释里写出那个名字会让它报"server.mjs 装配了未登记的路由族"。
 import { createContextSnapshotsRoutes } from './routes/context-snapshots.mjs'
 import { createModelProfilesRoutes } from './routes/model-profiles.mjs'
 import { createModelProvidersRoutes } from './routes/model-providers.mjs'
@@ -7048,12 +7053,8 @@ const router = createRouter([
     buildSnapshotExport, verifySnapshotExport, CONTEXT_EXPORT_CODES,
     ContextExportError, SourceError, TOKENIZER_REGISTRY,
   }),
-  createConfigBundleRoutes({
-    json,
-    bindingStore, modelStore, buildBundle,
-    planImport, validateBundle, assertApplicable,
-    BUNDLE_ERRORS, BundleError, handleRun,
-  }),
+  // ★ 2026-10-12：配置包那一族的装配段已随「配置包」整体删除（理由见文件头那段）。
+  //   `/api/config-bundle` 这个命名空间**不再存在**。⚠ 同上：注释里不写那个工厂名。
   createPriceTablesRoutes({
     json,
     budgetPriceTables, createPriceTable, BUDGET_ERRORS,
@@ -7321,9 +7322,9 @@ async function handle(req, res, stripPrefix) {
     // 本族这 2 条已全部搬进模块，`server.mjs` 里不再有它们。
     // 归属 /api/model-bindings 的那 2 条都在这里了。
     if (await router.dispatch(req, res, { path, url })) return
-    // ── 配置包导出/导入（PRT-5xx，spec §6.6） —— 已提取到 `./routes/config-bundle.mjs`（PRT-316 第 16 族 / 切片 17）──
-    // 整段搬走：`server.mjs` 里现在**不再有** `/api/config-bundle` 路由，该命名空间只住一个地方。
-    if (await router.dispatch(req, res, { path, url })) return
+    // ── 配置包导出/导入 —— **已整体拆除（2026-10-12）** ──
+    // 它曾住在这里、后来提取到 `./routes/config-bundle.mjs`（PRT-316 第 16 族 / 切片 17），
+    // 现在整族连同契约与判据一起删掉了。`/api/config-bundle` 这个命名空间**不再存在**。
     // ── 单次运行预算账本与价目表（PRT-503 / PRT-510 / PRT-511，spec §6.6） —— 已提取到 `./routes/run-budget.mjs`（PRT-316 第 29 族 / 切片 31）──
     // 本族这 6 条已全部搬进模块，`server.mjs` 里不再有它们。
     if (await router.dispatch(req, res, { path, url })) return

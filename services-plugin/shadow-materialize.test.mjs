@@ -121,6 +121,88 @@ test('③b ★★ 读数里要**说明**这一类（否则「未变 1」会让�
   assert.match(line, /任何东西都不许写它们/)
 })
 
+// ══════════════════════════════════════════════════════════════════════════
+// ③c ★★★ "它会自己补上的默认值"不算差异（2026-10-12，修完 includeSecretRefs 之后
+//     剩下来的**最后一处**差异）
+//
+// 真机读数：修掉 P2 读路径那个参数之后，门从 `修改 3` 降到 `修改 1` ——
+// 只剩 `svea-ds` 的 `models`。因果链是读 DSH 源码得出的，不是猜：
+//
+//   `svea-ds` 的 patch 里模型**没声明 `input`** ⇒ DSH 的模型 schema 里 `input` 没默认值
+//   （注释明说"缺席 ⇒ `[]` ⇒ 回落到路线级"）⇒ 解析落到 `defaultInput = ['text']`
+//   ⇒ `listModels()` **总是**报 `inputModalities: ['text']` ⇒ 快照带上 `input`，
+//   而 Legion 侧没有 ⇒ 归一化成 `null` ⇒ **永远报一处差异**。
+//
+// 而这处差异**写进去也不改变任何东西**（物化写 Legion 的 models 时不带 `input`，
+// DSH 照样落 `defaultInput`）⇒ 它唯一的后果是**每 5 分钟重写一次、永不收敛** ——
+// 而门禁的放行条件恰恰是"连续几轮 diff 为空"。
+//
+//   > 一处"它会自己补上"的默认值，与一处"它真的不一样"的差异，
+//   > 在 `models` 这一格上是同一行；而前者永远消不掉 —— 于是那道门永远开不了。
+//
+// 口径与 `provider-store` 的更新语义**同一条**：**留空即继承，不覆盖**。
+// ⚠ 但**显式空数组仍然是差异**（"我要清空它"是表态），所以下面两个方向都钉。
+// ══════════════════════════════════════════════════════════════════════════
+
+test('③c ★★★ Legion 侧**未声明** `input`（null）而 DSH 侧有默认值 `["text"]` ⇒ **不是差异**', () => {
+  const legionNoInput = [{
+    id: 'svea-ds', displayName: 'svea-ds', api: 'openai-completions', baseURL: 'https://a.example/v1',
+    secretRef: 'SVEA_DS_API_KEY',
+    models: [{ id: 'm1', name: 'M1' }],   // ← 没有 input
+  }]
+  const dshDefaults = [{
+    id: 'svea-ds', displayName: 'svea-ds', api: 'openai-completions', baseURL: 'https://a.example/v1',
+    apiKeyEnv: 'SVEA_DS_API_KEY', credentialConfigured: true, declaredInSettings: true,
+    models: [{ id: 'm1', name: 'M1', input: ['text'] }],   // ← DSH 落了 defaultInput
+  }]
+  const plan = planMaterialization({ desired: legionNoInput, actual: dshDefaults })
+  assert.equal(plan.clean, true, '引擎自己补的默认值不是差异 —— 否则门永远开不了')
+  assert.deepEqual(plan.update, [])
+  assert.equal(plan.counts.unchanged, 1)
+  // 反向锚：`changedFields` 必须与"未变"判定**一致**（共用同一个函数）。
+  assert.deepEqual(changedFields(normalizeForCompare(dshDefaults[0]), normalizeForCompare(legionNoInput[0])), [],
+    'sameAs 说"未变"而 changedFields 说"models"变了两处就会分叉 —— 这正是 BUG-033 的形态')
+})
+
+test('③c ★★★ 反方向：Legion 侧**显式声明空数组** `[]` ⇒ **仍然是差异**（"我要清空"是表态）', () => {
+  const legionExplicitEmpty = [{
+    id: 'svea-ds', displayName: 'svea-ds', api: 'openai-completions', baseURL: 'https://a.example/v1',
+    secretRef: 'SVEA_DS_API_KEY',
+    models: [{ id: 'm1', name: 'M1', input: [] }],   // ← 显式空：与"没声明"是两件事
+  }]
+  const dshDefaults = [{
+    id: 'svea-ds', displayName: 'svea-ds', api: 'openai-completions', baseURL: 'https://a.example/v1',
+    apiKeyEnv: 'SVEA_DS_API_KEY', credentialConfigured: true, declaredInSettings: true,
+    models: [{ id: 'm1', name: 'M1', input: ['text'] }],
+  }]
+  const plan = planMaterialization({ desired: legionExplicitEmpty, actual: dshDefaults })
+  assert.equal(plan.clean, false, '显式空数组必须**照旧**报差异 —— 否则用户的"清空"会被静默吞掉')
+  assert.deepEqual(plan.update, [{ id: 'svea-ds', fields: ['models'] }])
+  // 两个值必须可分辨：null（未声明）与 []（显式空）
+  assert.equal(normalizeForCompare({ id: 'x', models: [{ id: 'm' }] }).models[0].input, null)
+  assert.deepEqual(normalizeForCompare({ id: 'x', models: [{ id: 'm', input: [] }] }).models[0].input, [])
+})
+
+test('③c ★★ 真的不同仍然要报：`["text"]` vs `["image"]`、以及显式声明的 contextWindow', () => {
+  const base = {
+    id: 'p', displayName: 'P', api: 'openai-completions', baseURL: 'https://a.example/v1',
+    apiKeyEnv: 'K', credentialConfigured: true, declaredInSettings: true,
+    models: [{ id: 'm1', name: 'M1', input: ['image'], contextWindow: 1000 }],
+  }
+  const wantDifferentInput = [{
+    id: 'p', displayName: 'P', api: 'openai-completions', baseURL: 'https://a.example/v1', secretRef: 'K',
+    models: [{ id: 'm1', name: 'M1', input: ['text'] }],
+  }]
+  assert.equal(planMaterialization({ desired: wantDifferentInput, actual: [base] }).clean, false,
+    '两侧都表了态且不同 ⇒ 必须报差异（这条规则只放行"未声明"，不是放行一切）')
+  const wantWindow = [{ ...wantDifferentInput[0], models: [{ id: 'm1', name: 'M1', input: ['image'], contextWindow: 2000 }] }]
+  const plan = planMaterialization({ desired: wantWindow, actual: [base] })
+  assert.equal(plan.clean, false)
+  assert.deepEqual(plan.update, [{ id: 'p', fields: ['models'] }], '显式声明的 contextWindow 不同也要报')
+  // 模型数量不同当然也要报
+  assert.equal(planMaterialization({ desired: [{ ...wantDifferentInput[0], models: [] }], actual: [base] }).clean, false)
+})
+
 test('④ ★ 要删的那几条必须被点名（P2 存在的唯一理由）', () => {
   const extra = [...DSH, { id: 'svea-ds', displayName: 'SVEA', api: 'openai-completions', apiKeyEnv: 'SVEA_DS_API_KEY', credentialConfigured: true, models: [{ id: 'm9' }] }]
   // Legion 里**没有** svea-ds ⇒ 接管会把它 unset 掉

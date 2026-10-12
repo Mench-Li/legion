@@ -28,12 +28,13 @@
 // ★ 退出码把 `warn` 与 `critical` **分开**，也把"读不到"单独一档 ——
 //   一个把所有非正常都回 1 的脚本，会让监控分不出"快去清盘"与"去装监控"。
 // ============================================================================
-import { statSync, existsSync, readdirSync, statfsSync, writeFileSync, renameSync, unlinkSync, mkdirSync } from 'node:fs'
+import { statSync, existsSync, readdirSync, statfsSync, writeFileSync, renameSync, unlinkSync, mkdirSync, readFileSync } from 'node:fs'
 import { dirname, join, resolve, basename, sep } from 'node:path'
 import { hostname } from 'node:os'
 
 import { storageReport, levelSummary, WARN_HEADROOM_FACTOR, CRITICAL_HEADROOM_FACTOR, BACKUP_HEADROOM_FACTOR } from '../../team-hub/storage-health.mjs'
-import { DEFAULT_STATE_PATH, makeState, writeStateAtomic } from '../../team-hub/storage-state.mjs'
+import { DEFAULT_STATE_PATH, makeState, writeStateAtomic, parseState, stateHistory } from '../../team-hub/storage-state.mjs'
+import { pushSample } from '../../team-hub/storage-growth.mjs'
 
 /**
  * 写状态时用的 `fs` 面 —— **显式列出来**，不整包传 `node:fs`。
@@ -325,9 +326,18 @@ function main(argv) {
         console.error('[storage-check] 已跳过状态写入（体检结论不受影响）。')
       }
     } else {
+      // ★ 历史样本：读**上一份**状态里的历史，追加这一次的读数。
+      //   读不到（第一轮、文件坏了、版本不认识）就从空开始 ——
+      //   而"从空开始"意味着前 6 小时趋势算不出来，那是**诚实**的代价。
+      const prev = parseState(readStateRaw(args.state))
+      const atMs = Date.now()
+      const history = pushSample(
+        prev.ok === true ? stateHistory(prev.state) : [],
+        { atMs, dbBytes: report.dbBytes, freeBytes: report.freeBytes },
+      )
       const state = makeState({
         level: v.level, exitCode: v.exitCode, report, problems,
-        atMs: Date.now(), host: safeHostname(),
+        atMs, host: safeHostname(), history,
       })
       const w = writeStateAtomic({ fs: STATE_FS, path: args.state, state, dir: dirname(args.state) })
       if (args.json !== true) {
@@ -351,3 +361,8 @@ function safeHostname() {
 // 只在被直接运行时执行（被 import 时只导出 `checkStorage` 供判据使用）。
 const isMain = process.argv[1] !== undefined && basename(process.argv[1]) === 'storage-check.mjs'
 if (isMain) process.exit(main(process.argv.slice(2)))
+
+/** 读状态文件原文；不存在回 null（**不是**抛 —— 第一轮就是这种情形）。 */
+function readStateRaw(path) {
+  try { return readFileSync(path, 'utf8') } catch { return null }
+}

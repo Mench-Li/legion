@@ -212,4 +212,79 @@ describe('storage-check CLI（真进程）', () => {
       assert.deepEqual(backupAfter, backupBefore, '备份目录不许变')
     } finally { s.cleanup() }
   })
+
+  it('★★★ ⑬ 历史样本跨**多次运行**累积（趋势预测的原料全靠它）', () => {
+    // ★ 这一条必须真跑进程：`pushSample` 的纯判据证明它算得对，
+    //   证明不了 CLI **真的**把上一次的历史读进来了。
+    const s = sandbox()
+    try {
+      const state = join(s.run, 's.json')
+      cli(['--db', s.db, '--backups', s.backups, '--state', state])
+      const first = JSON.parse(readFileSync(state, 'utf8'))
+      assert.equal(first.history.length, 1, '第一次跑应当只有 1 条')
+      assert.equal(first.history[0].dbBytes, 4096)
+      assert.equal(first.history[0].freeBytes > 0, true, '剩余空间也要记进历史')
+
+      // ★ 第二次要**时间前进**：同一毫秒会被 pushSample 正确地丢掉。
+      //   真等一会儿（~1.1 秒）—— 模拟"上一轮定时器"，而不是伪造时间。
+      const until = Date.now() + Number(process.env.LEGION_CLI_TEST_WAIT_MS ?? 1100)
+      while (Date.now() < until) { /* 忙等：子进程行为，没法注入时钟 */ }
+      cli(['--db', s.db, '--backups', s.backups, '--state', state])
+      const second = JSON.parse(readFileSync(state, 'utf8'))
+      assert.equal(second.history.length, 2, `第二次跑应当累积到 2 条，实际 ${second.history.length}`)
+      assert.ok(second.history[1].atMs > second.history[0].atMs, '时间必须前进')
+      assert.deepEqual(second.history.map((x) => x.dbBytes), [4096, 4096], '库没变，两条读数应当一样')
+    } finally { s.cleanup() }
+  })
+
+  it('★★★ ⑭ 旧状态文件**坏掉**时从空开始，且不抛（不许因此拒跑体检）', () => {
+    const s = sandbox()
+    try {
+      const state = join(s.run, 's.json')
+      writeFileSync(state, '{ 这不是 json', 'utf8')
+      const r = cli(['--db', s.db, '--backups', s.backups, '--state', state])
+      assert.equal(r.status, 0, `体检本身必须照常成功，实际 ${r.status}`)
+      const after = JSON.parse(readFileSync(state, 'utf8'))
+      assert.equal(after.history.length, 1, '坏文件 → 从空开始（1 条）')
+      assert.equal(after.level, 'ok')
+    } finally { s.cleanup() }
+  })
+
+  it('★★★ ⑮ 版本不认识的状态文件 → 也从空开始（不许按旧格式读）', () => {
+    const s = sandbox()
+    try {
+      const state = join(s.run, 's.json')
+      writeFileSync(state, JSON.stringify({
+        schema: 99, atMs: Date.now(), level: 'ok', exitCode: 0,
+        history: [{ atMs: Date.now() - 3600000, dbBytes: 1, freeBytes: 1 }],
+      }), 'utf8')
+      cli(['--db', s.db, '--backups', s.backups, '--state', state])
+      const after = JSON.parse(readFileSync(state, 'utf8'))
+      assert.equal(after.schema, 1, `写出来的是**当前**版本（${after.schema}`)
+      assert.equal(after.history.length, 1, '不认识的历史不许被沿用')
+    } finally { s.cleanup() }
+  })
+
+  it('★★★ ⑯ 历史在上限内**有界**（跑很多轮也不会无限长大）', () => {
+    const s = sandbox()
+    try {
+      const state = join(s.run, 's.json')
+      // 预置一份"已经很长"的历史（每条间隔 1 分钟，都在 7 天窗口内）。
+      const now = Date.now()
+      const long = Array.from({ length: 500 }, (_, i) => ({
+        atMs: now - (500 - i) * 60000, dbBytes: 4096 + i, freeBytes: 1e9,
+      }))
+      writeFileSync(state, JSON.stringify({
+        schema: 1, atMs: now, level: 'ok', exitCode: 0,
+        report: { dbBytes: 4096, walBytes: 0, totalUsedBytes: 4096, freeBytes: 1e9, totalBytes: 2e9, neededBytes: 0, backupAgeMs: 1000, backupStale: false },
+        problems: [], history: long,
+      }), 'utf8')
+      cli(['--db', s.db, '--backups', s.backups, '--state', state])
+      const after = JSON.parse(readFileSync(state, 'utf8'))
+      assert.ok(after.history.length <= 200, `历史必须被截到 200，实际 ${after.history.length}`)
+      assert.ok(after.history.length >= 100, `不该被截得太狠，实际 ${after.history.length}`)
+      // 保留的是**新**的那一头：最后一条应当是这一次的读数。
+      assert.equal(after.history[after.history.length - 1].dbBytes, 4096)
+    } finally { s.cleanup() }
+  })
 })

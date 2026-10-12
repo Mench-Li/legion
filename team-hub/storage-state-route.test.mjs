@@ -32,6 +32,28 @@ const STATE_PATH = join(tmpRoot, 'run', 'storage-state.json')
 let mod
 let base = ''
 
+/**
+ * 落一份**带历史样本**的状态文件（模拟定时器跑了很多轮）。
+ *
+ * `perHour` 是库每小时长多少字节；样本以"现在"结尾 —— 否则趋势会被判成
+ * 陈旧（那正是另一条判据要验的事）。
+ */
+const seedHistory = ({ rounds = 8, perHour = 1 * 1024 * 1024, nowMs = Date.now(), level = 'ok' } = {}) => {
+  mkdirSync(join(tmpRoot, 'run'), { recursive: true })
+  const HOUR = 3600 * 1000
+  const history = Array.from({ length: rounds }, (_, i) => ({
+    atMs: nowMs - (rounds - 1 - i) * HOUR,
+    dbBytes: 4 * 1024 * 1024 + i * perHour,
+    freeBytes: 45 * 1024 ** 3,
+  }))
+  writeFileSync(STATE_PATH, JSON.stringify(makeState({
+    level, exitCode: level === 'ok' ? 0 : 1, atMs: nowMs, host: 'test-host',
+    report: { dbBytes: history[history.length - 1].dbBytes, walBytes: 4 * 1024 * 1024, freeBytes: 45 * 1024 ** 3, backupAgeMs: HOUR, backupStale: false },
+    problems: [], history,
+  })), 'utf8')
+  return history
+}
+
 /** 直接落一份状态文件（模拟定时器跑完）。 */
 const seed = (over = {}) => {
   mkdirSync(join(tmpRoot, 'run'), { recursive: true })
@@ -352,5 +374,70 @@ describe('/api/identity/storage-state', () => {
       `路径是目录时必须报 unreadable，实际 ${r.json.storage.reason}（ENOENT 分支被误用了）`)
     assert.notEqual(r.json.storage.reason, 'no-state')
     rmSync(STATE_PATH, { recursive: true, force: true })
+  })
+
+  it('★★★ ⑬ 端点必须报**趋势**（只有"现在多大"答不出"还剩多久"）', async () => {
+    seedHistory({ rounds: 8, perHour: 1 * 1024 * 1024 })
+    const r = await get('/api/identity/storage-state')
+    assert.equal(r.status, 200)
+    const g = r.json.storage.growth
+    assert.ok(g, '响应里必须有 growth 块')
+    assert.equal(g.reason, 'growing', JSON.stringify(g))
+    assert.ok(Number.isFinite(g.bytesPerDay) && g.bytesPerDay > 0, `bytesPerDay=${g.bytesPerDay}`)
+    assert.ok(Number.isFinite(g.daysEffective), `daysEffective=${g.daysEffective}`)
+    assert.equal(g.sampleCount, 8)
+    // 而说法是**渲染好的**（运维会直接读它）。
+    assert.equal(typeof g.summary.text, 'string')
+    assert.doesNotMatch(g.summary.text, /\{[A-Za-z_]/, `不许剩占位符：${g.summary.text}`)
+  })
+
+  it('★★★ ⑭ 样本不够时趋势是 `insufficient`，**不给任何时间数**', async () => {
+    seedHistory({ rounds: 3, perHour: 1 * 1024 * 1024 })
+    const r = await get('/api/identity/storage-state')
+    const g = r.json.storage.growth
+    assert.equal(g.reason, 'insufficient')
+    assert.equal(g.bytesPerDay, null)
+    assert.equal(g.daysEffective, null, '不许给一个从 3 个样本算出来的到期时间')
+    assert.match(g.summary.text, /算不出来/)
+  })
+
+  it('★★★ ⑮ **陈旧样本**的趋势必须被拒绝（服务重启后 tpfs 清空就是这个情形）', async () => {
+    // ★ 状态文件在 tmpfs 上 —— 机器重启后历史就没了。而下一次定时器跑之前，
+    //   文件根本不在。这一条验的是"样本很老"那一路。
+    seedHistory({ rounds: 8, perHour: 1 * 1024 * 1024, nowMs: Date.now() - 3 * 24 * 3600 * 1000 })
+    const r = await get('/api/identity/storage-state')
+    const g = r.json.storage.growth
+    assert.equal(g.reason, 'stale-samples', JSON.stringify(g))
+    assert.equal(g.bytesPerDay, null, '三天前的曲线不许当成现在的趋势')
+    assert.match(g.summary.text, /定时器|给不出/)
+  })
+
+  it('★★★ ⑯ 没有历史（老状态文件 / 刚重启）→ `insufficient`，**不是**崩', async () => {
+    seed()   // 不带 history 的那一份
+    const r = await get('/api/identity/storage-state')
+    assert.equal(r.status, 200)
+    assert.equal(r.json.storage.growth.reason, 'insufficient')
+    assert.equal(r.json.storage.growth.sampleCount, 0)
+  })
+
+  it('★★★ ⑰ 状态文件缺失时 `growth` 块**仍然在**（形状不许随情形变）', async () => {
+    // ★ 一个"有时候没有 growth 字段"的响应，会让调用方在别处炸 ——
+    //   而那种炸发生在**正好没有状态文件**的时候（＝还没装定时器的新部署）。
+    rmSync(STATE_PATH, { force: true })
+    const r = await get('/api/identity/storage-state')
+    assert.equal(r.status, 200)
+    assert.ok(r.json.storage.growth !== undefined, '缺文件时 growth 也必须存在')
+    assert.equal(r.json.storage.growth.reason, 'insufficient')
+    assert.equal(r.json.storage.growth.sampleCount, 0)
+    assert.equal(typeof r.json.storage.growth.summary.text, 'string')
+  })
+
+  it('★★★ ⑱ 状态文件读不出来时 `growth` 块也在（形状一致）', async () => {
+    mkdirSync(join(tmpRoot, 'run'), { recursive: true })
+    writeFileSync(STATE_PATH, '{ 坏', 'utf8')
+    const r = await get('/api/identity/storage-state')
+    assert.equal(r.json.storage.reason, 'unreadable')
+    assert.ok(r.json.storage.growth !== undefined)
+    assert.equal(r.json.storage.growth.reason, 'insufficient')
   })
 })

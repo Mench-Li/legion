@@ -7712,6 +7712,27 @@ async function handle(req, res, stripPrefix) {
     // 归属 /api/artifact 的那 1 条都在这里了。
     if (await router.dispatch(req, res, { path, url })) return
 
+    // ── 桌面端才有的功能面：**说出来**，而不是回一句"没找到" ──────────────
+    //
+    // 工作台 SPA 引用的 129 个 `/api/` 路径里有 31 个在 Hub 上**没有路由** ——
+    // 它们操作的是**用户本机**的东西（目录、盘符、OS 文件管理器、DSH 安装），
+    // 在 `workbench/scripts/serve.mjs`（**仅回环**）里实现。
+    //
+    // ★ 不能把它们搬过来：Hub 监听公网，搬过来等于让任何能访问互联网的人
+    //   读写**服务器**的文件系统。所以要做的是"说出来"。
+    //
+    // ★★ 这一行**必须在所有路由 dispatch 之后**（它就是 404 兜底）。
+    //    正因如此，那张前缀表可以写得宽而**绝不可能**抢走真路由 ——
+    //    例如 `/api/web/` 在表里，而 `/api/web/history` 是真路由：真路由先赢。
+    //
+    //    > 一个"只在没人接的时候才说话"的兜底，
+    //    > 与一个"可能抢走真实接口"的中间件，区别只在**调用点**。
+    const onlyDesktop = desktopOnlyFor(path)
+    if (onlyDesktop !== null) {
+      json(res, DESKTOP_ONLY_STATUS, desktopOnlyBody(onlyDesktop))
+      return
+    }
+
     json(res, 404, { error: `not found: ${path}` })
   } catch (e) {
     const message = e instanceof Error ? e.message : String(e)
@@ -7912,6 +7933,8 @@ import { parseTrustedProxies } from './client-ip.mjs'
 // 与来源限速共用同一份边界规则（`rate-limit.mjs` 里的 `decide`），
 // 差别只在"问的问题"与"键是什么"。
 import { QUOTA_RESOURCES, quotaMessage, checkQuotaLimitsMatch, QUOTA_CODE, RATE_LIMIT_STATUS } from './rate-limit.mjs'
+// 桌面端才有的功能面：让 Hub 把"这件事要在本机做"说出来，而不是回一句 not found。
+import { desktopOnlyFor, desktopOnlyBody, DESKTOP_ONLY_STATUS } from './desktop-only.mjs'
 // 存储健康：磁盘满的时候用户看到什么、运维怎么提前知道。
 // 整形放在 `withTx` 里（所有写的事务边界），所以各路由族一行都不用改。
 import {

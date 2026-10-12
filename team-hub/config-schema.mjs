@@ -906,6 +906,11 @@ export const SCHEMA = defineSchema({
     // 这一个是"**服务器**现在存不下"—— 用户既然没做错什么，重试与换网络
     // 也都不会好，只有运维清出空间才有用。混用会让前端给出错误的建议。
     'STORAGE_UNAVAILABLE',
+    // 功能**按设计只在桌面端（本机）有**时的具名错误码。
+    // 第五个，与上面四个都不同：那不是"你错了"、也不是"服务器存不下"，
+    // 而是"**这里根本没有这个功能**"——用户做什么都不会好，
+    // 只有换到桌面端。混进 404（"没找到"）会让它读起来像一处 bug。
+    'DESKTOP_ONLY',
     // `routes/chat.mjs` 的通用失败码（配额守卫与既有写路径共用的兜底）。
     'CHAT_REQUEST_FAILED',
     'IDENTITY_RESET_CONSUMED', 'IDENTITY_RESET_EXPIRED', 'IDENTITY_RESET_NOT_FOUND',

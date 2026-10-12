@@ -95,8 +95,40 @@ function hubGet(path: string): Promise<Response> {
   return fetchWithSessionRetry(`${hubBase()}${path}`, { headers: authHeaders() })
 }
 
+/**
+ * 读 JSON；失败时**保留后端说的话**。
+ *
+ * ## ★ 这一行原本是 `throw new Error(\`${res.status} ${res.statusText}\`)`
+ *
+ * 它把响应体整个丢掉，于是界面只能显示 `501 Not Implemented` ——
+ * 而后端明明回了：
+ *
+ *     { code: 'DESKTOP_ONLY', desktopOnly: true,
+ *       error: '「文件中心」需要在**桌面端**（你本机）使用 —— …',
+ *       hint:  '在装在你电脑上的 Legion 桌面端里用「文件中心」…' }
+ *
+ * 这正是 `hub-errors.ts` 文件头记的那条断链：
+ *
+ *   > **后端加了码、前端还是笼统提示 —— 那条码就等于没加。**
+ *
+ * 而且它比"没加"更坏一点：`code`/`error` 在后端**有判据守着**，
+ * 所以看起来是"已经做了"。链路上唯一少的那一环，在 `hubPost`（已修）
+ * 与这里的 `readJson`（这一处）之间。
+ *
+ * ★ 为什么值得单独改这一行：`readJson` 有 **~30 个调用方**，
+ *   其中就包括 `/api/fs/*`、`/api/files/*` 那几个**桌面端才有**的面板 ——
+ *   它们正是唯一能让用户看到"这个功能要在桌面端用"的地方。
+ *
+ * ★ 下面的实现与 `hubPost`（L720 附近）**逐字相同**，不是"差不多的两份"：
+ *   两份不同的错误映射会在某一天给出两句不一样的话。
+ */
 async function readJson<T>(res: Response): Promise<T> {
-  if (!res.ok) throw new Error(`${res.status} ${res.statusText}`)
+  if (!res.ok) {
+    const text = await res.text().catch(() => '')
+    let parsed: unknown = null
+    try { parsed = text ? JSON.parse(text) : null } catch { parsed = null }
+    throw hubErrorFromBody(res.status, text, parsed)
+  }
   return res.json() as Promise<T>
 }
 

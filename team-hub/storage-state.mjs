@@ -36,6 +36,8 @@
 // 于是"没人测了"与"上次测到的是危险"两件事同时可见。
 // ============================================================================
 
+import { normalizeSamples, MAX_HISTORY } from './storage-growth.mjs'
+
 /** 状态文件的格式版本。读到不认识的版本时**不许猜**（见 `parseState`）。 */
 export const STATE_SCHEMA = 1
 
@@ -97,6 +99,9 @@ export function makeState(input = {}) {
       backupStale: src.report?.backupStale === true,
     },
     problems: Array.isArray(src.problems) ? src.problems.filter((p) => typeof p === 'string').slice(0, 20) : [],
+    // 历史样本（有界）。趋势预测靠它 —— 只留最新那一条是不够的：
+    // 一个样本量不出"在长多快"，而两个样本量出来的东西没有意义。
+    history: normalizeSamples(src.history).slice(-MAX_HISTORY),
     host: typeof src.host === 'string' && src.host.length > 0 ? src.host.slice(0, 120) : null,
   }
 }
@@ -332,4 +337,16 @@ export function renderSummary(key, vars = {}) {
 
 function withText(s) {
   return { key: s.key, vars: s.vars, text: renderSummary(s.key, s.vars) }
+}
+
+/**
+ * 从状态里安全地取出历史样本。
+ *
+ * ★ 单独一个函数而不是让调用方写 "state.history ?? []"：状态文件是
+ *   **另一个进程**写的，字段缺失/类型不对是常态，而这个函数保证
+ *   拿到的永远是"干净的样本数组"（供趋势直接用）。
+ */
+export function stateHistory(state) {
+  const src = (state === null || typeof state !== 'object') ? {} : state
+  return normalizeSamples(src.history)
 }

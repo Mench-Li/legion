@@ -3688,3 +3688,13 @@ body {
 .provider-cred-warn { color: #d53d3d; }
 .provider-cred-unknown { color: #8a6d1b; }
 
+/* ── 从供应商派生档案（"我还有必要新建档案嘛"）────────────────────────────────
+ * 「生成 N 个档案」是一个**顺带的下一步**，与"编辑/删除"不是一类动作，
+ * 所以它长得比它们轻：描边、不抢焦点、也不进删除的那一列。 */
+.provider-derive { border-color: #b9d6c4; color: #1c6b3d; }
+.provider-derive:hover { background: #f2faf5; }
+.provider-derive-plan { max-height: 220px; overflow: auto; font-size: 13px; color: #526477; }
+.provider-derive-plan ul { margin: 6px 0 0; padding-left: 20px; }
+.provider-derive-plan code { background: #f1f3f5; padding: 1px 4px; border-radius: 4px; }
+.set-form-hint { font-size: 12px; color: #657384; line-height: 1.7; margin: 6px 0 10px; }
+

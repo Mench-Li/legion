@@ -27,9 +27,28 @@ interface Provider {
    *   老 hub（没这个字段）时保持 `undefined` ⇒ 界面说"无法核验"，也不猜。
    */
   credential?: { state?: string; ref?: string | null; detail?: string | null }
+  /**
+   * ★ 档案对账（`team-hub/profile-derivation.mjs`）：
+   *   `missing` = 这个供应商清单里**还没有档案**的模型数（面板据此提供"生成"按钮）；
+   *   `orphaned` = 有档案、但供应商清单里已经没有这个模型（**只报不动**）。
+   *   老 hub 没这一列时为 `undefined` ⇒ 面板不显示数量，也不提供生成。
+   */
+  profiles?: { existing: number; missing: number; orphaned: number }
   models: { id: string; name?: string }[]
   source: string
   version: number
+}
+
+/** 派生计划里的一条新增档案（hub 的 `plan.create` 原样透出）。 */
+interface DerivedProfile { id: string; model: string; displayName: string }
+interface DeriveResult {
+  summary?: string
+  created?: string[]
+  existing?: string[]
+  conflicts?: { model: string; reason?: string }[]
+  orphaned?: { profileId: string; model: string }[]
+  plan?: { create?: DerivedProfile[] }
+  dryRun?: boolean
 }
 
 /** 凭证状态 → 界面读法（与 `team-hub/credential-status.mjs` 同口径）。 */
@@ -85,6 +104,52 @@ export function DshProvidersPanel(): React.JSX.Element {
   const [form, setForm] = useState<Form>(empty)
   /** 密钥库的可用性（`GET /api/secrets/status`）。`null` = 还没问出来。 */
   const [keyStore, setKeyStore] = useState<{ ok: boolean; message: string } | null>(null)
+  /**
+   * ★ 从供应商派生模型档案（"我还有必要新建档案嘛"）。
+   *
+   * `deriving` 非空 = 对话框开着。打开时**先 dryRun 一次**：让用户在写库前就看到
+   * 「将新建 N 条」与那些档案的 id —— 与 P3 物化同一套"先看计划再落笔"。
+   */
+  const [deriving, setDeriving] = useState<Provider | null>(null)
+  const [deriveRuntime, setDeriveRuntime] = useState('dsh')
+  const [deriveResult, setDeriveResult] = useState<DeriveResult | null>(null)
+  const [deriveBusy, setDeriveBusy] = useState(false)
+
+  /**
+   * 打开派生对话框并**预览**（dryRun）。
+   *
+   * `runtimeType` 不猜：供应商里没有这个信息，Legion 目前也只有 `dsh` 一个适配器
+   * （`runtime/adapters/`），所以这里预填 `dsh` 但**显示出来让用户看见**，
+   * 而不是在服务端默默用一个默认值（那会让"我没选过运行时"与"我选了 dsh"同形）。
+   */
+  async function openDerive(p: Provider): Promise<void> {
+    setDeriving(p); setDeriveResult(null); setError(''); setNotice('')
+    setDeriveBusy(true)
+    try {
+      const r = await hubRequest('POST', `/api/model-providers/${encodeURIComponent(p.id)}/derive-profiles`,
+        { actor: 'general', runtimeType: deriveRuntime, dryRun: true }) as DeriveResult
+      setDeriveResult(r)
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e))
+    } finally { setDeriveBusy(false) }
+  }
+
+  async function confirmDerive(): Promise<void> {
+    if (!deriving) return
+    setDeriveBusy(true); setError('')
+    try {
+      const r = await hubRequest('POST', `/api/model-providers/${encodeURIComponent(deriving.id)}/derive-profiles`,
+        { actor: 'general', runtimeType: deriveRuntime }) as DeriveResult
+      const failed = (r as { failed?: unknown[] }).failed ?? []
+      setNotice(`已为「${deriving.displayName}」生成模型档案：${r.summary ?? ''}` +
+        (failed.length > 0 ? `；其中 ${failed.length} 条写入失败` : '') +
+        '。已存在的档案一个字都没动。')
+      setDeriving(null); setDeriveResult(null)
+      await load()
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e))
+    } finally { setDeriveBusy(false) }
+  }
 
   async function load(): Promise<void> {
     setLoading(true); setError('')
@@ -225,11 +290,49 @@ export function DshProvidersPanel(): React.JSX.Element {
         {p.source === 'dsh-import' && <span className="provider-custom-badge">自运行环境导入</span>}
         <span className={`provider-state-dot${cred.cls}`} role="img" aria-label={cred.label} title={cred.title} />
         <span className="provider-cred-label" title={cred.title}>{cred.label}</span>
+        {/* ★ 档案对账：这一列让"我还要不要手工新建档案"有个明确的答案 ——
+            还缺几个、点一下就补齐。没有这一列时用户只能一条条自己数。 */}
+        {p.profiles !== undefined && p.profiles.missing > 0 &&
+          <button className="btn small provider-derive" disabled={busy || deriveBusy}
+            title={`这个供应商的清单里有 ${p.profiles.missing} 个模型还没有模型档案；点一下按「供应商 + 模型」把它们补齐（已存在的不会被动）`}
+            onClick={() => void openDerive(p)}>生成 {p.profiles.missing} 个档案</button>}
+        {p.profiles !== undefined && p.profiles.missing === 0 &&
+          <span className="provider-cred-label" title={`这个供应商的 ${p.profiles.existing} 个模型都已经有档案`}>档案齐全</span>}
+        {p.profiles !== undefined && p.profiles.orphaned > 0 &&
+          <span className="provider-cred-unknown" title={`有 ${p.profiles.orphaned} 条档案的模型已经不在这个供应商的清单里（**没有动它们**：删档案是不可逆方向的动作，且可能正被岗位绑定引用）`}>
+            {p.profiles.orphaned} 条档案已不在清单里
+          </span>}
         <button className="btn" disabled={busy} onClick={() => edit(p)}>编辑</button>
         <button className="btn provider-delete" disabled={busy} onClick={() => setRemoving(p)}>删除</button>
       </div>})}
       <button className="provider-add" disabled={busy} onClick={() => { setEditing(null); setForm(empty); setOpen(true); setNotice(''); setError('') }}>＋ 添加模型供应商</button>
     </div>
+    {deriving && <div className="provider-editor-mask"><div className="provider-editor-dialog" role="dialog" aria-label={`从 ${deriving.displayName} 生成模型档案`}>
+      <h3>从「{deriving.displayName}」生成模型档案</h3>
+      <p>模型档案是"选了哪个模型"的登记（岗位绑定与运行历史都要一个稳定的引用）。
+        它的 <code>provider</code> / <code>model</code> / <code>id</code> / 显示名全都能从这个供应商算出来 ——
+        <strong>所以不用手填</strong>；地址与凭证会<strong>留空继承</strong>这个供应商，不会再存一份。</p>
+      <label className="field"><span>运行时类型（供应商里没有这个信息，所以问你一次）</span>
+        <select className="set-input" value={deriveRuntime} disabled={deriveBusy} onChange={e => setDeriveRuntime(e.target.value)}>
+          <option value="dsh">dsh（Legion 目前唯一的运行时适配器）</option>
+        </select>
+      </label>
+      {deriveBusy && <p>正在算计划…</p>}
+      {deriveResult?.plan && <div className="provider-derive-plan">
+        <p><strong>{deriveResult.summary}</strong></p>
+        {deriveResult.plan.create && deriveResult.plan.create.length > 0 && <ul>
+          {deriveResult.plan.create.map(c => <li key={c.id}><code>{c.id}</code> ← {c.model}</li>)}
+        </ul>}
+        {(deriveResult.plan.create?.length ?? 0) === 0 && <p>没有需要新建的模型档案。</p>}
+      </div>}
+      {error && <div className="set-notice bad" role="alert">{error}</div>}
+      <div className="set-row-space">
+        <button className="btn primary" disabled={deriveBusy || (deriveResult?.plan?.create?.length ?? 0) === 0} onClick={() => void confirmDerive()}>
+          {deriveBusy ? '处理中…' : `生成这 ${deriveResult?.plan?.create?.length ?? 0} 个档案`}
+        </button>
+        <button className="btn" disabled={deriveBusy} onClick={() => { setDeriving(null); setDeriveResult(null) }}>取消</button>
+      </div>
+    </div></div>}
     {removing && <div className="provider-editor-mask"><div className="provider-editor-dialog" role="alertdialog" aria-label="删除供应商"><h3>删除 {removing.displayName}？</h3><p>删除后，使用该供应商的岗位需要重新选择模型。已存储的密钥不会被删除。</p><button className="btn provider-delete" disabled={busy} onClick={() => void remove()}>确认删除</button><button className="btn" disabled={busy} onClick={() => setRemoving(null)}>取消</button></div></div>}
     {open && <div className="provider-editor-mask"><form role="dialog" aria-modal="true" aria-label={editing ? `编辑 ${editing.displayName}` : '添加模型供应商'} className="set-form model-provider-form" onSubmit={e => { e.preventDefault(); void save() }}><h3>{editing ? `编辑 ${editing.displayName}` : '添加自定义供应商'}</h3>{error && <div className="set-notice bad" role="alert">{error}</div>}{notice && <div className="set-notice ok" role="status">{notice}</div>}<div className="set-grid">
       <label className="field"><span>供应商 ID</span><input className="set-input" value={form.provider} disabled={!!editing || busy} onChange={e => set('provider', e.target.value)} required placeholder="例如 company-gateway" /></label>

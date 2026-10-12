@@ -382,3 +382,123 @@ test('⑰ ★ 没有引用名的供应商 ⇒ `none`（不是错误，也不需�
   assert.equal(p.credential.state, 'none')
   assert.equal(p.credential.ref, null)
 })
+
+// ============================================================================
+// 从供应商派生档案 —— "我还有必要新建档案嘛，直接来源于模型与供应商才对啊"
+//
+// 档案**必须存在**（岗位绑定与 Run 历史要一个稳定的引用），但**不该手工新建**：
+// provider/model/displayName/id 全都能从"供应商 + 它清单里的第几个模型"算出来。
+// ============================================================================
+
+test('⑱ ★★ 列表里每个供应商带 `profiles.missing`（还有几个模型没有档案）', async () => {
+  const r = await get('/api/model-providers')
+  const fjd = r.body.providers.find((p) => p.id === 'fjd-ds')
+  assert.ok(fjd.profiles, '面板要靠这一列说话；没有它用户只能一条条自己数')
+  assert.equal(fjd.profiles.existing, 0, '这一套里还没建过档案')
+  // 夹具（本文件顶部的 `SNAPSHOT`）里 fjd-ds 是 **2** 个模型；真实库里是 3 个。按夹具写。
+  assert.equal(fjd.profiles.missing, 2, 'fjd-ds 的夹具清单里有 2 个模型')
+  assert.equal(typeof fjd.profiles.orphaned, 'number')
+})
+
+test('⑲ ★★ dryRun：给出计划但**一条都不写**（先看计划再落笔）', async () => {
+  const r = await post('/api/model-providers/fjd-ds/derive-profiles', { actor: 'general', runtimeType: 'dsh', dryRun: true })
+  assert.equal(r.status, 200, JSON.stringify(r.body))
+  assert.equal(r.body.dryRun, true)
+  assert.equal(r.body.plan.create.length, 2)
+  assert.match(r.body.summary, /新增 2/)
+  // ★ 真的没写：档案列表仍然是空的
+  const after = await get('/api/model-profiles')
+  assert.equal(after.body.profiles.length, 0, '★ dryRun 不许写任何东西')
+})
+
+test('⑳ ★★ 真跑：建出三条，且 `endpoint`/`secretRef` **留空**（留空即继承供应商）', async () => {
+  const r = await post('/api/model-providers/fjd-ds/derive-profiles', { actor: 'general', runtimeType: 'dsh' })
+  assert.equal(r.status, 200, JSON.stringify(r.body))
+  assert.equal(r.body.created.length, 2, JSON.stringify(r.body))
+  assert.deepEqual(r.body.conflicts, [])
+  const after = await get('/api/model-profiles')
+  const rows = after.body.profiles
+  assert.equal(rows.length, 2)
+  for (const p of rows) {
+    assert.equal(p.provider, 'fjd-ds')
+    assert.equal(p.runtimeType, 'dsh')
+    // ★★ 派生的档案不许抄一份供应商的连接信息进去 —— 那正是上一轮刚收敛掉的重复
+    assert.equal(p.endpoint, null, `${p.id} 的 endpoint 必须留空（留空即继承供应商）`)
+    assert.equal(p.hasCredential, false, `${p.id} 不该自带凭证引用`)
+    assert.match(p.displayName, /^FJD · /, '显示名按"供应商显示名 · 模型"')
+  }
+})
+
+test('㉑ ★★ 幂等：再跑一遍 ⇒ 新增 0 / 已存在 3，且**已有档案一个字都没变**', async () => {
+  const before = await get('/api/model-profiles')
+  const snapshot = before.body.profiles.map((p) => ({ id: p.id, version: p.version, displayName: p.displayName }))
+  const r = await post('/api/model-providers/fjd-ds/derive-profiles', { actor: 'general', runtimeType: 'dsh' })
+  assert.equal(r.status, 200)
+  assert.equal(r.body.created.length, 0)
+  assert.equal(r.body.existing.length, 2)
+  assert.match(r.body.summary, /新增 0/)
+  const after = await get('/api/model-profiles')
+  assert.deepEqual(
+    after.body.profiles.map((p) => ({ id: p.id, version: p.version, displayName: p.displayName })),
+    snapshot,
+    '★ 已存在的档案连 version 都不该动（派生只 create，不改）',
+  )
+})
+
+test('㉒ ★★ 没给 runtimeType ⇒ 400 DERIVE_RUNTIME_TYPE_REQUIRED，且**不猜也不写**', async () => {
+  const before = (await get('/api/model-profiles')).body.profiles.length
+  const r = await post('/api/model-providers/svea-ds/derive-profiles', { actor: 'general' })
+  assert.equal(r.status, 400, JSON.stringify(r.body))
+  assert.equal(r.body.code, 'DERIVE_RUNTIME_TYPE_REQUIRED')
+  assert.match(r.body.error, /不猜|第一次运行才失败/)
+  assert.equal((await get('/api/model-profiles')).body.profiles.length, before, '★ 拒绝时不许写任何东西')
+})
+
+test('㉓ ★★ 路由顺序：`/derive-profiles` **不能**被通配 id 吞掉（否则 id 会变成 `X/derive-profiles`）', async () => {
+  // 位置对了 ⇒ 供应商不存在时是干净的 404「没有这个模型供应商」
+  const missing = await post('/api/model-providers/never-existed-15/derive-profiles', { actor: 'general', runtimeType: 'dsh' })
+  assert.equal(missing.status, 404, JSON.stringify(missing.body))
+  assert.match(String(missing.body.error), /没有这个模型供应商/)
+  assert.equal(String(missing.body.error).includes('derive-profiles'), false,
+    '★ 错误信息里出现 derive-profiles ⇒ 它被当成 id 去 update 了（顺序反了）')
+  // 404 而不是被 update 的 409/400：这条路由确实排在通配之前
+  const slash = await post('/api/model-providers/a%2Fb/derive-profiles', { actor: 'general', runtimeType: 'dsh' })
+  assert.equal(slash.status, 400)
+  assert.equal(slash.body.code, 'BAD_ID_ENCODING')
+})
+
+test('㉔ ★★ 算出来的 id 被**另一个模型**占用 ⇒ 报冲突、跳过、不覆盖别人的档案', async () => {
+  await post('/api/model-providers', {
+    actor: 'general',
+    provider: { id: 'derive-c-15', displayName: 'C', baseURL: 'https://c.example/v1', models: [{ id: 'x' }] },
+  })
+  // 手工建一条 id 恰好是派生 id、但配的是**别的模型**的档案
+  await post('/api/model-profiles', {
+    actor: 'general',
+    profile: { id: 'derive-c-15.x', displayName: '别的', runtimeType: 'dsh', provider: 'derive-c-15', model: 'other' },
+  })
+  const r = await post('/api/model-providers/derive-c-15/derive-profiles', { actor: 'general', runtimeType: 'dsh' })
+  assert.equal(r.status, 200, JSON.stringify(r.body))
+  assert.equal(r.body.created.length, 0)
+  assert.equal(r.body.conflicts.length, 1)
+  assert.equal(r.body.conflicts[0].reason, 'ID_TAKEN_BY_OTHER')
+  // 那条被占用的档案仍然是它自己
+  const rows = (await get('/api/model-profiles')).body.profiles
+  const taken = rows.find((p) => p.id === 'derive-c-15.x')
+  assert.equal(taken.model, 'other', '★ 绝不能把别人的档案改写成 x')
+})
+
+test('㉕ ★ 供应商清单里没有的模型 ⇒ 只报 `orphaned`，**绝不自动删**', async () => {
+  // 把 derive-c-15 的清单换成 y（x 那条档案就"孤儿"了）
+  const cur = (await get('/api/model-providers')).body.providers.find((p) => p.id === 'derive-c-15')
+  await post('/api/model-providers/derive-c-15', {
+    actor: 'general', version: cur.version,
+    provider: { id: 'derive-c-15', displayName: 'C', baseURL: 'https://c.example/v1', models: [{ id: 'y' }] },
+  })
+  const r = await post('/api/model-providers/derive-c-15/derive-profiles', { actor: 'general', runtimeType: 'dsh' })
+  assert.equal(r.status, 200, JSON.stringify(r.body))
+  assert.deepEqual(r.body.orphaned.map((o) => o.model), ['other'])
+  assert.match(r.body.summary, /未动/)
+  const rows = (await get('/api/model-profiles')).body.profiles
+  assert.ok(rows.some((p) => p.model === 'other'), '★ 孤儿档案必须还在（删是不可逆方向的动作，该由人决定）')
+})

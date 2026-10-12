@@ -200,6 +200,15 @@ export const SCHEMA = defineSchema({
     'INSTALL_DIR_UNRESOLVED', 'PRODUCT_HOME_UNRESOLVED', 'PRODUCT_HOME_INSIDE_INSTALL_DIR',
     'WORKSPACE_NOT_CONFIGURED', 'PATH_NOT_ABSOLUTE', 'ROLE_DIRS_OVERLAP',
     'SECRETS_INSIDE_INSTALL_DIR', 'SECRETS_INSIDE_DATA_DIR', 'SECRETS_INSIDE_CACHE_DIR',
+    // ── 从供应商派生档案的具名错误码 / 冲突原因（`profile-derivation.mjs`）──
+    //
+    // 同样只是长得像环境变量（全大写），**不是** env 读取点：
+    //   · `DERIVE_RUNTIME_TYPE_REQUIRED` —— 没给 `runtimeType` 时**拒绝**（不猜，与
+    //     `MIGRATION_RUNTIME_TYPE_REQUIRED` 同一条纪律）；
+    //   · `DERIVE_UNAVAILABLE` —— 这个中枢没接档案表（`routes/model-providers.mjs`）；
+    //   · `ID_TAKEN_BY_OTHER` / `TOMBSTONED_ID` —— 算出来的档案 id 被别人占用 / 是墓碑，
+    //     于是**跳过并报出来**（绝不静默复用别人的 id）。
+    'DERIVE_RUNTIME_TYPE_REQUIRED', 'DERIVE_UNAVAILABLE', 'ID_TAKEN_BY_OTHER', 'TOMBSTONED_ID',
     // ── 远程 Agent 通道（S-B / S-D）的具名错误码 ──
     //
     // 三个来源，都**不是**环境变量读取点，只是长得像（全大写）：

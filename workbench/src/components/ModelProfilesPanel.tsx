@@ -262,6 +262,15 @@ export function ModelProfilesPanel(): React.JSX.Element {
 
       <div className="set-form">
         <div className="set-form-title">{editing === null ? '新建档案' : `编辑档案 ${editing.id}`}</div>
+        {/* ★ 这一句是回答"我还有必要新建档案嘛"：常规情况下**不用**在这儿手填 ——
+            档案的 provider / model / id / 显示名全都能从供应商算出来，
+            在「模型」页对一个供应商点「生成 N 个档案」即可（地址与凭证会留空继承供应商）。
+            这个表单留着是为了**真正的偏离**（例如同一个供应商的某个模型走另一个网关）。 */}
+        <p className="set-form-hint">
+          通常不用在这里手填：「模型」页对某个供应商点「生成 N 个档案」就能把它清单里的模型补成档案
+          （provider / model / id / 显示名都从供应商算出来，地址与凭证留空继承供应商）。
+          这里留给**要偏离**的场合：某一条档案要用另一个网关或另一把钥匙时，才在这里写。
+        </p>
         <div className="set-grid">
           <label className="field"><span>id</span>
             <input className={fieldCls('id')} value={form.id} disabled={editing !== null}

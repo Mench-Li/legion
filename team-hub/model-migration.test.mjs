@@ -302,3 +302,69 @@ describe('⑦ 执行：只增不改、不删源、半途失败如实上报', () 
     assert.equal(plan([row()]).digest, plan([row()]).digest)
   })
 })
+
+// ---------------------------------------------------------------------------
+// ★★ 「这个模型是不是已经有档案」按 **(供应商, 模型)** 判，不按 `id`
+//
+// 2026-10-10 现场复现（那台机器上真的会出错）：
+//   库里三条 fjd 档案的 id 是**连字符**风格 `fjd-ds-deepseek-v4-pro-openai`，
+//   而 `profileIdFor` 算出来的是**点号** `fjd-ds.deepseek-v4-pro-openai`。
+//   于是只按 id 认身份时，预演给出「将新建 2 个模型档案」而 `skipped=0` ——
+//   它会建出两条重复的、且**缺 endpoint 与凭证**的档案，
+//   再把 17 条岗位绑定指到那两条上，而不是指到库里那两条能用的。
+//
+// 这与 `profile-derivation.mjs` 的纪律 ① 是同一条：身份是 `(provider, model)`，
+// `id` 只是一个名字。
+// ---------------------------------------------------------------------------
+describe('⑨ 「已有档案」按 (供应商, 模型) 认，不按 id', () => {
+  /** 库里既有的档案：id 是**连字符**风格（与派生规则不一致），这是实测形状。 */
+  const existing = [{
+    id: 'custom-ds-deepseek-v4-pro', provider: 'custom-ds', model: 'deepseek-v4-pro',
+    endpoint: 'https://x.example/v1', secretRef: 'X_KEY', deleted: false,
+  }]
+
+  test('★★★ 同一个 (供应商, 模型) 已有活档案 ⇒ **不建重复**，且不报"待补 endpoint/凭证"', () => {
+    const p = plan([row()], { existingProfiles: existing })
+    assert.deepEqual([...p.toCreate], [],
+      '★ 按 id 认身份时这里会产出 custom-ds.deepseek-v4-pro（点号）—— 一条重复档案')
+    assert.deepEqual([...p.needsAttention], [],
+      '★ 重复档案会因为"老数据没 endpoint"进入待补清单，而库里那条本来就能用')
+    assert.equal(p.ok, true)
+  })
+
+  test('★★★ 岗位绑定指向**既有那条**的 id，不是按派生规则另起的那个', () => {
+    const p = plan([row()], { existingProfiles: existing })
+    assert.equal(p.toBind.length, 1)
+    assert.equal(p.toBind[0].primaryProfile, 'custom-ds-deepseek-v4-pro',
+      '★ 指向派生 id 会让"界面上看着有绑定，跑的却是另一条没人配过的档案"')
+    assert.equal(p.toBind[0].primaryProfile, existing[0].id)
+  })
+
+  test('★ 跳过项**说清**它为什么跳过（"已有活档案"与"同 id 已存在"是两件事）', () => {
+    const p = plan([row()], { existingProfiles: existing })
+    assert.equal(p.skipped.length, 1)
+    assert.match(p.skipped[0].reason, /已经有活档案/)
+    assert.equal(p.skipped[0].id, 'custom-ds-deepseek-v4-pro', '报出来的应当是可以去点的那个 id')
+  })
+
+  test('★ 墓碑**不算**已有（删过的档案不该把这次迁移挡成"已存在"）', () => {
+    const dead = [{ ...existing[0], deletedAtMs: 1 }]
+    const p = plan([row()], { existingProfiles: dead })
+    assert.deepEqual([...p.toCreate].map((c) => c.id), ['custom-ds.deepseek-v4-pro'],
+      '墓碑是"有历史"不是"有档案"：一次 Run 可能还记着它，所以新建仍要按派生规则来')
+  })
+
+  test('★ 只传 id 的老形状仍然可用（向后兼容），但它认不出"不同 id 同一对"', () => {
+    // 只给 id 时按 id 判 —— 行为与从前逐字相同（不静默改变老调用方的语义）
+    const byId = plan([row()], { existingProfiles: ['custom-ds-deepseek-v4-pro'] })
+    assert.deepEqual([...byId.toCreate].map((c) => c.id), ['custom-ds.deepseek-v4-pro'],
+      '只给 id 时它认不出这一对已经有档案 —— 所以调用方必须传整行（路由已经改了）')
+  })
+
+  test('★ 其它供应商的同名模型不互相顶替', () => {
+    const other = [{ id: 'other.x', provider: 'other', model: 'deepseek-v4-pro', deleted: false }]
+    const p = plan([row()], { existingProfiles: other })
+    assert.deepEqual([...p.toCreate].map((c) => c.id), ['custom-ds.deepseek-v4-pro'],
+      '★ 身份是 (供应商, 模型) 两元组：别的供应商有同名模型，不构成"已经有档案"')
+  })
+})

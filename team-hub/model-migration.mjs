@@ -124,6 +124,37 @@ export function planModelMigration({
   const knownProfileIds = new Set(existingProfiles.map((p) => (typeof p === 'string' ? p : p?.id)).filter(Boolean))
   const knownBindings = new Set(existingBindings.map((b) => `${b?.scope ?? ''}\u0000${b?.employeeRole ?? b?.role ?? ''}`))
 
+  /**
+   * ★★ 「这个 `(供应商, 模型)` 是不是**已经有**一条活档案」——身份是**它俩**，不是 `id`。
+   *
+   * ## 为什么（2026-10-10，现场复现）
+   *
+   * 实测这台机器：库里的三条 fjd 档案 id 是**连字符**风格
+   * （`fjd-ds-deepseek-v4-pro-openai`），而 `profileIdFor` 算出来的是**点号**
+   * （`fjd-ds.deepseek-v4-pro-openai`）。于是只按 `id` 认身份时，
+   * 预演给出的是「将新建 2 个模型档案」而 `skipped=0` —— 它**没认出**
+   * 那两个模型已经有档案了，会建出两条重复的、且**缺 endpoint 与凭证**的档案，
+   * 再把 17 条岗位绑定指到那两条重复档案上。
+   *
+   * 这与 `profile-derivation.mjs` 的纪律 ① 是**同一条**：身份是 `(provider, model)`，
+   * `id` 只是一个名字。
+   *
+   *   > 一条"按 id 认身份"的判据，与一条"按 (供应商, 模型) 认身份"的判据，
+   *   > 在**库里的 id 恰好等于派生规则**的那台机器上是同一个东西。
+   *
+   * 位置在**本模块**而不是调用方：调用方（路由）此前把整行降级成 `id` 再传进来，
+   * 信息就是在那里丢的。现在两种形状都收（字符串 / 整行），但**认身份只按 (provider, model)**。
+   */
+  const liveByPair = new Map()
+  for (const p of existingProfiles) {
+    if (p === null || typeof p !== 'object' || Array.isArray(p)) continue
+    if (typeof p.provider !== 'string' || typeof p.model !== 'string') continue
+    const deleted = p.deleted === true || (p.deletedAtMs !== null && p.deletedAtMs !== undefined)
+    if (deleted) continue
+    if (typeof p.id !== 'string' || p.id === '') continue
+    liveByPair.set(`${p.provider}\u0000${p.model}`, p.id)
+  }
+
   /** id → 产生它的 (provider, model)；用来检测归一化撞车。 */
   const idOwner = new Map()
   /** 已经计划创建的 profile，避免同一对 (provider, model) 被计划两次。 */
@@ -162,8 +193,33 @@ export function planModelMigration({
     }
 
     const id = profileIdFor(provider, model)
-    // ② 撞车检测必须在"已计划"和"已存在"之间一起做。
+    /** 身份键：`(供应商, 模型)`。**认身份只按它**，不按 `id`。 */
     const owner = `${provider}\u0000${model}`
+    // ★★ 先按 **(供应商, 模型)** 认身份：已经有活档案就用**它的** id。
+    //    这一步必须在撞车检测之前 —— 撞车检测关心的是"归一化会不会把两个不同的模型
+    //    压成同一个 id"，而"这个模型已经有档案了"根本不是一次创建。
+    const liveId = liveByPair.get(owner)
+
+    if (liveId !== undefined) {
+      // 已有档案 ⇒ 不建、不改，**绑定指向它**（而不是指向一个按派生规则另起的重复 id）。
+      base.skipped.push({
+        index: i, scope, role, id: liveId,
+        reason: '这个 (供应商, 模型) 已经有活档案，不覆盖（迁移不修改既有配置）；绑定会指向它',
+      })
+      if (scope !== null && role !== null) {
+        const bkey = `${scope}\u0000${role}`
+        if (knownBindings.has(bkey)) {
+          base.skipped.push({ index: i, scope, role, reason: '这个 (scope, 岗位) 已有绑定，不覆盖' })
+        } else if (!base.toBind.some((b) => `${b.scope}\u0000${b.employeeRole}` === bkey)) {
+          base.toBind.push({ scope, employeeRole: role, primaryProfile: liveId, fallbackProfiles: [] })
+        }
+      } else {
+        base.skipped.push({ index: i, scope, role, reason: '这一行没有 scope 或岗位，无法形成岗位绑定' })
+      }
+      continue
+    }
+
+    // ② 撞车检测必须在"已计划"和"已存在"之间一起做。
     const prev = idOwner.get(id)
     if (prev !== undefined && prev !== owner) {
       const [p1, m1] = prev.split('\u0000')

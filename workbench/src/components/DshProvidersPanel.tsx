@@ -15,7 +15,18 @@ interface Provider {
   displayName: string
   api: string | null
   baseURL: string | null
-  secretRef: string | null
+  /**
+   * ★★ **这里没有 `secretRef`**（2026-10-12，BUG-028 已修）。
+   *
+   *   服务端不再把引用名发出来（"引用名也是可枚举的攻击面"，见 `model-store.mjs` 文件头）。
+   *   界面要表达"这条引用了凭证"用下面的 `credentialRequired` / `credential.hasRef`；
+   *   要写新钥匙则把**值**交给服务端（`credentialValue`），由它决定写进哪个槽位 ——
+   *   因为那可能是个客户端**算不出**的名字（从 DSH 导进来的 `apiKeyEnv`，两侧靠它对齐）。
+   *
+   *   类型里留一个 `secretRef` 字段会让下一个人以为它还在，而那正是这次要拆掉的东西。
+   */
+  /** 这条供应商**是否引用了一个凭证**（等价于"库里的 secretRef 非空"，但不给名字）。 */
+  credentialRequired?: boolean
   /**
    * ⚠ **这是 P1 从 DSH 导入的标记**，记的是"DSH 那边说它配过"，
    *  **不是**"本机密钥库里有这把钥匙"。界面不许用它下结论（BUG-023）。
@@ -68,25 +79,24 @@ interface DeriveResult {
 /** 凭证状态 → 界面读法（与 `team-hub/credential-status.mjs` 同口径）。 */
 function credentialView(p: Provider): { cls: string; label: string; title: string; ready: boolean } {
   const state = p.credential?.state
-  // ★ 2026-10-12：核验结果里**不再有引用名**（`credential.ref` 已从两端点去掉）——
-  //   引用名是可枚举的攻击面，界面要表达的是"引用了某把钥匙"（`hasRef`）而不是它叫什么。
-  //   `p.secretRef` 仍在（供应商那一族还没红色action，见 `docs/bugs/BUG-028`），
-  //   保留它只是为了在标题里给一个可读的名字；两者都没有时说"还没有填密钥"。
-  const ref = p.secretRef
-  const hasRef = p.credential?.hasRef === true || (typeof ref === 'string' && ref !== '')
+  // ★★ 2026-10-12（BUG-028 收口）：核验结果与供应商行里**都没有引用名**了。
+  //   界面只需知道"这一条引用了某把钥匙"（`hasRef` / `credentialRequired`），
+  //   而不需要知道它叫什么 —— 名字是可枚举的攻击面，而且客户端算不出它
+  //   （可能是个从 DSH 导进来的名字）。所以这里不再拼名字，只描述状态。
+  const hasRef = p.credential?.hasRef === true || p.credentialRequired === true
   if (state === 'ready') {
     return { cls: ' ready', label: '密钥已核验', title: `${hasRef ? '本机密钥库里已有这条凭证' : '这条凭证已核验'} · ${p.models.length} 个模型`, ready: true }
   }
   if (state === 'missing') {
     return {
       cls: ' missing', label: '密钥不在库里', ready: false,
-      title: `引用了${ref === null ? '一个凭证名' : ` ${ref}`}，但本机密钥库里**没有**它：钥匙从未存进来，或者它被删掉了（面板会显示"已配置"是另一件事，那是从运行环境导入的标记）`,
+      title: '这一条引用了凭证，但本机密钥库里**没有**它：钥匙从未存进来，或者它被删掉了（面板会显示"已配置"是另一件事，那是从运行环境导入的标记）',
     }
   }
   if (state === 'unavailable') {
     return {
       cls: ' unknown', label: '无法核验', ready: false,
-      title: `读不到本机密钥库，因此**无法判断**${ref === null ? '这条凭证' : ` ${ref}`}在不在（这不等于"没有"）`,
+      title: '读不到本机密钥库，因此**无法判断**这条凭证在不在（这不等于"没有"）',
     }
   }
   if (state === 'none') {
@@ -95,17 +105,16 @@ function credentialView(p: Provider): { cls: string; label: string; title: strin
   // 没有核验结果（老 hub / 请求失败）：**不猜**。
   return {
     cls: ' unknown', label: '未核验', ready: false,
-    title: p.secretRef ? `引用了 ${p.secretRef}，但这次没有核验它是否在库里` : '还没有填密钥',
+    title: hasRef ? '这一条引用了凭证，但这次没有核验它在不在库里' : '还没有填密钥',
   }
 }
 
 interface Form { provider: string; name: string; endpoint: string; protocol: string; models: string; key: string; runtimeType: string }
 const empty: Form = { provider: '', name: '', endpoint: '', protocol: 'openai-completions', models: '', key: '', runtimeType: 'dsh' }
 
-/** 凭证引用名的约定：`<ID>_API_KEY`（与 DSH 的 `refs` 键空间同形：POSIX 标识符）。 */
-function defaultKeyRef(id: string): string {
-  return `${id.toUpperCase().replace(/[^A-Z0-9]+/g, '_')}_API_KEY`
-}
+// ★ `defaultKeyRef()` 已删除（BUG-028）：槽位名不再由客户端算 ——
+//   从 DSH 导进来的行，其引用名是 DSH 侧的 `apiKeyEnv`，派生名与它不一定相同。
+//   写凭证时把**值**交给服务端（`credentialValue`），由它用那一行已有的名字。
 function asProviders(v: unknown): Provider[] {
   const list = (v as { providers?: unknown })?.providers
   return Array.isArray(list) ? list as Provider[] : []
@@ -256,34 +265,48 @@ export function DshProvidersPanel(): React.JSX.Element {
       if (!['http:', 'https:'].includes(endpoint.protocol) || endpoint.username || endpoint.password) {
         throw new Error('API 地址需使用 HTTP(S)，且不能内嵌账号密码。')
       }
-      const keyRef = editing?.secretRef ?? defaultKeyRef(id)
+      // ★★ 2026-10-12（BUG-028）：面板**不再需要**引用名。
+      //
+      //   旧写法是 `editing?.secretRef ?? defaultKeyRef(id)` —— 它读的是响应里的引用名。
+      //   读侧现在不给了（引用名是可枚举的攻击面），而且那是**对的**：
+      //   槽位名该由服务端决定，因为它可能是从 DSH 导进来的 `apiKeyEnv`
+      //   （两侧靠那个名字对齐），客户端**算不出**它。客户端自己算派生名的话，
+      //   "新钥匙写进另一个槽位、这一行仍指旧槽位"会表现成"保存成功但认证失败"。
+      //
+      //   所以：值随 `credentialValue` 一起发给供应商那条写路由，由服务端落槽位。
+      //   面板从头到尾不知道槽位叫什么，也不需要知道。
 
-      // ★ 先写凭证、再写供应商 —— 顺序不能反。
-      //   反过来的话"供应商写成功、凭证写失败"会留下一条**声称有密钥、其实没有**的配置，
-      //   而那正是旧实现里的部分成功状态（它当时只能在界面上补一句"凭证写入失败"）。
-      //   先写凭证则失败时什么都没落库，用户可以原样重试。
-      if (form.key) {
-        await hubRequest('POST', '/api/secrets', { ref: keyRef, value: form.key, purpose: `模型供应商 ${id}` })
-      }
+      // 顺序仍是**先钥匙、后供应商** —— 反过来的话"供应商写成功、钥匙写失败"
+      // 会留下一条**声称有密钥、其实没有**的配置（旧实现的部分成功状态）。
+      // 现在这一步与写供应商在**同一个请求**里由服务端完成，所以它天然原子：
+      // 钥匙写不进去就整次失败，什么都不会落库。
       savedName = form.name.trim() || id
       const provider = {
         id, displayName: savedName, api: form.protocol,
-        baseURL: form.endpoint.trim(), secretRef: form.key || editing?.secretRef ? keyRef : null,
-        // ★ 运行时在这里选一次、**记在供应商行上**：档案继承它，所以模型档案那页不用填。
+        baseURL: form.endpoint.trim(),
+        // ⚠ 这里**不发 `secretRef`**：没给 = 保留原值（`provider-store.update` 的语义），
+        //   而"清掉凭证"必须走显式的 `clearCredential`。
+        //   运行时在这里选一次、**记在供应商行上**：档案继承它，所以模型档案那页不用填。
         //   选项来自服务端（`runtimeTypes`），不写死。
         runtimeType: form.runtimeType,
         credentialConfigured: Boolean(form.key) || editing?.credentialConfigured === true,
         models: ids.map(modelId => editing?.models.find(m => m.id === modelId) ?? { id: modelId }),
       }
+      // 用户这次填了密钥 ⇒ 把**值**交给服务端（它决定槽位）；没填 ⇒ 不带这个字段。
+      const credentialValue = form.key ? form.key : null
       if (editing) {
         const r = await hubRequest('POST', `/api/model-providers/${encodeURIComponent(id)}`, {
           actor: 'general', version: editing.version, provider,
+          ...(credentialValue === null ? {} : { credentialValue }),
         }) as { profilesDerived?: DeriveResult }
         derived = r?.profilesDerived
       } else {
         // ★ 同名墓碑会**复活**（服务端返回 `revived`）。说"已恢复"而不是"已保存"：
         //   用户刚做过一次删除，他需要知道"那条又回来了"，而不是"又新建了一条"。
-        const created = await hubRequest('POST', '/api/model-providers', { actor: 'general', provider }) as { revived?: boolean; profilesDerived?: DeriveResult }
+        const created = await hubRequest('POST', '/api/model-providers', {
+          actor: 'general', provider,
+          ...(credentialValue === null ? {} : { credentialValue }),
+        }) as { revived?: boolean; profilesDerived?: DeriveResult }
         revived = created?.revived === true
         derived = created?.profilesDerived
       }

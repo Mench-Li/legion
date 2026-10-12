@@ -619,6 +619,12 @@ export const SCHEMA = defineSchema({
     //   · WRITE_FAILED — 本表没登记的内部码收敛到这里（503，不猜状态码）
     'SECRET_ADMIN_STORE_UNAVAILABLE', 'SECRET_REF_INVALID', 'SECRET_VALUE_EMPTY',
     'SECRET_NOT_FOUND', 'SECRET_STORE_WRITE_FAILED',
+    // ★ 2026-10-12（BUG-028）供应商那一族的三个具名码。它们长得像 env 名（全大写 + 下划线），
+    //   所以要登记 —— 但它们**不是**环境读取点，只是错误码：
+    //     · SECRET_STORE_NOT_WIRED    — 这个部署没接密钥库，带 `credentialValue` 的写被拒（不静默忽略）
+    //     · SECRET_REF_UNRESOLVED     — id 为空且那一行本来也没有引用名，定不出槽位名
+    //     · SECRET_REFS_REQUIRE_TOKEN — `?includeSecretRefs=1` 没过令牌校验（引用名不是公开只读数据）
+    'SECRET_STORE_NOT_WIRED', 'SECRET_REF_UNRESOLVED', 'SECRET_REFS_REQUIRE_TOKEN',
     // PRT-212 审批端口（team-hub/approval-port.mjs）的失败码。
     //
     // 它们是**这个端口**对外可见的名字，而端口要回答的问题恰恰是

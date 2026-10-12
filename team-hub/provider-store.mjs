@@ -65,6 +65,50 @@ const PROVIDER_FIELDS = Object.freeze([
 ])
 
 /**
+ * 一条供应商**默认**的凭证槽位名：`<ID 大写、非字母数字折成 _>_API_KEY`。
+ *
+ * 为什么需要一个**纯函数**版本（BUG-028）：读侧不再把引用名发给客户端之后，
+ * "用户新填的密钥该写进哪个槽位"就**不能**由客户端算、更不能问客户端要 ——
+ * 那正是要藏起来的东西。于是服务端需要一个确定的规则，而它必须是**可测的**。
+ *
+ * 只用于"这条供应商还没有引用名"的情形（新建，或从没配过凭证的老行）。
+ * **已有的引用名一律优先**：那可能是从 DSH 导进来的 `apiKeyEnv`（两侧靠这个名字对齐），
+ * 换成派生名会让物化把 DSH 侧的键名改掉 —— 而 DSH 那边的钥匙是按那个名字存的。
+ */
+export function defaultSecretRefFor(id) {
+  const s = String(id ?? '').trim()
+  if (s === '') return null
+  return `${s.toUpperCase().replace(/[^A-Z0-9]+/g, '_')}_API_KEY`
+}
+
+/**
+ * 决定一次写凭证该落到哪个槽位名。
+ *
+ * **已有的名字优先** —— 它可能是从 DSH 导进来的 `apiKeyEnv`（`secretRef ↔ apiKeyEnv`
+ * 两侧靠这个名字对齐），换成派生名会让物化把 DSH 侧的键名改掉，而 DSH 那边
+ * 的钥匙就是按那个名字存的 ⇒ "界面说保存成功、跑起来仍认证失败"。
+ *
+ * 没有已有的才用派生名（新建，或从没配过凭证的老行）。
+ *
+ * 返回 `{ ok: false, code }` 而不是抛：调用方要把它翻成一个**具名 400**，
+ * 而"这个 id 定不出槽位名"是个输入问题，不是服务端故障。
+ */
+export function resolveCredentialRef({ existingRef = null, id = null } = {}) {
+  if (typeof existingRef === 'string' && existingRef.trim() !== '') {
+    return { ok: true, ref: existingRef, from: 'existing' }
+  }
+  const derived = defaultSecretRefFor(id)
+  if (derived === null) {
+    return {
+      ok: false,
+      code: 'SECRET_REF_UNRESOLVED',
+      message: '这条供应商定不出凭证槽位名（id 为空，且它本来也没有引用名）',
+    }
+  }
+  return { ok: true, ref: derived, from: 'derived' }
+}
+
+/**
  * 把一条**读出来的**供应商行收窄成一份**写回去能用**的输入。
  *
  * 为什么需要它：`get()` / `list()` 的产物带着簿记字段（`source` / `version` / `createdAtMs` …），
@@ -489,20 +533,34 @@ export function createProviderStore({ db, clock = () => Date.now(), writeAudit =
     //   "我对它没意见"，不是"我要把它清掉"。清掉它的后果很具体 ——
     //   下一次自动派生就不知道该给新档案写哪个运行时了，而那正是这一轮要修的东西。
     const runtimeType = p.runtimeType ?? existing.runtimeType ?? null
+    // ★★ 2026-10-12（BUG-028）：`secretRef` 也是"没给 = 保留"，**但比 runtimeType 更严**：
+    //   它必须能表达"清掉"（用户有权删掉一条凭证引用），所以判据是 `=== undefined`
+    //   而不是 `??` —— `??` 会把显式 `null` 也当成"没给"，那样"清掉凭证"就永远做不到。
+    //
+    //   这一条是"读侧不再返回引用名"的**前提**：面板拿不到名字 ⇒ 只改显示名那次保存
+    //   必然不带 `secretRef` ⇒ 若当成长"清掉"，用户会在毫无提示的情况下丢凭证。
+    //
+    //     > 一个"改显示名顺手把凭证删了"的保存，
+    //     > 与一个"我就是要删凭证"的保存，在请求体里长得一模一样 ——
+    //     > 而两者在后果上是两个东西。
+    //
+    //   清掉它**不删密钥库里的那把钥匙**（那是另一件事，也是另一个人该决定的事）：
+    //   这里改的只是"这条供应商还引不引用它"。
+    const secretRef = Object.prototype.hasOwnProperty.call(input, 'secretRef') ? p.secretRef : existing.secretRef
     const nowMs = clock()
     const changed = []
     for (const [col, next, prev] of [
       ['display_name', p.displayName, existing.displayName],
       ['api', p.api, existing.api],
       ['base_url', p.baseURL, existing.baseURL],
-      ['secret_ref', p.secretRef, existing.secretRef],
+      ['secret_ref', secretRef, existing.secretRef],
       ['runtime_type', runtimeType, existing.runtimeType],
       ['models_json', JSON.stringify(p.models), JSON.stringify(existing.models)],
     ]) { if (next !== prev) changed.push(col) }
     db.prepare(
       `UPDATE model_providers SET display_name=?, api=?, base_url=?, secret_ref=?, runtime_type=?,
          credential_configured=?, models_json=?, source=?, version=version+1, updated_at_ms=? WHERE id=?`,
-    ).run(p.displayName, p.api, p.baseURL, p.secretRef, runtimeType, p.credentialConfigured ? 1 : 0,
+    ).run(p.displayName, p.api, p.baseURL, secretRef, runtimeType, p.credentialConfigured ? 1 : 0,
       JSON.stringify(p.models), source, nowMs, id)
     audit({ action: 'model-provider.update', id, actor, detail: { fields: changed, modelCount: p.models.length, droppedFields: dropped } })
     return get(id)

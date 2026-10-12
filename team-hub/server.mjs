@@ -6993,7 +6993,11 @@ const router = createRouter([
   }),
   // ★ `modelStore` 是"从供应商派生档案"要用的：判断"哪些模型还没有档案"
   //   要读档案表（含墓碑，见 `profile-derivation.mjs` 的纪律 ①）。
-  createModelProvidersRoutes({ json, handleRun, providerStore, credentialStatus, modelStore }),  createUsageRoutes({
+  // ★ `secretAdmin` 一起注入：读侧不再返回引用名之后（BUG-028），"用户填的那把新钥匙
+  //   写进哪个槽位"只能由服务端决定 —— 见 `model-providers.mjs` 的 `credentialIntent`。
+  // ★ `authorized` 一起注入：`?includeSecretRefs=1` 那一条参数要**单独**过令牌校验
+  //   （引用名是密钥库的槽位清单，不该跟着读路径公开）。没注入时那条参数被拒。
+  createModelProvidersRoutes({ json, handleRun, providerStore, credentialStatus, modelStore, secretAdmin, authorized }),  createUsageRoutes({
     json,
     authorized, usageRollup, optionalIntParam,
     db, ROLLUP_DIMENSIONS, evaluateBudgetAlert,

@@ -33,10 +33,50 @@
 // ============================================================================
 
 import { ModelError, MODEL_ERRORS } from '../model-store.mjs'
-import { toProviderInput } from '../provider-store.mjs'
+import { toProviderInput, resolveCredentialRef } from '../provider-store.mjs'
 // `profileIdFor` 与判定同住一个模块（它 2026-10-12 从已拆除的 `model-migration.mjs` 搬来）。
 import { describeDerivation, matchProviderModels, planProfileDerivation, profileIdFor, resolveRuntimeType } from '../profile-derivation.mjs'
 import { SUPPORTED_RUNTIME_TYPES } from '../../runtime/contracts/model.mjs'
+
+/**
+ * 这次请求能不能读到**引用名**（BUG-028 的两读口径）。
+ *
+ * 默认**不能**（`wantRefs !== true` 时连判定都不做）；要读就必须通过传进来的
+ * `authorized`（那个部署的机器令牌校验）。
+ *
+ * 为什么不是"读路径一律公开"：`GET /api/model-providers` **故意不校验令牌**
+ * （见文件头那段：与同目录其它读路径同口径，单机部署根本没有令牌）。
+ * 而引用名是"密钥库的槽位清单"—— 它不该因为"这一族是读路径"就跟着公开。
+ * 于是这里做了本族此前没有的一件事：给一个参数**单独**要求鉴权。
+ *
+ *   > 一个"谁都能读、顺手也能读到槽位名"的读端点，
+ *   > 与一个"谁都能读、但槽位名要令牌"的读端点，在**没设令牌的部署**上是同一个东西
+ *   > —— 而那种部署本来就把整个中枢开放着，所以这不是新的泄漏面。
+ *
+ * 没给 `authorized`（老部署 / 别处直接构造）⇒ **拒绝**：无法证明调用方有权限时，
+ * 默认给"没有名字"的那一份，而不是"反正大概没事"。
+ *
+ * 写成模块级导出函数而不是闭包里的私有件：它是一条**判定**，必须能在不起 hub 的
+ * 情况下被逐种输入测到（见 `model-providers-routes.test.mjs` 的 ⑱ 那一组）。
+ *
+ * @returns {{ok: boolean, include: boolean, code?: string, message?: string}}
+ */
+export function mayReadSecretRefs({ wantRefs, authorized = null, req = null } = {}) {
+  if (wantRefs !== true) return { ok: true, include: false }
+  if (typeof authorized !== 'function') {
+    return {
+      ok: false, include: false, code: 'SECRET_REFS_REQUIRE_TOKEN',
+      message: '这个部署没有可用的鉴权注入，因此不能读引用名（拒绝，而不是"大概没事"）',
+    }
+  }
+  if (authorized(req) !== true) {
+    return {
+      ok: false, include: false, code: 'SECRET_REFS_REQUIRE_TOKEN',
+      message: '读引用名需要令牌：那是密钥库的槽位清单，不是公开只读数据',
+    }
+  }
+  return { ok: true, include: true }
+}
 
 /**
  * @param json         写 JSON 响应的注入件（属于 server.mjs）
@@ -54,6 +94,19 @@ export function createModelProvidersRoutes({
   // ★ 从供应商派生档案（"我还有必要新建档案嘛"）：需要读档案表以判断
   //   "哪些模型还没有档案"。省略时那一列不出现、派生端点回 503（**不猜**）。
   modelStore = null,
+  // ★★ 2026-10-12（BUG-028）：写凭证的**唯一**入口。
+  //
+  //   读侧不再返回引用名之后，客户端就**没有名字**能拿去调 `POST /api/secrets`
+  //   （那正是要藏起来的东西）。于是"用户填的那把新密钥写进哪个槽位"由**服务端**决定：
+  //   请求体带 `credentialValue`（明文值），服务端用那一行**已有的**引用名；
+  //   它为空时用 `defaultSecretRefFor(id)`。
+  //
+  //   省略时（老部署）带 `credentialValue` 的请求被**具名拒掉**，而不是静默忽略 ——
+  //   静默忽略的表现是"面板说保存成功、钥匙其实没写进去"，而那要到第一次跑模型才发现。
+  secretAdmin = null,
+  // ★★ 一个参数的**单独**鉴权（`?includeSecretRefs=1`）：见 `mayReadSecretRefs`。
+  //   省略 ⇒ 那条参数被**具名拒绝**（403），而不是"没有 authorized 就放行"。
+  authorized = null,
 }) {
   /** 读一次档案表（含墓碑：id 占用判定要用）。读不出来 ⇒ null（**不是**空表）。 */
   const profilesSnapshot = () => {
@@ -152,11 +205,75 @@ export function createModelProvidersRoutes({
     return err
   }
 
+  /**
+   * 出站**唯一**的供应商形状：**抹掉引用名**（BUG-028）。
+   *
+   * 本族的每个响应（列表 / 创建 / 更新 / 导入 / 发现）都必须过这里。
+   * "每个端点各自记得抹掉"与"有一个统一的出口"不是同一件事 ——
+   * 前者在**新加一个端点**的那天就失效了，而失效的表现是"引用名悄悄又发出去了"。
+   *
+   *   实测抓到它的那条判据（`config-bundle-routes.test.mjs` 用例 ④）在**原始字节**上
+   *   找引用名：档案那一族曾把 `credential.ref` 一并发出，供应商这一族则一直整行原样返回。
+   *   两处的规矩都写在 `model-store.mjs` 的文件头：
+   *   **读出去的东西不含 `secretRef`；引用名也是可枚举的攻击面。**
+   *
+   * 客户端因此**不需要**这个名字：写凭证时由服务端决定槽位（见下面的 `credentialIntent`）。
+   * 要表达"缺哪把钥匙"用 `credential.hasRef` + `credentialRequired`，不说它叫什么。
+   *
+   * ★ 但有一个**内部**消费者确实需要它：物化 / 影子对账要拿 Legion 侧的引用名与 DSH 的
+   *   `apiKeyEnv` 对齐（`services-plugin/materialize-plan.mjs` 的 `secretRef ↔ apiKeyEnv`）。
+   *   所以还有一条**带鉴权**的读法（`?includeSecretRefs=1`，判定见 `mayReadSecretRefs`）——
+   *   这正是 `model-store.mjs` 那个 `get` / `internalGet` 两读口径在 HTTP 层的对应物。
+   */
+  const publicProvider = (p) => {
+    const { secretRef, ...rest } = p
+    return { ...rest, credentialRequired: secretRef !== null && secretRef !== undefined }
+  }
+
+  /**
+   * 把一次写请求里的**凭证意图**落成 `secretRef`（必要时先把钥匙写进密钥库）。
+   *
+   * 三种意图，必须分得开（BUG-028）：
+   *   · `credentialValue` 是非空字符串 —— 用户填了新钥匙：**先写密钥库、再写引用名**；
+   *   · `clearCredential === true` —— 用户要撤掉引用：`secretRef = null`
+   *     （`null` 是显式的，所以 `provider-store` 的"没给 = 保留"不会吞掉它）；
+   *   · 两者都没有 —— **不动这一项**（返回的补丁里**不含** `secretRef` 键，
+   *     于是仓储按"没给"处理 ⇒ 保留原值）。
+   *
+   * 槽位名的取法：**已有的优先**（可能是 DSH 导进来的 `apiKeyEnv`，两侧靠它对齐），
+   * 没有才用 `defaultSecretRefFor(id)`。客户端从头到尾看不到这个名字。
+   *
+   * 顺序（先钥匙、后引用）与旧面板的纪律一致：反过来的话，"供应商写成功、钥匙写失败"
+   * 会留下一条**声称有钥匙、其实没有**的配置。
+   */
+  const credentialIntent = async (body, id, existing) => {
+    const value = typeof body?.credentialValue === 'string' ? body.credentialValue : ''
+    if (body?.clearCredential === true) return { patch: { secretRef: null, credentialConfigured: false } }
+    if (value.trim() === '') return { patch: {} }
+    if (secretAdmin === null || typeof secretAdmin !== 'function') {
+      throw invalidInput('SECRET_STORE_NOT_WIRED',
+        '这个部署没有接密钥库，因此不能通过界面写凭证（请求里的 credentialValue 没有被忽略）')
+    }
+    // ★ 校验交给密钥库自己（`assertSecretRef` 是唯一判据），这里只决定用哪个名字。
+    const slot = resolveCredentialRef({ existingRef: existing?.secretRef ?? null, id })
+    if (slot.ok !== true) throw invalidInput(slot.code, slot.message)
+    const ref = slot.ref
+    const r = await secretAdmin().put({ ref, value, purpose: `模型供应商 ${id}` })
+    return { patch: { secretRef: r?.meta?.ref ?? ref, credentialConfigured: true }, ref }
+  }
+
   const routes = [
     {
       method: 'GET',
       match: 'exact',
-      path: '/api/model-providers',      async run(req, res) {
+      path: '/api/model-providers',      async run(req, res, ctx) {
+        // ★ 两读口径：默认那一份**没有引用名**；带 `?includeSecretRefs=1` 且过了令牌校验
+        //   才给（内部消费者只有一个：物化 / 影子对账）。
+        const vis = mayReadSecretRefs({ wantRefs: ctx?.url?.searchParams?.get('includeSecretRefs') === '1', authorized, req })
+        if (vis.ok !== true) {
+          json(res, 403, { ok: false, code: vis.code, error: vis.message })
+          return
+        }
         const providers = providerStore.list()
         // ★ 一次列表只问密钥库**一遍**（20 个供应商不该产生 20 次 DPAPI 打开）。
         let snapshot = null
@@ -169,15 +286,8 @@ export function createModelProvidersRoutes({
         const profiles = profilesSnapshot()
         // `credential` 是**核验结果**；`credentialConfigured` 保留原样（它是 P1 导入的标记，
         // 别的消费者还在用）。界面必须读前者 —— 两者在"钥匙其实不在库里"时说的不是一回事。
-        //
-        // ★★ 2026-10-12：**不把引用名放进响应**。`snapshot.of(ref)` 的产物里带 `ref`，
-        //   直接塞进去就等于把 `secretRef`（密钥库的槽位名）交给任何能读这一页的人 ——
-        //   而 `model-store.mjs` 的文件头写着"引用名也是可枚举的攻击面，读出去不含它"。
-        //   档案那条路已经因此被 `config-bundle-routes.test.mjs` 用例 ④ 抓住过一次
-        //   （在**原始字节**上验），这里是同一个坑、只是端点不同。
-        //   要表达"缺哪把钥匙"用 `hasRef` + `state`，不说槽位名。
         const enriched = providers.map((p) => {
-          const out = { ...p }
+          const out = vis.include ? { ...p, credentialRequired: p.secretRef !== null && p.secretRef !== undefined } : publicProvider(p)
           if (snapshot !== null) {
             const verified = snapshot.of(p.secretRef)
             out.credential = { state: verified.state, hasRef: verified.ref !== null, detail: verified.detail }
@@ -213,15 +323,19 @@ export function createModelProvidersRoutes({
         // ★ 同名墓碑会**复活**（不是 409）：删掉一个从 DSH 导入的供应商、再加回来，
         //   是用户的正常动作；拒绝只会逼他发明 `xxx-1` 这种与 DSH 配置 id 不一致的别名。
         //   响应里带 `revived`，好让面板说"已恢复"而不是"已创建"。
-        await handleRun(req, res, (body) => {
+        await handleRun(req, res, async (body) => {
           const input = body.provider ?? body
+          const id = typeof input.id === 'string' ? input.id : ''
           // ★ 先把 `runtimeType` 定下来（写库之前）：定不下来就整次拒，不留"供应商在、档案没生成"的中间态。
           const rt = resolveIncomingRuntimeType(input)
           if (rt.ok !== true) throw invalidInput(rt.code, rt.message)
-          const r = providerStore.create({ ...input, runtimeType: rt.runtimeType }, { actor: body.actor })
+          // ★ 凭证意图：新建没有"已有的引用名"，所以槽位名由派生规则定。
+          //   ⚠ 必须在 `create` **之前**写钥匙（见 `credentialIntent` 的顺序理由）。
+          const cred = await credentialIntent(body, id, null)
+          const r = providerStore.create({ ...input, ...cred.patch, runtimeType: rt.runtimeType }, { actor: body.actor })
           // ★★ 添加完**立刻自动生成**模型档案（将军："添加完自动生成供应商档案"）。
           const profilesDerived = deriveForProvider(r.provider.id, { actor: body.actor, requestedRuntimeType: rt.runtimeType })
-          return { ...r.provider, revived: r.revived, profilesDerived }
+          return { ...publicProvider(r.provider), revived: r.revived, profilesDerived }
         })
       },
     },
@@ -242,7 +356,7 @@ export function createModelProvidersRoutes({
             providerId: p.id,
             ...deriveForProvider(p.id, { actor: body.actor, requestedRuntimeType: body.runtimeType ?? null }),
           }))
-          return { ...r, profilesDerived: derived }
+          return { ...r, providers: (r.providers ?? []).map(publicProvider), profilesDerived: derived }
         })
       },
     },
@@ -372,7 +486,7 @@ export function createModelProvidersRoutes({
       async run(req, res, { path }) {
         const id = decodeURIComponent(path.slice('/api/model-providers/'.length))
         if (id === '') { json(res, 400, { ok: false, error: '缺少供应商 id', code: 'MISSING_PARAM' }); return }
-        await handleRun(req, res, (body) => {
+        await handleRun(req, res, async (body) => {
           const input = body.provider ?? body
           // 改的时候没给 `runtimeType` ⇒ **保留原来那个**（老行上它可能是 NULL）。
           // 这一条与 `providerStore.update` 里的 `?? existing.runtimeType` 是同一条规则，
@@ -388,10 +502,12 @@ export function createModelProvidersRoutes({
                 return r
               })()
           if (rt.ok !== true) throw invalidInput(rt.code, rt.message)
-          const updated = providerStore.update(id, { ...input, runtimeType: rt.runtimeType }, { actor: body.actor, version: body.version })
+          // ★ 凭证意图：更新时**已有的引用名优先**（面板没有名字可回传，见 BUG-028）。
+          const cred = await credentialIntent(body, id, existing)
+          const updated = providerStore.update(id, { ...input, ...cred.patch, runtimeType: rt.runtimeType }, { actor: body.actor, version: body.version })
           // ★ 改了清单（比如加了一个模型）⇒ 新模型**立刻**有档案；去掉的模型只**报**不删。
           const profilesDerived = deriveForProvider(id, { actor: body.actor, requestedRuntimeType: rt.runtimeType })
-          return { ...updated, profilesDerived }
+          return { ...publicProvider(updated), profilesDerived }
         })
       },
     },

@@ -17,7 +17,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 
-import { planMaterialization } from './materialize-plan.mjs'
+import { planMaterialization, normalizeForCompare } from './materialize-plan.mjs'
 import { planToOps, expectedResidual, verifyResidual, providerValue } from './materialize-ops.mjs'
 import { runMaterialization } from './materializer.mjs'
 
@@ -91,6 +91,48 @@ const LEGION_FJD = {
   secretRef: 'FJD_DS_API_KEY', models: [{ id: 'm1', name: 'M1' }],
 }
 const hub = (providers) => async () => ({ status: 200, text: async () => JSON.stringify({ ok: true, providers, empty: providers.length === 0 }) })
+
+// ── ★★ 内部读：**必须**带 `includeSecretRefs=1`（BUG-028 的收口）─────────────
+//
+// hub 的默认读响应不再含引用名（那是密钥库的槽位清单，不该跟着读路径公开）。
+// 而这一层**需要**它：`planMaterialization()` 要把 Legion 的 `secretRef` 与 DSH 的
+// `apiKeyEnv` 归一化成同一个东西来比。少了它，Legion 侧会读成"没有引用名"，
+// 于是**每一轮对账都报差异** —— 而"每轮都报差异"会让人把这道读数关掉，
+// 那才是真正丢掉的东西（P1/P2 的可观测性就是它）。
+//
+// 所以这条判据盯的是："内部消费者与 hub 的两读口径**对得上**"。
+// 门禁形状上它是一条 URL 断言 —— 因为断言的正是"它问了哪一份"。
+test('⑲ ★★★ 读 Legion 目录必须带 `includeSecretRefs=1`（否则对账永远报差异）', async () => {
+  const urls = []
+  const fetchImpl = async (url) => {
+    urls.push(String(url))
+    return { status: 200, text: async () => JSON.stringify({ ok: true, providers: [LEGION_FJD], empty: false }) }
+  }
+  // ⚠ `fakeHost()` 返回的就是 ctx 本身（不是 `{ctx}`）—— 与文件里其它用例一致。
+  const ctx = fakeHost({ initial: {} })
+  // ⚠ 必须 `enabled: true`：门关着时它在读 Legion 目录**之前**就早退了（那是 ⑦ 的判据），
+  //   于是这里会读到"一次请求都没有" —— 而那是"门关着"，不是"没带参数"。
+  //
+  // ⚠ 也必须带 `teamHubToken`：生产里这一层**总是**带着令牌（中枢设了令牌，
+  //   不带就 401）。不带令牌时它走的是 URL 的另一支 —— 于是"改坏了带令牌那一支"
+  //   在判据眼里看不出区别（实测：这条判据第一版就是这样漏掉了一个变异）。
+  await runMaterialization({
+    ctx, hubUpstream: 'http://hub.test', fetchImpl, enabled: true, teamHubToken: 'T0KEN', log: () => {},
+  })
+  const asked = urls.find((u) => u.includes('/api/model-providers'))
+  assert.ok(asked !== undefined, `这一层根本没去读 Legion 的目录：${JSON.stringify(urls)}`)
+  assert.match(asked, /includeSecretRefs=1/,
+    '不带这个参数就会拿到"没有引用名"的那一份，而对账需要它 ⇒ 每轮报差异')
+})
+
+test('⑲ ★ 反向锚：读到的引用名要真的进到归一化结果里', () => {
+  // 如果哪天 hub 忽略那个参数（或这一层不再传它），`normalizeForCompare` 会读成 null，
+  // 而 null 与 DSH 的真实值比较**永远不等** ⇒ 对账每轮报"修改 1"。
+  const withRef = normalizeForCompare({ id: 'x', displayName: 'X', secretRef: 'R' })
+  assert.equal(withRef.apiKeyEnv, 'R', 'Legion 侧的 `secretRef` 必须被翻成比较用的 `apiKeyEnv`')
+  const without = normalizeForCompare({ id: 'x', displayName: 'X' })
+  assert.equal(without.apiKeyEnv, null, '没给引用名时归一化成 null（这就是"不带参数"时的读数）')
+})
 
 // ── 纯函数：ops 翻译 ────────────────────────────────────────────────────────
 

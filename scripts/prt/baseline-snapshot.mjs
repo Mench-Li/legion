@@ -285,11 +285,16 @@ SOURCES.routesUsage = join(ROOT, 'team-hub', 'routes', 'usage.mjs')
 // ★ 切片 16（context-snapshots）是**子分隔符最多**的族（4 个），
 //   而且 `assemble` 那条上面没有分隔符 —— "有的路由有说明、有的没有"两种都要对。
 SOURCES.routesContextSnapshots = join(ROOT, 'team-hub', 'routes', 'context-snapshots.mjs')
-// ★ 切片 17（config-bundle）：这一族逼出了生成器两个"前十六族恰好都成立"的假定 ——
-//   `instanceof` 不沾"被调用/取成员"两种形态；`ALWAYS` 只放行、不注入。
-SOURCES.routesConfigBundle = join(ROOT, 'team-hub', 'routes', 'config-bundle.mjs')
-// ★ 切片 18（price-tables）：第一族**被夹在别人的区间里**的 —— 逼出了搬运脚本
-//   上边界的真 bug（往上找分隔符时可能找到**别人**的分隔符）。
+// ★★ 2026-10-12：`SOURCES.routesConfigBundle`（切片 17）已删除 —— 「配置包」（PRT-508）
+//   整体拆掉了，`team-hub/routes/config-bundle.mjs` 这个文件不再存在。
+//   留着它的后果实测到了：`platformHttpRoutes()` 在这里 `readFileSync` 一个不存在的路径
+//   ⇒ **抛 ENOENT**，而报出来的用例名是"api.ts 里用到的每个 /api/ 路径都能找到"
+//   （`workbench/scripts/model-api.test.mjs` ③）。也就是说：删掉一个路由族之后，
+//   第一条红的判据在**另一个目录**里，而它的名字指向"前端写了不存在的端点" ——
+//   一个与真实成因（生成器的源清单没跟着删）毫不相干的结论。
+//
+//   > 一份"我登记了哪些源文件"的清单，与一份"那些源文件都还在"的事实，
+//   > 只在有人删文件的那一天分叉；而分叉的表现是**别人的**用例红。
 SOURCES.routesPriceTables = join(ROOT, 'team-hub', 'routes', 'price-tables.mjs')
 // ★ 切片 19（config）：第一族走**活绑定** —— 它读的 `deliveryBookkeepingFailures`
 //   在宿主里是 `let` 且三处 `+= 1`，按值注入会永久陈旧。
@@ -376,7 +381,7 @@ export const ROUTE_FAMILY_SOURCES = Object.freeze([
   { module: 'routesModelProviders', family: 'model-providers', factory: 'createModelProvidersRoutes' },
   { module: 'routesUsage', family: 'usage', factory: 'createUsageRoutes' },
   { module: 'routesContextSnapshots', family: 'context-snapshots', factory: 'createContextSnapshotsRoutes' },
-  { module: 'routesConfigBundle', family: 'config-bundle', factory: 'createConfigBundleRoutes' },
+  // ★ 2026-10-12：`routesConfigBundle` 已删（配置包拆除，见 SOURCES 里那段说明）。
   { module: 'routesPriceTables', family: 'price-tables', factory: 'createPriceTablesRoutes' },
   { module: 'routesConfig', family: 'config', factory: 'createConfigRoutes' },
   { module: 'routesCreate', family: 'create', factory: 'createCreateRoutes' },

@@ -17,7 +17,7 @@ import assert from 'node:assert/strict'
 import { hubErrorFromBody } from '../src/hub-errors.ts'
 import { chainView } from '../src/modelSettings.ts'
 import {
-  aclView, bundlePlanView, collectionView, failedState, loadingState,
+  aclView, collectionView, failedState, loadingState,
   panelErrorFrom, probeViewFrom, readyState, resolutionView, secretDeleteResultView, secretErrorView,
   secretRefEditView, secretRowView, secretStatusView, secretWriteResultView,
 } from '../src/modelSettingsUi.ts'
@@ -392,73 +392,18 @@ describe('⑥ 自检：ok:false 走 HTTP 200，它不是「没有凭证」', () 
   })
 })
 
-// ─────────────────────────────────────── ⑦ 配置包计划
+// ★★ 2026-10-12：这里原本是「⑦ 配置包导入计划」整块（7 条用例，测 `bundlePlanView`）——
+//   随「配置包」（PRT-508）整体删除。理由不是"没人用"，而是**它在单机部署里没有用**：
+//   包里那 27 行（模型档案 + 岗位绑定）本来就在 `team.db` 里 ⇒ 每一次整库备份都已经带着它们；
+//   而凭证值从来不在包里（在本机 DPAPI 密钥库）⇒ 换机器无论如何都要重填。
+//   现在"配置能不能搬"由**备份/恢复**负责（`product/server/backup.mjs`）。
+//
+//   那一块里值得留住的两条**读法纪律**没有随它消失，而是被它们原本该在的地方继承了：
+//     · "被跳过的必须说出来" ⇒ `bundlePlanView` 的对象没了，但同一条纪律在
+//       `provider-store.update` 的"没给 vs 给 null"上活着（判据见 `team-hub/model-secret-leak.test.mjs` ②）；
+//     · "计划不合法 → 拒绝优先，不再列将会做什么" ⇒ 见 `team-hub/routes/model-providers.mjs`
+//       的 `credentialIntent`（写凭证失败必须**具名拒**，不许"面板说成功、钥匙没进去"）。
 
-describe('⑦ 配置包导入计划：keep 策略下"零冲突"不等于"都导入了"', () => {
-  const applicableOk = { ok: true, code: null, reason: null }
-
-  test('keep 策略把冲突变成 skip：**被跳过的必须说出来**', () => {
-    const v = bundlePlanView(
-      { ok: true, summary: { willWrite: 0, conflicts: 0, keptLocal: 3, needsCredential: 0, danglingRefs: [] } },
-      applicableOk,
-    )
-    assert.equal(v.applicable, true, '"零冲突"时服务端确实说可以应用')
-    assert.ok(v.lines.some((l) => /3 条/.test(l) && /不会导入/.test(l)), `必须说清有 3 条没进去：${v.lines.join(' | ')}`)
-    assert.doesNotMatch(v.headline, /可以导入/, `一条都不写的时候不能说"可以导入"：${v.headline}`)
-  })
-
-  test('未决冲突 → 不能应用，且原因来自服务端的 applicable', () => {
-    const v = bundlePlanView(
-      { ok: true, summary: { willWrite: 2, conflicts: 2, keptLocal: 0, danglingRefs: [] } },
-      { ok: false, code: 'IMPORT_HAS_CONFLICTS', reason: '有 2 处冲突未决：换模型会同时改变成本、质量与数据去向' },
-    )
-    assert.equal(v.applicable, false)
-    assert.match(v.blocked, /2 处冲突未决/)
-    assert.notEqual(v.headline, '可以导入')
-  })
-
-  test('**"全都没导入"与"有冲突"两种计划的读法必须不同**', () => {
-    const kept = bundlePlanView({ ok: true, summary: { willWrite: 0, conflicts: 0, keptLocal: 3, danglingRefs: [] } }, applicableOk)
-    const conflict = bundlePlanView({ ok: true, summary: { willWrite: 0, conflicts: 3, keptLocal: 0, danglingRefs: [] } }, { ok: false, code: 'IMPORT_HAS_CONFLICTS', reason: 'r' })
-    assert.equal(kept.applicable, true)
-    assert.equal(conflict.applicable, false)
-    assert.notDeepEqual(kept.lines, conflict.lines)
-  })
-
-  test('计划不合法 → 拒绝优先：不再列"将写入 N 条"', () => {
-    const v = bundlePlanView({ ok: false, errors: ['profiles[0].model 缺失', 'bindings[1] 引用悬空'] }, null)
-    assert.equal(v.applicable, false)
-    assert.deepEqual(v.lines, [])
-    assert.match(v.blocked, /profiles\[0\]\.model 缺失/)
-    assert.match(v.blocked, /bindings\[1\] 引用悬空/)
-  })
-
-  test('没有计划 → 不崩，并说清先做什么', () => {
-    for (const bad of [null, undefined, 'x', 42]) {
-      const v = bundlePlanView(bad, null)
-      assert.equal(v.applicable, false)
-      assert.match(v.blocked, /先粘贴/)
-    }
-  })
-
-  test('要凭证的条数被单独说出来（否则导入完"看起来配好了"）', () => {
-    const v = bundlePlanView(
-      { ok: true, summary: { willWrite: 2, conflicts: 0, keptLocal: 0, needsCredential: 2, danglingRefs: [] } },
-      applicableOk,
-    )
-    assert.equal(v.headline, '可以导入')
-    assert.ok(v.lines.some((l) => /需要凭证/.test(l) && /录入/.test(l)), v.lines.join(' | '))
-  })
-
-  test('悬空引用被报出来（服务端会因此拒绝应用）', () => {
-    const v = bundlePlanView(
-      { ok: true, summary: { willWrite: 1, conflicts: 0, keptLocal: 0, danglingRefs: [{ binding: 'default/reviewer', profile: 'gone' }] } },
-      { ok: false, code: 'IMPORT_DANGLING_PROFILE_REF', reason: '绑定 default/reviewer 引用了不存在的模型档案 gone' },
-    )
-    assert.equal(v.applicable, false)
-    assert.ok(v.lines.some((l) => /引用了不存在的档案/.test(l)), v.lines.join(' | '))
-  })
-})
 
 // ★ 2026-10-12：这里原有「⑦b 迁移计划复用 importPlanView」两块用例 —— 随「配置迁移」
 //   一起删掉了（`migrationPlanView` 与它复用的 `importPlanView` 都已移除）。

@@ -124,23 +124,11 @@ describe('① 每条客户端调用都打到正确的 method + 路径（错法�
   // ★ 2026-10-12：这里原有「迁移：计划（带/不带协议）与执行」一条 —— 随「配置迁移」
   //   整个功能（PRT-506）删掉了：`fetchMigrationPlan` / `applyMigration` 与
   //   `/api/model-migration/*` 都不再存在。理由见 `docs/bugs/BUG-026` / `BUG-027`。
-
-  test('配置包：导出 / 计划导入 / 执行导入', async () => {
-    await api.fetchConfigBundle()
-    assert.match(lastCall().url, /\/api\/config-bundle$/)
-
-    await api.fetchConfigBundle('model-profiles')
-    assert.match(lastCall().url, /\/api\/config-bundle\?kind=model-profiles$/)
-
-    await api.planConfigBundle({ version: 1 }, 'fail', 'general')
-    assert.equal(lastCall().method, 'POST')
-    assert.match(lastCall().url, /\/api\/config-bundle\/plan$/)
-    assert.equal(lastCall().body.conflictPolicy, 'fail')
-
-    await api.applyConfigBundle({ version: 1 }, 'skip', 'general')
-    assert.match(lastCall().url, /\/api\/config-bundle\/apply$/)
-    assert.equal(lastCall().body.conflictPolicy, 'skip')
-  })
+  //
+  //   ★★ 同一批的「配置包：导出 / 计划导入 / 执行导入」也删了 —— 「配置包」（PRT-508）
+  //   整体拆除：在单机部署里它没有用处（那些行本来就在每一次整库备份里），
+  //   而"配置能不能搬"现在由**备份/恢复**负责。理由与它那条不可替代的判据去哪了，
+  //   见 `workbench/src/api.ts` 里那一节留下的说明。
 
   test('凭证：状态 / 列表 / 新增 / 轮换 / 删除（方法 + 路径逐字对上）', async () => {
     await api.fetchSecretStatus()
@@ -379,7 +367,8 @@ describe('③ 每条路径都必须在平台契约里真实存在（交叉校验
 
     // 本轮新增的那一族**必须**在集合里——否则上面的阈值可能被既有调用凑够，
     // 而新写的路径一条都没被检查到。
-    for (const p of ['/api/model-profiles', '/api/model-bindings', '/api/config-bundle/plan',
+    // ★ 2026-10-12：名单里的 `/api/config-bundle/plan` 已随「配置包」删除（那条路径不再存在）。
+    for (const p of ['/api/model-profiles', '/api/model-bindings',
       '/api/secrets', '/api/secrets/status']) {
       assert.ok(found.some((f) => f.path === p || f.path.startsWith(p + '/')), `抽取结果里缺少 ${p}`)
     }

@@ -4,7 +4,8 @@
 //   接一个渠道一天就能看到效果，但它会把**那一个渠道的偶然形状**钉进核心 —— 先来的渠道会成为
 //   事实标准（§2 对 F-23 的警告同理）。⇒ 第一刀的判据是：**接入第二个渠道时核心零 diff**。
 //
-// 本模块是**纯结构**：不做 I/O、不读环境、不碰凭据（与 `runtime/contracts/config-bundle.mjs` 同一条纪律）。
+// 本模块是**纯结构**：不做 I/O、不读环境、不碰凭据（与 `runtime/contracts/context.mjs` 同一条纪律；
+// 这一族里原来举的例子是 `runtime/contracts/config-bundle.mjs`，它已随配置包拆除）。
 // 渠道只负责"翻译"，判定（身份、幂等、放不放行）全在这里。
 
 export const CHANNEL_IDS = ['feishu', 'rest', 'email']

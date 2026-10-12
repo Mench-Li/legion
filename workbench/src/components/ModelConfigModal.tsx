@@ -6,7 +6,6 @@ import type { AgentModelCfg, RosterAgent } from '../types'
 import { toast } from './Toast'
 import { ModelProfilesPanel } from './ModelProfilesPanel'
 import { ModelBindingsPanel } from './ModelBindingsPanel'
-import { ModelTransferPanel } from './ModelTransferPanel'
 import { SecretVaultPanel } from './SecretVaultPanel'
 import { DshProvidersPanel } from './DshProvidersPanel'
 import { AgentAvatar } from '../avatar'
@@ -18,18 +17,21 @@ interface ModelConfigModalProps {
   embedded?: boolean
 }
 
-type Tab = 'providers' | 'quick' | 'profiles' | 'bindings' | 'transfer' | 'secrets'
+type Tab = 'providers' | 'quick' | 'profiles' | 'bindings' | 'secrets'
 
 const TABS: Array<{ id: Tab; label: string }> = [
   { id: 'providers', label: '供应商与模型' },
   { id: 'quick', label: '⚡ 快速分配' },
   { id: 'profiles', label: '🗂 模型档案' },
   { id: 'bindings', label: '🔗 岗位绑定' },
-  // ★ 2026-10-12：这个页签原本叫「配置搬家」，里面有**两件事**：① 迁移老配置（PRT-506）
-  //   与 ② 导出/导入配置包（PRT-508）。① 已拆除（它把 `agent_models` 搬成岗位绑定，
-  //   而绑定当时没有任何活的消费者）。现在只剩 ②，名字随之改成它实际做的事：
-  //   一个叫"搬家"的页签里只放着"导出/导入"，会让人以为迁移还在。
-  { id: 'transfer', label: '📦 配置包' },
+  // ★★ 2026-10-12：这里原本还有第三个「配置搬家」页签，装着**两件事**：
+  //   ① 迁移老配置（PRT-506）、② 导出/导入配置包（PRT-508）。两件都已拆除：
+  //     · ① 的产物（岗位绑定）当时没有活的消费者，那批意图已经用一次迁移搬完，
+  //       消费者也接上了（`plugins/src/dispatchModel.ts`）；
+  //     · ② 在单机部署里没有用处 —— 那 10 条档案 + 17 条绑定本来就在**每一次整库备份**里，
+  //       而凭证值从来不在包里（在本机 DPAPI 密钥库），换机器无论如何都要重填。
+  //   现在"配置能不能搬"由**备份/恢复**负责（`product/server/backup.mjs`）。
+  //   ⇒ 这个弹窗只剩四件事，每件都是这台机器上真实要做的。
   { id: 'secrets', label: '🔑 凭证库' },
 ]
 
@@ -183,7 +185,6 @@ export function ModelConfigModal({ scope, roster, onClose, embedded = false }: M
           {tab === 'quick' && (scope ? <QuickAssignTab scope={scope} roster={roster} /> : <div className="set-notice muted">请在左侧选择具体工作空间，再分配岗位模型。</div>)}
           {tab === 'profiles' && <ModelProfilesPanel />}
           {tab === 'bindings' && (scope ? <ModelBindingsPanel scope={scope} rosterRoles={roles} /> : <div className="set-notice muted">请在左侧选择具体工作空间，再配置岗位绑定。</div>)}
-          {tab === 'transfer' && <ModelTransferPanel />}
           {tab === 'secrets' && <SecretVaultPanel />}
         </div>
       </div>

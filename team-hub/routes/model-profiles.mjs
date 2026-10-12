@@ -103,8 +103,9 @@ export function createModelProfilesRoutes({
    *   第一版把 `credentialSources()` 的产物**原样**塞了进去，于是
    *   `credential.ref` / `connection.credential.ref` 把 `secretRef` 一起带出去了 ——
    *   而本族的纪律写得很清楚（`model-store.mjs` 的文件头 ②）：**读出去的东西不含
-   *   `secretRef`**，"引用名也是可枚举的攻击面"。`config-bundle-routes.test.mjs` 的
-   *   用例 ④ 在**原始字节**上验这件事，当场变红：
+   *   `secretRef`**，"引用名也是可枚举的攻击面"。那条判据（当时住在
+   *   `config-bundle-routes.test.mjs` ④，配置包拆除后搬到 `model-secret-leak.test.mjs` ①）
+   *   在**原始字节**上验这件事，当场变红：
    *
    *       响应体里出现了引用名：…"credential":{"state":"unavailable","ref":"legion/leak"…
    *

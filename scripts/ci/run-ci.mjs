@@ -798,11 +798,15 @@ async function stageTest() {
       //   把参数拼进 ssh 命令串，远端 shell 再分词一次，带空格的参数在第一个空格处
       //   被切开——任务照建、照跑、照完成，只是目标少了一半（服务器上看板留着的
       //   标题就是截断后的样子）。它现在跑子进程断言"坏参数当场具名退出"。
-      label: 'server-scripts（口令取值 / 异地备份 / 替手机做动作的参数解码）',
+      label: 'server-scripts（口令取值 / 异地备份 / 替手机做动作的参数解码 / 备份"拿得回来"的关键表清单）',
       files: [
         'product/server/read-credentials.test.mjs',
         'product/server/offsite.test.mjs',
         'product/server/phone-act.test.mjs',
+        // ★ 2026-10-12：备份的关键表清单此前**一条判据都没有** —— 于是三张模型表
+        //   一直不在 `EXPECTED_TABLES` 里而没人发现（详见该文件与 BACKUP.md 的那两段）。
+        //   这一套现在钉住两个方向：表都在 / **缺一张必须报不 ok 并点名**（后者才是这次事故的成因）。
+        'product/server/backup.test.mjs',
       ],
       cwd: ROOT,
     },
@@ -4101,14 +4105,19 @@ async function stageTest() {
       cwd: ROOT,
     },
     {
-      // PRT-508（spec §6.6 第 403 行）：配置导入导出，导出**永远不含密钥**。
-      label: 'config-bundle（PRT-508：导出剥掉 secretRef、导入挡密钥、冲突默认不覆盖、悬空引用拦下）',
-      files: ['runtime/contracts/config-bundle.test.mjs'],
-      cwd: ROOT,
-    },
-    {
-      label: 'config-bundle-routes（PRT-508：导出/计划/应用三条路由，plan 必须不写库）',
-      files: ['team-hub/config-bundle-routes.test.mjs'],
+      // ★★ 2026-10-12：这里原有两条套件 —— `config-bundle`（契约，PRT-508）与
+      //   `config-bundle-routes`（三条路由）。两条都随「配置包」整体拆除而删除：
+      //   在单机部署里它没有用处（那些行本来就在每一次整库备份里），
+      //   而"配置能不能搬"由备份/恢复负责（`product/server/backup.mjs`）。
+      //
+      //   ★ 那条不可替代的判据**搬了家而不是陪葬**：原 `config-bundle-routes.test.mjs` ④
+      //   在**原始字节**上验"读模型配置的端点不吐凭证引用名"（它当场抓出过 BUG-028），
+      //   现在住在 `team-hub/model-secret-leak.test.mjs`。理由见该文件头部：
+      //   一条抓出过真缺陷的判据，如果它恰好住在**另一样东西**的用例文件里，
+      //   删那样东西的那一天它就会跟着消失，而"它不见了"与"它从来没存在过"
+      //   在 CI 的读数里是同一个东西。
+      label: 'model-secret-leak（读模型配置的端点不吐凭证引用名/密钥：在原始字节上验）',
+      files: ['team-hub/model-secret-leak.test.mjs'],
       cwd: ROOT,
     },
     {

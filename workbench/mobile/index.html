@@ -188,6 +188,19 @@ body:not([data-screen="app"]) #btn-lang { display:none; }
  *
  * ★ `bottom` 比 `#popup-host`（+74px）高一个弹框身位，两者同时出现时不叠在一起：
  *   一个"提醒"压在一条"错误"上面，用户会只看到上面那条。 */
+/* ── 离线读标记（`read-cache.mjs`）──────────────────────────────────────────
+ *
+ * ★ 样式上它比待发横幅**更安静**（没有按钮、边框更淡），因为它不需要用户做
+ *   任何事 —— 它只是"你正在看的东西是旧的"这一句告知。
+ *   一个长得像"需要你处理"的标记会让人去找一个不存在的动作。
+ * ★ 但看板那条（`.error`）要**显眼**：它说的是"照着做可能做错"。 */
+#offline-note { margin:0 0 8px; padding:8px 11px; border-radius:9px;
+  background:var(--panel-2); border:1px dashed rgba(255,196,0,.4);
+  font-size:12.5px; line-height:1.5; }
+#offline-note.error { border:1px solid rgba(255,92,92,.5); }
+#offline-text { font-weight:600; }
+.offline-detail { margin:4px 0 0; color:var(--muted-2); font-size:12px; }
+
 /* ── 离线待发横幅（`outbox.mjs`）────────────────────────────────────────────
  *
  * ★ 它**不是浮层**，而是 `#main` 顶部的一段普通内容（`position:static`）。
@@ -307,6 +320,20 @@ body:not([data-screen="app"]) #btn-lang { display:none; }
 </section>
 
 <main id="main">
+  <!-- 离线读的标记。
+       ★ 为什么它不能省：一份**没有标记的**缓存数据，与一份实时数据，在屏幕上
+         长得一模一样 —— 而后果完全不同：用户会照着三天前的看板去催一个
+         早就完成的任务。
+       ★ 它放在 `#view-chat` / `#view-tasks` **之外**（那两块是互斥的），
+         因为"离线"这件事对两块都成立；但文字由 `renderOfflineNote()`
+         按**当前显示的是哪一块**决定 ——
+         说"消息是旧的"而用户正在看看板，是一句与屏幕无关的话。
+       ★ 它比待发横幅更靠上：这是"你正在看的东西可不可信"，
+         比"我有几条没发出去"更根本。 -->
+  <div id="offline-note" class="hidden" role="status" aria-live="polite">
+    <span id="offline-text"></span>
+    <p id="offline-detail" class="offline-detail"></p>
+  </div>
   <!-- 离线待发横幅。
        ★ 为什么它必须存在（而不是"队列在后台默默工作就好"）：
          一个**用户看不见的**待发队列，与"消息根本没发出去"在用户眼里是同一个东西

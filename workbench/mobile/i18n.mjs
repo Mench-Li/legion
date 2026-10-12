@@ -123,6 +123,24 @@ export const EN = Object.freeze({
   '这些消息服务端拒绝了，需要你处理（改一下或删掉）。':
     'The server rejected these messages. They need your attention (edit or delete).',
 
+  // ── 离线**读**的标记（`read-cache.mjs`）─────────────────────────────────────
+  //
+  // ★ 两层键：外层拿 `{ago}`，`ago` 自己是另一句话（"{hours} 小时前"）。
+  //   两层都是字面量，所以覆盖率判据两层都看得见。
+  // ★ 看板那两条的措辞比消息那两条**重**，因为后果不同：
+  //   一个旧的看板会让人照着不存在的世界去行动。
+  '离线 · 这是 {ago} 的消息': 'Offline · these messages are from {ago}',
+  '离线 · 看板是 {ago} 的': 'Offline · this board is from {ago}',
+  '{mins} 分钟前': '{mins} min ago',
+  '{hours} 小时前': '{hours} h ago',
+  '{days} 天前': '{days} d ago',
+  '这是上次连上时看到的对话，可以读，但不能当作现在的状态。':
+    'This is the conversation from the last time you were online. You can read it, '
+    + 'but do not treat it as the current state.',
+  '任务状态会变，照着过期的看板做决定可能做错。连上网络再确认一次。':
+    'Task state changes. Acting on a stale board can lead you to the wrong decision. '
+    + 'Reconnect and check again.',
+
   // ── 时间线：作者与来源标签 ────────────────────────────────────────────────
   //
   // ★ 这几个**不在** `t('…')` 里出现：`timelineMetaFor()` 返回它们，

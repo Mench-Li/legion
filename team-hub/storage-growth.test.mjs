@@ -494,6 +494,36 @@ test('★★★ `renderVars` 的两条边界各有反例（不许恒真）', () 
   // 反向：一个**缺**的变量必须留下（否则上面"替换"那条恒真）。
   assert.equal(renderVars('{a}', {}), '{a}')
 })
+test('★★★ 跨度**不许印出「0」**（生产上实测到「跨 0 分钟」）', () => {
+  // ★ 与 `storage-state.mjs` 的 `humanAge` 同一条规矩：不许出现「0 分钟」。
+  //   两个方向的错都要防 —— 上一轮防的是 `Math.max(1, …)` 把「刚刚」
+  //   说成「一小时前」，这一轮防的是不写它时直接印出一个「0」。
+  const tiny = [
+    { atMs: T0, dbBytes: 1000 },
+    { atMs: T0 + 1000, dbBytes: 2000 },
+  ]
+  const s = growthSummary(null, { samples: tiny }, { freeBytes: 1 * GiB, dbBytes: 1 * MiB })
+  assert.doesNotMatch(s.text, /跨 0 /, '不许出现「跨 0 …」：' + s.text)
+  assert.match(s.text, /不到 1 分钟/, '一秒的跨度应当说「不到 1 分钟」：' + s.text)
+})
+
+test('★★★ 跨度的各档边界（钉住单位，不只是「不是 0」）', () => {
+  const HOUR = 3600000
+  const at = (spanMs) => growthSummary(null,
+    { samples: [{ atMs: T0, dbBytes: 1000 }, { atMs: T0 + spanMs, dbBytes: 2000 }] },
+    { freeBytes: 1 * GiB, dbBytes: 1 * MiB })
+  assert.match(at(30_000).text, /不到 1 分钟/, '30 秒')
+  assert.match(at(60_000).text, /1 分钟/, '1 分钟')
+  assert.match(at(59 * 60_000).text, /59 分钟/, '59 分钟')
+  assert.match(at(HOUR).text, /1 小时/, '1 小时')
+  assert.match(at(3 * HOUR).text, /3 小时/, '3 小时')
+  assert.match(at(3 * 24 * HOUR).text, /3\.0 天/, '3 天')
+  // ★ 而且**所有**档位都不许出现「0 」开头的时间。
+  for (const span of [1000, 30_000, 59_999, 60_000, HOUR, 47 * HOUR, 48 * HOUR]) {
+    const text = at(span).text
+    assert.doesNotMatch(text, /跨 0 /, 'span=' + span + ' 时印出了「跨 0 …」：' + text)
+  }
+})
 // ── ⑦ ★★★ 端到端：`growthReport` ────────────────────────────────────────
 
 test('★★★ `growthReport` 把趋势与预测合成一块，字段齐全', () => {

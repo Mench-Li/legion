@@ -367,9 +367,22 @@ export function growthSummary(projection, input, opts) {
     { rate: rate ?? '?', conf: String(b.confidence), span: spanText(b.spanMs), eff: eff ?? '?' })
 }
 
+/**
+ * 把"跨度"说成人话：`25 分钟` / `3 小时` / `2.5 天` / `不到 1 分钟`。
+ *
+ * ★ 与 `storage-state.mjs` 的 `humanAge` 同一条规矩：**不许印出"0"**。
+ *   1 秒钟的跨度会算出 `Math.round(1000/60000)` = `0` —— 生产上实测到
+ *   「跨 **0 分钟**」这句话，而它读起来像"没测"而不是"刚测过两次"。
+ *
+ *   > 一个为了避免出现"0"而写下的 `Math.max(1, …)`，会把"刚刚"变成"一小时前"；
+ *   > 而一个**不写**它的地方，会直接印出"0" —— 两个方向的错都得防。
+ *
+ *   （上一轮在 `humanAge` 上踩的是前一个方向；这一轮 `spanText` 是后一个。）
+ */
 function spanText(ms) {
   const v = num(ms)
   if (v === null || v <= 0) return '(不足)'
+  if (v < 60000) return '不到 1 分钟'
   const h = v / 3600000
   if (h < 1) return `${Math.round(v / 60000)} 分钟`
   if (h < 48) return `${Math.round(h)} 小时`

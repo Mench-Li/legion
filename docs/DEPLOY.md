@@ -1087,6 +1087,118 @@ esbuild 这类交互式子进程保持原样、如实 EPERM），据此真实直
 
 ---
 
+## 13. 发布说明：官网撤掉桌面端下载，改讲「一个入口、两种设备、同一份数据」
+
+**产品定位变化**：主打 Web + 移动端（桌面端降为次要）。官网是这次变化的落点。
+
+### 13.1 撤掉了什么
+
+「部署 / 下载」那一节的第二张卡（Windows 桌面端 → 下载电脑版 + 版本/体积/日期 +
+备选线路）**整块撤掉**，中英两站都撤：
+
+| 撤掉的东西 | 位置 |
+| --- | --- |
+| `download` 动态块（返回只剩 `cta` / `hub`） | `team-hub/routes/site.mjs` |
+| 五个只服务于它的参数（downloadUrl/lines/version/size/date） | 同上 |
+| 五个文案串（cta/notYet/otherLines/deployWinEmpty/ctaWarnShort） | 同上 COPY |
+| `formatSize` / `formatDate`（删）、`isHttpUrl`（搬走） | 同上 |
+| `createSiteRoutes` 的 `readRelease` 参数 | 同上 |
+| 读 `CF-IPCountry` 那一段（读地区只为给下载按钮选线路） | 同上 `servePage` |
+| Windows 卡片 + `<!-- legion:download -->` 标记 | `site/index.html`、`site/en/index.html` |
+
+### 13.2 ★★★ 一处差点静默失效的接线：按地区选线
+
+`CF-IPCountry` 选下载线路原先**只有官网**在读。官网按钮撤掉后，
+`server.mjs` 里接门口页那一行是：
+
+    downloadUrl: () => describeDownload().url        // ← 把 visitor 吃掉了
+
+官网那条路（`readRelease`）自己传了 country，所以以前看不出问题。撤掉之后
+门口页成了唯一还有下载按钮的地方，而这一行不转发地区 ⇒ **永远选默认线路**。
+
+它不报错、不变慢、页面完全正常 —— 只是那条"给国内用户准备的线"不再被选中。
+
+> 一个"把参数默默丢掉"的适配器，
+> 与一个"下游根本不需要参数"的适配器，在只看这一行的时候是同一个东西。
+
+改法：`downloadUrl: (visitor) => describeDownload(visitor).url`，读地区搬到门口页
+（`createPortalRoutes` 的 dispatch）。判据也一起搬（`download-lines.test.mjs` ⑥）。
+
+### 13.3 顺手修掉的一处真缺陷：门口页的 href 没有协议白名单
+
+`isHttpUrl`（防 `javascript:` 进 href）只存在于 `site.mjs`，而门口页写出下载链接时
+**只做了 `esc()`** —— `esc()` 挡不住 `javascript:alert(1)`，那是一个完全合法的
+HTML 属性值。搬到 `portal.mjs` 时改名为 `isSafeHref` 并**放宽**（也接受站内相对
+路径，否则 `/legion/releases/<id>/…` 这种最常见的情形会被判成坏的），
+同时多了一种情形并说清楚：
+
+| 配置 | 页面 |
+| --- | --- |
+| 可用的地址 | 可点按钮 |
+| 配了但不可用 | 「下载地址配得不对」 |
+| 没配 | 「电脑版尚未发布」 |
+
+★ 第三种与第二种分开是这次顺手加的：一个**配了但配坏**的地址原先走"没配"那条路，
+页面写"尚未发布" —— 那是**反的**：运营者明明配了东西，却被告知"还没发布"，
+他会去查上传流程，而问题在那一行配置里。
+
+### 13.4 生产实测（2026-10-12）
+
+| 检查 | 结果 |
+| --- | --- |
+| 官网首页含「下载电脑版 / Legion-Setup / .exe / legion/releases / Windows x64 / 尚未发布」 | 各 **0 次** |
+| 官网首页含新文案（一个入口两种设备同一份数据 / 电脑·手机 / 同一份数据 / 不是同步的副本 / 不用安装 / 手机上打开就看得到 / 同一个库） | 各 **≥1 次** |
+| 英文站 | `one set of data` / `Desktop · Phone` / `Nothing to install` 各 1；`Download for Windows` / `Legion-Setup` 各 0 |
+| `/workbench/` `/mobile/` `/api/config` | 200 / 200 / 200 |
+| 服务 | legion-hub、nginx、cloudflared、存储体检定时器全部 active，`NRestarts=0`，错误日志 0 条 |
+
+### 13.5 ★ 两个必须说清的事实
+
+**① 更新源不在 Hub 那棵树上，而它完好。** 真正的自动更新源是**另一份静态根**
+（`/srv/legion-updates/production/`），经 `updates.legion-si.online` 发出：
+
+    /legion/feeds/stable/win-x64.json                    200（合法的 update-feed@1，指向 rel-0.1.4）
+    /legion/releases/rel-0.1.4/manifest.json             200
+    /legion/releases/rel-0.1.4/Legion-Setup-win-x64.exe  200
+
+Hub 自己那棵 `LEGION_RELEASES_DIR=/var/lib/legion-hub/releases` **只有 `releases/`、
+没有 `feeds/`** —— 所以 `legion-si.online/legion/feeds/*` 一直是 404。
+**这是既有状态，与本次改动无关**（本次没有碰 `releases.mjs`）。
+
+**② 门口页在这台部署上**访问不到** —— 所以用户端现在**没有任何下载入口**。**
+
+`server.mjs` 把官网族 unshift 在门口页**之后**，于是两者都声明 `GET /` 时
+**官网先答**；门口页只在官网答不了（`site/index.html` 不存在）时兜底。
+这台部署有官网 ⇒ `/` 永远是官网。
+
+因此"官网撤掉、门口页保留"的真实效果是：**用户看不到任何下载入口了**
+（门口页里那个下载卡片仍在代码里、渲染函数实测仍产出"下载电脑版"，
+但它被官网挡住了）。这是**既有设计**（门口页一直是兜底），不是这次改的 ——
+但它意味着这次改动的**用户可见结果比"官网撤掉一个卡片"更彻底**。
+
+要恢复"能下但不在官网首页"的形态，有两条路（都还没做，等指示）：
+
+- 把官网族与门口页的顺序对调（`/` 给门口页、官网挪到别的路径）—— 影响面大，不建议；
+- 在官网某一处**显式**放一个通往门口页的链接 —— 但那等于又把下载入口加回官网。
+
+### 13.6 诚实边界
+
+- **CSS 里 `.dl-actions` / `.dl-meta` / `.dl-lines` 三条规则没删**：纯样式、不产生
+  行为，而渲染层已不再产出这三个 class（有一条判据盯"产出"这一侧）。
+- 生产上那条备选线路的标签曾经是**乱码**（`鍥介檯绾胯矾`，应为「国际线路」）——
+  那是 `/etc/legion-download-lines.json` 的字节被写坏了。官网撤掉下载区后它不再
+  出现在官网；**门口页那条线路的标签没碰**，需要单独修那个配置文件。
+- **破坏性验证**：18 处破坏全部精确转红，4 文件逐字节还原，还原后 110/110。
+  过程中它抓出三处**我自己的判据太松**（新写的"两种设备/同一份数据"在**整页**
+  里找关键词，于是改标题、改引言、删掉"手机"三处全绿）以及**三处空破坏**。
+  验证器本身也曾被中断并把一处补丁留在工作区（已手工复原；现在它开头另存原文、
+  注册 exit/SIGINT/SIGTERM 复原、每次运行先清理上次残留、结果写 JSON 而不是抓 stdout）。
+
+    > 一个"改文件 → 跑测试 → 改回来"的验证器，
+    > 与一个"可能把改动留在工作区"的验证器，在它跑完的那一次看起来一模一样。
+
+---
+
 ## 附录 A：发布检查单（每次发布逐项打勾）
 
 - [ ] CI 全绿：`node scripts/ci/run-ci.mjs` exit 0（evidence 归档 docs/T093-evidence/）

@@ -222,6 +222,24 @@ const KNOWN_SILENT = Object.freeze([
   'literalWouldMatchNothing', // runtime/dsh-composition/external-api-scope.mjs:1061
   'whenUnattended', // runtime/dsh-composition/enforcement-mapping.mjs:266
   'wireChecked', // runtime/dsh-composition/runtime-contract-server.mjs:599
+  // ★★ 2026-10-12：`registerIpc` 进来的理由与上面三项**不同**，写清楚以免这张表被读错。
+  //
+  //   它**不是哑声明** —— 读者是有的，就在 `desktop/update-wiring.mjs:151` 的
+  //   `if (registerIpc) {`（同一份解构参数，`:86` 给了默认值 `true`）。
+  //   扫描器把它报出来，是因为它在 `scripts/qa/update-e2e-live.mjs:129` 只看到一次
+  //   **传参**（`registerIpc: false`），而读者在**另一个文件**里 ——
+  //   这一版扫描器只在同一个文件里找读者。
+  //
+  //   ⇒ 所以这一行让 `KNOWN_SILENT` 的语义**变了**：它此前只装"真没人读的声明"，
+  //     现在也装"扫描器看不见读者的声明"。这是**有代价**的处置，所以立一条规矩：
+  //
+  //     > 下一项要进来，必须先证明"读者真的不存在"；
+  //     > 只能证明"我这个扫描器找不到读者"的，不算 —— 那正是这一项的来历。
+  //
+  //   另一条更彻底的修法（把扫描器改成能跨文件追参数）没有采用：它要理解
+  //   "这个对象字面量被传给了谁"，而那正是"用一个更聪明的判据换掉一个更笨但确定的判据"
+  //   的典型场合 —— 笨的那条至少**不会漏报**，只是会多报一次让人看一眼。
+  'registerIpc', // desktop/update-wiring.mjs:151（★ 有读者；见上面的说明）
 ])
 const found = rows.map((r) => r.key).sort()
 const known = [...KNOWN_SILENT].sort()

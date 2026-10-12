@@ -127,8 +127,15 @@ export const DIR_CLASSES = Object.freeze({
   LogDir: '日志：可轮转、可清理',
 })
 
-/** 数据产物分类规则（按路径判定，用于 §⑤ 数据拓扑）。 */
-function classifyPath(p) {
+/**
+ * 数据产物分类规则（按路径判定，用于 §⑤ 数据拓扑）。
+ *
+ * ★ 2026-10-12 导出：判据需要**直接喂它**来验"规则覆盖了已知几类来源"，
+ *   而不是靠"清单里恰好有一条那种路径" —— 后者在那些文件被移出仓库之后
+ *   会变成一条**永远不可能满足**的死判据（`scratch/` 就是这样：它第 118 轮进了
+ *   `.gitignore`，随后那批临时证据被移出索引）。
+ */
+export function classifyPath(p) {
   if (/^scratch\//.test(p)) return { class: 'InstallDir', note: '测试证据/临时产物，随仓库分发' }
   if (/^\.tmp-/.test(p)) return { class: 'InstallDir', note: '未清理的临时目录，落在仓库根' }
   if (/^docs\//.test(p)) return { class: 'InstallDir', note: '文档证据' }

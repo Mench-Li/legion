@@ -31,9 +31,10 @@
         }
       ],
       "sensitiveEnv": [
-        "TEAM_HUB_TOKEN"
+        "TEAM_HUB_TOKEN",
+        "LEGION_IDENTITY_KEY"
       ],
-      "declaredFieldCount": 18,
+      "declaredFieldCount": 34,
       "envReadKeys": [
         "CHAT_ATTACH_BLACKLIST_EXT",
         "CHAT_ATTACH_MAX_BYTES",
@@ -53,7 +54,7 @@
       ],
       "envReadCount": 15,
       "undeclaredEnvKeys": [],
-      "filesScanned": 113
+      "filesScanned": 134
     },
     {
       "name": "workbench",
@@ -85,7 +86,7 @@
         "DSH_WORKBENCH_TOKEN",
         "TEAM_HUB_TOKEN"
       ],
-      "declaredFieldCount": 28,
+      "declaredFieldCount": 29,
       "envReadKeys": [
         "BASE_URL",
         "DSH_HUB_UPSTREAM",
@@ -104,7 +105,7 @@
       ],
       "envReadCount": 14,
       "undeclaredEnvKeys": [],
-      "filesScanned": 78
+      "filesScanned": 88
     },
     {
       "name": "whiteboard",
@@ -169,7 +170,7 @@
       ],
       "envReadCount": 2,
       "undeclaredEnvKeys": [],
-      "filesScanned": 28
+      "filesScanned": 32
     },
     {
       "name": "board-plugin",
@@ -215,18 +216,25 @@
       "protocol": "进程内 + spawn 子进程",
       "ports": [],
       "sensitiveEnv": [
-        "TEAM_HUB_TOKEN"
+        "TEAM_HUB_TOKEN",
+        "LEGION_IDENTITY_KEY"
       ],
-      "declaredFieldCount": 4,
+      "declaredFieldCount": 10,
       "envReadKeys": [
         "DSH_HUB_UPSTREAM",
         "DSH_WEB_URL",
+        "LEGION_APPLY_MODEL_CONFIG",
+        "LEGION_APPLY_MODEL_CONFIG_DELETES",
+        "LEGION_IDENTITY_KEY",
+        "LEGION_RECONCILE_INTERVAL_MS",
+        "LEGION_REMOTE_AUTH",
+        "LEGION_WORKSPACE_DIR",
         "TEAM_HUB_HOST",
         "TEAM_HUB_TOKEN"
       ],
-      "envReadCount": 4,
+      "envReadCount": 10,
       "undeclaredEnvKeys": [],
-      "filesScanned": 2
+      "filesScanned": 9
     },
     {
       "name": "product",
@@ -247,22 +255,29 @@
       "sensitiveEnv": [
         "TEAM_HUB_TOKEN"
       ],
-      "declaredFieldCount": 11,
+      "declaredFieldCount": 18,
       "envReadKeys": [
+        "AGENT_ROLE",
+        "HUB",
+        "LEGION_ADMIN_NAME",
         "LEGION_CACHE_DIR",
         "LEGION_DATA_DIR",
         "LEGION_HOME",
         "LEGION_INSTALL_DIR",
         "LEGION_LOG_DIR",
         "LEGION_PRODUCT_CONFIG",
+        "LEGION_PW_FILE",
         "LEGION_READINESS_TIMEOUT_MS",
+        "LEGION_SPACE",
         "LEGION_WORKSPACE_DIR",
+        "PW_FILE",
+        "SCOPE",
         "TEAM_HUB_TOKEN",
         "TEAM_HUB_URL"
       ],
-      "envReadCount": 10,
+      "envReadCount": 17,
       "undeclaredEnvKeys": [],
-      "filesScanned": 84
+      "filesScanned": 124
     },
     {
       "name": "orchestrator",
@@ -360,6 +375,10 @@
         "orchestrator",
         "runtime"
       ],
+      "LEGION_IDENTITY_KEY": [
+        "team-hub",
+        "services-plugin"
+      ],
       "DSH_WORKBENCH_TOKEN": [
         "workbench"
       ],
@@ -413,237 +432,6 @@
   ],
   "dataTopology": {
     "ok": true,
-    "files": [
-      {
-        "path": ".tmp-l1db/t.db",
-        "class": "InstallDir",
-        "note": "未清理的临时目录，落在仓库根"
-      },
-      {
-        "path": ".tmp-l1db/t.db-shm",
-        "class": "InstallDir",
-        "note": "未清理的临时目录，落在仓库根"
-      },
-      {
-        "path": ".tmp-l1db/t.db-wal",
-        "class": "InstallDir",
-        "note": "未清理的临时目录，落在仓库根"
-      },
-      {
-        "path": "scratch/t117-round2-evidence-backup/scratch-t117-r2/hub-e2e/team.db",
-        "class": "InstallDir",
-        "note": "测试证据/临时产物，随仓库分发"
-      },
-      {
-        "path": "scratch/t117-round2-evidence-backup/scratch-t117-r2/hub-e2e/team.db-shm",
-        "class": "InstallDir",
-        "note": "测试证据/临时产物，随仓库分发"
-      },
-      {
-        "path": "scratch/t117-round2-evidence-backup/scratch-t117-r2/hub-e2e/team.db-wal",
-        "class": "InstallDir",
-        "note": "测试证据/临时产物，随仓库分发"
-      },
-      {
-        "path": "scratch/t117-round2-evidence-backup/scratch-t117-r2/hub-e2e3/team.db",
-        "class": "InstallDir",
-        "note": "测试证据/临时产物，随仓库分发"
-      },
-      {
-        "path": "scratch/t117-round2-evidence-backup/scratch-t117-r2/hub-e2e3/team.db-shm",
-        "class": "InstallDir",
-        "note": "测试证据/临时产物，随仓库分发"
-      },
-      {
-        "path": "scratch/t117-round2-evidence-backup/scratch-t117-r2/hub-e2e3/team.db-wal",
-        "class": "InstallDir",
-        "note": "测试证据/临时产物，随仓库分发"
-      },
-      {
-        "path": "scratch/t117-round2-evidence-backup/scratch-t117-r2/hub-slice/team.db",
-        "class": "InstallDir",
-        "note": "测试证据/临时产物，随仓库分发"
-      },
-      {
-        "path": "scratch/t117-round2-evidence-backup/scratch-t117-r2/hub-slice/team.db-shm",
-        "class": "InstallDir",
-        "note": "测试证据/临时产物，随仓库分发"
-      },
-      {
-        "path": "scratch/t117-round2-evidence-backup/scratch-t117-r2/hub-slice/team.db-wal",
-        "class": "InstallDir",
-        "note": "测试证据/临时产物，随仓库分发"
-      },
-      {
-        "path": "scratch/t117-round2-evidence-backup/scratch-t117-r2/hub-slice2/team.db",
-        "class": "InstallDir",
-        "note": "测试证据/临时产物，随仓库分发"
-      },
-      {
-        "path": "scratch/t117-round2-evidence-backup/scratch-t117-r2/hub-slice2/team.db-shm",
-        "class": "InstallDir",
-        "note": "测试证据/临时产物，随仓库分发"
-      },
-      {
-        "path": "scratch/t117-round2-evidence-backup/scratch-t117-r2/hub-slice2/team.db-wal",
-        "class": "InstallDir",
-        "note": "测试证据/临时产物，随仓库分发"
-      },
-      {
-        "path": "scratch/t117-round2-evidence-backup/scratch-t117-r2/mig-sim.db",
-        "class": "InstallDir",
-        "note": "测试证据/临时产物，随仓库分发"
-      },
-      {
-        "path": "scratch/t117-round3-final-snapshot/scratch-t117-r2/hub-e2e/team.db",
-        "class": "InstallDir",
-        "note": "测试证据/临时产物，随仓库分发"
-      },
-      {
-        "path": "scratch/t117-round3-final-snapshot/scratch-t117-r2/hub-e2e/team.db-shm",
-        "class": "InstallDir",
-        "note": "测试证据/临时产物，随仓库分发"
-      },
-      {
-        "path": "scratch/t117-round3-final-snapshot/scratch-t117-r2/hub-e2e/team.db-wal",
-        "class": "InstallDir",
-        "note": "测试证据/临时产物，随仓库分发"
-      },
-      {
-        "path": "scratch/t117-round3-final-snapshot/scratch-t117-r2/hub-e2e3/team.db",
-        "class": "InstallDir",
-        "note": "测试证据/临时产物，随仓库分发"
-      },
-      {
-        "path": "scratch/t117-round3-final-snapshot/scratch-t117-r2/hub-e2e3/team.db-shm",
-        "class": "InstallDir",
-        "note": "测试证据/临时产物，随仓库分发"
-      },
-      {
-        "path": "scratch/t117-round3-final-snapshot/scratch-t117-r2/hub-e2e3/team.db-wal",
-        "class": "InstallDir",
-        "note": "测试证据/临时产物，随仓库分发"
-      },
-      {
-        "path": "scratch/t117-round3-final-snapshot/scratch-t117-r2/hub-slice/team.db",
-        "class": "InstallDir",
-        "note": "测试证据/临时产物，随仓库分发"
-      },
-      {
-        "path": "scratch/t117-round3-final-snapshot/scratch-t117-r2/hub-slice/team.db-shm",
-        "class": "InstallDir",
-        "note": "测试证据/临时产物，随仓库分发"
-      },
-      {
-        "path": "scratch/t117-round3-final-snapshot/scratch-t117-r2/hub-slice/team.db-wal",
-        "class": "InstallDir",
-        "note": "测试证据/临时产物，随仓库分发"
-      },
-      {
-        "path": "scratch/t117-round3-final-snapshot/scratch-t117-r2/hub-slice2/team.db",
-        "class": "InstallDir",
-        "note": "测试证据/临时产物，随仓库分发"
-      },
-      {
-        "path": "scratch/t117-round3-final-snapshot/scratch-t117-r2/hub-slice2/team.db-shm",
-        "class": "InstallDir",
-        "note": "测试证据/临时产物，随仓库分发"
-      },
-      {
-        "path": "scratch/t117-round3-final-snapshot/scratch-t117-r2/hub-slice2/team.db-wal",
-        "class": "InstallDir",
-        "note": "测试证据/临时产物，随仓库分发"
-      },
-      {
-        "path": "scratch/t117-round3-final-snapshot/scratch-t117-r2/mig-sim.db",
-        "class": "InstallDir",
-        "note": "测试证据/临时产物，随仓库分发"
-      },
-      {
-        "path": "scratch/t117-round3-final-snapshot/scratch-t117-r2/scratch-t117-r2/hub-e2e/team.db",
-        "class": "InstallDir",
-        "note": "测试证据/临时产物，随仓库分发"
-      },
-      {
-        "path": "scratch/t117-round3-final-snapshot/scratch-t117-r2/scratch-t117-r2/hub-e2e/team.db-shm",
-        "class": "InstallDir",
-        "note": "测试证据/临时产物，随仓库分发"
-      },
-      {
-        "path": "scratch/t117-round3-final-snapshot/scratch-t117-r2/scratch-t117-r2/hub-e2e/team.db-wal",
-        "class": "InstallDir",
-        "note": "测试证据/临时产物，随仓库分发"
-      },
-      {
-        "path": "scratch/t117-round3-final-snapshot/scratch-t117-r2/scratch-t117-r2/hub-e2e3/team.db",
-        "class": "InstallDir",
-        "note": "测试证据/临时产物，随仓库分发"
-      },
-      {
-        "path": "scratch/t117-round3-final-snapshot/scratch-t117-r2/scratch-t117-r2/hub-e2e3/team.db-shm",
-        "class": "InstallDir",
-        "note": "测试证据/临时产物，随仓库分发"
-      },
-      {
-        "path": "scratch/t117-round3-final-snapshot/scratch-t117-r2/scratch-t117-r2/hub-e2e3/team.db-wal",
-        "class": "InstallDir",
-        "note": "测试证据/临时产物，随仓库分发"
-      },
-      {
-        "path": "scratch/t117-round3-final-snapshot/scratch-t117-r2/scratch-t117-r2/hub-slice/team.db",
-        "class": "InstallDir",
-        "note": "测试证据/临时产物，随仓库分发"
-      },
-      {
-        "path": "scratch/t117-round3-final-snapshot/scratch-t117-r2/scratch-t117-r2/hub-slice/team.db-shm",
-        "class": "InstallDir",
-        "note": "测试证据/临时产物，随仓库分发"
-      },
-      {
-        "path": "scratch/t117-round3-final-snapshot/scratch-t117-r2/scratch-t117-r2/hub-slice/team.db-wal",
-        "class": "InstallDir",
-        "note": "测试证据/临时产物，随仓库分发"
-      },
-      {
-        "path": "scratch/t117-round3-final-snapshot/scratch-t117-r2/scratch-t117-r2/hub-slice2/team.db",
-        "class": "InstallDir",
-        "note": "测试证据/临时产物，随仓库分发"
-      },
-      {
-        "path": "scratch/t117-round3-final-snapshot/scratch-t117-r2/scratch-t117-r2/hub-slice2/team.db-shm",
-        "class": "InstallDir",
-        "note": "测试证据/临时产物，随仓库分发"
-      },
-      {
-        "path": "scratch/t117-round3-final-snapshot/scratch-t117-r2/scratch-t117-r2/hub-slice2/team.db-wal",
-        "class": "InstallDir",
-        "note": "测试证据/临时产物，随仓库分发"
-      },
-      {
-        "path": "scratch/t117-round3-final-snapshot/scratch-t117-r2/scratch-t117-r2/mig-sim.db",
-        "class": "InstallDir",
-        "note": "测试证据/临时产物，随仓库分发"
-      },
-      {
-        "path": "scratch/t117-round3-final-snapshot/scratch-t117-r3-hub/mig-sim.db",
-        "class": "InstallDir",
-        "note": "测试证据/临时产物，随仓库分发"
-      },
-      {
-        "path": "scratch/t117-round3-final-snapshot/scratch-t117-r3-hub/team.db",
-        "class": "InstallDir",
-        "note": "测试证据/临时产物，随仓库分发"
-      },
-      {
-        "path": "scratch/t117-round3-final-snapshot/scratch-t117-r3-hub/team.db-shm",
-        "class": "InstallDir",
-        "note": "测试证据/临时产物，随仓库分发"
-      },
-      {
-        "path": "scratch/t117-round3-final-snapshot/scratch-t117-r3-hub/team.db-wal",
-        "class": "InstallDir",
-        "note": "测试证据/临时产物，随仓库分发"
-      }
-    ]
+    "files": []
   }
 }

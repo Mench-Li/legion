@@ -958,6 +958,10 @@ async function stageTest() {
         // 守的是那一句「算不出来就说算不出来」—— 两个样本外推出来的
         // "预测"与一个真的预测，在告警列表上长得一模一样。
         'team-hub/storage-growth.test.mjs',
+        // 桌面端才有的功能面：让 Hub 把「这件事要在本机做」说出来，
+        // 而不是回一句 not found（那读起来像坏了，而它是有意的）。
+        // 端到端那一节证明**真路由优先** —— 前缀表写得宽而不抢真接口。
+        'team-hub/desktop-only.test.mjs',
       ],
       cwd: ROOT,
     },

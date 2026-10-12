@@ -2687,6 +2687,35 @@ function withTx(mutate) {
       else db.exec('ROLLBACK')
     } catch { /* 已回滚 */ }
     txDepth -= 1
+    // ★★ 磁盘满（`SQLITE_FULL`）之类的**存储**错误在这里整形，而不是逐个路由去改。
+    //
+    //   实测（2026-10-12）：库写不进去时原本回的是
+    //      400 { error: "database or disk is full", code: "ERR_SQLITE_ERROR" }
+    //   而 400 的含义是"**客户端**请求有错，别重试了" —— 于是手机端的离线待发队列
+    //   把它判成**永久失败**、停止自动重试。可磁盘满根本不是永久的：
+    //   运维清出空间后，同一条重发完全能成功。
+    //
+    //   > 一条"磁盘满时被标成永久失败"的消息，其实等一会儿就能发出去 ——
+    //   > 但队列再也不会自动试了。
+    //
+    //   整形放在这里是因为 `withTx` 是**所有写**的事务边界：现有各族
+    //   （26 个族共用 `handleWrite`，另有几个有自己的 catch）读的都是
+    //   `e.statusCode` / `e.status` / `e.code`，所以整形之后它们**一行都不用改**。
+    //
+    //   > 一处漏改的"逐个修"，与一处没写的"逐个修"，在代码评审里长得一模一样 ——
+    //   > 区别只在事故当天才出现。
+    const shape = storageErrorShape(e)
+    if (shape !== null) {
+      // 原始错误挂在 `cause` 上：运维要能看到 `SQLITE_FULL` 这个真因，
+      // 而用户只该看到那句中文。
+      throw Object.assign(new Error(shape.message, { cause: e }), {
+        status: shape.status,
+        statusCode: shape.status,
+        code: shape.code,
+        retryAfterSec: shape.retryAfterSec,
+        storageKind: shape.kind,
+      })
+    }
     throw e
   }
 }
@@ -7612,7 +7641,29 @@ async function handle(req, res, stripPrefix) {
       // 一个正常的响应，服务端没有任何记录）。至少要留下一条记录。
       console.error(`[team-hub] 响应已发出后仍抛出异常：${message}`)
       res.end()
-    } else json(res, 500, { error: message })
+      return
+    }
+    // ★ 兜底：存储错误**不经过** `withTx` 的那些路径（读路径、启动期、
+    //   直接 `db.exec` 的地方）也可能撞上它。整形一次，别让用户看到
+    //   500 + 一句原始英文。
+    //
+    //   `withTx` 已经把过一遍的（带 `STORAGE_CODE`）在这里会被 `storageErrorShape`
+    //   判成"不是存储错误"（幂等），于是沿用上面那个已整形的形状。
+    const shape = storageErrorShape(e)
+    if (shape !== null) {
+      json(res, shape.status, { error: shape.message, code: shape.code, retryAfterSec: shape.retryAfterSec })
+      return
+    }
+    // 已经整过形的（`withTx` 抛上来的）也走同一套响应形状。
+    if (e !== null && typeof e === 'object' && e.code === STORAGE_CODE) {
+      json(res, Number(e.statusCode) || STORAGE_STATUS, {
+        error: message,
+        code: STORAGE_CODE,
+        ...(Number.isFinite(Number(e.retryAfterSec)) ? { retryAfterSec: Number(e.retryAfterSec) } : {}),
+      })
+      return
+    }
+    json(res, 500, { error: message })
   }
 }
 
@@ -7781,6 +7832,11 @@ import { parseTrustedProxies } from './client-ip.mjs'
 // 与来源限速共用同一份边界规则（`rate-limit.mjs` 里的 `decide`），
 // 差别只在"问的问题"与"键是什么"。
 import { QUOTA_RESOURCES, quotaMessage, checkQuotaLimitsMatch, QUOTA_CODE, RATE_LIMIT_STATUS } from './rate-limit.mjs'
+// 存储健康：磁盘满的时候用户看到什么、运维怎么提前知道。
+// 整形放在 `withTx` 里（所有写的事务边界），所以各路由族一行都不用改。
+import {
+  storageErrorShape, STORAGE_CODE, STORAGE_STATUS, storageReport, levelSummary,
+} from './storage-health.mjs'
 import { createMobileRoutes } from './routes/mobile.mjs'
 import { createPortalRoutes } from './routes/portal.mjs'
 import { createReleaseRoutes, latestInstaller, readReleaseManifest } from './routes/releases.mjs'

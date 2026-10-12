@@ -877,6 +877,11 @@ export const SCHEMA = defineSchema({
     // 写成同一个码会让前端把"你建得太多了"渲染成"你的网络有问题"，
     // 于是用户按错误的方向自救：换网络、换设备、反复重试 —— 全都不会好。
     'ACCOUNT_QUOTA_EXCEEDED',
+    // 存储不可用（磁盘满 / 库只读 / I/O 错）时的具名错误码。
+    // 第四个，也必须与上面三个分开：前三者是"**你**的动作太频繁/太多"，
+    // 这一个是"**服务器**现在存不下"—— 用户既然没做错什么，重试与换网络
+    // 也都不会好，只有运维清出空间才有用。混用会让前端给出错误的建议。
+    'STORAGE_UNAVAILABLE',
     // `routes/chat.mjs` 的通用失败码（配额守卫与既有写路径共用的兜底）。
     'CHAT_REQUEST_FAILED',
     'IDENTITY_RESET_CONSUMED', 'IDENTITY_RESET_EXPIRED', 'IDENTITY_RESET_NOT_FOUND',

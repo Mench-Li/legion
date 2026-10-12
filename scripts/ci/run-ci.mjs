@@ -954,6 +954,9 @@ async function stageTest() {
         // 首屏：登录表单不许闪（每次打开都先看到登录页再被抽走），
         // 且进主界面之后不许在六个串行请求期间是一片空白。
         'workbench/mobile/screen-plan.test.mjs',
+        // 语言层：决策 + 插值 + 静态替换，以及**覆盖率差集**
+        // （`t('…')` 与 `data-i18n` 的中文都必须有英文 —— 漏译不会以任何其他形式暴露）。
+        'workbench/mobile/i18n.test.mjs',
         'workbench/scripts/mobile-board-parity.test.mjs',
       ],
       cwd: ROOT,

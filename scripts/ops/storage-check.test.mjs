@@ -15,10 +15,12 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync, utimesSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { join, sep } from 'node:path'
 
-import { EXIT, verdict, checkStorage, parseArgv } from './storage-check.mjs'
+import { EXIT, verdict, checkStorage, parseArgv, statePathCheck } from './storage-check.mjs'
 import { CRITICAL_MIN_FREE_BYTES, WARN_MIN_FREE_BYTES } from '../../team-hub/storage-health.mjs'
+import { codeOnly } from '../../scripts/lib/code-only.mjs'
+import { DEFAULT_STATE_PATH } from '../../team-hub/storage-state.mjs'
 
 const MiB = 1024 * 1024
 const HOUR = 3600 * 1000
@@ -224,17 +226,159 @@ test('★★ 参数解析不抛（argv 可能是什么都没有）', () => {
   assert.equal(parseArgv(['--db']).db, '')
 })
 
-// ── ⑤ ★★★ 脚本本身能被 CI 解析、且不像"会写东西" ─────────────────────────
+/**
+ * 读源码，并且**只看代码行**。
+ *
+ * ★ 这是被同一个坑绊到**第三次**之后抽出来的：
+ *   在源码里找"某个名字有没有出现"时，写实现的人**正好也会在自己的注释里
+ *   提到那个名字** —— 于是判据在完全正确的实现上变红。
+ *
+ *   前两次：`storageErrorShape` 的计数（`storage-health.test.mjs`）、
+ *   以及这里 `rmSync` 出现在我解释这条判据的那段注释里。
+ *
+ *   > 一个"在注释里解释某条规则"的实现，
+ *   > 与一个"真的违反那条规则"的实现，在按子串搜索的判据眼里一模一样。
+ */
+async function codeOf(rel) {
+  const src = (await import('node:fs')).readFileSync(new URL(rel, import.meta.url), 'utf8').replace(/\r\n/g, '\n')
+  return src.split('\n')
+    .filter((l) => {
+      const t = l.trim()
+      return !t.startsWith('//') && !t.startsWith('*') && !t.startsWith('/*') && !t.startsWith('*/')
+    })
+    .join('\n')
+}
 
-test('★★★ 这个脚本是**只读**的（它不该修改库或备份）', async () => {
-  // 它会被挂到监控上周期性地跑。一个"顺手清一下旧备份"的监控脚本
-  // 会在没人注意的时候删数据。
-  const src = (await import('node:fs')).readFileSync(
-    new URL('./storage-check.mjs', import.meta.url), 'utf8',
-  )
-  // 只允许出现**读**类调用；写入类的一个都不许有。
-  for (const banned of ['writeFileSync', 'unlinkSync', 'rmSync', 'mkdirSync', 'renameSync', 'rmdirSync', 'appendFileSync', 'createWriteStream']) {
-    assert.equal(src.includes(banned), false, `存储体检脚本里不许出现 ${banned}`)
+// ── ⑤ ★★★ 写入面：它现在会写状态文件，但**只能**写到该写的地方 ────────────
+//
+// ★ 这一节原本是一条"脚本必须**只读**"的判据（禁止出现任何写入调用）。
+//   加上状态落盘之后它红了 —— 而它红得**有道理**：脚本从此有了一条
+//   **数据丢失**路径，那条路径在加状态之前根本不存在。
+//
+//   最容易的做法是把判据放宽成"现在允许写了"，那等于把这条安全性质直接删掉。
+//   所以改成**更强**的一组：既然必须写，就保证只能写到该写的地方。
+//
+//   > 一个"因为实现变了就放宽"的判据，
+//   > 与一个从来没写过的判据，在事故之后看起来是一样的。
+
+test('★★★ 仍然禁止**删除/追加/整树**类的调用（体检绝不该清东西）', async () => {
+  const code = await codeOf('./storage-check.mjs')
+  // `unlinkSync` 只允许用于**收尾自己的临时文件**（见下一条），
+  // 而整树删除、追加、截断、拷贝一律禁止。
+  for (const banned of ['rmSync', 'rmdirSync', 'appendFileSync', 'createWriteStream', 'truncateSync', 'copyFileSync']) {
+    assert.equal(code.includes(banned), false, `存储体检脚本的**代码**里不许出现 ${banned}`)
   }
-  assert.ok(src.includes('statfsSync') || src.includes('statfs'), '它应当真的去读磁盘余量')
+  assert.ok(code.includes('statfsSync') || code.includes('statfs'), '它应当真的去读磁盘余量')
+})
+
+test('★★★ `unlinkSync` 只出现在**声明写入面**那一处', async () => {
+  const code = await codeOf('./storage-check.mjs')
+  const calls = code.split('\n').map((l) => l.trim()).filter((l) => /unlinkSync/.test(l))
+  // 1 处 import（`import { …, unlinkSync, … }`）+ 1 处列进 `STATE_FS`。
+  // 真正的调用在 `storage-state.mjs` 里（模块自带判据）。
+  assert.ok(calls.length <= 2, `unlinkSync 出现了 ${calls.length} 次，比预期多：\n  ${calls.join('\n  ')}`)
+})
+
+test('★★★ 状态写入必须**只**经过 `writeStateAtomic`（原子、已单测）', async () => {
+  const code = await codeOf('./storage-check.mjs')
+  // 直接 `writeFileSync(最终路径, …)` 是**非原子**的：Hub 有机会读到半截 JSON，
+  // 于是它报"状态文件读不出来"，而真相只是"写入方正在写"。
+  assert.ok(code.includes('writeStateAtomic'), '必须用 writeStateAtomic')
+  // `STATE_FS` 把写入面**显式列出来**（而不是整包传 `node:fs`），判据才查得下去。
+  assert.match(code, /const STATE_FS = \{/, '写入面必须显式列出来，便于判据盯住它')
+})
+
+test('★★★ 反例守卫：`codeOf` 真的会剔掉注释（否则上面几条恒真）', async () => {
+  // 我的注释里**确实**提到了 `rmSync`（就在解释这条判据的那一段）。
+  // 所以：原文件里有，`codeOf` 之后的代码里没有 —— 两边都断言，证明剔除真的在生效。
+  const raw = (await import('node:fs')).readFileSync(new URL('./storage-check.mjs', import.meta.url), 'utf8')
+  assert.equal(raw.includes('rmSync'), true, '原文件里应当有（注释里提到了它）')
+  assert.equal((await codeOf('./storage-check.mjs')).includes('rmSync'), false, 'codeOf 必须把它剔掉')
+  // 而一个**真的**在代码里的词不许被剔掉。
+  assert.equal((await codeOf('./storage-check.mjs')).includes('statfsSync'), true)
+})
+
+// ── ⑥ ★★★ 落点判定：只能写到该写的地方 ─────────────────────────────────────
+
+test('★★★ 落点是库文件本身（或它的 wal/shm）→ **致命拒绝**（会覆盖数据库）', () => {
+  // ★ 这是加状态写入**引入**的一条真实的数据丢失路径：
+  //   一个打错的 `--state` 会直接盖掉库。必须拒绝，而不是"写就是了"。
+  const db = join(sep, 'var', 'lib', 'legion-hub', 'team.db')
+  for (const target of [db, `${db}-wal`, `${db}-shm`, `${db}-journal`]) {
+    const r = statePathCheck(target, { dbPath: db, backupsDir: join(sep, 'var', 'lib', 'legion-hub', 'backups') })
+    assert.equal(r.ok, false, `${target} 必须被拒绝`)
+    assert.equal(r.fatal, true, `${target} 是致命（会丢数据）`)
+    assert.match(r.reason, /覆盖数据库/)
+  }
+})
+
+test('★★★ 落点在**备份目录**里 → 致命拒绝（会让"备份新鲜"永远为真）', () => {
+  // 一个 JSON 落进备份目录之后，`newestMtimeMs` 会把它当成"最新一份备份" ——
+  // 于是"备份陈旧"这条判据**永远不再报警**，而那正是它存在的理由。
+  const backups = join(sep, 'var', 'lib', 'legion-hub', 'backups')
+  const db = join(sep, 'var', 'lib', 'legion-hub', 'team.db')
+  for (const target of [backups, join(backups, 'storage-state.json')]) {
+    const r = statePathCheck(target, { dbPath: db, backupsDir: backups })
+    assert.equal(r.ok, false, `${target} 必须被拒绝`)
+    assert.equal(r.fatal, true)
+    assert.match(r.reason, /备份/)
+  }
+  // ★ 反向：备份目录**外面**的同类路径不许被"备份目录"那条规则误伤
+  //   （前缀匹配写宽了就会这样：`backups-other/` 以 `backups` 开头）。
+  //
+  //   ⚠️ 判据必须断言**是哪条规则**拒绝的，不能只断言 `ok`。
+  //      第一版我写的是 `ok === true`，于是它在**正确实现**上红了 ——
+  //      因为 `backups-other/` **确实**与库在同一块盘上，被规则 ③ 正确拒绝。
+  //      两条规则都会拒绝它，但**理由**完全不同，而理由决定了该做什么。
+  const sibling = join(sep, 'var', 'lib', 'legion-hub', 'backups-other', 's.json')
+  const sib = statePathCheck(sibling, { dbPath: db, backupsDir: backups })
+  assert.doesNotMatch(String(sib.reason), /备份目录/, '不许被"备份目录"那条规则误伤')
+  assert.match(String(sib.reason), /同一块盘/, '它应当被"同一块盘"那条规则拒绝（这才是对的理由）')
+  // 而"同前缀但不是备份目录"这一点，在放行同盘之后就能通过 ——
+  // 如果它被"备份目录"那条**致命**规则拒了，放行也救不回来。
+  assert.equal(statePathCheck(sibling, { dbPath: db, backupsDir: backups, allowOnDataDisk: true }).ok, true,
+    '放行同盘之后它就该通过（致命规则没有放行开关，这条证明它不是被致命规则拒的）')
+})
+
+test('★★★ 落点与库**同一块盘** → 默认拒绝，但可以**显式**放行', () => {
+  // 那正是 `storage-state.mjs` 文件头 ① 说不能做的事：盘满时状态文件也会写不进去。
+  // 允许放行（有的部署可能故意这么干），但必须显式。
+  const db = join(sep, 'var', 'lib', 'legion-hub', 'team.db')
+  const same = join(sep, 'var', 'lib', 'legion-hub', 'storage-state.json')
+  const r = statePathCheck(same, { dbPath: db, backupsDir: join(sep, 'var', 'lib', 'legion-hub', 'backups') })
+  assert.equal(r.ok, false, '默认必须拒绝')
+  assert.equal(r.fatal, false, '它不是数据丢失，是设计违反 —— 两级要分开')
+  assert.match(r.reason, /同一块盘|tmpfs/)
+  // 显式放行之后才通过。
+  assert.equal(statePathCheck(same, { dbPath: db, allowOnDataDisk: true }).ok, true)
+  // ★ 而致命那两级**没有**放行开关：放行了也不许通过（盖库是不可挽回的）。
+  assert.equal(statePathCheck(db, { dbPath: db, allowOnDataDisk: true }).ok, false, '盖库没有任何放行开关')
+})
+
+test('★★★ tmpfs 落点通过（这是默认形态）', () => {
+  const r = statePathCheck(join(sep, 'run', 'legion-hub', 'storage-state.json'),
+    { dbPath: join(sep, 'var', 'lib', 'legion-hub', 'team.db'), backupsDir: join(sep, 'var', 'lib', 'legion-hub', 'backups') })
+  assert.equal(r.ok, true, '默认落点必须能通过 —— 否则部署起来第一步就错')
+  assert.equal(r.reason, null)
+})
+
+test('★★ 没给库/备份路径时只判"非空"（不许因为缺参照就一律拒绝）', () => {
+  assert.equal(statePathCheck(join(sep, 'run', 'x.json'), {}).ok, true)
+  assert.equal(statePathCheck('', {}).ok, false)
+  assert.equal(statePathCheck('   ', {}).ok, false)
+  for (const bad of [null, undefined, 42, {}]) {
+    assert.equal(statePathCheck(bad, {}).ok, false, `${String(bad)} 必须被拒绝`)
+    assert.doesNotThrow(() => statePathCheck(bad, {}))
+  }
+})
+
+test('★★ `--state` / `--no-state` / `--allow-state-on-data-disk` 都被认识', () => {
+  const a = parseArgv(['--state', '/run/x.json', '--allow-state-on-data-disk'])
+  assert.equal(a.state, '/run/x.json')
+  assert.equal(a.allowStateOnDataDisk, true)
+  assert.equal(a.bad, undefined)
+  assert.equal(parseArgv(['--no-state']).noState, true)
+  // 默认落点必须是 tmpfs（与 `storage-state.mjs` 的默认一致）。
+  assert.equal(parseArgv([]).state, DEFAULT_STATE_PATH)
+  assert.match(parseArgv([]).state, /^\/run\//)
 })

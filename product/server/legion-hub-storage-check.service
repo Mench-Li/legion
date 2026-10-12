@@ -1,0 +1,56 @@
+[Unit]
+Description=Legion Hub 存储余量体检（磁盘余量 + 备份新鲜度 → 状态文件）
+Documentation=file:///srv/legion-hub/app/docs/DEPLOY.md
+After=legion-hub.service
+
+[Service]
+Type=oneshot
+# 与备份同一身份：体检只读库文件、只写自己的状态文件。
+User=legion-hub
+Group=legion-hub
+WorkingDirectory=/srv/legion-hub/app
+# ★ `--state` 落在 **tmpfs**（`/run`）上，**不是** `/var/lib/legion-hub/`。
+#
+#   库与备份都在那块盘上，而"盘满"正是这个单元要提前发现的事。
+#   把状态文件写在同一块盘上，会在盘满时**连同磁盘一起写不进去** ——
+#   而那一刻正是最需要这个读数的时候。
+#
+#   > 一个"写在被测磁盘上"的健康状态，会在磁盘满的时候**连同磁盘一起坏掉** ——
+#   > 而它存在的全部理由就是报告那件事。
+#
+#   脚本自己也会拒绝写进那块盘（`statePathCheck`），这里显式写出来是为了
+#   让读这个文件的人一眼看到理由。
+ExecStart=/usr/bin/node /srv/legion-hub/app/scripts/ops/storage-check.mjs \
+  --db /var/lib/legion-hub/team.db \
+  --backups /var/lib/legion-hub/backups \
+  --state /run/legion-hub/storage-state.json
+
+# ★ `RuntimeDirectory` 会**创建 `/run/legion-hub` 并设好属主**（systemd 以 root
+#   创建后 chown 给 `User=`）。这是这套东西能工作的前提：`/run` 本身是 root 的，
+#   而以 `legion-hub` 身份跑的脚本自己建不了它。
+RuntimeDirectory=legion-hub
+# ★★★ `yes` —— **不能是默认的 `no`**。
+#
+#   systemd 的语义：`no` = 单元**停止时删掉**这个目录。
+#   而本单元是 `Type=oneshot`，`ExecStart` 一结束它**立刻就停** ——
+#   于是刚写好的状态文件当场被删，Hub 那边**永远**显示"没有在定时体检存储"。
+#
+#   > 一个"每次跑完就把自己的结论删掉"的体检，
+#   > 与一个"从来没跑过"的体检，在读数上是同一个东西。
+#
+#   （我第一版写的就是 `no`，而且注释里还信心十足地说"默认就是不删" ——
+#     那句话是错的。见 `product/server/storage-units.test.mjs`，
+#     现在有一条判据专门盯着这个键。）
+RuntimeDirectoryPreserve=yes
+
+# ★ 退出码 0/1/2/3 各是一个**要报出来**的结论（见脚本文件头）。
+#   不设 `SuccessExitStatus`：非零就是"要人看"，落在 `systemctl --failed` 里。
+#   把 warn/critical 也当成"成功"，与没有告警是同一件事。
+
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+NoNewPrivileges=true
+# 只读库与备份目录，只写自己的运行目录。
+ReadOnlyPaths=/var/lib/legion-hub
+ReadWritePaths=/run/legion-hub

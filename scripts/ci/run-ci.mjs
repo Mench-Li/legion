@@ -811,6 +811,18 @@ async function stageTest() {
         // 与"它是只读的"两件事都要有判据 —— 一个会顺手删旧备份的监控脚本，
         // 会在没人注意的时候删数据。
         'scripts/ops/storage-check.test.mjs',
+        // CLI 级：真的把进程跑起来，看磁盘上发生了什么。
+        // ★ 这是被破坏性验证逼出来的一族 —— 把 `main()` 里的落点检查短路掉、
+        // 或把原子写换成内联 writeFileSync，纯函数判据**都不会红**。
+        'scripts/ops/storage-check-cli.test.mjs',
+        // 剥注释工具的自身判据：它是"判据的判据"，两个方向都要有反例
+        // （注释里的名字要去掉、代码里的名字要留下）—— 只测一个方向的
+        // 工具会让依赖它的判据整体偏向一边，而那种偏向看起来是绿的。
+        'scripts/lib/code-only.test.mjs',
+        // 存储体检的 **systemd 单元**：两处错的写法看起来完全正常 ——
+        // `--state` 落在库那块盘上，以及 `RuntimeDirectoryPreserve=no`
+        // （systemd 的默认值，而它会在 oneshot 停止时删掉刚写好的状态文件）。
+        'product/server/storage-units.test.mjs',
       ],
       cwd: ROOT,
     },
@@ -933,6 +945,15 @@ async function stageTest() {
         // 确定性复现，不需要填满一块真盘）。它多守一条**跨模块**的链：
         // 响应形状会被喂进手机端离线队列的分类器，断言它判成"可重试"。
         'team-hub/storage-full-http.test.mjs',
+        // 定时体检的**读数**：谁在监控、多久前测的、结论是什么。
+        // 守的是三种「看起来正常」的坏法，其中最要紧的一条是：
+        // 陈旧的 ok 比陈旧的 critical 危险得多（你以为有人看着，其实没有人在测）。
+        'team-hub/storage-state.test.mjs',
+        // 端到端：真 HTTP + 真路由。多守一条**哪一层挡的** ——
+        // `remote-auth-gate` 与路由自己的守卫都会 401，但在**只绑回环、
+        // 没开远端鉴权**的部署里那道门不存在，此时后者是唯一的保护，
+        // 所以它必须被单独验（绕开那道门，直接调路由）。
+        'team-hub/storage-state-route.test.mjs',
       ],
       cwd: ROOT,
     },

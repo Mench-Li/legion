@@ -134,6 +134,19 @@ export const SCHEMA = defineSchema({
       doc: '每个账号每小时能创建的聊天消息数（防库被灌满）；0 = 关掉这一层。Agent 的汇报不计入',
     },
     {
+      // 定时体检的状态文件落点。
+      //
+      // ★ 默认在 **tmpfs**（`/run`），**不是** `/var/lib/legion-hub/`（库与备份在同一块盘上）。
+      //   写在库那块盘上，会在**盘满的时候连状态文件一起写不进去** ——
+      //   而那一刻正是最需要这个读数的时候。
+      //
+      //   > 一个"写在被测磁盘上"的健康状态，会在磁盘满的时候**连同磁盘一起坏掉** ——
+      //   > 而它存在的全部理由就是报告那件事。
+      key: 'storageStatePath', env: 'LEGION_STORAGE_STATE_PATH', type: 'string',
+      default: '/run/legion-hub/storage-state.json',
+      doc: '存储体检的状态文件（定时器写、Hub 读）；默认在 tmpfs 上，别改到库所在的那块盘',
+    },
+    {
       key: 'downloadUrl', env: 'LEGION_DOWNLOAD_URL', type: 'string', default: '',
       doc: '桌面版安装包的下载地址（显示在 Hub 首页）；留空 = 首页如实显示"尚未发布"',
     },

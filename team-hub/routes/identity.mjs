@@ -20,8 +20,11 @@
 // 只给中文消息的话，前端只能做字符串匹配——那是一种会在文案改动时静默失效的耦合。
 // ============================================================================
 
+import { readFileSync } from 'node:fs'
+
 import { clientIpFrom, isLoopbackOrPrivate } from '../client-ip.mjs'
 import { limitMessage, RATE_LIMIT_CODE, RATE_LIMIT_STATUS, QUOTA_RESOURCES } from '../rate-limit.mjs'
+import { readStateLevel, stateSummary } from '../storage-state.mjs'
 
 /** 把仓储抛出的具名错误映射成 HTTP。 */
 function errorResponse(store, e) {
@@ -44,6 +47,9 @@ export function createIdentityRoutes({
   // 按**账号**的用量配额上限（键同 `QUOTA_RESOURCES`）。只用于**如实报出**读数 ——
   // 判定在 `server.mjs` 的 `requireAccountQuota`，诊断在这里，两处读同一份注入值。
   quotas = {},
+  // 定时体检的状态文件路径（`storageStatePath`）。诊断端点读它来回答
+  // "那个定时器**真的在跑**吗" —— 而这个问题只能由**读数的新鲜度**回答。
+  storageStatePath = '',
 } = {}) {
   for (const [name, fn] of Object.entries({ json, readBody, authorized, requireString })) {
     if (typeof fn !== 'function') throw new TypeError(`createIdentityRoutes 缺注入项：${name}`)
@@ -152,6 +158,61 @@ export function createIdentityRoutes({
     }
   }
 
+  /**
+   * 运维端点共用的门：**机器令牌或系统管理员**。
+   *
+   * ★ 抽出来是因为这一类端点会越来越多（限速读数、存储读数……），
+   *   而"每处各写一遍鉴权"必然漂 —— 漂的那一次会是**更松**的那一次，
+   *   因为写第二遍的人会照抄一段自己觉得对的东西。
+   *
+   *   > 两处各写一遍的鉴权，与一处写对、另一处写漏，在代码评审里长得一样。
+   *
+   * ★ 它们**刻意都不在公开名单里**：一个匿名可读的"我有没有在限速/盘满没满"
+   *   等于把运维面暴露给任何人。要看它就先有凭据。
+   *
+   * @returns {boolean} true = 已经回过响应，调用方应当直接 return
+   */
+  function requireOperator(req, res, url, what) {
+    if (authorized(req)) return false
+    const me = currentUser(req, url)
+    if (me.ok !== true) {
+      json(res, 401, { ok: false, code: 'HUB_TOKEN_REQUIRED', error: `${what}需要 Hub 管理令牌或系统管理员账号` })
+      return true
+    }
+    try {
+      userStore.requireSystemAdmin(me.userId)
+    } catch (e) {
+      const { status, body } = errorResponse(userStore, e)
+      json(res, status, body)
+      return true
+    }
+    return false
+  }
+
+  /**
+   * 读定时体检的状态文件，并**按新鲜度**给出现在的判定。
+   *
+   * ★ 读失败**不抛**也**不回 500**：一个读不出来的状态文件本身就是一个
+   *   **要报出来的读数**（"没人测"或"写入方坏了"），不是这个端点坏了。
+   *   回 500 会让运维以为端点有问题，而去查错的东西。
+   */
+  function readStorageState(nowMs = Date.now()) {
+    const path = typeof storageStatePath === 'string' && storageStatePath.length > 0 ? storageStatePath : null
+    if (path === null) {
+      return { ...readStateLevel({ raw: null, nowMs }), summary: stateSummary({ raw: null, nowMs }), path: null }
+    }
+    let raw = null
+    try {
+      raw = readFileSync(path, 'utf8')
+    } catch (e) {
+      // `ENOENT` = 文件不在（定时器没跑过）；其它错误 = 文件在但读不出来。
+      // ★ 两者**不能合并**：前者是"去装定时器"，后者是"去查权限/写入方"。
+      raw = e?.code === 'ENOENT' ? null : '{ 读不出来 }'
+    }
+    const level = readStateLevel({ raw, nowMs })
+    return { ...level, summary: stateSummary({ raw, nowMs }), path }
+  }
+
   /** 取用户令牌并校验。返回 `{ ok, ... }`，不抛。 */
   function currentUser(req, url) {
     const header = String(req.headers.authorization ?? '')
@@ -221,24 +282,28 @@ export function createIdentityRoutes({
         //   按来源限速在不配 `LEGION_TRUSTED_PROXIES` 时**必然**失效
         //   （Hub 绑回环 → 推出来的来源永远是 127.0.0.1 → `effective:false`
         //   → 整层被跳过）。那是一个**配置事实**，不是 bug，而它必须能被读出来。
-        //
-        // ★ 但它**刻意不放在公开名单里**：一个匿名可读的"我有没有在限速"
-        //   等于告诉攻击者该不该放手打。运维要看它，就该先有凭据。
-        //   要求**机器令牌或系统管理员**——两者都是运维身份。
-        if (!authorized(req)) {
-          const me = currentUser(req, url)
-          if (me.ok !== true) { json(res, 401, { ok: false, code: 'HUB_TOKEN_REQUIRED', error: '查看限速状态需要 Hub 管理令牌或系统管理员账号' }); return }
-          try {
-            userStore.requireSystemAdmin(me.userId)
-          } catch (e) {
-            const { status, body } = errorResponse(userStore, e)
-            json(res, status, body)
-            return
-          }
-        }
+        if (requireOperator(req, res, url, '查看限速状态')) return
         // 只回形状与计数，**不回**任何地址：把来源 IP 回显给调用方会让这个
         // 端点本身变成信息泄露（"你们从哪个 IP 访问我"）。
         json(res, 200, { ok: true, rateLimit: rateReport(req) })
+      },
+    },
+    {
+      method: 'GET',
+      path: '/api/identity/storage-state',
+      async run(req, res, { url }) {
+        // ★ 这个端点存在的理由：上一轮有了体检脚本与四档退出码，但**没有定时器** ——
+        //   于是"盘快满了"仍然不会主动告警。有了定时器之后，还需要有人能回答
+        //   "那个定时器**真的在跑**吗"。
+        //
+        //   这个问题只能由**读数的新鲜度**回答：一个每小时跑一次的定时器与一个
+        //   上个月就停了的定时器，在没有状态文件的情况下**完全一样**。
+        //
+        //   > 一个"配了定时器"的部署，与一个"定时器从来没跑成功过"的部署，
+        //   > 在 `systemctl list-timers` 里长得一模一样 ——
+        //   > 只要没人去看 `LAST` 那一列。
+        if (requireOperator(req, res, url, '查看存储体检状态')) return
+        json(res, 200, { ok: true, storage: readStorageState() })
       },
     },
     {

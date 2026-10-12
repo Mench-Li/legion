@@ -8148,6 +8148,10 @@ if (REMOTE_AGENT_ENABLED) {
     // 按**账号**的用量配额（与上面的来源限速是两件事，见 DEPLOY.md §2.5）。
     // 这里注入上限表；诊断端点据此**如实报出**，判定在 `requireAccountQuota`。
     quotas: QUOTA_LIMITS,
+    // 定时体检的状态文件。`/api/identity/storage-state` 读它来回答
+    // "那个定时器**真的在跑**吗" —— 而这个问题只能由**读数的新鲜度**回答：
+    // 一个每小时跑一次的定时器与一个上个月就停了的，在没有状态文件时完全一样。
+    storageStatePath: CFG.values.storageStatePath ?? '',
   }))
   router.list.push(
     { family: 'identity', method: 'GET', path: '/api/identity/status' },

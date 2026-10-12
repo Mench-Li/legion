@@ -449,6 +449,212 @@ test('★★ 英文表里"用不上"的条目要能被看见（它们不是错�
     + `其余 ${orphans.length} 条由渲染边界按原文查表（预期）`)
 })
 
+// ── ⑦ 闭环：投影层**能产出的每一句文案**都必须有英文 ────────────────────────
+
+/**
+ * 把投影层"能说出来的每一句话"都枚举出来，逐一核对英文表。
+ *
+ * ★ 这是本族最后补上的一块，也是最关键的一块 —— 前面几支判据都从**源码文本**
+ *   出发（找 `t('…')` 的字面量、找未包 `t()` 的字面量、找标记了的元素），
+ *   而它们在"文案由**函数**在运行期拼出来"时全部失明：
+ *
+ *   · `timelineMetaFor` 返回的 `我`/`我说`/`进展` —— 漏了，英文下作者名是中文；
+ *   · `notifyButtonPlan` 返回的 `开启系统提醒：…通知你。` —— 漏了。
+ *     更阴的是：我的英文表里有 `开启系统提醒：…通知你`（**没有句号**，给 HTML 属性用的），
+ *     而函数返回的那一句**带句号** —— 差一个字符，查表就落空。
+ *     生产上的活体检查照出来了，而**38 条判据一条都没红**。
+ *
+ *   > 一支"从源码里找字符串"的判据，与一支"问那段代码到底会说出什么"的判据，
+ *   > 在文案都是字面量的时候是同一个东西 ——
+ *   > 而文案一旦由函数拼出来，前者就再也看不见它了。
+ *
+ * 所以这里**真的把那些函数跑一遍**（它们都是纯决策，没有 DOM 依赖），
+ * 收集返回值里的中文，与 `EN` 求差集。
+ */
+test('★★★ 投影层能产出的每一句中文，英文表里都必须有', async () => {
+  const board = await import('./board.mjs')
+  const popup = await import('./popup.mjs')
+  const timeline = await import('./timeline.mjs')
+  const notifyPlan = await import('./notify-plan.mjs')
+  const notice = await import('./notice.mjs')
+  const screenPlan = await import('./screen-plan.mjs')
+
+  const seen = new Set()
+  const add = (v) => { if (typeof v === 'string' && CJK.test(v)) seen.add(v) }
+
+  // board.mjs —— 意图（标签 + 提示）、状态标签、列标题、视角标签。
+  for (const o of board.INTENT_OPTIONS) { add(o.label); add(o.hint) }
+  for (const v of Object.values(board.TASK_STATUS_LABELS)) add(v)
+  for (const c of board.BOARD_COLUMNS) add(c.title)
+  for (const v of board.BOARD_VIEWS) add(v.label)
+
+  // board.mjs —— 任务行与元信息是**按任务**拼的，所以喂几种形状的真任务。
+  const taskShapes = [
+    { id: 'T-1', status: 'todo', priority: 'high' },
+    { id: 'T-1', status: 'in_progress' },
+    { id: 'T-1', status: 'in_review' },
+    { id: 'T-1', status: 'blocked' },
+    { id: 'T-1', status: 'done' },
+    { id: 'T-1', status: 'canceled' },
+    { id: 'T-1', status: 'unknown_status' },
+    { id: 'T-1', status: 'todo', awaitingNode: true, lastAttemptState: 'Failed', attempts: 3 },
+    { id: 'T-1', status: 'in_progress', lastAttemptState: 'Running' },
+    { id: 'T-1', status: 'in_progress', lastAttemptState: 'UnknownOutcome' },
+    { id: 'T-1', status: 'in_progress', lastAttemptState: 'AwaitingApproval' },
+    { id: 'T-1', status: 'todo', lastAttemptState: 'Stopped' },
+  ]
+  for (const t of taskShapes) {
+    add(board.taskLine(t))
+    add(board.taskMeta(t))
+    // `boardColumns` 返回 `{ columns, unknown, total }`，不是数组 —— 两处都要过。
+    const cols = board.boardColumns([t])
+    for (const c of cols.columns) add(c.title)
+    for (const c of cols.unknown) add(c.title)
+  }
+  // 所有状态码都过一遍（`TASK_STATUS_LABELS` 的键是状态机的全集）。
+  for (const status of Object.keys(board.TASK_STATUS_LABELS)) {
+    add(board.taskLine({ id: 'T-1', status }))
+    add(board.taskMeta({ id: 'T-1', status }))
+  }
+
+  // popup.mjs —— 状态标签、动作标签。**不传翻译器**：这些是纯查表的常量。
+  for (const v of Object.values(popup.POPUP_STATUS_LABEL)) add(v)
+  for (const v of Object.values(popup.ACTION_LABEL ?? {})) add(v)
+
+  // notify-plan.mjs —— 提醒按钮的文案（"差一个句号"那个坑就在这里）。
+  for (const supported of [true, false]) {
+    for (const permission of ['default', 'granted', 'denied', 'unsupported']) {
+      for (const standalone of [true, false]) {
+        add(notifyPlan.notifyButtonPlan({ supported, permission, standalone }).message)
+      }
+    }
+  }
+
+  // notice.mjs / screen-plan.mjs 的固定文案。
+  add(notice.sessionExpiredMessage())
+  add(screenPlan.BOOT_TITLE)
+
+  // 哨兵：低于这个数说明判据没真的跑到那些投影函数（比阈值本身更值得警惕的是"收集到 0 句"）。
+  // 这里只收集**纯查表的常量**（弹框那些拼出来的句子由下一条判据覆盖），实测 32 句。
+  assert.ok(seen.size >= 25, `只收集到 ${seen.size} 句 —— 判据可能没真的跑到那些投影函数`)
+  const missing = [...seen].filter((s) => EN[s] === undefined).sort()
+  assert.deepEqual(missing, [],
+    '投影层会说这些中文，但英文表里没有 —— 英文模式下它们原样显示中文，\n'
+    + '而"从源码里找字符串"的那几支判据看不见由函数拼出来的文案：\n  '
+    + missing.map((s) => JSON.stringify(s)).join('\n  '))
+})
+
+test('★★★ 渲染处翻完之后，投影层的产出里不许再有中文', async () => {
+  // ★ 这是**更强、也更本质**的那条判据。它同时覆盖两条通路：
+  //
+  //   ① **常量**（`label: '未登录'`）—— 由渲染处 `t(label)` 翻；
+  //   ② **拼出来的句子**（`Attempt 状态：Running`、`🔄 T-1 进行中`）——
+  //      变量在句子里，**不可能被枚举**，所以"整体查表"永远落空。
+  //      加多少键都覆盖不到 `T-2`、`T-3`……
+  //
+  //   > 一个"把变量拼进句子再整体查表"的方案，在句子是常量时能用；
+  //   > 而它恰好在句子**需要**翻译（含变量）的时候失效。
+  //
+  //   拼出来的那两处（`popupText` / `deriveConnectionState`）现在接受**可选翻译器**：
+  //   不传时逐字产出中文（对等判据与所有既有调用完全不变），传了就按语言产出。
+  //   下面模拟渲染处：把翻译器传进去，再对结果做一次 `t()`（与 `app.mjs` 一致），
+  //   然后问"用户最终看到的中文还有没有"。
+  //
+  //   ⚠️ 我第一版把这条写成"传了翻译器就不该有中文"，那对**常量**是错的 ——
+  //      常量本来就该由渲染处翻。判据表述错了会逼出错误的实现。
+  const popup = await import('./popup.mjs')
+  const timeline = await import('./timeline.mjs')
+  const tr = (key, vars) => t(key, vars, 'en')
+  /** 渲染处的样子：把投影结果交给 `t()`。 */
+  const render = (v) => (typeof v === 'string' ? t(v, null, 'en') : v)
+
+  const leftovers = []
+  const check = (what, v) => {
+    const shown = render(v)
+    if (typeof shown === 'string' && CJK.test(shown)) leftovers.push(`${what} → ${JSON.stringify(shown)}`)
+  }
+
+  const actions = [
+    'transition', 'hold', 'unhold', 'reassign', 'test-report', 'evidence',
+    'goal:publish', 'goal:done', 'goal:cancel', 'goal:pause', 'something-unknown',
+  ]
+  const states = ['todo', 'in_progress', 'in_review', 'blocked', 'done', 'canceled', 'weird']
+  for (const action of actions) {
+    for (const to of states) {
+      check(`popupText(${action},to=${to})`, popup.popupText({ action, detail: { to }, taskId: 'T-1', member: null }, null, tr))
+      check(`popupText(${action},to=${to},who)`, popup.popupText({ action, detail: { to }, taskId: 'T-1', member: 'dev' }, 'dev', tr))
+    }
+    check(`popupText(${action},no-detail)`, popup.popupText({ action, detail: null, taskId: 'T-1' }, null, tr))
+  }
+
+  for (const hubReachable of [true, false]) {
+    for (const signedIn of [true, false]) {
+      for (const nodeOnline of [true, false, null]) {
+        for (const runtimeHealthy of [true, false, null]) {
+          for (const activeTaskState of [null, 'Running', 'AwaitingApproval', 'UnknownOutcome']) {
+            const s = timeline.deriveConnectionState({ hubReachable, signedIn, nodeOnline, runtimeHealthy, activeTaskState, t: tr })
+            check(`deriveConnectionState(${activeTaskState}).label`, s.label)
+            check(`deriveConnectionState(${activeTaskState}).detail`, s.detail)
+          }
+        }
+      }
+    }
+  }
+
+  assert.deepEqual(leftovers, [],
+    '渲染处翻完之后这些**仍然是中文** —— 说明它们绕过了翻译：\n  ' + leftovers.join('\n  '))
+})
+
+test('★★ 反例守卫：拼出来的句子必须靠翻译器，不能靠"多加点键"', async () => {
+  // 证明"整体查表"这条路是真的走不通 —— 否则上面那条判据就是多余的复杂度。
+  const popup = await import('./popup.mjs')
+  const zh = popup.popupText({ action: 'transition', detail: { to: 'in_review' }, taskId: 'T-777' }, null)
+  assert.ok(CJK.test(zh), `对照组应当是中文：${JSON.stringify(zh)}`)
+  // 任务号一变，句子就变 —— 所以"把每句都加进英文表"是**不可能**完成的。
+  const other = popup.popupText({ action: 'transition', detail: { to: 'in_review' }, taskId: 'T-778' }, null)
+  assert.notEqual(zh, other, '任务号变化会改变句子 —— 枚举方案在原理上就不成立')
+  assert.equal(EN[zh], undefined, '这句话不在英文表里（它本来也不该在：任务号是变量）')
+  // 而带翻译器的版本是英文，且**不含任务号以外的中文**。
+  const en = popup.popupText({ action: 'transition', detail: { to: 'in_review' }, taskId: 'T-777' }, null, (k, v) => t(k, v, 'en'))
+  assert.equal(CJK.test(en), false, `带翻译器后不该有中文：${JSON.stringify(en)}`)
+  assert.ok(en.includes('T-777'), '任务号要保留在结果里')
+})
+
+test('★★ 反例守卫：闭环判据必须能抓住"差一个标点"', () => {
+  // 实测踩到：英文表里有 `开启系统提醒：…通知你`（无句号，给 HTML 属性用），
+  // 而 `notifyButtonPlan` 返回的是 `开启系统提醒：…通知你。`（有句号）——
+  // 差一个字符，`t()` 就落空，而所有基于源码文本的判据全绿。
+  const a = '开启系统提醒：页面不在前台时也会通知你'
+  const b = '开启系统提醒：页面不在前台时也会通知你。'
+  assert.notEqual(a, b, '这两个 key 必须被视为**不同**的字符串')
+})
+
+test('★★★ 拼句子的那两处必须**真的**把翻译器传下去', () => {
+  // ★ 破坏性验证抓出来的洞：把 `popupText(…, t)` 改回 `popupText(…)`、
+  //   把 `deriveConnectionState({ ...input, t })` 改回 `deriveConnectionState(input)`，
+  //   **42 条判据全绿** —— 因为上面那条判据是"给投影层**喂**翻译器看结果"，
+  //   它验证的是投影层**能**翻译，却没验证渲染处**有没有**把翻译器递过去。
+  //
+  //   > 一条"接口支持某能力"的判据，与一条"调用方真的用了它"的判据，
+  //   > 在没人忘记传参的时候是同一个东西。
+  const app = read('app.mjs')
+  assert.match(app, /popupText\(p\.row,\s*whoFor\([^)]*\),\s*t\)/,
+    'showPopup 必须把 t 交给 popupText —— 否则含任务号的弹框正文永远是中文')
+  assert.match(app, /deriveConnectionState\(\{\s*\.\.\.input,\s*t\s*\}\)/,
+    'setConnection 必须把 t 交给 deriveConnectionState —— 否则 `Attempt 状态：…` 永远是中文')
+})
+
+test('★ 反例守卫：上一条不是恒真（不传 t 的写法必须被抓住）', () => {
+  const badPopup = 'const base = popupText(p.row, whoFor(p.row?.member))'
+  assert.doesNotMatch(badPopup, /popupText\(p\.row,\s*whoFor\([^)]*\),\s*t\)/)
+  const badConn = 'state.conn = deriveConnectionState(input)'
+  assert.doesNotMatch(badConn, /deriveConnectionState\(\{\s*\.\.\.input,\s*t\s*\}\)/)
+  const goodPopup = 'const base = popupText(p.row, whoFor(p.row?.member), t)'
+  assert.match(goodPopup, /popupText\(p\.row,\s*whoFor\([^)]*\),\s*t\)/)
+  const goodConn = 'state.conn = deriveConnectionState({ ...input, t })'
+  assert.match(goodConn, /deriveConnectionState\(\{\s*\.\.\.input,\s*t\s*\}\)/)
+})
+
 // ── ⑥ 接线：语言可切换、且被真的应用 ────────────────────────────────────────
 
 /** 取一个函数的函数体（先配平参数表的圆括号，再配平花括号，最后去掉注释）。

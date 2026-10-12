@@ -208,7 +208,9 @@ function setConnection(input) {
   // ★ 记住最后一次输入。切语言时要**重画状态条**，而它是由这个输入推导出来的 ——
   //   不记住的话，切换语言后状态条会停在旧语言（"未登录" vs "Not signed in"）。
   state.connInput = input
-  state.conn = deriveConnectionState(input)
+  // ★ 把 `t` 交给 `deriveConnectionState`：它的 `detail` 有一句是**拼**出来的
+  //   （`Attempt 状态：Running`），拼出来的句子整体查表一定落空。
+  state.conn = deriveConnectionState({ ...input, t })
   const el = $('status')
   el.querySelector('.dot').className = `dot ${state.conn.tone}`
   el.querySelector('.label').textContent = t(state.conn.label)
@@ -971,11 +973,13 @@ function showPopupText(text, onClick = null) {
 /** 弹一条任务提醒：可点（去任务详情），到时自己走。`reason` 可选（"为什么停在这"）。 */
 function showPopup(p, reason = null) {
   const tid = validTaskId(p.row?.taskId)
-  const base = popupText(p.row, whoFor(p.row?.member))
-  // `base` 是界面文案（翻它）；`reason` 是任务评论里的**数据**（原样保留）。
-  // 整体拼完再交给 `showPopupText` 查表是匹配不上的 —— 那样英文模式下
-  // 弹框正文仍然是中文。
-  const text = reason === null ? t(base) : t('@popupWithReason', { base: t(base), reason })
+  // ★ 把 `t` 交给 `popupText`：它产出的句子是**拼**的（含任务号），
+  //   整体查表必然落空 —— 任务号是变量，加多少键都覆盖不到。
+  const base = popupText(p.row, whoFor(p.row?.member), t)
+  // `base` **已经是目标语言**（上面把 `t` 交给了 `popupText`），所以不再动它。
+  // `reason` 是任务评论里的**数据**（人或 Agent 写的），原样保留；只有连接符按语言走。
+  // （早先这里写的是"整体拼完再查表"，那对含任务号的句子一定匹配不上。）
+  const text = reason === null ? base : t('@popupWithReason', { base, reason })
   // 点一下就去处理它 —— 一条叫你过来的消息如果点不动，
   // 你还得自己翻到任务页找那一条，那正是这条提醒本想省掉的一步。
   showPopupText(text, tid !== null ? () => { void openTask(tid) } : () => showView('tasks'))

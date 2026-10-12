@@ -159,11 +159,12 @@ body[data-screen="boot"] #boot { display:block; }
 body[data-screen="login"] #screen-login { display:flex; }
 body[data-screen="app"] #main { display:block; }
 body[data-screen="app"] #composer { display:flex; }
-/* 头部那组动作（页签 / 刷新 / 退出）只在主界面出现 —— 登录页上画着它们
+/* 头部那组动作（页签 / 刷新 / 退出 / 语言）只在主界面出现 —— 登录页上画着它们
    等于给出一组看得见、点不动的控件。 */
 body:not([data-screen="app"]) #tabs,
 body:not([data-screen="app"]) #btn-refresh,
-body:not([data-screen="app"]) #btn-logout { display:none; }
+body:not([data-screen="app"]) #btn-logout,
+body:not([data-screen="app"]) #btn-lang { display:none; }
 
 /* ── 启动骨架 ───────────────────────────────────────────────────────────── */
 .skeleton { display:flex; flex-direction:column; gap:11px; margin-top:16px; }
@@ -220,19 +221,25 @@ body:not([data-screen="app"]) #btn-logout { display:none; }
 <header>
   <div class="row">
     <h1 id="title">Legion</h1>
-    <button id="btn-notify" class="icon-btn hidden" title="开启系统提醒：页面不在前台时也会通知你">🔔</button>
-    <button id="btn-refresh" class="icon-btn" title="刷新">刷新</button>
-    <button id="btn-logout" class="icon-btn" title="退出登录">退出</button>
+    <!-- ★ 语言按钮**显式豁免**翻译（`data-i18n-ignore`）：它的文字由
+         `renderLangButton()` 按当前语言写成"另一种语言的自称"，而 title 按设计
+         就是双语的（"语言 / Language"）—— 翻成单语反而让另一边的人认不出来。 -->
+    <button id="btn-lang" class="icon-btn" title="语言 / Language" data-i18n-ignore>中/EN</button>
+    <button id="btn-notify" class="icon-btn hidden" title="开启系统提醒：页面不在前台时也会通知你" data-i18n-attr="title">🔔</button>
+    <button id="btn-refresh" class="icon-btn" title="刷新" data-i18n-attr="title" data-i18n>刷新</button>
+    <button id="btn-logout" class="icon-btn" title="退出登录" data-i18n-attr="title" data-i18n>退出</button>
   </div>
-  <div id="status"><span class="dot muted"></span><span class="label">连接中…</span><span class="detail"></span></div>
+  <!-- 状态条：`label` / `detail` 由 `setConnection` 在运行时改写，但**首屏那一句**
+       （"连接中…"）是静态的 —— 不标记它，英文模式下开机瞬间会闪一句中文。 -->
+  <div id="status"><span class="dot muted"></span><span class="label" data-i18n>连接中…</span><span class="detail"></span></div>
   <div id="tabs" role="tablist">
     <button id="tab-chat" role="tab" aria-selected="true">Agent</button>
-    <button id="tab-tasks" role="tab" aria-selected="false">任务</button>
+    <button id="tab-tasks" role="tab" aria-selected="false" data-i18n>任务</button>
   </div>
 </header>
 
 <section id="boot">
-  <p class="viewtitle" id="boot-title">正在连接…</p>
+  <p class="viewtitle" id="boot-title" data-i18n>正在连接…</p>
   <!-- 骨架：进主界面后还要等六个串行请求（空间/任务/提醒/会话/消息），
        那段时间内容区本来是**空的** —— 弱网下看起来就是卡死。
        放在启动屏里，于是那段等待有一条"正在发生什么"的形状。 -->
@@ -250,43 +257,46 @@ body:not([data-screen="app"]) #btn-logout { display:none; }
      `body[data-screen=…]` 那几条规则。它们的可见性**只**由 `data-screen` 决定
      （见上面那段 CSS），于是"同时显示两块"或"一块都不显示"在结构上不可能。 -->
 <section id="screen-login">
-  <h2 id="auth-title">登录 Legion</h2>
-  <div class="hint" id="auth-hint">用你的 Legion 账号登录。</div>
-  <label>用户名<input id="login-name" autocomplete="username" autocapitalize="off" /></label>
-  <label>口令<input id="login-password" type="password" autocomplete="current-password" /></label>
-  <label id="register-invite-row" class="hidden">邀请码<input id="register-invite" autocapitalize="off" /></label>
-  <div class="hint hidden" id="password-hint">口令至少 8 个字符。</div>
-  <button class="primary" id="btn-login">登录</button>
-  <button id="btn-register" class="hidden">注册新账号</button>
+  <h2 id="auth-title" data-i18n>登录 Legion</h2>
+  <div class="hint" id="auth-hint" data-i18n>用你的 Legion 账号登录。</div>
+  <!-- ★ 这几个 `<label>` 里**还有 input**：给 label 加 `data-i18n` 会让
+       `el.textContent = …` 把 input 一起替换成纯文本（输入框就此消失）。
+       所以文字要单独包一层 `<span data-i18n>`，只替换它自己。 -->
+  <label><span data-i18n>用户名</span><input id="login-name" autocomplete="username" autocapitalize="off" /></label>
+  <label><span data-i18n>口令</span><input id="login-password" type="password" autocomplete="current-password" /></label>
+  <label id="register-invite-row" class="hidden"><span data-i18n>邀请码</span><input id="register-invite" autocapitalize="off" /></label>
+  <div class="hint hidden" id="password-hint" data-i18n>口令至少 8 个字符。</div>
+  <button class="primary" id="btn-login" data-i18n>登录</button>
+  <button id="btn-register" class="hidden" data-i18n>注册新账号</button>
   <div class="hint" id="auth-switch"></div>
-  <div class="hint" id="bootstrap-hint" hidden>这台 Hub 还没有初始化：请在服务器上建第一个管理员账号。</div>
+  <div class="hint" id="bootstrap-hint" hidden data-i18n>这台 Hub 还没有初始化：请在服务器上建第一个管理员账号。</div>
   <div id="login-error" class="error-box hidden"></div>
   <div id="login-notice" class="notice-box hidden"></div>
 </section>
 
 <main id="main">
   <div id="view-chat">
-    <div id="agent-chips" class="agent-chips hidden" role="list" aria-label="成员选择"></div>
+    <div id="agent-chips" class="agent-chips hidden" role="list" aria-label="成员选择" data-i18n-attr="aria-label"></div>
     <div id="agent-picker"></div>
     <div id="timeline"></div>
   </div>
   <div id="view-tasks" class="hidden">
     <p class="viewtitle" id="board-scope"></p>
-    <div id="board-views" role="tablist" aria-label="任务视角"></div>
+    <div id="board-views" role="tablist" aria-label="任务视角" data-i18n-attr="aria-label"></div>
     <div id="task-groups" class="groups"></div>
   </div>
 </main>
 
 <footer id="composer">
-  <div id="intents" role="group" aria-label="消息意图"></div>
+  <div id="intents" role="group" aria-label="消息意图" data-i18n-attr="aria-label"></div>
   <div id="intent-hint"></div>
   <div id="target-row">
-    <select id="agent-select" aria-label="目标 Agent"></select>
-    <select id="task-select" class="hidden" aria-label="目标任务"></select>
+    <select id="agent-select" aria-label="目标 Agent" data-i18n-attr="aria-label"></select>
+    <select id="task-select" class="hidden" aria-label="目标任务" data-i18n-attr="aria-label"></select>
   </div>
   <div class="row">
-    <textarea id="composer-input" rows="1" placeholder="给 Agent 发消息…"></textarea>
-    <button class="primary" id="btn-send">发送</button>
+    <textarea id="composer-input" rows="1" placeholder="给 Agent 发消息…" data-i18n-attr="placeholder"></textarea>
+    <button class="primary" id="btn-send" data-i18n>发送</button>
   </div>
 </footer>
 
@@ -307,8 +317,8 @@ body:not([data-screen="app"]) #btn-logout { display:none; }
      但 z-index 更高、带动作按钮：错误与回执要比"提醒"更靠近焦点。 -->
 <div id="toast-host" class="hidden" role="alert" aria-live="assertive">
   <span id="toast-text"></span>
-  <button id="toast-retry" class="hidden">重试</button>
-  <button id="toast-close" aria-label="关闭提示">关闭</button>
+  <button id="toast-retry" class="hidden" data-i18n>重试</button>
+  <button id="toast-close" aria-label="关闭提示" data-i18n-attr="aria-label" data-i18n>关闭</button>
 </div>
 
 <script type="module" src="./app.mjs"></script>

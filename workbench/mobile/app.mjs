@@ -59,6 +59,13 @@ import {
 import { notifyMechanism, notificationTag, notifyButtonPlan } from './notify-plan.mjs'
 // 首屏该显示哪一块。三块由 `body[data-screen]` 单点切换，见 `screen-plan.mjs` 文件头。
 import { isScreen, screenAfterProbe } from './screen-plan.mjs'
+// 语言层：**中文原文就是 key**，英文是一张覆盖表。翻译发生在**渲染边界**
+// （下面那几处写 DOM 的地方），而不是在投影层 —— 那些投影的 zh 返回值同时被
+// 对等判据钉着（与桌面端逐字相同、被 timeline.test.mjs 用 /未登录/ 匹配），
+// 动它们不是为了翻译该做的事。
+import {
+  t, setLocale, getLocale, resolveLocale, applyStaticI18n, LOCALES, LOCALE_LABEL,
+} from './i18n.mjs'
 
 const $ = (id) => document.getElementById(id)
 const LS_REFRESH = 'legion.mobile.refresh'
@@ -201,8 +208,8 @@ function setConnection(input) {
   state.conn = deriveConnectionState(input)
   const el = $('status')
   el.querySelector('.dot').className = `dot ${state.conn.tone}`
-  el.querySelector('.label').textContent = state.conn.label
-  el.querySelector('.detail').textContent = state.conn.detail
+  el.querySelector('.label').textContent = t(state.conn.label)
+  el.querySelector('.detail').textContent = state.conn.detail === '' ? '' : t(state.conn.detail)
 }
 
 // ── 渲染：对话 ──────────────────────────────────────────────────────────────
@@ -232,6 +239,8 @@ function renderTimeline() {
     const p = document.createElement('div')
     p.className = 'hint'
     p.textContent = state.agents.length === 0
+      ? t('这个空间下还没有 Agent。')
+      : t('还没有消息。用下面输入框给这个 Agent 派一个任务试试。')
       ? '这个空间下还没有 Agent。'
       : '还没有消息。用下面输入框给这个 Agent 派一个任务试试。'
     root.replaceChildren(p)
@@ -248,11 +257,11 @@ function renderTimeline() {
     meta.className = 'meta'
     const { who, tagText, tagClass } = timelineMetaFor(e)
     const author = document.createElement('span')
-    author.textContent = who
+    author.textContent = t(who)
     meta.appendChild(author)
     const tag = document.createElement('span')
     tag.className = `tag ${tagClass}`
-    tag.textContent = tagText
+    tag.textContent = t(tagText)
     meta.appendChild(tag)
     if (e.openableTask) {
       const a = document.createElement('a')
@@ -292,7 +301,7 @@ function renderBoardViews() {
   box.replaceChildren()
   for (const v of BOARD_VIEWS) {
     const b = document.createElement('button')
-    b.textContent = v.label
+    b.textContent = t(v.label)
     b.setAttribute('aria-selected', String(state.boardView === v.id))
     b.addEventListener('click', () => { state.boardView = v.id; renderBoardViews(); renderBoard() })
     box.appendChild(b)
@@ -314,14 +323,14 @@ function renderBoard() {
     const box = document.createElement('div')
     box.className = 'group'
     const h = document.createElement('h2')
-    h.textContent = viewOf(state.boardView)?.label ?? ''
+    h.textContent = t(viewOf(state.boardView)?.label ?? '')
     const n = document.createElement('span'); n.className = 'n'; n.textContent = String(shown.length)
     h.appendChild(n)
     box.appendChild(h)
     if (shown.length === 0) {
       const p = document.createElement('div')
       p.className = 'hint'
-      p.textContent = `这个视角下没有任务。（共 ${state.tasks.length} 条，切到「全部」看）`
+      p.textContent = t('@noTasksInView', { n: state.tasks.length })
       box.appendChild(p)
     }
     for (const t of shown) box.appendChild(taskCard(t))
@@ -337,7 +346,7 @@ function renderBoard() {
     const box = document.createElement('div')
     box.className = 'group'
     const h = document.createElement('h2')
-    h.textContent = col.title
+    h.textContent = t(col.title)
     const n = document.createElement('span')
     n.className = 'n'
     n.textContent = String(col.count)
@@ -352,11 +361,11 @@ function renderBoard() {
     box.className = 'group'
     const h = document.createElement('h2')
     // 不认识的状态照实说。悄悄丢掉的后果是"状态机加了状态、手机上少了任务"。
-    h.textContent = '未识别的状态'
+    h.textContent = t('未识别的状态')
     box.appendChild(h)
     for (const t of unknown) {
       const card = taskCard(t)
-      card.querySelector('.s').textContent = `库里的状态：${t.status}`
+      card.querySelector('.s').textContent = t('@rawStatus', { status: t.status })
       box.appendChild(card)
     }
     frag.appendChild(box)
@@ -364,7 +373,7 @@ function renderBoard() {
   if (!any) {
     const p = document.createElement('div')
     p.className = 'hint'
-    p.textContent = '这个空间还没有任务。用下面输入框派一个。'
+    p.textContent = t('这个空间还没有任务。用下面输入框派一个。')
     frag.appendChild(p)
   }
   root.replaceChildren(frag)
@@ -380,7 +389,7 @@ function taskCard(t) {
   card.appendChild(name)
   const s = document.createElement('div')
   s.className = 's'
-  s.textContent = taskLine(t)
+  s.textContent = t(taskLine(t))
   // 「等电脑领取」是**等待**不是**执行中**。不标出来的话，用户在电脑关机时
   // 会以为任务在跑，于是等下去。
   if (isWaitingForNode(t)) s.textContent += '（电脑上线后自动开始）'
@@ -398,12 +407,12 @@ function taskCard(t) {
   // 或者反复试。要改已完成的活，那是**新任务**，不是追加要求。
   if (canAppendFeedback(t)) {
     const b1 = document.createElement('button')
-    b1.textContent = '追加要求'
+    b1.textContent = t('追加要求')
     b1.addEventListener('click', () => { chooseTaskForFeedback(t.id); focusComposer('feedback') })
     acts.appendChild(b1)
   }
   const b2 = document.createElement('button')
-  b2.textContent = '问这个 Agent'
+  b2.textContent = t('问这个 Agent')
   b2.addEventListener('click', () => {
     const owner = state.agents.find((a) => a.role === (t.role ?? t.soldier))
     if (owner !== undefined) void selectAgent(owner.agentId)
@@ -436,7 +445,7 @@ function renderTargets() {
   sel.replaceChildren()
   if (state.agents.length === 0) {
     const o = document.createElement('option')
-    o.textContent = '这个空间下还没有 Agent'
+    o.textContent = t('这个空间下还没有 Agent')
     o.value = ''
     sel.appendChild(o)
     sel.disabled = true
@@ -473,7 +482,7 @@ function renderTargets() {
   const head = $('agent-picker')
   const cur = state.agents.find((a) => a.agentId === state.agentId) ?? null
   if (cur === null) {
-    head.textContent = state.agents.length === 0 ? '这个空间还没有 Agent' : ''
+    head.textContent = state.agents.length === 0 ? t('这个空间还没有 Agent') : ''
     head.className = 'hint'
   } else {
     head.className = 'viewtitle'
@@ -514,19 +523,21 @@ function renderIntents() {
   box.replaceChildren()
   for (const o of INTENT_OPTIONS) {
     const b = document.createElement('button')
-    b.textContent = o.label
+    b.textContent = t(o.label)
     b.dataset.intent = o.id
     b.setAttribute('aria-pressed', String(state.intent === o.id))
     b.addEventListener('click', () => focusComposer(o.id))
     box.appendChild(b)
   }
   const cur = intentOf(state.intent) ?? INTENT_OPTIONS[0]
-  $('intent-hint').textContent = cur.hint
+  $('intent-hint').textContent = t(cur.hint)
   const needsTask = cur.needsTask === true
   $('task-select').classList.toggle('hidden', !needsTask)
   // 意图决定"这句话会不会变成任务"，所以它必须影响占位符——用户不该靠
   // 记住 chip 的位置来判断自己正在做什么。
-  $('composer-input').placeholder = cur.id === 'create_task'
+  $('composer-input').placeholder = t(cur.id === 'create_task'
+    ? '描述要做的事，电脑上线后会领取执行…'
+    : cur.id === 'feedback' ? '给这条任务补充要求（下一轮执行时生效）…' : '问状态、要解释…')
     ? '描述要做的事，电脑上线后会领取执行…'
     : cur.id === 'feedback' ? '给这条任务补充要求（下一轮执行时生效）…' : '问状态、要解释…'
 }
@@ -595,14 +606,14 @@ function renderAuth() {
   const registerBtn = $('btn-register')
   registerBtn.classList.toggle('hidden', !canRegister)
   const registering = state.authMode === 'register'
-  $('auth-title').textContent = registering ? '注册 Legion' : '登录 Legion'
-  $('btn-login').textContent = registering ? '注册并登录' : '登录'
-  registerBtn.textContent = registering ? '已有账号，去登录' : '注册新账号'
+  $('auth-title').textContent = t(registering ? '注册 Legion' : '登录 Legion')
+  $('btn-login').textContent = t(registering ? '注册并登录' : '登录')
+  registerBtn.textContent = t(registering ? '已有账号，去登录' : '注册新账号')
   $('password-hint').classList.toggle('hidden', !registering)
   $('register-invite-row').classList.toggle('hidden', !(registering && state.identity.registration === 'invite'))
-  $('auth-hint').textContent = registering
+  $('auth-hint').textContent = t(registering
     ? (state.identity.registration === 'invite' ? '这台 Hub 需要邀请码。' : '填一个用户名与口令即可开始。')
-    : '用你的 Legion 账号登录。Hub 地址默认取当前站点。'
+    : '用你的 Legion 账号登录。Hub 地址默认取当前站点。')
   $('auth-switch').textContent = canRegister ? '' : ''
 }
 
@@ -726,7 +737,7 @@ async function refreshSpaces() {
   const info = await api('/api/identity/me').catch(() => null)
   const roles = info?.roles ?? []
   if (roles.length === 0) {
-    $('board-scope').textContent = '还没有加入任何空间'
+    $('board-scope').textContent = t('还没有加入任何空间')
     return
   }
   const spaces = roles.map((r) => ({ id: r.space, role: r.role }))
@@ -748,7 +759,7 @@ async function refreshSpaces() {
     sel.appendChild(o)
   }
   sel.addEventListener('change', () => { void switchScope(sel.value) })
-  host.replaceChildren(document.createTextNode('空间：'), sel)
+  host.replaceChildren(document.createTextNode(t('空间')), sel)
 }
 
 /** 换空间要**重置一切与它绑定的东西**：Agent、会话、时间线、游标、事件流。 */
@@ -867,7 +878,7 @@ function hideToast() {
 function toast(message, { tone = 'error', retry = null, ms = 0 } = {}) {
   const host = $('toast-host')
   if (host === null) return
-  $('toast-text').textContent = message
+  $('toast-text').textContent = t(message)
   host.classList.toggle('notice', tone === 'notice')
   host.classList.remove('hidden')
   toastRetry = typeof retry === 'function' ? retry : null
@@ -887,7 +898,7 @@ function showError(message, { retry = null } = {}) {
   const host = pickNoticeHost({ loginScreenVisible: loginScreenVisible() })
   if (host === HOST_INLINE) {
     const box = $('login-error')
-    box.textContent = message
+    box.textContent = t(message)
     box.classList.remove('hidden')
     setTimeout(() => { box.classList.add('hidden') }, 8000)
     return
@@ -900,7 +911,7 @@ function showNotice(message) {
   const host = pickNoticeHost({ loginScreenVisible: loginScreenVisible() })
   if (host === HOST_INLINE) {
     const box = $('login-notice')
-    box.textContent = message
+    box.textContent = t(message)
     box.classList.remove('hidden')
     setTimeout(() => { box.classList.add('hidden') }, 6000)
     return
@@ -945,7 +956,7 @@ function showPopupText(text, onClick = null) {
   const card = document.createElement('button')
   card.className = 'popup'
   if (onClick === null) card.classList.add('plain')
-  card.textContent = text
+  card.textContent = t(text)
   if (onClick !== null) card.addEventListener('click', () => { card.remove(); if (host.children.length === 0) host.classList.add('hidden'); onClick() })
   host.prepend(card)
   host.classList.remove('hidden')
@@ -1301,6 +1312,53 @@ async function doLogin() {
  *   少 remove 一块会同时显示两块，少 add 一块会一块都不显示，而两者在截图上
  *   都是"页面坏了"。现在只有这一个写入点。
  */
+/** 语言偏好存这里。存的是**用户的选择**，不是"当前显示的语言"。 */
+const LS_LOCALE = 'legion.mobile.lang'
+
+/**
+ * 应用语言：设状态 → 换静态文案 → 同步 `<html lang>` → 重画脚本生成的部分。
+ *
+ * ★ `<html lang>` 必须跟着走：读屏用它选发音，浏览器用它选字体
+ *   （中文与西文的首选字体不同）。只换文案而不换 `lang`，英文界面会用中文字体渲染。
+ */
+function applyLocale(locale) {
+  setLocale(locale)
+  // 写不进去不影响本次会话（隐私模式下 localStorage 会抛）。
+  try { localStorage.setItem(LS_LOCALE, locale) } catch { /* 忽略 */ }
+  if (typeof document !== 'undefined') {
+    document.documentElement.lang = locale === 'en' ? 'en' : 'zh-CN'
+    applyStaticI18n(document, locale)
+  }
+  renderLangButton()
+  // 由脚本生成的那些文案要重画 —— 静态替换管不到它们。
+  renderAuth()
+  renderIntents()
+  renderBoardViews()
+  renderBoard()
+  renderTimeline()
+  renderNotifyButton()
+}
+
+/** 语言切换按钮：显示**另一种**语言的自称（"按下去会看到什么"）。 */
+function renderLangButton() {
+  const btn = $('btn-lang')
+  if (btn === null) return
+  const next = getLocale() === 'zh' ? 'en' : 'zh'
+  btn.textContent = LOCALE_LABEL[next]
+  btn.dataset.nextLocale = next
+  btn.title = getLocale() === 'zh' ? 'Switch to English' : '切换到中文'
+}
+
+/** 启动时定语言：用户选过就用他的，否则看浏览器，最后才默认。 */
+function initLocale() {
+  let saved = null
+  try { saved = localStorage.getItem(LS_LOCALE) } catch { /* 读不到就走浏览器语言 */ }
+  applyLocale(resolveLocale({
+    saved,
+    navLang: typeof navigator !== 'undefined' ? navigator.language : null,
+  }))
+}
+
 function setScreen(screen) {
   if (!isScreen(screen)) {
     // 写错值 ⇒ 三条 CSS 规则全不匹配 ⇒ 三块都不显示。当场炸比白屏好查。
@@ -1391,6 +1449,11 @@ function bind() {
     renderAuth()
   })
   $('btn-logout').addEventListener('click', doLogout)
+    // 语言切换：只支持两种，所以是"切到另一种"而不是下拉框。
+    $('btn-lang').addEventListener('click', () => {
+      const next = $('btn-lang').dataset.nextLocale
+      if (LOCALES.includes(next)) applyLocale(next)
+    })
   // 系统提醒授权：请求必须在**用户手势**里发，所以只能挂在一个真实点击上。
   //
   // ★ 现在按钮**始终可见**，所以要按 `notifyButtonPlan` 的状态分流：
@@ -1405,12 +1468,12 @@ function bind() {
     if (!plan.actionable) {
       // 用浮层而不是页面内弹框：这条按钮在头部，用户点它是想要一个**解释**，
       // 而解释必须落在他正在看的地方（页面内的提醒弹框可能被输入区挡着）。
-      showNotice(plan.message)
+      showNotice(t(plan.message))
       return
     }
     void requestSystemNotifyPermission().then((p) => {
       renderNotifyButton()
-      showNotice(notifyButtonPlan({ supported: true, permission: p }).message)
+      showNotice(t(notifyButtonPlan({ supported: true, permission: p }).message))
     })
   })
   // 用户显式点：立刻跑，不走去抖（他在等结果，不该再等 400ms）。
@@ -1465,6 +1528,9 @@ function registerServiceWorker() {
 async function main() {
   bind()
   registerServiceWorker()
+  // ★ 语言要在**任何渲染之前**定下来：静态文案替换与脚本生成的文案都要用它，
+  //   晚一步就会出现"中文界面闪一下然后变英文"。
+  initLocale()
   renderIntents()
   renderNotifyButton()
   // ★ 起点是**启动屏**，不是登录屏。

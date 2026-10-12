@@ -150,7 +150,7 @@ async function api(path, { method = 'GET', body = null, auth = true, retry = tru
     res = await fetch(hubBase() + path, { method, headers, body: body === null ? undefined : JSON.stringify(body) })
   } catch (e) {
     setConnection({ hubReachable: false })
-    throw new Error(`无法连接 Hub：${e.message}`)
+    throw new Error(t('@cannotReachHub', { message: e.message }))
   }
   if (res.status === 401 && auth && retry && state.refresh) {
     // 令牌过期与"会话被撤销"是两种情形，但都值得先试一次刷新。
@@ -205,6 +205,9 @@ function clearSession() {
 // ── 渲染：状态条 ────────────────────────────────────────────────────────────
 
 function setConnection(input) {
+  // ★ 记住最后一次输入。切语言时要**重画状态条**，而它是由这个输入推导出来的 ——
+  //   不记住的话，切换语言后状态条会停在旧语言（"未登录" vs "Not signed in"）。
+  state.connInput = input
   state.conn = deriveConnectionState(input)
   const el = $('status')
   el.querySelector('.dot').className = `dot ${state.conn.tone}`
@@ -241,8 +244,6 @@ function renderTimeline() {
     p.textContent = state.agents.length === 0
       ? t('这个空间下还没有 Agent。')
       : t('还没有消息。用下面输入框给这个 Agent 派一个任务试试。')
-      ? '这个空间下还没有 Agent。'
-      : '还没有消息。用下面输入框给这个 Agent 派一个任务试试。'
     root.replaceChildren(p)
     return
   }
@@ -392,11 +393,14 @@ function taskCard(t) {
   s.textContent = t(taskLine(t))
   // 「等电脑领取」是**等待**不是**执行中**。不标出来的话，用户在电脑关机时
   // 会以为任务在跑，于是等下去。
-  if (isWaitingForNode(t)) s.textContent += '（电脑上线后自动开始）'
+  if (isWaitingForNode(t)) s.textContent += t('（电脑上线后自动开始）')
   card.appendChild(s)
   const m = document.createElement('div')
   m.className = 'm'
-  m.textContent = taskMeta(t)
+  // `taskMeta` 也是**投影层**（`board.mjs`），返回中文标签（"等电脑领取"等）——
+  // 与 `taskLine` 一样在渲染处翻。它曾漏掉：它是函数调用、不是字面量，
+  // "未包 t() 的中文字面量"那支判据看不见它（现由"生产者"判据盯着）。
+  m.textContent = t(taskMeta(t))
   if (m.textContent.length > 0) card.appendChild(m)
   const acts = document.createElement('div')
   acts.className = 'acts'
@@ -512,7 +516,7 @@ function renderTargets() {
   if (feedbackBtn !== null) {
     const usable = active.length > 0
     feedbackBtn.disabled = !usable
-    feedbackBtn.title = usable ? '' : '当前没有可追加要求的活动任务'
+    feedbackBtn.title = usable ? '' : t('当前没有可追加要求的活动任务')
   }
   if (state.targetTaskId === null && active.length > 0) state.targetTaskId = active[0].id
 }
@@ -538,8 +542,6 @@ function renderIntents() {
   $('composer-input').placeholder = t(cur.id === 'create_task'
     ? '描述要做的事，电脑上线后会领取执行…'
     : cur.id === 'feedback' ? '给这条任务补充要求（下一轮执行时生效）…' : '问状态、要解释…')
-    ? '描述要做的事，电脑上线后会领取执行…'
-    : cur.id === 'feedback' ? '给这条任务补充要求（下一轮执行时生效）…' : '问状态、要解释…'
 }
 
 function focusComposer(intent) {
@@ -747,7 +749,7 @@ async function refreshSpaces() {
   }
   const host = $('board-scope')
   if (spaces.length === 1) {
-    host.replaceChildren(document.createTextNode(`空间：${spaces[0].id}（${spaces[0].role}）`))
+    host.replaceChildren(document.createTextNode(t('@spaceLabel', { id: spaces[0].id, role: spaces[0].role })))
     return
   }
   const sel = document.createElement('select')
@@ -824,9 +826,9 @@ async function send(text, intentOverride = null) {
       showView('tasks')
       await refreshTasks()
       if (typeof r?.taskId === 'string') highlightTask(r.taskId)
-      showNotice(`已派任务 ${r?.taskId ?? ''}：电脑上线后会领取执行。`)
+      showNotice(t('@taskDispatched', { taskId: r?.taskId ?? '' }))
     } else if (plan.intent.id === 'feedback') {
-      showNotice(`要求已记到 ${plan.taskId}，下一轮执行时生效。`)
+      showNotice(t('@feedbackRecorded', { taskId: plan.taskId }))
     }
   } catch (e) {
     showLoginError(e.message)
@@ -970,7 +972,10 @@ function showPopupText(text, onClick = null) {
 function showPopup(p, reason = null) {
   const tid = validTaskId(p.row?.taskId)
   const base = popupText(p.row, whoFor(p.row?.member))
-  const text = reason === null ? base : `${base} —— ${reason}`
+  // `base` 是界面文案（翻它）；`reason` 是任务评论里的**数据**（原样保留）。
+  // 整体拼完再交给 `showPopupText` 查表是匹配不上的 —— 那样英文模式下
+  // 弹框正文仍然是中文。
+  const text = reason === null ? t(base) : t('@popupWithReason', { base: t(base), reason })
   // 点一下就去处理它 —— 一条叫你过来的消息如果点不动，
   // 你还得自己翻到任务页找那一条，那正是这条提醒本想省掉的一步。
   showPopupText(text, tid !== null ? () => { void openTask(tid) } : () => showView('tasks'))
@@ -1087,7 +1092,9 @@ async function notifySystem(taskId, body) {
   if (mechanism === 'none') return false
 
   const tag = notificationTag(taskId, body)
-  const title = 'Legion 指挥台'
+  // 通知的标题与正文都会出现在**系统通知栏**里 —— 那是用户看到的第一行字，
+  // 必须跟界面同一种语言。（`body` 由调用方传，已是渲染后的文案。）
+  const title = t('Legion 指挥台')
   try {
     if (mechanism === 'service-worker') {
       await registration.showNotification(title, { body, tag, data: { taskId: taskId ?? null } })
@@ -1099,7 +1106,7 @@ async function notifySystem(taskId, body) {
   } catch (e) {
     // ★ 不静默：这一条以前是 `return false`，于是"发不出去"与"没开启"在界面上
     //   完全一样。现在说出来，并说明页面内的提醒不受影响。
-    showError(`系统提醒发送失败：${e?.message ?? e}（页面内的提醒照常出现）`)
+    showError(t('@notifySendFailed', { message: e?.message ?? e }))
     return false
   }
 }
@@ -1145,7 +1152,9 @@ function renderNotifyButton() {
         || navigator.standalone === true),
   })
   btn.classList.toggle('hidden', !plan.visible)
-  btn.title = plan.message
+  // ★ `plan.message` 是 `notifyButtonPlan` 产出的**中文原文**（它同时就是 key）——
+  //   不翻它，英文模式下这个按钮的提示仍然是中文。活体检查抓到过这一处。
+  btn.title = t(plan.message)
   // 不可点（已授权/被拒/不支持）时用 `aria-disabled` 而不是 `disabled`：
   // 仍然要能点开看那句话，只是不该再去请求授权。
   btn.setAttribute('aria-disabled', plan.actionable ? 'false' : 'true')
@@ -1265,7 +1274,7 @@ async function postIdentity(path, body) {
   })
   const j = await r.json().catch(() => null)
   if (!r.ok || j?.ok !== true) {
-    const err = new Error(j?.error ?? `请求失败（HTTP ${r.status}）`)
+    const err = new Error(j?.error ?? t('@dispatchFailed', { status: r.status }))
     err.code = j?.code ?? null
     throw err
   }
@@ -1289,9 +1298,9 @@ async function doLogin() {
         // 一个不叫 default 的 Hub 上必然失败，而失败信息只有"空间不存在"。
         ...(state.scope === null ? {} : { space: state.scope }),
         code: $('register-invite').value.trim() || undefined,
-        label: `手机 ${navigator.platform ?? ''}`.trim(),
+        label: t('@deviceLabel', { platform: navigator.platform ?? '' }).trim(),
       })
-      : await postIdentity('/api/identity/login', { name, password, label: `手机 ${navigator.platform ?? ''}`.trim() })
+      : await postIdentity('/api/identity/login', { name, password, label: t('@deviceLabel', { platform: navigator.platform ?? '' }).trim() })
     state.access = j.accessToken
     state.refresh = j.refreshToken
     sessionStorage.setItem(SS_ACCESS, state.access)
@@ -1304,19 +1313,42 @@ async function doLogin() {
   }
 }
 
-/**
- * 切到某一块屏。**唯一的**入口 —— 三块的可见性只由 `body[data-screen]` 决定。
- *
- * ★ 修复前这里是两处各自 `classList.add/remove('hidden')`（`showLoginScreen` 与
- *   `enterApp` 各一份，一共六次操作）。那种写法的问题不是啰嗦，是**漏一次就错**：
- *   少 remove 一块会同时显示两块，少 add 一块会一块都不显示，而两者在截图上
- *   都是"页面坏了"。现在只有这一个写入点。
- */
 /** 语言偏好存这里。存的是**用户的选择**，不是"当前显示的语言"。 */
 const LS_LOCALE = 'legion.mobile.lang'
 
 /**
- * 应用语言：设状态 → 换静态文案 → 同步 `<html lang>` → 重画脚本生成的部分。
+ * 重画**所有**由状态派生的界面。
+ *
+ * ★ 这个函数存在的理由是"切语言时漏画一块"这一类 bug。
+ *
+ *   第一版 `applyLocale` 里**手写**了一串要重跑的函数，而没有任何东西会提醒我
+ *   漏了谁 —— 于是漏了 `renderTargets`（"追加要求"按钮的 title）、
+ *   `refreshSpaces` 的"还没有加入任何空间"、以及状态条。生产上的活体检查抓到了
+ *   其中两条（占位符与提醒按钮 title 另有原因：一个是我改坏的多行三元，
+ *   一个是根本没包 `t()`）。
+ *
+ *   > 一份手抄的"要重画这些"清单，与一份"重画全部"的清单，
+ *   > 在它俩恰好一致的时候是同一个东西 ——
+ *   > 而手抄的那份每加一个渲染点就少一项。
+ *
+ *   所以**载入路径与切语言路径共用这一个函数**。新增渲染点时加进这里，
+ *   两条路径同时得到它；忘了加，两条路径同时缺 ——
+ *   而"只在切换语言时缺"这种不对称，是最难发现的一类。
+ */
+function renderAll() {
+  setConnection(state.connInput ?? {})
+  renderTargets()
+  renderAuth()
+  renderIntents()
+  renderBoardViews()
+  renderBoard()
+  renderTimeline()
+  renderNotifyButton()
+  renderLangButton()
+}
+
+/**
+ * 应用语言：设状态 → 换静态文案 → 同步 `<html lang>` → 重画全部。
  *
  * ★ `<html lang>` 必须跟着走：读屏用它选发音，浏览器用它选字体
  *   （中文与西文的首选字体不同）。只换文案而不换 `lang`，英文界面会用中文字体渲染。
@@ -1329,14 +1361,7 @@ function applyLocale(locale) {
     document.documentElement.lang = locale === 'en' ? 'en' : 'zh-CN'
     applyStaticI18n(document, locale)
   }
-  renderLangButton()
-  // 由脚本生成的那些文案要重画 —— 静态替换管不到它们。
-  renderAuth()
-  renderIntents()
-  renderBoardViews()
-  renderBoard()
-  renderTimeline()
-  renderNotifyButton()
+  renderAll()
 }
 
 /** 语言切换按钮：显示**另一种**语言的自称（"按下去会看到什么"）。 */
@@ -1359,6 +1384,14 @@ function initLocale() {
   }))
 }
 
+/**
+ * 切到某一块屏。**唯一的**入口 —— 三块的可见性只由 `body[data-screen]` 决定。
+ *
+ * ★ 修复前这里是两处各自 `classList.add/remove('hidden')`（`showLoginScreen` 与
+ *   `enterApp` 各一份，一共六次操作）。那种写法的问题不是啰嗦，是**漏一次就错**：
+ *   少 remove 一块会同时显示两块，少 add 一块会一块都不显示，而两者在截图上
+ *   都是"页面坏了"。现在只有这一个写入点。
+ */
 function setScreen(screen) {
   if (!isScreen(screen)) {
     // 写错值 ⇒ 三条 CSS 规则全不匹配 ⇒ 三块都不显示。当场炸比白屏好查。

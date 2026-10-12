@@ -59,6 +59,12 @@ export const DYNAMIC_KEYS = Object.freeze({
   '@notifyPrompt': { zh: '开启系统提醒：页面不在前台时也会通知你。', en: 'Enable system notifications: get notified while the page is in the background.' },
   '@notifySendFailed': { zh: '系统提醒发送失败：{message}（页面内的提醒照常出现）', en: 'Could not send the system notification: {message} (in-page alerts still work)' },
   '@sessionExpiredHint': { zh: '会话已过期，请重新登录。', en: 'Your session expired. Please sign in again.' },
+  // ★ 提醒正文是**界面文案**，而 `reason` 是任务评论里的**数据**（人或 Agent 写的），
+  //   两件事必须分开：整体拼完再查表一定匹配不上任何 key，于是英文模式下
+  //   弹框正文仍然是中文。这里翻 `base`、原样保留 `reason`，只让连接符按语言走。
+  '@popupWithReason': { zh: '{base} —— {reason}', en: '{base} — {reason}' },
+  // 多个空间时的下拉框标题（`空间：s1（owner）`）。
+  '@spaceLabel': { zh: '空间：{id}（{role}）', en: 'Space: {id} ({role})' },
 })
 
 /**
@@ -79,6 +85,18 @@ export const EN = Object.freeze({
   '发送': 'Send',
   '取消': 'Cancel',
   '空间': 'Space: ',
+
+  // ── 时间线：作者与来源标签 ────────────────────────────────────────────────
+  //
+  // ★ 这几个**不在** `t('…')` 里出现：`timelineMetaFor()` 返回它们，
+  //   调用处再用 `t(who)` / `t(tagText)` 翻。所以"`t()` 里的字面量"那支差集
+  //   **看不见**它们 —— 第一版就漏了这五条，英文模式下时间线的作者名仍是中文。
+  //   现在由一条**反向判据**盯着（见 `i18n.test.mjs` 的 UNWRAPPED_OK 清单）。
+  '我': 'Me',
+  '系统': 'System',
+  '我说': 'I said',
+  '进展': 'Progress',
+  '回复': 'Reply',
 
   // ── 头部 / 页签 ──────────────────────────────────────────────────────────
   '任务': 'Tasks',

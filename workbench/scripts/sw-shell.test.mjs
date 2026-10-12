@@ -69,12 +69,28 @@ describe('Service Worker 预缓存清单', () => {  test('★ 清单覆盖整张
   })
 
   test('反向锚：清单不是靠"多写几个"蒙对的', () => {
-    // 如果哪天有人把 SHELL 写成"整个目录"，这条会提醒他——预缓存一份
-    // 测试文件或图标构建脚本没有意义，而且会随目录增长而失控。
+    // 这条守的是"SHELL 不许退化成整个目录的抄本"：预缓存一份测试文件或构建脚本
+    // 没有意义，而且会随目录增长而失控。
+    //
+    // ★ 判据从**计数**改成**结构**（2026-10-12）：原来是
+    //   `shell.length <= all.size + 3`，那个 `+3` 是给 `index.html` /
+    //   `manifest.webmanifest` 留的余量。而图标**也应当**进预缓存
+    //   （它们不是代码，走 cacheFirst，第一次离线就漏），余量就不够用了。
+    //
+    //   计数式判据的问题在于它是**间接**的：它通过"项数不多"来推断"没抄目录"，
+    //   于是每加一个**合理**的资源都要去调那个魔数，而调大的时候没有任何东西
+    //   能说清"大到多少就不对了"。改成直接问那个问题：
+    //   **每一件多出来的东西，是不是一份允许预缓存的非代码资源？**
     const { all } = moduleGraph()
     const shell = shellList()
-    assert.ok(shell.length <= all.size + 3,
-      `SHELL 有 ${shell.length} 项而模块图只有 ${all.size} 个——它不该包含测试与构建脚本`)
+    // 允许出现在 SHELL 里而**不在**模块图中的，只有这几类非代码资源。
+    const NON_CODE = /\.(?:png|ico|svg|jpg|jpeg|webp|woff2?)$/
+    const extras = shell.filter((f) => !all.has(f))
+    const offenders = extras.filter((f) => !(NON_CODE.test(f) || /\.(?:html|webmanifest)$/.test(f)))
+    assert.deepEqual(offenders, [],
+      `SHELL 里出现了不该预缓存的杂项：${offenders.join('、')}\n`
+      + '（只有模块图里的代码与 index/manifest/图标 可以进 SHELL）')
+    // 原来的两条硬红线保留：测试与构建脚本任何时候都不许进。
     assert.ok(shell.every((f) => !/\.test\.mjs$|make-icons/.test(f)), 'SHELL 里不该有测试或构建脚本')
   })
 

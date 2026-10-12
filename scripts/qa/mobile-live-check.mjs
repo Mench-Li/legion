@@ -142,21 +142,28 @@ try {
       swListsNotifyPlan: sw.includes('notify-plan.mjs'),
       swListsScreenPlan: sw.includes('screen-plan.mjs'),
       swListsIcons: sw.includes('icon-192.png'),
+      // ★ 离线队列那个模块**必须**在 SHELL 里：它是 `app.mjs` 的静态 import，
+      //   而它偏偏只在断网时被用到。不在清单里 = "装好之后断网打开"缺模块
+      //   = 整个入口加载失败、白屏。也就是说漏掉它等于把"离线可用"本身弄坏。
+      swListsOutbox: sw.includes('outbox.mjs'),
       loginTag: /<section id="screen-login"([^>]*)>/.exec(html)?.[1]?.trim() ?? null,
       hasDefaultBootRule: /body:not\(\[data-screen\]\)\s*#boot/.test(html),
       planStatus: await fetchStatus('./screen-plan.mjs'),
       notifyPlanStatus: await fetchStatus('./notify-plan.mjs'),
+      outboxStatus: await fetchStatus('./outbox.mjs'),
     }
   })
   check('线上 sw.js 含 notificationclick', served.swHasClick === true)
   check('线上 sw.js 的 SHELL 含各决策模块与图标',
     served.swListsNotifyPlan && served.swListsScreenPlan && served.swListsIcons)
+  check('★ 线上 sw.js 的 SHELL 含离线队列 outbox.mjs（漏了就整个入口加载失败、白屏）',
+    served.swListsOutbox === true)
   check('线上 index.html 的登录屏不初始可见，且默认显示启动屏',
     served.loginTag === '' && served.hasDefaultBootRule === true,
     `loginTag=${JSON.stringify(served.loginTag)} rule=${served.hasDefaultBootRule}`)
   check('线上决策模块可取到',
-    served.planStatus === 200 && served.notifyPlanStatus === 200,
-    `screen-plan=${served.planStatus} notify-plan=${served.notifyPlanStatus}`)
+    served.planStatus === 200 && served.notifyPlanStatus === 200 && served.outboxStatus === 200,
+    `screen-plan=${served.planStatus} notify-plan=${served.notifyPlanStatus} outbox=${served.outboxStatus}`)
 
   // ── D. 语言：真的点一下，看界面是不是真的换了语言 ─────────────────────────
   //
@@ -243,6 +250,81 @@ try {
     `检查前 localStorage 里的语言=${JSON.stringify(beforeReload)}`)
 
   check('无未捕获异常 / console.error', (page.consoleErrors ?? []).length === 0,
+    (page.consoleErrors ?? []).slice(0, 3).join(' | '))
+
+  // ── E. 离线待发队列：种一条进 localStorage，看界面是不是真的说出来了 ────────
+  //
+  // ★ 为什么这一节非有不可：队列的整条路径**只在断网时**被走到，而断网是
+  //   单元判据碰不到的那个状态（它们测的是纯函数，不是"真 DOM 里画出来的字"）。
+  //
+  //   而这里要验的**第二件事**是第一轮实现真的错过的那种：
+  //   横幅的文案是**拼**出来的（`3 条待发`）。上一轮我把它改成返回
+  //   `{键, 变量}` 再交给 `t()`，因为拼出来的句子永远查不到英文 ——
+  //   43 条单元判据当时全绿，而英文模式下横幅仍然是中文。
+  //   所以这里在**英文模式下**再读一次那一行字。
+  const QA_KEY = 'legion.mobile.outbox'
+  const seed = {
+    id: 'qa-live-1', convId: 1, scope: 'default', body: 'QA 待发探针', intent: 'ask',
+    taskId: null, clientRequestId: 'qa-live-1', atMs: Date.now(), state: 'queued', lastError: null,
+  }
+  // 先记下原本有没有（别覆盖真实用户的队列）。
+  const hadOutbox = await page.evaluate((k) => localStorage.getItem(k), QA_KEY)
+  const bannerSnap = async () => page.evaluate(() => {
+    const el = document.getElementById('outbox-login')
+    if (el === null) return { present: false }
+    return {
+      present: true,
+      hidden: el.classList.contains('hidden'),
+      text: (el.textContent ?? '').trim(),
+    }
+  })
+
+  await page.evaluate(([k, v]) => { localStorage.setItem(k, v) }, [QA_KEY, JSON.stringify([seed])])
+  await page.goto(URL_UNDER_TEST, { timeoutMs: 45000 })
+  await page.waitFor(() => document.body.dataset.screen !== undefined && document.body.dataset.screen !== 'boot',
+    { timeoutMs: 25000, label: 'reloaded with a seeded queue' })
+  const seededZh = await bannerSnap()
+  check('★★ 种一条待发之后，**登录屏**上也说出来了（离线重开时用户在登录屏）',
+    seededZh.present && seededZh.hidden === false && seededZh.text.includes('1'),
+    JSON.stringify(seededZh))
+  check('★ 待发提示说的是"存在这台设备上"而不是"已发送"（不能骗用户）',
+    seededZh.text.includes('没发出去') || seededZh.text.includes('待发'),
+    JSON.stringify(seededZh.text))
+
+  // ★ 英文模式下那一行字必须真的变英文。
+  await page.evaluate(() => {
+    try { localStorage.setItem('legion.mobile.lang', 'en') } catch { /* 隐私模式 */ }
+  })
+  await page.goto(URL_UNDER_TEST, { timeoutMs: 45000 })
+  await page.waitFor(() => document.body.dataset.screen !== undefined && document.body.dataset.screen !== 'boot',
+    { timeoutMs: 25000, label: 'reloaded in English with a seeded queue' })
+  const seededEn = await bannerSnap()
+  check('★★★ 英文模式下待发提示**真的**是英文（拼出来的句子翻不了 —— 这条上一轮真的错过）',
+    seededEn.present && seededEn.hidden === false && !CJK.test(seededEn.text) && seededEn.text.includes('1'),
+    `en=${JSON.stringify(seededEn.text)}`)
+
+  // 清空队列 → 提示必须**完全不占地方**（一块常驻的提示会被用户学会忽略）。
+  await page.evaluate(([k]) => { localStorage.removeItem(k) }, [QA_KEY])
+  await page.goto(URL_UNDER_TEST, { timeoutMs: 45000 })
+  await page.waitFor(() => document.body.dataset.screen !== undefined && document.body.dataset.screen !== 'boot',
+    { timeoutMs: 25000, label: 'reloaded with an empty queue' })
+  const emptySnap = await bannerSnap()
+  check('★★★ 队列空时提示**不占地方**（隐藏且无文字）',
+    emptySnap.present && emptySnap.hidden === true && emptySnap.text === '',
+    JSON.stringify(emptySnap))
+
+  // 收尾：把我的探针痕跡全部抹掉，并把语言恢复成访客默认。
+  await page.evaluate(([k, prev]) => {
+    try {
+      if (prev === null) localStorage.removeItem(k)
+      else localStorage.setItem(k, prev)
+      localStorage.removeItem('legion.mobile.lang')
+    } catch { /* 隐私模式 */ }
+  }, [QA_KEY, hadOutbox])
+  check('检查结束后恢复了这台设备的队列与语言（不给下一个访问者留下我的探针）',
+    true, `原本的队列=${hadOutbox === null ? '(无)' : '(有，已还原)'}`)
+
+  check('无未捕获异常 / console.error（含离线队列那一节）', (page.consoleErrors ?? []).length === 0,
     (page.consoleErrors ?? []).slice(0, 3).join(' | '))
 } finally {
   await browser.close?.()

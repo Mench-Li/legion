@@ -45,6 +45,12 @@ const SHELL = [
   // 语言层的 i18n.mjs）
   './app.mjs', './board.mjs', './timeline.mjs', './refresh-loop.mjs', './popup.mjs', './avatar.mjs',
   './notice.mjs', './notify-plan.mjs', './screen-plan.mjs', './i18n.mjs',
+  // ★ `outbox.mjs` **必须**在清单里，而且比别的模块更要紧：
+  //   它偏偏只在**离线**时被真正用到（排空、横幅都在断网路径上）。
+  //   不在清单里的话，"装好之后断网打开"会缺这个模块 ——
+  //   而它是 `app.mjs` 的**静态 import**，缺了就是整个入口加载失败、页面白屏。
+  //   也就是说：漏掉它等于把"离线可用"这件事本身弄坏。
+  './outbox.mjs',
   // ★ 图标也进清单：它们**不是代码**，走 cacheFirst 那条路，于是"装好之后立刻离线"
   //   打开时会缺图标 —— 而那正是 PWA 要守住的那一种情形。
   //   （随包发布、几乎不变，进清单的成本只是首次安装多两个请求。）

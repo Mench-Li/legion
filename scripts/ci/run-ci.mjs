@@ -975,6 +975,10 @@ async function stageTest() {
         // 语言层：决策 + 插值 + 静态替换，以及**覆盖率差集**
         // （`t('…')` 与 `data-i18n` 的中文都必须有英文 —— 漏译不会以任何其他形式暴露）。
         'workbench/mobile/i18n.test.mjs',
+        // 离线待发队列。守的是"用户打的字不许因为网不好而消失"——
+        // 而那条路径**只在断网时**被走到，也就是测试最难复现、生产上最常发生的状态。
+        // 抽成纯决策正是为了在正常网络下把断网行为逐条钉死。
+        'workbench/mobile/outbox.test.mjs',
         'workbench/scripts/mobile-board-parity.test.mjs',
       ],
       cwd: ROOT,

@@ -66,6 +66,12 @@ import { isScreen, screenAfterProbe } from './screen-plan.mjs'
 import {
   t, setLocale, getLocale, resolveLocale, applyStaticI18n, LOCALES, LOCALE_LABEL,
 } from './i18n.mjs'
+// 离线待发队列。决策全在 `outbox.mjs`（纯函数、可测），这里只做三件事：
+// 存取 localStorage、画横幅、在能连上时按顺序排空。
+import {
+  isQueueable, classifyFailure, makeEntry, appendEntry, nextEntry, markResult,
+  drainPlan, outboxSummary, outboxBanner, OUTBOX_LIMIT, ENTRY_STATE,
+} from './outbox.mjs'
 
 const $ = (id) => document.getElementById(id)
 const LS_REFRESH = 'legion.mobile.refresh'
@@ -82,6 +88,14 @@ const POPUP_REPLAY_MS = 6 * 60 * 60 * 1000
 const POPUP_TTL_MS = 9000
 /** 「提醒已就绪」这句只对每个浏览器说一次（说多了就成了噪音）。 */
 const LS_POPUP_ARMED = 'legion.mobile.popuparmed'
+/**
+ * 离线待发队列在 localStorage 里的键。
+ *
+ * ★ 为什么用 `localStorage` 而不是内存/sessionStorage：队列存在的全部意义就是
+ *   **熬过"这一屏被关掉"**。手机浏览器切走标签页、PWA 被系统回收、用户锁屏
+ *   两小时 —— 这些都会清掉内存与 sessionStorage，而待发的消息必须还在。
+ */
+const LS_OUTBOX = 'legion.mobile.outbox'
 function popupArmedShown() {
   try { return localStorage.getItem(LS_POPUP_ARMED) === '1' } catch { return true }
 }
@@ -792,6 +806,232 @@ async function switchScope(scope) {
   await openConversation()
 }
 
+// ── 离线待发队列 ────────────────────────────────────────────────────────────
+//
+// 所有决策在 `outbox.mjs`（纯函数、29 条判据）。这里只做存取、绘制、排空。
+//
+// ★ 这个文件里唯一不能出错的一件事：**幂等键在入队时生成一次、重放时原样复用**。
+//   服务端按 `(scope, actor, clientRequestId)` 去重，所以重放永远不会建出第二条 ——
+//   但那个前提是靠"键不变"维持的。把生成挪到发送那一刻，这个队列立刻从
+//   "能重放"变成"会重复发送"。
+
+/** 队列本体。懒加载一次，之后一直在内存里（写操作都会落盘）。 */
+let outbox = null
+
+function loadOutbox() {
+  if (outbox !== null) return outbox
+  try {
+    const raw = localStorage.getItem(LS_OUTBOX)
+    const parsed = raw === null ? [] : JSON.parse(raw)
+    // ★ 读出来先**校验形状**：localStorage 是用户能改、别的版本也能写的共享空间。
+    //   一条缺 `clientRequestId` 的条目重放时会变成"重复发送"，所以宁可丢掉它，
+    //   也不许它进队列。
+    outbox = Array.isArray(parsed)
+      ? parsed.filter((e) => e && typeof e.clientRequestId === 'string' && e.clientRequestId.length > 0
+        && typeof e.body === 'string' && Number.isInteger(Number(e.convId)))
+        .map((e) => ({
+          ...e,
+          convId: Number(e.convId),
+          atMs: Number.isFinite(Number(e.atMs)) ? Number(e.atMs) : Date.now(),
+          state: e.state === ENTRY_STATE.FAILED ? ENTRY_STATE.FAILED : ENTRY_STATE.QUEUED,
+        }))
+      : []
+  } catch {
+    // 坏 JSON 就当没有 —— 但**不要**顺手把键删掉：那会在一次读取失败时
+    // 抹掉用户所有待发的消息。留着，等他下次写入时被覆盖。
+    outbox = []
+  }
+  return outbox
+}
+
+function saveOutbox() {
+  try {
+    localStorage.setItem(LS_OUTBOX, JSON.stringify(outbox ?? []))
+  } catch {
+    // 写不进去（配额满 / 隐私模式）**必须说出来**：不说的话，用户以为消息在排队，
+    // 而它其实只活在内存里，一关页面就没了。
+    showNotice(t('待发队列存不进本机存储（可能是隐私模式或空间已满）。请保持这一页打开，或清一点空间。'))
+  }
+}
+
+/** 入队失败时的统一处理：**说清为什么，并且不吞掉用户的字**。 */
+function outboxReject(reason) {
+  showError(reason)
+}
+
+/**
+ * 把一条消息放进队列。
+ * @returns {boolean} true = 已入队（调用方可以清空输入框）
+ */
+function enqueueForLater({ plan, convId, scope }) {
+  const queueable = isQueueable(plan.intent.id)
+  if (queueable.ok !== true) {
+    // ★ `feedback` 走这里。**不清输入框** —— 原文留着，用户回到线上自己发。
+    outboxReject(queueable.reason)
+    return false
+  }
+  const list = loadOutbox()
+  const entry = makeEntry({
+    id: `ob-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+    convId,
+    scope,
+    body: plan.body,
+    intent: plan.intent.id,
+    taskId: plan.taskId,
+    // ★★ 幂等键在**这里**生成，此后永久复用（重放时读的就是这个字段）。
+    clientRequestId: `mobile-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+    atMs: Date.now(),
+  })
+  const r = appendEntry(list, entry, { limit: OUTBOX_LIMIT })
+  if (r.accepted !== true) {
+    if (r.reason !== null) outboxReject(r.reason)
+    return false
+  }
+  outbox = r.entries
+  saveOutbox()
+  renderOutbox()
+  return true
+}
+
+/** 画横幅。空队列 → 整块 `hidden`（不占地方，见 index.html 那段注释）。 */
+function renderOutbox() {
+  const host = $('outbox')
+  const list = loadOutbox()
+  const banner = outboxBanner({
+    entries: list,
+    nowMs: Date.now(),
+    // ★ 三态：`state.conn` 来自真实探测，不是 `navigator.onLine`
+    //   （后者在"连上了 Wi-Fi 但没有出口"时也说在线，而那正是最常见的断网形态）。
+    online: state.conn.online === true,
+  })
+  // ★ 登录屏那一块**先画**，而且早退之前就要画完：
+  //   用户离线重开页面会停在登录屏，而那时的横幅（住在 `#main`）他看不见。
+  renderOutboxOnLoginScreen(banner, list)
+  if (host === null) return
+  if (banner === null) {
+    host.classList.add('hidden')
+    return
+  }
+  host.classList.remove('hidden')
+  host.classList.toggle('error', banner.tone === 'error')
+  // ★ 键 + 变量交给 `t()` —— **不**在这里拼句子。
+  //   `outbox.mjs` 返回的是字面量键，所以 i18n 那支覆盖率判据看得见它们；
+  //   而拼出来的 `'3 条待发'` 永远查不到英文（见 `outboxBanner` 的注释）。
+  $('outbox-text').textContent = t(banner.textKey, banner.textVars)
+  $('outbox-detail-text').textContent = t(banner.detailKey, banner.detailVars)
+  const summary = outboxSummary({ entries: list, nowMs: Date.now() })
+  // 「重试」只在有**可自动重试**的条目时才出现：全是永久失败时按它没有任何作用，
+  // 一个按下去什么都不发生的按钮比没有按钮更让人困惑。
+  $('outbox-retry').classList.toggle('hidden', summary.queued === 0)
+  // 列表开着的时候要跟着重画（条目会被发掉/删掉）。
+  if (!$('outbox-list').classList.contains('hidden')) renderOutboxList()
+}
+
+/**
+ * 登录屏上的待发提示。**只读、不带按钮**。
+ *
+ * ★ 为什么它不长成同一个横幅：登录屏上用户能做的事只有"登录"。
+ *   给他一个「重试」按钮，按下去仍然发不出去（没有会话/没有网络），
+ *   而一个按了没反应的按钮会让他怀疑整个应用。
+ *   这里只回答一个问题："我打的字还在吗？" —— 答案是"在，N 条"。
+ */
+function renderOutboxOnLoginScreen(banner, list) {
+  const host = $('outbox-login')
+  if (host === null) return
+  if (banner === null || list.length === 0) {
+    host.classList.add('hidden')
+    host.textContent = ''
+    return
+  }
+  host.classList.remove('hidden')
+  host.textContent = t('你还有 {n} 条消息没发出去（存在这台设备上，登录并连上网络后会自动发出）。', {
+    n: String(list.length),
+  })
+}
+
+/** 展开的明细：每条原文 + 失败原因 + 单条删除。 */
+function renderOutboxList() {
+  const host = $('outbox-list')
+  if (host === null) return
+  const list = loadOutbox()
+  const frag = document.createDocumentFragment()
+  for (const e of list) {
+    const li = document.createElement('li')
+    const body = document.createElement('div')
+    body.className = 'ob-body'
+    body.textContent = e.body
+    if (e.lastError !== null && e.lastError !== undefined) {
+      const err = document.createElement('div')
+      err.className = 'ob-err'
+      err.textContent = e.state === ENTRY_STATE.FAILED
+        ? t('发不出去：{message}', { message: e.lastError })
+        : t('上次失败：{message}', { message: e.lastError })
+      body.appendChild(err)
+    }
+    const del = document.createElement('button')
+    del.textContent = t('删掉')
+    del.addEventListener('click', () => {
+      outbox = loadOutbox().filter((x) => x.id !== e.id)
+      saveOutbox()
+      renderOutbox()
+      // 删掉了却还开着空列表会让人以为没删掉。
+      if (loadOutbox().length === 0) $('outbox-list').classList.add('hidden')
+    })
+    li.append(body, del)
+    frag.appendChild(li)
+  }
+  host.replaceChildren(frag)
+}
+
+/**
+ * 排空队列。**按顺序**，遇到瞬时失败就停（见 `drainPlan` 的注释）。
+ *
+ * @returns {number} 真正发出去的条数
+ */
+async function flushOutbox() {
+  let sent = 0
+  for (const entry of drainPlan(loadOutbox())) {
+    let outcome
+    let detail = {}
+    try {
+      await api('/api/agent-messages', {
+        method: 'POST',
+        body: {
+          conv: entry.convId, scope: entry.scope, by: 'mobile', body: entry.body, intent: entry.intent,
+          ...(entry.taskId === null ? {} : { target: { taskId: entry.taskId } }),
+          // ★★ 用条目里存着的那个键，**不重新生成**。
+          clientRequestId: entry.clientRequestId,
+        },
+      })
+      outcome = 'ok'
+    } catch (e) {
+      outcome = classifyFailure({
+        status: typeof e?.status === 'number' ? e.status : null,
+        code: e?.code ?? null,
+        // `api()` 在 fetch 抛错时把 hubReachable 置 false，但那条错误没有 status。
+        offline: typeof e?.status !== 'number',
+      })
+      detail = { status: e?.status ?? null, message: e?.message ?? null }
+    }
+    const r = markResult(loadOutbox(), entry.id, outcome, detail)
+    outbox = r.entries
+    saveOutbox()
+    if (outcome === 'ok') {
+      sent += 1
+      continue
+    }
+    // 停在第一条没成功的上（顺序即时间线）。会话过期另外说一句。
+    if (outcome === 'session') showNotice(t('有一条待发消息在等你重新登录。'))
+    break
+  }
+  renderOutbox()
+  if (sent > 0) {
+    showNotice(t('已发出去 {n} 条待发消息。', { n: String(sent) }))
+    await refreshTimeline().catch(() => { })
+  }
+  return sent
+}
+
 // ── 发送 ────────────────────────────────────────────────────────────────────
 
 async function send(text, intentOverride = null) {
@@ -833,7 +1073,32 @@ async function send(text, intentOverride = null) {
       showNotice(t('@feedbackRecorded', { taskId: plan.taskId }))
     }
   } catch (e) {
-    showLoginError(e.message)
+    // ★★ 失败**先分类**，再决定说什么、以及要不要把这条消息收进队列。
+    //
+    //   修复前这里是 `showLoginError(e.message)` 一句话 —— 断网时用户打的字
+    //   就只留在输入框里，一旦离开这一屏或 PWA 被回收就没了。
+    //
+    //   分类的两个方向不对等（见 `outbox.mjs` 文件头）：
+    //     · 瞬时（断网/5xx/429）→ **入队**，告诉他"待发 N 条"
+    //     · 永久（400/403/404…）→ **不入队**，因为重试一万次也不会成功；
+    //       改成把服务端的原因直接说出来，原文留在输入框里让他改
+    //     · 会话过期（401）→ 不入队但**原文留着**：他重新登录后自己按一次发送
+    //       （`api()` 那边已经切回登录页并说明了）
+    const outcome = classifyFailure({
+      status: typeof e?.status === 'number' ? e.status : null,
+      code: e?.code ?? null,
+      offline: typeof e?.status !== 'number',
+    })
+    if (outcome === 'transient') {
+      // 入队成功 → 输入框清空（消息已经在队列里了，留着会让用户以为没发出去）。
+      // 入队失败（队列满 / feedback）→ 不清，`enqueueForLater` 已经说了原因。
+      if (enqueueForLater({ plan, convId: state.convId, scope: state.scope })) {
+        $('composer-input').value = ''
+        showNotice(t('网络不通，这条已经放进待发队列，连上后会自动发出。'))
+      }
+    } else {
+      showLoginError(e.message)
+    }
   } finally {
     $('btn-send').disabled = false
   }
@@ -1453,6 +1718,16 @@ async function enterApp(me) {
     //   比落进去少几块内容糟得多 —— 前者是"页面坏了"，后者只是"还没加载完"。
     //   用 `finally` 而不是在末尾写一行：末尾那行会被将来任何一处 `return` 跳过。
     setScreen('app')
+    // ★ 落屏之后立刻画一次待发横幅，并**试着排空**。
+    //
+    //   为什么要在这里排空（而不只靠 `online` 事件）：`online` 事件只在网络
+    //   **状态变化**时来。而"上次离线时排了队、这次打开就已经有网"这个组合下
+    //   事件根本不会触发 —— 队列会一直躺在那里，直到用户碰巧再断一次网。
+    //
+    //   排空是自分类的（见 `flushOutbox`），所以不需要先探测：
+    //   没网时第一条就会失败并被判成瞬时，队列原样留着。
+    renderOutbox()
+    void flushOutbox()
   }
   // 登录后落在 **Agent**（聊天）——那是这个产品的主功能；
   // 「任务」是查账的地方，不是入口。
@@ -1463,6 +1738,16 @@ function doLogout() {
   void api('/api/identity/logout', { method: 'POST', body: {} }).catch(() => { })
   clearSession()
   stopStream()
+  // ★ 待发队列**刻意不在这里清**。
+  //
+  //   队列里的每一条都带着它自己的会话凭据吗？不 —— 它带着 `convId` 和原文，
+  //   发送时要靠**当前的**会话。所以换一个账号登录后，那些条目会以新账号的身份
+  //   发出去，可能落到他无权访问的会话上（服务端会 403，被分类成永久失败并
+  //   标出来给他看 —— 那是**可见**的结果，不是静默丢失）。
+  //
+  //   两个选择都不干净，这里选"留着"是因为：清掉是**静默删掉用户打的字**，
+  //   而留着的最坏结果是"他登录后看到几条发不出去的消息，自己删掉"。
+  //   两个方向的代价不对等（与 `classifyFailure` 同一条理由）。
   location.reload()
 }
 
@@ -1542,9 +1827,27 @@ function bind() {
   // 网络恢复意味着**现在能问了**，所以就去问：`refreshLoop.now()` 会重跑
   // refreshTasks，由它按真实 presence 定读数（在线/离线/未知）。
   // 拿不到时会落到 `.catch`，那时才该说不可达。
-  window.addEventListener('online', () => { refreshLoop.now() })
+  window.addEventListener('online', () => {
+    refreshLoop.now()
+    // ★ 顺便**排空待发队列**：`online` 只说明"系统认为有网"，队列自己的
+    //   每一条都会按真实响应分类（瞬时→留着继续等，永久→标出来给人看）。
+    //   所以这里不需要先探测，直接试就行 —— 试错是安全的（幂等键保着）。
+    void flushOutbox()
+  })
   // 离线这条是**事实**：连不上 Hub 时读到的任何东西都不是最新的，如实说。
-  window.addEventListener('offline', () => { setConnection({ hubReachable: false }) })
+  window.addEventListener('offline', () => {
+    setConnection({ hubReachable: false })
+    // 横幅的话要跟着变（"断网中" vs "正在重试…"）。
+    renderOutbox()
+  })
+  // ── 待发横幅上的两个按钮 ──
+  $('outbox-detail').addEventListener('click', () => {
+    const list = $('outbox-list')
+    const opening = list.classList.contains('hidden')
+    list.classList.toggle('hidden', !opening)
+    if (opening) renderOutboxList()
+  })
+  $('outbox-retry').addEventListener('click', () => { void flushOutbox() })
 }
 
 /**
@@ -1570,6 +1873,10 @@ async function main() {
   initLocale()
   renderIntents()
   renderNotifyButton()
+  // ★ 待发横幅要在**任何落屏之前**画一次：
+  //   登录屏上也要显示"你还有 N 条没发出去"（见 `renderOutboxOnLoginScreen`），
+  //   而离线重开页面会停在登录屏 —— 那一刻正是用户最担心"我的字还在吗"的时候。
+  renderOutbox()
   // ★ 起点是**启动屏**，不是登录屏。
   //
   //   修复前模板里 `#screen-login` 没有 `hidden`，于是已经登录的人每次打开都先

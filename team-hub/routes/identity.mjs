@@ -24,7 +24,8 @@ import { readFileSync } from 'node:fs'
 
 import { clientIpFrom, isLoopbackOrPrivate } from '../client-ip.mjs'
 import { limitMessage, RATE_LIMIT_CODE, RATE_LIMIT_STATUS, QUOTA_RESOURCES } from '../rate-limit.mjs'
-import { readStateLevel, stateSummary } from '../storage-state.mjs'
+import { readStateLevel, stateSummary, parseState, stateHistory } from '../storage-state.mjs'
+import { growthReport } from '../storage-growth.mjs'
 
 /** 把仓储抛出的具名错误映射成 HTTP。 */
 function errorResponse(store, e) {
@@ -198,8 +199,16 @@ export function createIdentityRoutes({
    */
   function readStorageState(nowMs = Date.now()) {
     const path = typeof storageStatePath === 'string' && storageStatePath.length > 0 ? storageStatePath : null
+    // 路径没配 → 与"文件不在"同一个结论（`no-state`），形状也**必须一致**：
+    // 一个"缺字段"的响应会让调用方在别处炸。
+    const none = (extra) => ({
+      ...readStateLevel({ raw: null, nowMs }),
+      summary: stateSummary({ raw: null, nowMs }),
+      path,
+      ...extra,
+    })
     if (path === null) {
-      return { ...readStateLevel({ raw: null, nowMs }), summary: stateSummary({ raw: null, nowMs }), path: null }
+      return none({ growth: growthReport({ samples: [], freeBytes: null, dbBytes: null, nowMs }) })
     }
     let raw = null
     try {
@@ -209,8 +218,22 @@ export function createIdentityRoutes({
       // ★ 两者**不能合并**：前者是"去装定时器"，后者是"去查权限/写入方"。
       raw = e?.code === 'ENOENT' ? null : '{ 读不出来 }'
     }
+    const parsed = parseState(raw)
     const level = readStateLevel({ raw, nowMs })
-    return { ...level, summary: stateSummary({ raw, nowMs }), path }
+    // ★ 趋势预测用的是状态文件里那份**历史样本**（定时器每次跑追加一条）。
+    //   只报"现在多大"答不出"照这个速度还剩多久" —— 而那正是要开放给更多人
+    //   之前唯一想知道的数。
+    //
+    //   ★ `nowMs` 必须传下去：不传的话，一条**三天前**的曲线会照样算出
+    //     "还有 N 天到危险线" —— 那个数看起来最像真话，而它是**当时**的趋势。
+    const growth = growthReport({
+      samples: stateHistory(parsed.ok === true ? parsed.state : null),
+      walBytes: level.report?.walBytes ?? null,
+      freeBytes: level.report?.freeBytes ?? null,
+      dbBytes: level.report?.dbBytes ?? null,
+      nowMs,
+    })
+    return { ...level, summary: stateSummary({ raw, nowMs }), path, growth }
   }
 
   /** 取用户令牌并校验。返回 `{ ok, ... }`，不抛。 */

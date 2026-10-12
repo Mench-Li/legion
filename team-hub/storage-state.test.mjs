@@ -15,10 +15,11 @@ import { join } from 'node:path'
 import * as fs from 'node:fs'
 
 import { codeOnly } from '../scripts/lib/code-only.mjs'
+import { MAX_HISTORY } from './storage-growth.mjs'
 
 import {
   STATE_SCHEMA, STALE_AFTER_MS, DEFAULT_STATE_PATH, LEVELS, STATE_REASONS,
-  isAlarming, makeState, parseState, readStateLevel, writeStateAtomic, stateSummary, renderSummary, humanAge,
+  isAlarming, makeState, parseState, readStateLevel, writeStateAtomic, stateSummary, renderSummary, humanAge, stateHistory,
 } from './storage-state.mjs'
 
 const MIN = 60_000
@@ -471,4 +472,69 @@ test('★★★ 判据只写临时目录（不许把真实落点当写入目标�
   // 而所有用例都必须用 `mkdtempSync` 造的目录。
   assert.match(src, /mkdtempSync/, '判据应当用临时目录')
   assert.match(DEFAULT_STATE_PATH, /^\/run\//, '（同时确认默认落点仍然是 tmpfs）')
+})
+
+// ── ⑩ ★★★ 历史样本（趋势预测的原料）────────────────────────────────────────
+
+test('★★★ makeState 带上历史样本，并且**有界**', () => {
+  const many = Array.from({ length: 400 }, (_, i) => ({ atMs: T0 + i * HOUR, dbBytes: 1000 + i, freeBytes: 5e9 }))
+  const s = makeState({ level: 'ok', atMs: T0 + 400 * HOUR, history: many })
+  assert.ok(Array.isArray(s.history))
+  assert.ok(s.history.length <= MAX_HISTORY, `历史必须被截到 ${MAX_HISTORY}，实际 ${s.history.length}`)
+  // 留下的是**新**的那一头。
+  assert.equal(s.history[s.history.length - 1].dbBytes, 1000 + 399)
+})
+
+test('★★★ makeState 会把历史里的**坏样本**剔掉（不许把脏的写进状态）', () => {
+  // ★ 状态文件是端点直接拿来算趋势的 —— 脏样本在这里过了，
+  //   就会在预测那里变成一条被拉平或拉歪的曲线。
+  const s = makeState({
+    level: 'ok', atMs: T0,
+    history: [
+      { atMs: T0, dbBytes: 1000 },
+      { atMs: T0 + HOUR },                       // 缺 dbBytes
+      { atMs: T0 + 2 * HOUR, dbBytes: 'x' },     // 类型不对
+      { atMs: null, dbBytes: 3000 },
+      null,
+      { atMs: T0 + 3 * HOUR, dbBytes: 4000 },
+    ],
+  })
+  assert.equal(s.history.length, 2, JSON.stringify(s.history))
+  assert.deepEqual(s.history.map((x) => x.dbBytes), [1000, 4000])
+})
+
+test('★★★ 没给历史时是空数组（**不是** undefined —— 端点会直接数它）', () => {
+  for (const bad of [undefined, null, 'x', 42, {}]) {
+    const s = makeState({ level: 'ok', history: bad })
+    assert.ok(Array.isArray(s.history), `history=${String(bad)} 时应当是数组`)
+    assert.equal(s.history.length, 0)
+  }
+  assert.deepEqual(makeState({ level: 'ok' }).history, [])
+})
+
+test('★★★ stateHistory 只回干净的样本，且畸形输入不抛', () => {
+  const s = makeState({ level: 'ok', atMs: T0 + HOUR, history: [{ atMs: T0, dbBytes: 5 }, { atMs: T0 + HOUR, dbBytes: 9 }] })
+  assert.equal(stateHistory(s).length, 2)
+  for (const bad of [null, undefined, 'x', 42, {}, { history: 'x' }, { history: [null] }]) {
+    assert.doesNotThrow(() => stateHistory(bad))
+    assert.deepEqual(stateHistory(bad), [], `${JSON.stringify(bad)} 应当回空数组`)
+  }
+})
+
+test('★★★ 走一圈：makeState → JSON → parseState → stateHistory 不丢样本', () => {
+  const history = [{ atMs: T0, dbBytes: 100 }, { atMs: T0 + HOUR, dbBytes: 200 }, { atMs: T0 + 2 * HOUR, dbBytes: 300 }]
+  const s = makeState({ level: 'ok', atMs: T0 + 2 * HOUR, history })
+  const back = parseState(JSON.stringify(s))
+  assert.equal(back.ok, true)
+  // ⚠️ 期望值要写**规范化之后**的形状：`normalizeSamples` 会给缺 `freeBytes`
+  //    的样本补上 `null` —— 于是"传进去的"与"读回来的"在键集上不同。
+  //    （第一版我拿原始数组去 deepEqual，红了，而那是**判据**没写准。）
+  const canonical = [
+    { atMs: T0, dbBytes: 100, freeBytes: null },
+    { atMs: T0 + HOUR, dbBytes: 200, freeBytes: null },
+    { atMs: T0 + 2 * HOUR, dbBytes: 300, freeBytes: null },
+  ]
+  assert.deepEqual(stateHistory(back.state), canonical, '往返之后样本必须一字不差')
+  // ★ 而**关键字段**（时间与库大小）一个都不许变 —— 那是趋势的唯一输入。
+  assert.deepEqual(stateHistory(back.state).map((x) => [x.atMs, x.dbBytes]), canonical.map((x) => [x.atMs, x.dbBytes]))
 })

@@ -954,6 +954,10 @@ async function stageTest() {
         // 没开远端鉴权**的部署里那道门不存在，此时后者是唯一的保护，
         // 所以它必须被单独验（绕开那道门，直接调路由）。
         'team-hub/storage-state-route.test.mjs',
+        // 容量**趋势**：库在以多快的速度长、什么时候到危险线。
+        // 守的是那一句「算不出来就说算不出来」—— 两个样本外推出来的
+        // "预测"与一个真的预测，在告警列表上长得一模一样。
+        'team-hub/storage-growth.test.mjs',
       ],
       cwd: ROOT,
     },

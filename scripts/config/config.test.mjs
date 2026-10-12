@@ -449,7 +449,23 @@ const NOT_SECRET_BY_NAME = new Set([
   // 标成 sensitive 会让它从 `/api/config` 里被抹掉——而运维排查
   // "我配了词表目录，到底生效了没有"时正是要看它。
   'team-hub.LEGION_TOKENIZER_DIR',
+  // ★ 2026-10-12：`LEGION_RATE_LIMIT_PASSWORD_RESET` 是**口令重置的限流次数**（`type: 'int'`），
+  //   不是口令本身 —— 名字里的 PASSWORD 修饰的是"被限流的那个动作"。
+  //   实测它在 CI 里红着（`88e0b124` 之后），而修法**不是**给它标 sensitive：
+  //   把 `rateLimitPasswordReset=10` 从摘要里抹成 `***`，等于让运维排查
+  //   "重置是不是被限死了"时看不到那个数字 —— 那是把一条可运维信息换成一个假安全感。
+  //
+  //   判定依据是**类型**（int / min / max）而不只是名字：密钥不会有 min/max 与默认 10。
+  //   下一个人如果把它改成 string 装真口令，这条断言会先红（那时它就该敏感了）。
+  'team-hub.LEGION_RATE_LIMIT_PASSWORD_RESET',
 ])
+
+test('★ 上面这条豁免的判据是**类型**：那三项确实不是密钥形状（防止它被当成逃生门）', () => {
+  const f = HUB.field('rateLimitPasswordReset')
+  assert.equal(f.type, 'int', '它是次数上限；一旦改成 string 装真口令，豁免就必须撤掉')
+  assert.equal(typeof f.default, 'number')
+  assert.equal(typeof f.min, 'number')
+})
 
 test('安全：凡 env 名含 TOKEN/SECRET/KEY 的字段都必须标记 sensitive', () => {
   for (const [name, schema] of Object.entries(SCHEMAS)) {
@@ -509,7 +525,11 @@ test('一致性：三份 schema 的 process 名与登记表一致，且 secret �
   assert.deepEqual(BOARD.secretKeys(), ['token'])
   // P3-4 插件族：能配 token 的两个插件必须标 sensitive（摘要/--json 都走脱敏）
   assert.deepEqual(BOARD_PLUGIN.secretKeys(), ['hubToken'])
-  assert.deepEqual(SERVICES.secretKeys(), ['teamHubToken'])
+  // ★ 2026-10-12：`teamHubIdentityKey`（`LEGION_IDENTITY_KEY`，远程 Agent 的身份密钥）
+  //   实际已在 services-plugin 的 schema 里，且标了 sensitive —— 上面那条名字启发式判据
+  //   也是靠它才通过的。期望值此前只有 `teamHubToken`，于是这一条一直红着
+  //   （与上一版 `HUB.secretKeys()` 那处是同一批遗漏，只是那一处当时改过了、这处没有）。
+  assert.deepEqual(SERVICES.secretKeys().sort(), ['teamHubIdentityKey', 'teamHubToken'])
   assert.deepEqual(PLUGINS.secretKeys(), [])
 })
 
@@ -612,7 +632,18 @@ test('P3-4：plugins schema 覆盖插件真实读取的全部 env，且扫描器
   for (const key of ['TEAM_HUB_HOST', 'TEAM_HUB_TOKEN', 'DSH_HUB_UPSTREAM', 'DSH_WEB_URL']) {
     assert.ok(svc.reads.has(key), `services-plugin 的 baseEnv.${key} 读取点必须被扫出来（否则配置面有盲区）`)
   }
-  assert.deepEqual(SERVICES.envNames().sort(), ['DSH_HUB_UPSTREAM', 'DSH_WEB_URL', 'TEAM_HUB_HOST', 'TEAM_HUB_TOKEN'])
+  assert.deepEqual(SERVICES.envNames().sort(), [
+    // ★★ 2026-10-12 重数过（并逐条核对：这 10 个键在 schema 里都有字段，且扫描器确实扫到了读取点）。
+    //   多出来的 6 个是**远程 Agent / 物化**那两批接进来的：
+    //     · `LEGION_IDENTITY_KEY`（身份密钥，sensitive）与 `LEGION_REMOTE_AUTH` —— 要传给 team-hub 进程；
+    //     · `LEGION_APPLY_MODEL_CONFIG` / `..._DELETES` / `LEGION_RECONCILE_INTERVAL_MS` —— 物化那三个开关；
+    //     · `LEGION_WORKSPACE_DIR` —— 工作区落点。
+    //   它们都属 services-plugin（它负责把子进程拉起来并注入这些变量），所以留在这个 schema 里是对的。
+    'DSH_HUB_UPSTREAM', 'DSH_WEB_URL',
+    'LEGION_APPLY_MODEL_CONFIG', 'LEGION_APPLY_MODEL_CONFIG_DELETES',
+    'LEGION_IDENTITY_KEY', 'LEGION_RECONCILE_INTERVAL_MS', 'LEGION_REMOTE_AUTH', 'LEGION_WORKSPACE_DIR',
+    'TEAM_HUB_HOST', 'TEAM_HUB_TOKEN',
+  ])
 
   // board-plugin 从环境回落的 hub token
   const boardPlug = scanProcess('board-plugin', { includeTests: false })
@@ -703,7 +734,12 @@ test('P3-4：插件族的 schema 不接管宿主 composition 的主配置面（�
   }
   // services-plugin 声明了它**注入**的 env/CLI（跨进程规则据此判断实际生效值）
   const injects = SERVICES.injects
+  // ★ 2026-10-12 重数过：多了 `team-hub:LEGION_IDENTITY_KEY` 与 `team-hub:LEGION_REMOTE_AUTH`
+  //   （远程 Agent 那批 —— services-plugin 拉起 team-hub 进程时要把身份密钥与远程鉴权开关传下去）。
+  //   两个都指向 services-plugin **自己的**字段（`teamHubIdentityKey` / `teamHubRemoteAuth`），
+  //   不是"接管宿主的 composition 配置面"，所以加进这份名单是对的。
   assert.deepEqual(injects.map((i) => `${i.target}:${i.env}`).sort(), [
+    'team-hub:LEGION_IDENTITY_KEY', 'team-hub:LEGION_REMOTE_AUTH',
     'team-hub:TEAM_HUB_HOST', 'team-hub:TEAM_HUB_PORT', 'team-hub:TEAM_HUB_TOKEN',
     'workbench:DSH_HUB_UPSTREAM', 'workbench:DSH_MODELS_BASE_URL', 'workbench:DSH_WORKBENCH_PORT', 'workbench:TEAM_HUB_TOKEN',
   ])
@@ -1305,6 +1341,18 @@ test('★★ product 的 16 处动态下标逐条对账：14 处真读进 dynami
   //    schema 文件就在扫描目录里，它自己的登记文本（`env[OS_HOME_ENV.HOME]` 之类）会被同一条规则再扫一遍，
   //    直接数 scan.dynamic 会把**声明**当成读取点（这条断言第一版就是这么红的，正好是 Trap 1 的真身）。
   const got = cov.source.map((d) => `${d.file} → ${d.expr}`).sort()
+  // ★★ 2026-10-12：16 处逐条重数过（不是照抄）。
+  //   与上一版的差别**只有三处的位置**：`OS_HOME_ENV.{HOME,USER_PROFILE,LOCAL_APP_DATA}`
+  //   从 `product/launcher/cli.mjs` **搬到了** `product/paths.mjs`
+  //   （那一轮把"家目录怎么解析"收进了 `product/paths.mjs` 这个单一来源）。
+  //   条数、表达式、其余文件全都没变 —— 声明侧（`PRODUCT.dynamicEnvReads`）
+  //   当时已经指向新位置了，**只有这条判据的期望列表没跟上**。
+  //
+  //   > 一次"只是搬了个文件"的重构，
+  //   > 与一次"读取点凭空多/少了"的改动，在期望值过期的判据眼里是同一种红。
+  //
+  //   所以重数时逐条对过**表达式**（不是只看条数）：条数从 16 变 16 时，
+  //   光看数字会以为"没变"。
   assert.deepEqual(got, [
     'product/launcher/allowlist.mjs → env[key]',
     'product/launcher/allowlist.mjs → env[key]',
@@ -1320,16 +1368,17 @@ test('★★ product 的 16 处动态下标逐条对账：14 处真读进 dynami
     'product/launcher/bundled-runtime.mjs → key',
     'product/launcher/bundled-runtime.mjs → key',
     'product/launcher/cli.mjs → env[DSH_HOME_ENV]',
-    'product/launcher/cli.mjs → env[OS_HOME_ENV.HOME]',
-    'product/launcher/cli.mjs → env[OS_HOME_ENV.LOCAL_APP_DATA]',
-    'product/launcher/cli.mjs → env[OS_HOME_ENV.USER_PROFILE]',
     // PRT-708：托盘图标宿主要在 Windows 上照 DSH 那条解析顺序找 shell，
     // 于是多了 PATH / ProgramFiles / SystemRoot 三处读（PATH 读两处，见注册表 occ=2）。
     'product/launcher/tray-icon.mjs → env[SHELL_ENV.PATH]',
     'product/launcher/tray-icon.mjs → env[SHELL_ENV.PATH]',
     'product/launcher/tray-icon.mjs → env[SHELL_ENV.PROGRAM_FILES]',
     'product/launcher/tray-icon.mjs → env[SHELL_ENV.SYSTEM_ROOT]',
+    // ★ 这三处 2026-10-12 时住在 `product/paths.mjs`（原先在 `cli.mjs`）。
     'product/paths.mjs → env[LEGION_ENV.HOME]',
+    'product/paths.mjs → env[OS_HOME_ENV.HOME]',
+    'product/paths.mjs → env[OS_HOME_ENV.LOCAL_APP_DATA]',
+    'product/paths.mjs → env[OS_HOME_ENV.USER_PROFILE]',
     'product/paths.mjs → env[envKey]',
   ], 'product 的动态下标清单变了——重数一遍再改 schema，不要照抄旧数字')
   assert.equal(cov.self.length, 12, 'product 声明之后，schema 自身登记文本命中 12 处（必须被排除，不是待登记）')

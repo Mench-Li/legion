@@ -17,6 +17,7 @@ import { SCHEMA_FILES } from '../config/check.mjs'
 import {
   DIR_CLASSES,
   buildInventory,
+  classifyPath,
   diffInventories,
   findPlaintextCredentials,
 } from './topology-inventory.mjs'
@@ -176,7 +177,22 @@ test('④ 当前仓库无明文凭证落盘（有则须登记为 PRT-505 迁移�
 test('⑤ 数据产物分类到五类目录之一', () => {
   const inv = load()
   const classes = new Set(Object.keys(DIR_CLASSES))
-  assert.deepEqual(inv.dataTopology.files.length > 0, true, '未发现任何数据产物')
+  // ★★ 2026-10-12：这里原先是 `assert.deepEqual(inv.dataTopology.files.length > 0, true, '未发现任何数据产物')`。
+  //   它的本意是"分类规则真的跑到了数据"（防止空跑），但它把**理想状态当成了故障**：
+  //   仓库里**没有**被跟踪的数据产物（没有 db 被提交进来）恰恰是干净的状态 ——
+  //   实测 2026-10-12 清掉误提交的 `.tmp-l1db/*.db` 之后，这一条就开始报"未发现任何数据产物"。
+  //
+  //   > 一条"我没看到东西"就报警的判据，
+  //   > 在**真的没有东西**的时候，与它自己坏掉的时候，报的是同一句话。
+  //
+  //   所以"规则真的能分类"改用**喂样本**表达（下面那三行），
+  //   而这一条只负责"清单里每一条都合法"（空集时平凡为真）。
+  const samples = ['scratch/x/team.db', '.tmp-l1db/t.db', 'docs/evidence/y.db', 'somewhere/z.db']
+  for (const s of samples) {
+    const c = classifyPath(s)
+    assert.ok(classes.has(c.class), `样本 ${s} 的分类 ${c.class} 不在五类目录中`)
+    assert.ok(typeof c.note === 'string' && c.note.length > 0, `样本 ${s} 缺归属说明`)
+  }
   for (const f of inv.dataTopology.files) {
     assert.ok(classes.has(f.class), `${f.path} 的分类 ${f.class} 不在五类目录中`)
     assert.ok(typeof f.note === 'string' && f.note.length > 0, `${f.path} 缺归属说明`)
@@ -188,8 +204,22 @@ test('⑤ 被跟踪的数据产物都是 installDir 写入（这正是待迁移�
   const inInstall = inv.dataTopology.files.filter((f) => f.class === 'InstallDir')
   assert.equal(inInstall.length, inv.dataTopology.files.length,
     '存在非 installDir 的已跟踪数据产物，需要新增分类规则')
-  // 至少覆盖已知的两类来源
-  assert.ok(inv.dataTopology.files.some((f) => f.path.startsWith('scratch/')), '缺 scratch/ 来源')
+  // ★★ 2026-10-12：这里原先断言"清单里**至少有一条** `scratch/` 来源"——
+  //   它想守的是"分类规则覆盖了已知的几类来源"，却用"取一条真实数据"来表达。
+  //   而那种真实数据会**合法地消失**：`scratch/` 在第 118 轮进了 `.gitignore`，
+  //   那批临时证据文件随后被移出索引 ⇒ 这条断言变成**永远不可能满足**的死判据
+  //   （它不是红了，是"再也绿不了"）。
+  //
+  //   > 一条用"仓库里恰好有某个文件"来表达"我的规则覆盖了那一类"的判据，
+  //   > 与那条规则本身，在**文件还在**的时候是同一个东西。
+  //
+  //   所以改成直接喂分类规则：它守的仍然是"规则还在"，但不再依赖仓库里有什么。
+  const scratchClass = classifyPath('scratch/t117/x/team.db')
+  assert.equal(scratchClass.class, 'InstallDir', 'scratch/ 该被算作 installDir 写入')
+  assert.match(scratchClass.note, /临时|证据/, 'scratch/ 那条分类说明不见了')
+  const tmpClass = classifyPath('.tmp-l1db/t.db')
+  assert.equal(tmpClass.class, 'InstallDir')
+  assert.match(tmpClass.note, /临时/, '.tmp-* 那条分类说明不见了')
 })
 
 // ---------------------------------------------------------------- ⑥ diff

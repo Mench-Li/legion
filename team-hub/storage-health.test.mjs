@@ -13,6 +13,8 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 
+import { codeOnly } from '../scripts/lib/code-only.mjs'
+
 import {
   STORAGE_STATUS, STORAGE_CODE, STORAGE_RETRY_AFTER_SEC, BACKUP_HEADROOM_FACTOR, WARN_HEADROOM_FACTOR,
   WARN_MIN_FREE_BYTES, CRITICAL_MIN_FREE_BYTES, SQLITE_CODES, SYSTEM_CODES,
@@ -363,7 +365,10 @@ test('★ 反例守卫：上面的"互不相同"判据不是恒真', () => {
 // 上一轮在 `app.mjs` 上量过：一批"证明决策算得对"的判据，与一批"证明那个决策
 // 真的被用上了"的判据，在接线完好时是同一个东西 —— 只不过前者在**线没接上**
 // 的时候仍然全绿。
-const SERVER = readFileSync(new URL('./server.mjs', import.meta.url), 'utf8').replace(/\r\n/g, '\n')
+// ★ 剥掉注释再扫（`codeOnly`）—— 判据要在源码里找名字，而写实现的人
+//   **正好也会在自己的注释里提到那个名字**。这个坑已经绊到过四次，
+//   所以用 `scripts/lib/code-only.mjs` 那个共用实现，不再各抄一份。
+const SERVER = codeOnly(readFileSync(new URL('./server.mjs', import.meta.url), 'utf8'))
 
 test('★★★ `withTx`（所有写的事务边界）必须在 catch 里整形', () => {
   const i = SERVER.indexOf('function withTx(')
@@ -394,9 +399,8 @@ test('★★★ 整形只在这**两处**（多一处就是多一个会漂的副
   //
   // ⚠️ 计数必须**排除注释**：`server.mjs` 里有一句解释性的注释也提到这个名字，
   //    第一版把注释也算进去了，于是判据在**正确实现**上变红。
-  const codeLines = SERVER.split('\n')
-    .map((t) => t.trim())
-    .filter((t) => !t.startsWith('//') && !t.startsWith('*') && !t.startsWith('/*'))
+  // 已经是剥过注释的源码（`codeOnly`）。
+  const codeLines = SERVER.split('\n').map((t) => t.trim())
   const calls = codeLines.filter((t) => /storageErrorShape\(/.test(t) && !/^import/.test(t))
   const imports = codeLines.filter((t) => /^import\b|storageErrorShape,/.test(t) && /storageErrorShape/.test(t))
   assert.equal(calls.length, 2,

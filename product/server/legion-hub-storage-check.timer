@@ -1,0 +1,22 @@
+[Unit]
+Description=每小时给 Legion Hub 做一次存储余量体检
+
+[Timer]
+# 每小时的第 11 分钟。
+#
+# ★ 为什么不用 `OnCalendar=hourly`（= 每小时第 0 分）：
+#   `legion-hub-backup.timer` 特意选了 03:17 来躲开整点 —— 整点是一天里最挤的
+#   一刻（见它的注释）。这里同理：体检要读库文件的大小与磁盘余量，
+#   挤在整点与备份、certbot、dpkg 抢同一块盘只会让读数更慢更抖。
+#
+# ★ 为什么是**每小时**而不是每天：磁盘从"充足"到"写不进去"可能只隔一个
+#   大的上传或一次日志暴涨。每天测一次意味着最坏要 24 小时才发现 ——
+#   而 `STALE_AFTER_MS` 是 6 小时，也就是**最多允许漏 5 次**。
+OnCalendar=*-*-* *:11:00
+# 机器在该跑的时段关着时，开机后补跑一次。
+Persistent=true
+# 随机延迟：多台 Legion 不要同时读各自的库。
+RandomizedDelaySec=60
+
+[Install]
+WantedBy=timers.target

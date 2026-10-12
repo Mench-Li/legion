@@ -88,11 +88,72 @@
 | DSH_WORKBENCH_PORT/HOST、--token、DSH_HUB_UPSTREAM | args/env | 5173 / 127.0.0.1 / 无 token / http://127.0.0.1:8787 | 指挥台；**DSH_HUB_UPSTREAM 端口必须等于 TEAM_HUB_PORT**，否则 `/hub/*` 代理连不上（`check.mjs` 会拦） |
 | DSH_WEB_FETCH_ALLOW_PRIVATE | env | 关 | 仅测试/本地演示开；生产默认关闭（SSRF 防护） |
 | DSH_WEB_AUDIT_FILE / DSH_WEB_AUDIT_MAX_BYTES | env | workbench/data/web-audit.jsonl | 浏览器抓取审计路径/轮转上限 |
+| LEGION_TRUSTED_PROXIES | env | **空** | 可信反向代理的地址/CIDR（逗号分隔）。**留空 = 不信任何 `X-Forwarded-For`，按来源限速不生效**。Hub 绑回环 + 隧道填 `127.0.0.1/32,::1/128`。见 §2.4 |
+| LEGION_RATE_LIMIT_LOGIN / _REGISTER / _PASSWORD_RESET | env | 30 / 10 / 10 | 同一来源 15 分钟内允许的尝试次数（登录 / 注册 / 口令重置）；`0` = 关掉那一层。见 §2.4 |
+| LEGION_REGISTRATION / LEGION_REGISTRATION_MAX | env | closed / 20 | 注册策略与**全局**每小时新账号上限 —— 与上面的来源限速是两件事，见 §2.4 |
 | DSH_KANBAN_PORT/HOST/TOKEN、--token | args/env | 4820 / 127.0.0.1 / 空 | v1 遗留 |
 | whiteboard | env（也可 `--port/--host/--token`） | PORT 8080 / HOST 127.0.0.1 / DB_PATH / WHITEBOARD_TOKEN | 非回环监听必须设置 WHITEBOARD_TOKEN；见 whiteboard/docs/DEPLOY.md |
 安全不变量（三中心与平台既有）：/api/files/*、/api/web/fetch、/api/fs/* 仅回环地址可访问；写操作 token 鉴权
 （未配置放行=仅回环保护）；SSRF 协议白名单 + 私网/回环/混淆逐跳拦截；嵌套/内嵌 .git 任意层段 + realpath 复检拒绝；
 前端全部 React 文本节点渲染（无 dangerouslySetInnerHTML）；畸形 percent-encoding/超长/NUL 请求 400/404 且进程存活。
+
+### 2.4 按来源限速：**对外服务前必做的一步**
+
+**在公网上服务真实用户之前，必须显式设置 `LEGION_TRUSTED_PROXIES`。**
+不设的话这一层**不会生效**，而且**不会报错** —— 它会如实把自己报成不生效，
+而"一台以为自己在限速、其实没有的 Hub"与"一台真的在限速的 Hub"，
+在被攻击之前**没有任何区别**。
+
+**为什么是"配置出来"而不是"直接信那个头"**：部署形态是"Hub 绑回环 + 反代"，
+于是 `req.socket.remoteAddress` 恒为反代自己；真实来源只存在于
+`X-Forwarded-For` 里，而那是**调用方可以随便写**的头。
+
+> 一个"信一个没人验证过的 `X-Forwarded-For`"的按 IP 限速，
+> 与一个完全不限速的端点，在攻击者面前是同一个东西 ——
+> 只不过前者多了一行看起来很安全的代码。
+
+所以：**只有直连对端在可信表里时**才看那个头，并且从链的**右端**往左取第一个
+不可信地址（反代是**追加**它看到的地址，所以右端是"最近一跳说的真话"，
+攻击者只能污染左端）。
+
+**部署后必须核对**（这是判据，不是建议）：
+
+```bash
+# Hub 绑回环 + cloudflared 隧道
+LEGION_TRUSTED_PROXIES=127.0.0.1/32,::1/128     # 写进 /etc/legion-hub.env
+
+# 重启后看启动摘要里有没有它
+journalctl -u legion-hub -n 20 --no-pager | grep -o 'trustedProxies=[^ ]*'
+
+# ★ 真正的判据：经**公网**读一次，必须 reason=forwarded 且 effective=true
+curl -s -H "authorization: Bearer $TEAM_HUB_TOKEN" \
+  https://<你的域名>/api/identity/rate-limits
+# 期望：{"reason":"forwarded","effective":true,"loopbackOrPrivate":false, ...}
+# 若 effective=false：这一层不生效，按上面的原因码修（no-trusted-proxy / no-chain）
+```
+
+实测（2026-10-12，`legion-si.online`）三条路径的读数：
+
+| 路径 | `reason` | `effective` |
+| --- | --- | --- |
+| 经 Cloudflare 隧道 | `forwarded` | **true**（拿到真实公网客户端 IP） |
+| 直连回环、无 `X-Forwarded-For` | `no-chain` | false（拒绝拿回环当"一个客户端"） |
+| 直连回环 + 手工 `X-Forwarded-For` | `forwarded` | true（对端可信才采信） |
+
+**两个闸门不是一件事，别混**：
+
+| | 问的是 | 默认 | 适用 |
+| --- | --- | --- | --- |
+| `LEGION_REGISTRATION_MAX` | 这台 Hub 一小时内**新开了几个号** | 20/小时 | **全局**（防资源被灌满） |
+| `LEGION_RATE_LIMIT_*` | 这个**来源**发了多少次尝试 | 30 / 10 / 10 per 15min | **按来源**（防 credential stuffing） |
+
+**按用户名**的登录锁定（15 分钟内失败若干次即锁）是第三层，一直在生效；
+但它挡不住 credential stuffing —— 每个账号只试两三次就换下一个，
+按名字归并的计数对那种模式恒为 1。
+
+**已知取舍（不假装消除）**：同一办公室 / 运营商 CGNAT 出口后面的人会**一起**被限。
+所以上限定得宽（登录 30/15 分钟），且 429 的消息明确说"这是**来源**级别的限速，
+不是账号被封；换一个网络通常可以立即继续"。
 
 ---
 

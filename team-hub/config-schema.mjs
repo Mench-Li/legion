@@ -110,6 +110,20 @@ export const SCHEMA = defineSchema({
       key: 'releasesDir', env: 'LEGION_RELEASES_DIR', type: 'path', default: '',
       doc: '发布目录（含 feeds/ 与 releases/）；留空 = Hub 不托管安装包下载',
     },
+    // 官网"打开就能用"那个按钮指向哪里。
+    //
+    // ★ 为什么它是**配置**而不是写死的 `/mobile/`：官网由**哪台 Hub** 在服务，
+    //   与"用户该用哪台 Hub"可以是两件事。实测（2026-10-12）就是这个形态——
+    //   `legion-si.online`（服务器，空库）服务官网，而真正在干活的中枢在
+    //   `home.legion-si.online`（本机，守护连的那台）。写死相对路径时，访客从官网
+    //   点进去落到的是**另一个库**：每一步都对，地方错了。
+    //
+    //   **默认留空 = 相对 `/mobile/`**（维持原有行为，别的 Hub 部署一行都不改）。
+    //   要让官网把人送去别处，显式写出来。
+    {
+      key: 'mobileUrl', env: 'LEGION_MOBILE_URL', type: 'string', default: '',
+      doc: '官网"打开就能用"指向的地址；留空 = 本机相对路径 /mobile/',
+    },
     // ── 附件（P3-2 统一项：附件目录相关限值）──
     { key: 'attachMaxBytes', env: 'CHAT_ATTACH_MAX_BYTES', type: 'int', default: 10 * 1024 * 1024, min: 1, doc: '单附件大小上限（字节）' },
     { key: 'attachMaxPerMsg', env: 'CHAT_ATTACH_MAX_PER_MSG', type: 'int', default: 3, min: 1, doc: '每条消息附件数量上限' },

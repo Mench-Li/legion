@@ -8077,6 +8077,14 @@ if (REMOTE_AGENT_ENABLED) {
     root: join(ROOT, 'site'),
     readRelease: describeDownload,
     registration: CFG.values.registration ?? 'closed',
+    // ★ 官网"打开就能用"指向哪台 Hub。留空 = 走 `site.mjs` 的相对默认 `/mobile/`。
+    //
+    //   为什么它必须是配置：官网可以被**任意一台** Hub 服务，而"用户该用哪台"
+    //   是部署事实。实测（2026-10-12）：服务器那台（空库）服务官网，而真中枢在
+    //   本机 —— 写死相对路径会把访客送进**另一个库**。详见 config-schema 那一项。
+    mobilePath: (typeof CFG.values.mobileUrl === 'string' && CFG.values.mobileUrl.trim() !== '')
+      ? CFG.values.mobileUrl.trim()
+      : undefined,
   }))
 
   nodeGateway.attach(server)

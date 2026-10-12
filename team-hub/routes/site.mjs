@@ -128,20 +128,33 @@ function formatDate(ms) {
 const COPY = Object.freeze({
   zh: {
     lang: 'zh-CN',
+    // ★ 2026-10-12：首屏的主动作从"下载电脑版"改成"打开就能用"（→ Web 端）。
+    //
+    //   理由不是文案偏好，而是一个实测事实：Windows 11 的 Smart App Control
+    //   在**默认开启**的新装机上会拒绝运行**未签名**的安装包
+    //   （原文：`was blocked by your organization's Device Guard policy`）。
+    //   也就是说首屏那个主按钮，对相当一部分访客**点了装不上**。
+    //
+    //   > 一个"点了装不上"的主按钮，
+    //   > 与一个"能用的入口"，在页面截图上长得一模一样——
+    //   > 只不过前者让访客以为是自己机器坏了。
+    //
+    //   所以：Web 端是**主入口**（它不需要安装、不需要签名、也不受 SAC 影响），
+    //   桌面端降级为"另有 Windows 版（内部验证）"。
+    ctaWeb: '打开就能用',
+    // `cta` 仍然只用在**下载卡片**上（那个卡片本身就是"把包装到你机器上"）。
     cta: '下载电脑版',
     ctaSecond: '查看协作界面',
     explore: '探索 Legion',
     // 设计稿的首屏节奏是「两个动作 + 一行小字」，塞进一整段会把节奏压垮。
-    // 首屏一句。**自包含**，不再写「见下方」——详细处理方式已按业主意见撤掉，
-    // 留着那句就是一个指向空处的引用。签名状态由卡片上的徽标承担。
     ctaWarnShort: '当前为内部验证版：安装包未做代码签名。',
     deployWinEmpty: '桌面端安装包还没上传到这台 Hub；先向管理员索取。',
     notYet: '电脑版尚未发布',
     // T-196：备选线路那一段的前缀。措辞与 `.dl-meta` 同一路（短、无句号）。
     otherLines: '其他线路：',
-    mobile: '打开手机端',
-    regOpen: '这台 Hub 开放注册，打开手机端即可注册。',
-    regInvite: '这台 Hub 开放注册（需要邀请码），打开手机端即可注册。',
+    mobile: '打开就能用',
+    regOpen: '这台 Hub 开放注册，打开即可注册。',
+    regInvite: '这台 Hub 开放注册（需要邀请码），打开即可注册。',
     regClosed: '这台 Hub 未开放自助注册，请向管理员索取邀请码。',
     webRepo: '在 GitHub 上查看源码',
     trial: '产品演示（静态样本）',
@@ -151,6 +164,7 @@ const COPY = Object.freeze({
   },
   en: {
     lang: 'en',
+    ctaWeb: 'Open in your browser',
     cta: 'Download for Windows',
     ctaSecond: 'See the interface',
     explore: 'Explore Legion',
@@ -159,8 +173,8 @@ const COPY = Object.freeze({
     deployWinEmpty: 'No desktop installer has been uploaded to this Hub yet; ask the administrator.',
     notYet: 'Desktop build not yet published',
     otherLines: 'Other mirrors: ',
-    mobile: 'Open the mobile app',
-    regOpen: 'This Hub is open for sign-up — open the mobile app to register.',
+    mobile: 'Open in your browser',
+    regOpen: 'This Hub is open for sign-up — open it to register.',
     regInvite: 'This Hub is open for sign-up (invite code required) — open the mobile app to register.',
     regClosed: 'This Hub does not allow self sign-up; ask the administrator for an invite code.',
     webRepo: 'View the source on GitHub',
@@ -194,18 +208,24 @@ export function renderLiveBlocks({
   const has = String(downloadUrl).trim().length > 0
   const href = has ? esc(downloadUrl) : ''
 
-  // ① Hero 的两个动作。设计稿写的是"首屏只设两个动作"；这里第一个动作在有发布时
-  //    就是下载（我们确实有发布），没有发布时退回稿子原本的那一对，
-  //    而不是给一个点开 404 的按钮。
-  const cta = has
-    ? `<div class="actions">
-        <a href="${href}" class="btn primary">${c.cta}</a>
+  // ① Hero 的两个动作。
+  //
+  // ★ 2026-10-12：主动作是**打开就能用**（→ Web 端），它**不再取决于有没有发布**。
+  //
+  //   原先主动作在"有发布"时是下载安装包、在"没发布"时退回 `#workflow`。那条
+  //   分支隐含一个假设：桌面安装包是主入口。而实测发现 Windows 11 的
+  //   Smart App Control（新装机**默认开启**）会拒绝运行未签名的安装包 ——
+  //   于是那个主按钮对相当一部分访客**点了装不上**。
+  //
+  //   > 一个"点了装不上"的主按钮，
+  //   > 与一个"能用的入口"，在页面截图上长得一模一样——
+  //   > 只不过前者让访客以为是自己机器坏了。
+  //
+  //   Web 端不需要安装、不需要签名、也不受 SAC 影响，所以它才是主入口，
+  //   而且**跟有没有发布无关** —— 这条分支因此消失了（少一处会漂的地方）。
+  const cta = `<div class="actions">
+        <a href="${esc(mobilePath)}" class="btn primary">${c.ctaWeb}</a>
         <a href="#workflow" class="btn">${c.ctaSecond}</a>
-      </div>
-      <p class="hero-warn"><span class="warn">⚠</span> ${c.ctaWarnShort}</p>`
-    : `<div class="actions">
-        <a href="#workflow" class="btn primary">${c.ctaSecond}</a>
-        <a href="#capabilities" class="btn">${c.explore}</a>
       </div>`
 
   // ② 下载块（部署区里那张 Windows 卡片的内容）。
@@ -253,6 +273,12 @@ export function renderLiveBlocks({
   // 下载卡片：一句话 + **一个**动作 + 元信息 + 未签名说明 + 摘要。
   // 按钮只留下载那一个 —— "查看协作界面"在首屏已经是第二个动作，这张卡片里再放一次
   // 是重复；而这张卡片的主题就是"把这个包装到你机器上"。
+  //
+  // ⚠️ 2026-10-12：**不要**在这里加"若被 Smart App Control 拦住…"之类的处理说明。
+  //   业主 2026-10-09 定过：那些字比它们解决的问题更长，三条说明已撤
+  //   （`site-routes.test.mjs` 有一条 `doesNotMatch(/Smart App Control/)` 守着它）。
+  //   桌面端降级为次要入口这件事，由**首屏主按钮换成"打开就能用"**表达，
+  //   不需要在卡片里再解释一遍。
   const download = has
     ? `<div class="dl-actions">
          <a class="btn primary" href="${href}">${c.cta}</a>
@@ -264,12 +290,27 @@ export function renderLiveBlocks({
 
   // ③ 这台 Hub 自己的入口与注册状态。门口页原来承担的"这是什么、该去哪儿"，
   //    现在由官网承担——所以这一段不能丢。
+  //
+  // ★ 2026-10-12：这一格的主动作也是"打开就能用"，而且**与首屏同一个地址**
+  //   （`mobilePath`）。部署区第一张卡片标题是"本地 Web 工作台"，它就是 Web 入口；
+  //   原先它只给了一个纯文本链接，而首屏给的却是下载按钮 —— 两处对"主入口是谁"
+  //   给出了相反的答案。
+  //
+  //   > 一个"首屏说打开就能用、部署区说下载电脑版"的官网，
+  //   > 与一个只有其中一种说法的官网，在有人**两处都看**之前是同一个东西。
+  //
+  // ★ 用**独立的 class**（`hub-actions` 而不是复用 `dl-actions`）：两块在语义上
+  //   是不同的东西（Web 入口 / Windows 下载），而用例与 CSS 都要能指名道姓地
+  //   说"我说的是哪一块"。复用同一个 class 时，"第一块是哪一块"只能靠**文档顺序**
+  //   推断 —— 而顺序是模板里一个标记的位置，是随时会动的东西。
   const reg = registration === 'open' ? c.regOpen
     : registration === 'invite' ? c.regInvite
       : c.regClosed
-  const hub = `<p><a href="${REPO_URL}" rel="noopener">${c.webRepo}</a></p>
+  const hub = `<div class="hub-actions">
+      <a class="btn primary" href="${esc(mobilePath)}">${c.ctaWeb}</a>
+    </div>
     <p>${reg}</p>
-    <a href="${esc(mobilePath)}">${c.mobile}</a>`
+    <p><a href="${REPO_URL}" rel="noopener">${c.webRepo}</a></p>`
   // ★ 「产品演示」暂时收起（业主 2026-10-09：先注释掉）。
   //   要恢复：把下面两行解开，并把 `dispatch` 里的 `/demo` 路由与 `routes` 表里的
   //   两条一起放开（`site/demo/index.html` 一直都在，没有被删）。

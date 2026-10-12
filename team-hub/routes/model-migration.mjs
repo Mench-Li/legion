@@ -81,7 +81,16 @@ export function createModelMigrationRoutes({
         const plan = planModelMigration({
           legacyRows,
           runtimeType,
-          existingProfiles: modelStore.list().map((x) => x.id),
+          // ★★ 传**整行**，不是 `.map((x) => x.id)`。
+          //
+          //    身份是 `(供应商, 模型)`，而"这条模型是不是已经有档案"必须按它判：
+          //    实测这台机器的档案 id 是连字符风格（`fjd-ds-deepseek-v4-pro-openai`），
+          //    而派生规则算出来的是点号（`fjd-ds.deepseek-v4-pro-openai`）——
+          //    只传 id 时那两条会被判成"不存在"，于是预演说「将新建 2 个档案」、
+          //    而 17 条岗位绑定会指向两条**重复且缺 endpoint/凭证**的档案。
+          //    信息就是在这里被丢掉的，所以修在这里（**两条路都要修**：这个只读的
+          //    预演与下面那个真的执行，用的是同一份计划）。
+          existingProfiles: modelStore.list(),
           existingBindings: bindingStore.list(null),
         })
         // 顶层刻意**不放** `ok`：计划自己有一个 `ok`，两个 `ok` 在不同层级上
@@ -99,7 +108,9 @@ export function createModelMigrationRoutes({
           const plan = planModelMigration({
             legacyRows,
             runtimeType: body.runtimeType,
-            existingProfiles: modelStore.list().map((x) => x.id),
+            // 与上面那条预演**同一份输入**：两条路给出不同计划是最坏的形态
+            // （用户看到的与执行的不是一件事），所以这里同样传整行。
+            existingProfiles: modelStore.list(),
             existingBindings: bindingStore.list(null),
             actor: body.actor,
           })

@@ -1967,6 +1967,10 @@ async function stageTest() {
     { label: 'spaces（空间删除级联）', files: ['team-hub/spaces.test.mjs'], cwd: ROOT },
     { label: 'pipeline（空间流水线：编队即流水线 SP-P0）', files: ['team-hub/pipeline.test.mjs'], cwd: ROOT },
     { label: 'goal（目标生命周期）', files: ['team-hub/goal.test.mjs', 'team-hub/goal-closed.test.mjs'], cwd: ROOT },
+    // 2026-10-12：看板**往回拖**（已完成/待验收 → 重做/打回）的语义判定与接线。
+    // 这条路径此前是**静默**的两种坏结局（卡片拖不动 / 拖动了但下游一条都不重跑），
+    // 所以它不是"再加一组 UI 用例"，而是把那个动作的判据补上。
+    { label: 'rework-plan（看板往回拖：重做/打回的语义判定 + 必填改动点 + 接线判据）', files: ['workbench/scripts/rework-plan.test.mjs'], cwd: ROOT, nodeArgs: ['--experimental-strip-types'] },
     { label: 'rules（规范数据面）', files: ['team-hub/rules.test.mjs'], cwd: ROOT },
     { label: 'artifact（产物读取）', files: ['team-hub/artifact-content.test.mjs'], cwd: ROOT },
     { label: 'security（监听安全配置）', files: ['team-hub/security.test.mjs'], cwd: ROOT },
@@ -3401,6 +3405,9 @@ async function stageTest() {
         'team-hub/model-bindings-routes.test.mjs',
         'team-hub/models-routes.test.mjs',
         'team-hub/read-models-routes.test.mjs',
+        // 2026-10-12：重做族（`POST /api/rework`）。逐条点名而不是通配符——
+        // 完备性检查之所以有用，正是因为它要求**每一个**文件在清单里被点名。
+        'team-hub/rework-routes.test.mjs',
         'team-hub/run-budget-may-switch-model-routes.test.mjs',
         'team-hub/run-budget-routes.test.mjs',
         'team-hub/runtime-lease-routes.test.mjs',

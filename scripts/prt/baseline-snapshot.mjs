@@ -357,6 +357,10 @@ SOURCES.routesAgentWorkflow = join(ROOT, 'team-hub', 'routes', 'agent-workflow.m
 //   修法同本文件的老规矩：**把观测点补全**，不动断言一个字。
 SOURCES.routesIdentity = join(ROOT, 'team-hub', 'routes', 'identity.mjs')
 
+// ★★ 2026-10-12：重做族（`POST /api/rework`）的源文件。不登记它的后果与上面那族逐字相同：
+//   路由对基线不可见 ⇒ 删掉/改掉它，`--check` 会说「无漂移」。
+SOURCES.routesRework = join(ROOT, 'team-hub', 'routes', 'rework.mjs')
+
 /** 已提取出去的路由族模块（值 = 该文件里**声明式**路由的归属名）。 */
 export const ROUTE_FAMILY_SOURCES = Object.freeze([
   // ★★ 第 119 轮 + T-177 归零：**装配了却没登记的八个路由族**（同一道门禁自己报出来的）。
@@ -404,6 +408,11 @@ export const ROUTE_FAMILY_SOURCES = Object.freeze([
   { module: 'routesSkillsDocuments', family: 'skills-documents', factory: 'createSkillsDocumentsRoutes' },
   { module: 'routesReadModels', family: 'read-models', factory: 'createReadModelsRoutes' },
   { module: 'routesTaskLifecycle', family: 'task-lifecycle', factory: 'createTaskLifecycleRoutes' },
+  // ★★ 2026-10-12：**重做**族（`POST /api/rework`）。装配处紧跟 `task-lifecycle`
+  //   （两者同属"任务交接"这件事），所以这里也必须紧跟它——判据 ⑩ 直接比这两个序列。
+  //   它是**新族**而不是 `task-lifecycle` 里的一条：那条族的每一条都是"改这条任务"，
+  //   而这一条的结果是一份报告（作废旧链 + 发新目标 + 建链）。
+  { module: 'routesRework', family: 'rework', factory: 'createReworkRoutes' },
   { module: 'routesModelBindings', family: 'model-bindings', factory: 'createModelBindingsRoutes' },
   { module: 'routesModelBindingsByPath', family: 'model-bindings-by-path', factory: 'createModelBindingsByPathRoutes' },
   { module: 'routesRuntimeLease', family: 'runtime-lease', factory: 'createRuntimeLeaseRoutes' },

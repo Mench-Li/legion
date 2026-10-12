@@ -287,6 +287,11 @@ import { createRuntimeLeaseRoutes } from './routes/runtime-lease.mjs'
 import { createModelBindingsByPathRoutes } from './routes/model-bindings-by-path.mjs'
 import { createModelBindingsRoutes } from './routes/model-bindings.mjs'
 import { createTaskLifecycleRoutes } from './routes/task-lifecycle.mjs'
+// ★★ 2026-10-12：**重做**（验收不满意 → 打回重做 + 重建下游链）那一族。
+//   它一次做四件事（作废旧链 / 发新目标 / 建链 / 回填改动点），所以**不**并进
+//   `task-lifecycle`：那一族的每一条都是"改这条任务"，
+//   而这一条的结果是一份报告（新目标 + 新链 + 被作废的旧任务）。
+import { createReworkRoutes } from './routes/rework.mjs'
 import { createReadModelsRoutes } from './routes/read-models.mjs'
 import { createSkillsDocumentsRoutes } from './routes/skills-documents.mjs'
 import { createRunBudgetRoutes } from './routes/run-budget.mjs'
@@ -6243,6 +6248,171 @@ function advanceTask(id, by, ifVersion) {
 }
 
 /**
+ * 重做（`POST /api/rework` 的函数体）——**验收不满意 → 打回重做，并把下游链一起重建**。
+ *
+ * ## 它解决的是一件什么事
+ *
+ * 在指挥台上把一张**已验收（done）**的卡片往回拖，语义不是"改一个状态"，而是
+ * 「这一段链的产出我不要了：从这一环起重做，后面的审查/测试/部署都要以新产物重跑」。
+ * 三件事必须**一起**发生，少一件就留下一个说不通的状态：
+ *
+ *   ① 记下**改动点**（必填）——它是重做那一轮的输入。空着等于让执行者按原样再交一次，
+ *      而"又交了一遍同样的东西"与"根本没重做"在验收时看不出区别；
+ *   ② 旧链上**这一环及其下游**全部作废（`canceled`，行留着、评论指路）——否则看板上会
+ *      同时挂着"已完成的测试"与"正在重做的编码"，而两者说的不是同一份产物；
+ *   ③ 发一个**新目标**承接重做链（本岗位 → 沿空间流水线 `next` 到链尾），`blockedBy`
+ *      串好，守护认领后自动往下走。
+ *
+ * ## 为什么是"发新目标"，而不是"把旧目标重开"
+ *
+ * `assertGoalOpen()` 是数据层的唯一收口点，它存在的理由是 T-156 现场：给**已收口**目标
+ * 补建任务 ⇒ 同岗位两条链并存、产物路径相同互相覆盖。本仓对这件事的裁决写在它头上：
+ * 「目标是工作的单位，收口即结束；确实要续做，请发布新目标承接」。
+ * **重做正是续做**，所以它走新目标这条路，而不是给"done 不可恢复"开一个例外——
+ * 一个例外会让下一个读这段代码的人去猜：到底还有没有别的路径也能把目标弄回 active。
+ *
+ * ## 作废的范围（为什么连本任务一起作废）
+ *
+ * 作废集 = 同一目标下、岗位落在「本任务岗位 → 沿 `next` 到链尾」这一段上的**全部未取消任务**。
+ * 只作废下游是不够的：本任务自己的产出同样被判不合格，它必须一起作废，否则
+ * 「T-199 已验收」与「它的重做正在进行」会同时为真，而看板上没有任何东西能说清哪个算数。
+ *
+ * ## 只收 done / in_review
+ *
+ * `todo`/`in_progress` 往回拖是**同一目标内的退回**（打回重做），那条路已经有
+ * `/api/transition` + 评论，语义是"这一轮没做完/做得不对"，不该每次都长出一个新目标。
+ * 只有"已经验收过、又被判不合格"才是本函数要处理的那件事。
+ *
+ * @returns {{reworked: object, goal: object, created: Array, superseded: string[], roles: string[]}}
+ */
+function reworkTask({ id, by, reason, ifVersion = undefined, scope: requestScope = undefined } = {}) {
+  return withTx(() => {
+    if (typeof id !== 'string' || id.length === 0) throw new Error('缺少参数 id')
+    if (typeof reason !== 'string' || reason.trim().length === 0) {
+      throw Object.assign(new Error('缺少参数 reason：重做必须写清改动点（空着等于让执行者按原样再交一次）'), {
+        code: 'REWORK_REASON_REQUIRED', statusCode: 400, field: 'reason',
+      })
+    }
+    const cleanReason = reason.trim()
+    const t = getTask(id)
+    if (requestScope !== undefined && requestScope !== null && requestScope !== '' && t.scope !== requestScope) {
+      throw Object.assign(new Error('任务不属于请求空间'), { code: 'SCOPE_MISMATCH', statusCode: 403 })
+    }
+    if (t.status !== 'done' && t.status !== 'in_review') {
+      throw Object.assign(new Error(`任务 ${id} 当前 ${t.status}：只有已验收（done）或待验收（in_review）的任务能发起重做；开发中的任务请用「打回」（transition → todo）`), {
+        code: 'REWORK_STATE', statusCode: 409,
+      })
+    }
+    if (ifVersion !== undefined) {
+      if (!Number.isInteger(ifVersion)) throw new Error('ifVersion 必须是整数')
+      if (t.version !== ifVersion) throw new Error(`乐观锁冲突：任务 ${id} 当前 version=${t.version}，你期望 ${ifVersion}`)
+    }
+    const scope = t.scope
+    const byRole = new Map(readPipeline(scope).stages.filter(s => s.enabled).map(s => [s.role, s]))
+    const startRole = t.role ?? ''
+    if (startRole === '' || !byRole.has(startRole)) {
+      throw Object.assign(new Error(`任务 ${id} 的岗位「${startRole || '（空）'}」不在空间 ${scope} 的启用流水线里，无法推导重做链；请先在该空间流水线里配好这一环`), {
+        code: 'REWORK_STAGE_MISSING', statusCode: 409,
+      })
+    }
+    // 沿 next 走到链尾（seen 兜住环形配置：配成环时截断而不是转不出来）
+    const roles = []
+    const roleSet = new Set()
+    for (let cur = startRole; cur && byRole.has(cur) && !roleSet.has(cur); cur = byRole.get(cur).next ?? null) {
+      roleSet.add(cur)
+      roles.push(cur)
+    }
+    // 作废集：同目标下这条角色链上的未取消任务 + 本任务（老链可能没有 goalId）
+    const supersedeIds = new Set([t.id])
+    if (t.goalId) {
+      for (const row of db.prepare('SELECT id, role, status FROM tasks WHERE scope = ? AND goalId = ?').all(scope, t.goalId)) {
+        if (row.status === 'canceled') continue
+        if (roleSet.has(row.role ?? '')) supersedeIds.add(row.id)
+      }
+    }
+    // ── 承接重做的新目标 ────────────────────────────────────────────────
+    // 先落 goal 行（**active**）再建链：`insertGoalTask` 的收口断言只认"当前目标开着没"，
+    // 倒过来写会撞 assertGoalOpen 而报出一句与本意相反的话（"收口目标不接受新任务"）。
+    const oldGoal = t.goalId ? getGoal(t.goalId) : null
+    const objective = String(oldGoal?.objective ?? t.title).trim()
+    const newObjective = `${objective}（重做：${t.id} 验收不满意）`
+    const goalId = nextGoalId()
+    const at = now()
+    const carryDocSync = oldGoal?.docSync === true
+    db.prepare('INSERT INTO goal (id, scope, objective, status, version, mode, createdAt, updatedAt, endedAt, docsDir, docSync) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)')
+      .run(goalId, scope, newObjective, 'active', 1, 'chain', at, at, null, `docs/${goalId}`, carryDocSync ? 1 : 0)
+    const created = []
+    for (const [index, role] of roles.entries()) {
+      const stage = byRole.get(role)
+      const named = stage?.label && stage.label !== role ? stage.label : null
+      const label = named ?? GOAL_STAGE_LABELS[index % GOAL_STAGE_LABELS.length]
+      const std = standardsFor(role)
+      const predecessor = created.length > 0 ? [created.at(-1).id] : []
+      // 首环沿用原任务标题（人一眼能认出"重做的就是这张卡"）；下游把阶段前缀换成本环的
+      const title = index === 0 ? t.title : t.title.replace(/^【[^】]*】/, `【${label}】`)
+      const description = [
+        '[auto-goal]',
+        `[rework] 重做：原目标 ${t.goalId ?? '（无）'} · 原任务 ${t.id}（${label}）验收不满意。`,
+        `目标：${objective}`,
+        `改动点：${cleanReason}`,
+        `本阶段：${label}（${role}）`,
+      ].join('\n')
+      const task = insertGoalTask({
+        title,
+        description,
+        acceptance: std.acceptance,
+        boundary: { do: std.do, dont: std.dont },
+        role,
+        scope,
+        blockedBy: predecessor,
+        goalId,
+        // RC-2 同源：docSync 目标由链上 coder 承接（重做链同样只有实现岗背它）
+        docSync: carryDocSync && role === 'coder',
+      })
+      created.push({ id: task.id, role, label, title })
+    }
+    const first = created[0]
+    const chainText = created.map(c => `${c.id}（${c.role}）`).join(' → ')
+    // 改动点同时写进新任务的评论：守护把 general 的评论当"将军答复"带进下一轮提示词，
+    // 只写在描述里会在后续几轮被摘要掉。
+    appendTaskNote(first.id, by, `↩ 重做：原任务 ${t.id} 验收不满意。改动点：${cleanReason}`, 'comments')
+    // 团队计划冻结（PRT-402：目标创建时冻结这一版的团队/岗位/流水线）
+    contextPlanStore().putTeamPlan({
+      id: goalId,
+      version: 1,
+      goalId,
+      title: `目标 ${goalId} 的团队计划`,
+      stages: created.map(c => ({ role: c.role, label: c.label })),
+      note: `重做目标创建时冻结（承接 ${t.id}，编码/审查/测试/部署按空间流水线 next 重建，${created.length} 个阶段）`,
+    }, { scope, actor: by })
+    // ── 旧链作废：先留痕（指向新任务），再过状态机（含写入预约释放与审计） ──
+    const superseded = []
+    for (const sid of [...supersedeIds].sort()) {
+      const row = getTask(sid)
+      if (row.status === 'canceled') continue
+      appendTaskNote(sid, by, `⤫ 已被重做取代：新目标 ${goalId} 的 ${chainText}。改动点见 ${first.id}。`, 'comments')
+      transitionTask(sid, 'canceled', by)
+      superseded.push(sid)
+    }
+    audit(by, scope, 'rework', t.id, {
+      reason: cleanReason,
+      newGoalId: goalId,
+      created: created.map(c => c.id),
+      superseded,
+      roles,
+    }, t.goalId)
+    return {
+      reworked: { id: t.id, title: t.title, role: t.role, fromStatus: t.status, status: 'canceled' },
+      goal: goalView(getGoal(goalId)),
+      created,
+      superseded,
+      roles,
+      reason: cleanReason,
+    }
+  })
+}
+
+/**
  * 往任务的某个批注列追加一条 `{ by, at, text }`。
  *
  * 三个列各有各的意思，**不是**同一个东西的三种标签：
@@ -6737,14 +6907,31 @@ function optionalIntParam(url, name) {
   return Number.isSafeInteger(n) ? n : null
 }
 
-async function handleWrite(req, res, run) {
+/**
+ * 写路由的统一入口：鉴权 → 读体 → 取操作者/空间 → 跑域函数 → 回响应（错误整形在下面）。
+ *
+ * `envelope` 决定正文形状，**只在需要时**偏离既有约定：
+ *   · 缺省 `'task'` ⇒ `{ ok: true, task: result }`（绝大多数写路由，客户端读 `body.task`）；
+ *   · `null` ⇒ `{ ok: true, ...result }`（结果本身就是一份**报告**的写路由，见 `/api/rework`：
+ *     它一次做四件事——作废旧链、发新目标、建链、回填评论——把它们统统塞进一个叫 `task`
+ *     的字段里，会让调用方以为"这次写的就是那个任务"）。
+ *
+ * ★ 只给一个响应形状开关、不复制一份错误整形：那段映射（401/409/结构化字段）是
+ *   "所有写路由错误口径一致"的**唯一**保证，抄第二份之后两份就会各自漂移。
+ */
+async function handleWrite(req, res, run, { envelope = 'task' } = {}) {
   try {
     if (!authorized(req)) { json(res, 401, { error: '未授权：Bearer token 无效' }); return }
     const body = await readBody(req)
     const by = requireMember(body)
     const scope = readScope(body)
     const result = await run(body, by, scope)
-    json(res, 200, { ok: true, task: result })
+    if (envelope === null) {
+      const spread = result !== null && typeof result === 'object' ? result : { result }
+      json(res, 200, { ok: true, ...spread })
+      return
+    }
+    json(res, 200, { ok: true, [envelope]: result })
   } catch (e) {
     const message = e instanceof Error ? e.message : String(e)
     const status = Number(e?.statusCode) || (message.includes('乐观锁') ? 409 : 400)
@@ -7245,6 +7432,10 @@ const router = createRouter([
     transitionTask, settleGoalsOfScope, advanceTask,
     reassignTask, now, getTask,
     releaseStaleTasks, inboxCount, handleWrite,
+  }),
+  createReworkRoutes({
+    json,
+    handleWrite, reworkTask, audit,
   }),
   createModelBindingsRoutes({
     json,

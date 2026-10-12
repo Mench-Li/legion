@@ -134,7 +134,29 @@ test('目录穿越被拦下（含编码形式与符号前缀）', async () => {
   } finally { await s.close() }
 })
 
-test('挂载前缀之外的路径不由本族接管（返回未处理）', async () => {
+test('★★★ 裸挂载点 /mobile 必须 301 到 /mobile/（少一个斜杠就白屏的那个坑）', async () => {
+  // ★ 实测：修复前 `/mobile` 返回 **200** 且不重定向，而 `index.html` 用的是
+  //   **相对**引用（`./app.mjs`、`./manifest.webmanifest`、`./icon-192.png`）。
+  //   浏览器在无尾斜杠的路径下把 `./app.mjs` 解析成 `/app.mjs` ——
+  //   而根上并没有这个文件。于是：**页面加载出来了，但每一项资源都 404**，
+  //   用户看到的是一个白屏/半死页面，服务端日志里全是 200。
+  //
+  //   > 一个"在地址栏里少打一个斜杠就白屏"的页面，
+  //   > 与一个"能用"的页面，在测试里都是 200。
+  const s = await serveWith(MIGRATED)
+  try {
+    const res = await fetch(s.base + '/mobile', { redirect: 'manual' })
+    assert.equal(res.status, 301, '裸挂载点必须重定向')
+    assert.equal(res.headers.get('location'), '/mobile/')
+    await res.arrayBuffer()
+    // 跟随后必须真的能拿到页面（重定向到的地方要存在）。
+    const followed = await fetch(s.base + '/mobile', { redirect: 'follow' })
+    assert.equal(followed.status, 200)
+    assert.match(await followed.text(), /app\.mjs/)
+  } finally { await s.close() }
+})
+
+test('★ 挂载前缀之外的路径不由本族接管（返回未处理）', async () => {
   const family = createMobileRoutes({ root: MIGRATED })
   const calls = []
   const res = { writeHead: () => {}, end: () => {} }

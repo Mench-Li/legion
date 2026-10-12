@@ -906,6 +906,10 @@ async function stageTest() {
         'team-hub/device-store.test.mjs',
         'team-hub/mobile-routes.test.mjs',
         'team-hub/mobile-api-contract.test.mjs',
+        // 桌面工作台交给中枢托管：静态族（含**裸挂载点重定向**）+ `/hub/*` 前缀改写。
+        // 后者必须在**真实 server.mjs** 上验证 —— 页面能打开、看起来正常，
+        // 而每一次 API 调用都 404，是这一族最容易假绿的形态。
+        'team-hub/workbench-routes.test.mjs',
         'team-hub/identity-remote.test.mjs',
       ],
       cwd: ROOT,

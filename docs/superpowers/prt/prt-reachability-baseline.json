@@ -3,6 +3,31 @@
   "version": 1,
   "unreachable": [
     {
+      "file": "desktop/helper-entry.mjs",
+      "class": "by-design",
+      "reason": "升级 helper 的**进程入口**：由随包 Node 按路径运行（desktop/main.mjs:203 用 join(resourcesPath,'update','helper-entry.mjs') 定路径后 spawn；desktop/update-wiring.mjs:484 同一个落点），并且 desktop/scripts/shell-files.mjs:63 把它逐字列进随发布物的 HELPER_ENTRY，:132 还从它出发算闭包。它**不可能**出现在任何 import 图里，与 scrum/taskctl.mjs 是同一个形状（探针的 PROCESS_ENTRIES 只收仓库内相对路径，而它的运行落点是安装树的 resources/update/，故留在基线的 by-design 这一格）"
+    },
+    {
+      "file": "desktop/messages.mjs",
+      "class": "by-design",
+      "reason": "渲染进程的文案表：唯一 import 者是 desktop/startup.mjs（'./messages.mjs'），而 startup.mjs 由 desktop/startup.html:69 的 <script type=\"module\" src=\"./startup.mjs\"> 加载 ⇒ 它走的是 HTML 加载、不在 import 图里。探针不解析 HTML 的 script 标签，所以这一条链整段不可达（同为 by-design）"
+    },
+    {
+      "file": "desktop/startup.mjs",
+      "class": "by-design",
+      "reason": "桌面启动页的渲染脚本，由 desktop/startup.html:69 的 <script type=\"module\" src=\"./startup.mjs\"> 加载；它被 desktop/scripts/shell-files.mjs:45 列进随发布物的壳文件清单。它是**浏览器脚本**（模块作用域里就 querySelector，见 desktop/main.test.mjs:154-156 的说明），不可能出现在 Node 的 import 图里"
+    },
+    {
+      "file": "desktop/update-panel.mjs",
+      "class": "by-design",
+      "reason": "更新面板的渲染逻辑（纯函数 + DOM 接线两层），同样由桌面壳按页加载、并 shell-files.mjs:50 列进随发布物的壳清单；它有自己的用例（desktop/update-panel.test.mjs），但**没有非测试 import 者** ⇒ 判据是'浏览器脚本'，与 startup.mjs 同一条理由"
+    },
+    {
+      "file": "desktop/update-wiring.testkit.mjs",
+      "class": "by-design",
+      "reason": "桌面接线层用例的**造数据夹具**（文件头自述：单独放一个文件是因为它造的发行清单必须能通过真实的 validateRelease）；只在桌面那一族的 *.test.mjs 里被引用，没有生产消费者。与 product/update/fixtures/zip.mjs 是同一类：夹具不进生产链路"
+    },
+    {
       "file": "orchestrator/config-schema.mjs",
       "class": "by-design",
       "reason": "scan.mjs 读源码对账，不由别的模块 import"
@@ -53,44 +78,49 @@
       "reason": "第 39 轮：spec §7 第 6 条那六格指标的**口径**。与 `metrics-source.mjs` 是**同一个决定**——\"这些产品级动作由谁触发\"，不是本机能定的。★ 刻意**不**接进远程心跳（PRT-713 的载荷走允许名单，加键=加数据外流，该由人点头）。⇒ 裁决处：§5 第 16 条"
     },
     {
-      "file": "product/upgrade/audit.mjs",
-      "class": "deliberate",
-      "reason": "升级链的一环：`runtime-install.mjs` 的注释写明 Launcher **刻意不 import** 升级链（进程卫生）"
+      "file": "product/server/_mk-wal-fixture.mjs",
+      "class": "gap",
+      "reason": "没有生产路径。已查：`git grep -n mk-wal` 全仓零命中（无 .sh、无 systemd 单元、无用例、无文档引用它），台账 `docs/superpowers/prt/PRT-PROGRESS.md` 与 `docs/STATUS.md` 里也查不到它；`git log` 只有一次提交（`261765d0`，『可信域名入口打通 + 一致备份与恢复演练』）。文件头 `product/server/_mk-wal-fixture.mjs:1-2` 自述是「本地验证：VACUUM INTO 会把 WAL 里的内容并进快照吗？」的一次性造库脚本（argv 收 db 路径，默认 `/tmp/bktest/live.db`），而它要回答的那个问题已经写进 `product/server/BACKUP.md:31-39` 的结论 ⇒ 它今天是一条**零消费者**的已提交脚本。⇒ 裁决处：§5 第 17 条（同类先例：零生产入口的死实现由业主裁决后删除，见 `first-run.mjs` 636 行那次）。"
     },
     {
-      "file": "product/upgrade/backup.mjs",
-      "class": "deliberate",
-      "reason": "同 `product/upgrade/index.mjs`：升级链的一环（Launcher 刻意不 import，进程卫生）"
+      "file": "product/server/_phone-act.mjs",
+      "class": "by-design",
+      "reason": "由 shell 经 SSH **按路径**在服务器上跑，不由模块 import：`product/server/verify-experience.sh:31` 的 `phone()` 逐字是 `$SSH \"set -a; . /etc/legion-hub.env; set +a; node /srv/legion-hub/_phone-act.mjs --b64 ${enc[*]}\"`（该函数上方 `:18-27` 正是那次『参数被 ssh shell 切成两半』缺陷的注释）；用例侧 `product/server/phone-act.test.mjs` 同样按路径 spawn 它。同族先例：基线里 `team-hub/chat-l1-smoke.mjs`（按路径跑的冒烟脚本）也是 `by-design`。"
     },
     {
-      "file": "product/upgrade/channels.mjs",
-      "class": "deliberate",
-      "reason": "同 `product/upgrade/index.mjs`：升级链的一环（Launcher 刻意不 import，进程卫生）"
+      "file": "product/server/backup.mjs",
+      "class": "by-design",
+      "reason": "由 systemd 按路径跑，不由 JS import：`product/server/legion-hub-backup.service:13` 逐字 `ExecStart=/usr/bin/node /srv/legion-hub/app/product/server/backup.mjs`（`product/server/legion-hub-backup.timer` 每天 03:17 触发；`product/server/README.md:259` 记着『真正在用的是 `backup.mjs`』）。它唯一的非测试 import 者是 `product/server/offsite.mjs:42`（`inspectSnapshot`），而后者同样是由 systemd 按路径跑的服务端脚本 ⇒ 传递 `by-design`。"
     },
     {
-      "file": "product/upgrade/index.mjs",
-      "class": "deliberate",
-      "reason": "runtime-install.mjs: 注释写明 Launcher **刻意不 import** 升级链（进程卫生）"
+      "file": "product/server/install-first-pack.mjs",
+      "class": "by-design",
+      "reason": "由部署脚本按路径调用，不由 JS import：`product/server/rebootstrap.sh:90` 逐字 `if node \"$APP_DIR/product/server/install-first-pack.mjs\" \"$HUB\" /srv/legion-hub/first-space.pack.json /etc/legion-hub/first-admin-password.txt; then`（失败分支 `:94` 给出重跑命令）。用法块 `product/server/install-first-pack.mjs:18` 与它一致。已查：非 shell 的引用命中为零。"
     },
     {
-      "file": "product/upgrade/migration.mjs",
-      "class": "deliberate",
-      "reason": "同 `product/upgrade/index.mjs`：升级链的一环（Launcher 刻意不 import，进程卫生）"
+      "file": "product/server/offsite.mjs",
+      "class": "by-design",
+      "reason": "由 systemd 按路径跑，零 JS import：`product/server/legion-hub-offsite.service:29` 逐字 `ExecStart=/usr/bin/node /srv/legion-hub/app/product/server/offsite.mjs`（`product/server/legion-hub-offsite.timer` 每天 03:47 触发），用法块 `product/server/offsite.mjs:33-35` 与 `product/server/BACKUP.md:98-107` 逐字一致。它自己 import `./backup.mjs`（`product/server/offsite.mjs:42`），方向是它→backup。"
     },
     {
-      "file": "product/upgrade/package.mjs",
-      "class": "deliberate",
-      "reason": "同 `product/upgrade/index.mjs`：升级链的一环（Launcher 刻意不 import，进程卫生）"
+      "file": "product/server/read-credentials.mjs",
+      "class": "by-design",
+      "reason": "唯一的非测试 import 者是 `product/server/verify-phone.mjs:14`（`import { readCredentials } from './read-credentials.mjs'`），而那个脚本是**人工按路径跑的验收脚本**（`product/server/verify-phone.mjs:12` 的用法行 + `product/server/CONFIG.md:111` + `product/server/README.md:337`）⇒ 传递 `by-design`；用例侧只有 `product/server/read-credentials.test.mjs`。"
     },
     {
-      "file": "product/upgrade/preflight.mjs",
-      "class": "deliberate",
-      "reason": "同 `product/upgrade/index.mjs`：升级链的一环（Launcher 刻意不 import，进程卫生）"
+      "file": "product/server/verify-phone.mjs",
+      "class": "by-design",
+      "reason": "人工在服务器上按路径跑的一次性验收脚本，零 JS import：文件头 `product/server/verify-phone.mjs:12` 逐字是「用法（在服务器上）：node product/server/verify-phone.mjs [baseUrl]」，`product/server/CONFIG.md:111` 与 `product/server/README.md:337` 给出同一条命令。同族先例：基线里 `team-hub/chat-l1-smoke.mjs`（按路径跑的脚本）判 `by-design`。"
     },
     {
-      "file": "product/upgrade/switchover.mjs",
-      "class": "deliberate",
-      "reason": "同 `product/upgrade/index.mjs`：升级链的一环（Launcher 刻意不 import，进程卫生）"
+      "file": "product/update/fixtures/zip.mjs",
+      "class": "by-design",
+      "reason": "用例夹具，不是生产代码：文件头 `product/update/fixtures/zip.mjs:3` 逐字写着『测试用的最小 ZIP 构造器 —— **不是**生产代码』，`:11-25` 写明它必须待在 `fixtures/` 里，否则会被 `stage.mjs` 的打包过滤规则打进安装包。消费者全是用例：`product/update/extract.test.mjs:27`、`product/update/zip.test.mjs:312`、`product/update/install.test.mjs:969` 与 `:1017`。同族先例：基线里 `product/launcher/fixtures/prt509-credentials-probe.mjs` 也是 `by-design`。"
+    },
+    {
+      "file": "product/update/index.mjs",
+      "class": "by-design",
+      "reason": "自动更新的**公开出口 / barrel**：文件头 `product/update/index.mjs:5-15` 逐字『放在一个 barrel 里不是\"顺手导出\"，而是为了让人一眼看到边界』。零生产 importer —— 唯一的 import 者是 `product/update/modules.test.mjs:100`（用例按层对账）。同族先例：基线里 `product/index.mjs`（产品层公开出口）、`orchestrator/worker/index.mjs` 与 `runtime/context/index.mjs`（re-export 出口）都判 `by-design`。"
     },
     {
       "file": "runtime/adapters/dsh/parity.mjs",

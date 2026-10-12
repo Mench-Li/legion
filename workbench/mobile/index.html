@@ -145,6 +145,27 @@ footer textarea { resize:none; max-height:110px; font-size:14px; }
   padding:9px 11px; border-radius:8px; font-size:13px; }
 .hidden { display:none !important; }
 
+/* ── 全局提示（错误 / 回执）────────────────────────────────────────────────
+ *
+ * 与 `#popup-host` 同一套定位思路（输入区上方＝拇指活动区、视线落点），
+ * 但它是**更强**的一层：错误与回执必须比"提醒"更靠近焦点，所以 z-index 更高、
+ * 并且带动作按钮。堆叠顺序：`#popup-host`（30）< `#toast-host`（40）。
+ *
+ * `role="alert"` + `aria-live="assertive"`：错误要**立刻**被读屏播报；
+ * 而"提醒"（`#popup-host`）用的是 `polite` —— 它可以让位给用户手上的事，
+ * 错误不行。
+ *
+ * ★ `bottom` 比 `#popup-host`（+74px）高一个弹框身位，两者同时出现时不叠在一起：
+ *   一个"提醒"压在一条"错误"上面，用户会只看到上面那条。 */
+#toast-host { position:fixed; left:10px; right:10px;
+  bottom: calc(var(--safe-bottom) + 132px); display:flex; align-items:center; gap:8px;
+  z-index:40; padding:10px 12px; border-radius:10px; font-size:13px; line-height:1.5;
+  background:var(--panel-2); border:1px solid rgba(255,92,92,.55); color:var(--text);
+  box-shadow:0 10px 30px rgba(0,0,0,.55); animation: popup-in .18s ease; }
+#toast-host.notice { border-color: rgba(64,255,160,.45); }
+#toast-host #toast-text { flex:1; min-width:0; }
+#toast-host button { min-height:32px; padding:0 10px; font-size:12.5px; border-radius:7px; }
+
 /* ── 提醒弹框（BUG-021）────────────────────────────────────────────────────
  *
  * 手机上没有"右下角"可用，所以它落在**输入区正上方**：那是拇指活动区，
@@ -225,6 +246,22 @@ footer textarea { resize:none; max-height:110px; font-size:14px; }
      它必须**盖在输入区之上**——用户正在打字时来一条"有任务等你验收"，
      被输入区挡住就等于没弹。 -->
 <div id="popup-host" class="hidden" role="status" aria-live="polite"></div>
+
+<!-- 全局提示（错误 / 回执）。
+     ★ 为什么它必须在 `#screen-login` **之外**：
+       `#login-error` / `#login-notice` 住在登录页里，而进主界面时登录页会被整体
+       `hidden`（app.mjs 的 `enterApp`）。于是**登录之后**发生的每一条失败
+       ——发消息失败、500、断网、会话被撤销——都写进了一个 `display:none` 的盒子，
+       用户一条都看不到，而界面看起来一切正常。
+     > 一个"把错误写进一个隐藏盒子"的界面，
+     > 与一个"什么都不报错"的界面，在用户眼里是同一个东西。
+     位置与 `#popup-host` 同一套思路（输入区上方＝拇指活动区、视线落点），
+     但 z-index 更高、带动作按钮：错误与回执要比"提醒"更靠近焦点。 -->
+<div id="toast-host" class="hidden" role="alert" aria-live="assertive">
+  <span id="toast-text"></span>
+  <button id="toast-retry" class="hidden">重试</button>
+  <button id="toast-close" aria-label="关闭提示">关闭</button>
+</div>
 
 <script type="module" src="./app.mjs"></script>
 </body>

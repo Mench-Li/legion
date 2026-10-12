@@ -49,6 +49,11 @@ import {
 import { createRefresher } from './refresh-loop.mjs'
 import { popupBatch, popupText, readPopupSeq, reasonFromTask, shouldUseSystemNotify, validTaskId, writePopupSeq } from './popup.mjs'
 import { renderAvatar } from './avatar.mjs'
+// 两个**纯决策**：提示该写哪儿、会话该不该清。抽在 `notice.mjs` 里是为了可测 ——
+// 本文件在 Node 里不可 import（顶层读 `sessionStorage`），而这两个判断正是出过错的地方。
+import {
+  pickNoticeHost, shouldClearSession, sessionExpiredMessage, HOST_INLINE,
+} from './notice.mjs'
 
 const $ = (id) => document.getElementById(id)
 const LS_REFRESH = 'legion.mobile.refresh'
@@ -136,10 +141,19 @@ async function api(path, { method = 'GET', body = null, auth = true, retry = tru
     throw new Error(`无法连接 Hub：${e.message}`)
   }
   if (res.status === 401 && auth && retry && state.refresh) {
-    // 令牌过期与"会话被撤销"是两种情形，但都值得先试一次刷新；
-    // 刷新失败时会话确实没了，那时再回到登录页。
+    // 令牌过期与"会话被撤销"是两种情形，但都值得先试一次刷新。
     const ok = await refreshSession()
     if (ok) return api(path, { method, body, auth, retry: false })
+    // ★ 刷新也失败 ⇒ 会话确实没了。**必须切回登录屏并说出来**：
+    //   修复前这里只是继续往下 throw，界面停在旧样子，之后每个请求都静默 401 ——
+    //   用户看到的是一个"点什么都像卡住"的应用，而真正该做的是重新登录。
+    clearSession()
+    showLoginScreen()
+    showError(sessionExpiredMessage())
+    const stale = new Error(sessionExpiredMessage())
+    stale.status = res.status
+    stale.code = 'SESSION_EXPIRED'
+    throw stale
   }
   const text = await res.text()
   let json = null
@@ -794,9 +808,9 @@ async function send(text, intentOverride = null) {
       showView('tasks')
       await refreshTasks()
       if (typeof r?.taskId === 'string') highlightTask(r.taskId)
-      notice(`已派任务 ${r?.taskId ?? ''}：电脑上线后会领取执行。`)
+      showNotice(`已派任务 ${r?.taskId ?? ''}：电脑上线后会领取执行。`)
     } else if (plan.intent.id === 'feedback') {
-      notice(`要求已记到 ${plan.taskId}，下一轮执行时生效。`)
+      showNotice(`要求已记到 ${plan.taskId}，下一轮执行时生效。`)
     }
   } catch (e) {
     showLoginError(e.message)
@@ -805,11 +819,88 @@ async function send(text, intentOverride = null) {
   }
 }
 
-function notice(message) {
-  const box = $('login-notice')
-  box.textContent = message
-  box.classList.remove('hidden')
-  setTimeout(() => { box.classList.add('hidden') }, 6000)
+// ── 提示的去处：登录页内联盒子 / 全局浮层 ────────────────────────────────────
+//
+// ★ 这一节修的是一个实测过的形状：`#login-error` 与 `#login-notice` 住在
+//   `#screen-login` **里面**，而 `enterApp()` 会把登录页整体 `hidden`。
+//   于是登录之后发生的每一条失败——发消息失败、500、断网、会话被撤销——
+//   都写进了一个 `display:none` 的盒子：**用户一条都看不到**，
+//   而界面看起来一切正常。
+//
+//   > 一个"把错误写进一个隐藏盒子"的界面，
+//   > 与一个"什么都不报错"的界面，在用户眼里是同一个东西。
+//
+//   分流判据是**登录页此刻是否可见**（`notice.mjs` 的 `pickNoticeHost`）——
+//   不按错误类型分流：类型分不出"用户这会儿看不看得见"。
+
+/** 登录页此刻是否可见。**从 DOM 读**，不缓存 —— 它随时会被 `enterApp` 改掉。 */
+function loginScreenVisible() {
+  const el = $('screen-login')
+  return el !== null && !el.classList.contains('hidden')
+}
+
+/** `#toast-host` 上那条提示的收尾定时器（新提示要顶掉旧的）。 */
+let toastTimer = null
+/** 当前提示的「重试」动作（`null` = 没有可重试的东西，按钮藏起来）。 */
+let toastRetry = null
+
+function hideToast() {
+  if (toastTimer !== null) { clearTimeout(toastTimer); toastTimer = null }
+  toastRetry = null
+  const host = $('toast-host')
+  if (host === null) return
+  host.classList.add('hidden')
+  const retry = $('toast-retry')
+  if (retry !== null) retry.classList.add('hidden')
+}
+
+/**
+ * 全局浮层提示。`tone` 只有两档：`'error'`（红边）与 `'notice'`（绿边）。
+ * 有 `retry` 时给一个「重试」按钮 —— 修复前**没有任何重试入口**：
+ * 断网时点「刷新」毫无反应，用户只能猜。
+ */
+function toast(message, { tone = 'error', retry = null, ms = 0 } = {}) {
+  const host = $('toast-host')
+  if (host === null) return
+  $('toast-text').textContent = message
+  host.classList.toggle('notice', tone === 'notice')
+  host.classList.remove('hidden')
+  toastRetry = typeof retry === 'function' ? retry : null
+  const btn = $('toast-retry')
+  if (btn !== null) btn.classList.toggle('hidden', toastRetry === null)
+  if (toastTimer !== null) clearTimeout(toastTimer)
+  // `ms = 0` = 不自动消失：**错误要留在屏幕上等用户处理**，
+  // 而"8 秒后自己消失的错误"在用户低头看别处时就是没出现过。
+  toastTimer = ms > 0 ? setTimeout(hideToast, ms) : null
+}
+
+/**
+ * 统一的提示出口。所有"要告诉用户一句话"的地方都走这里，
+ * 于是"用户看不看得见"只由一个判据决定。
+ */
+function showError(message, { retry = null } = {}) {
+  const host = pickNoticeHost({ loginScreenVisible: loginScreenVisible() })
+  if (host === HOST_INLINE) {
+    const box = $('login-error')
+    box.textContent = message
+    box.classList.remove('hidden')
+    setTimeout(() => { box.classList.add('hidden') }, 8000)
+    return
+  }
+  toast(message, { tone: 'error', retry })
+}
+
+/** 回执（成功类）。与错误同一套去处判据，只是语气不同。 */
+function showNotice(message) {
+  const host = pickNoticeHost({ loginScreenVisible: loginScreenVisible() })
+  if (host === HOST_INLINE) {
+    const box = $('login-notice')
+    box.textContent = message
+    box.classList.remove('hidden')
+    setTimeout(() => { box.classList.add('hidden') }, 6000)
+    return
+  }
+  toast(message, { tone: 'notice', ms: 6000 })
 }
 
 // ── 提醒弹框（BUG-021 的手机一半）──────────────────────────────────────────
@@ -1071,10 +1162,10 @@ function stopStream() {
 // ── 登录 / 注册 ─────────────────────────────────────────────────────────────
 
 function showLoginError(message) {
-  const box = $('login-error')
-  box.textContent = message
-  box.classList.remove('hidden')
-  setTimeout(() => { box.classList.add('hidden') }, 8000)
+  // ★ 名字保留（登录页那几处调用点读起来仍然通顺），但**去处已经不由它决定**：
+  //   走 `showError` 的统一判据。修复前它无条件写 `#login-error`，
+  //   而登录后那个盒子是 `display:none` 的 —— 见本文件顶部「提示的去处」那一节。
+  showError(message)
 }
 
 async function postIdentity(path, body) {
@@ -1123,6 +1214,23 @@ async function doLogin() {
   }
 }
 
+/**
+ * 切回登录屏（`enterApp` 的逆向）。
+ *
+ * ★ 为什么需要它：会话在**使用中途**失效时（刷新令牌过期、被管理员撤销、
+ *   换了设备），修复前界面**停在原地**，之后每个请求都静默 401 ——
+ *   用户看到的是一个"点什么都像卡住"的应用，而该做的事是重新登录。
+ *   把登录屏切回来，本身就是最清楚的一句提示。
+ */
+function showLoginScreen() {
+  $('screen-login').classList.remove('hidden')
+  $('main').classList.add('hidden')
+  $('composer').classList.add('hidden')
+  $('title').textContent = 'Legion'
+  // 浮层要收掉：它可能压着登录表单，而登录表单此刻才是用户该看的东西。
+  hideToast()
+}
+
 async function enterApp(me) {
   $('screen-login').classList.add('hidden')
   $('main').classList.remove('hidden')
@@ -1164,6 +1272,14 @@ function doLogout() {
 
 function bind() {
   $('btn-login').addEventListener('click', () => { void doLogin() })
+  // 全局浮层的两个动作。修复前这个浮层不存在，于是"重试"这个动作无处可放 ——
+  // 断网时点「刷新」毫无反应，用户只能自己猜该干什么。
+  $('toast-close').addEventListener('click', hideToast)
+  $('toast-retry').addEventListener('click', () => {
+    const action = toastRetry
+    hideToast()
+    if (action !== null) void action()
+  })
   $('login-password').addEventListener('keydown', (e) => { if (e.key === 'Enter') void doLogin() })
   $('register-invite').addEventListener('keydown', (e) => { if (e.key === 'Enter') void doLogin() })
   $('btn-register').addEventListener('click', () => {
@@ -1236,20 +1352,34 @@ async function main() {
   renderIntents()
   renderNotifyButton()
   const reachable = await refreshStatus()
+  // ★ 只有"Hub **答复了**但拒绝"才算会话没了（`shouldClearSession`：看有没有
+  //   数字 `status`）。修复前这里是裸 `catch { clearSession() }` ——
+  //   于是**断网重开页面**就会把 localStorage 里那把 refresh 令牌删掉，
+  //   逼用户重新输口令。地铁、电梯、锁屏唤醒都会命中，而那是手机上
+  //   最高频的失败路径。
+  //
+  //   > 把"我连不上"读成"你被登出了"，代价是用户重新打一遍密码；
+  //   > 而这两件事在 `catch` 里长得一模一样。
   if (state.access !== null) {
     // 已有会话：直接进（令牌可能过期，`api` 会自动刷新一次）。
     try {
       const me = await api('/api/identity/me')
       await enterApp({ name: me.user?.name })
       return
-    } catch { clearSession() }
+    } catch (err) {
+      if (shouldClearSession(err)) clearSession()
+      else setConnection({ hubReachable: false })
+    }
   }
   if (state.refresh !== null && await refreshSession()) {
     try {
       const me = await api('/api/identity/me')
       await enterApp({ name: me.user?.name })
       return
-    } catch { clearSession() }
+    } catch (err) {
+      if (shouldClearSession(err)) clearSession()
+      else setConnection({ hubReachable: false })
+    }
   }
   // ★ 没登录 ≠ Hub 不可达。用 `refreshStatus()` 的真实结果决定措辞——
   //   一个把"你还没登录"说成"服务器连不上"的界面，会把用户送去查网络。

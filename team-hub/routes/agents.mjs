@@ -1,10 +1,15 @@
-export function createAgentsRoutes({ service, json, authorized, readBody, requireMember, readScope, requireSpace = null }) {
+export function createAgentsRoutes({ service, json, authorized, readBody, requireMember, readScope, requireSpace = null, requireQuota = null }) {
   const routes = [
     { method:'GET',path:'/api/agents',run: (u) => ({ agents:service.list(u.searchParams.get('scope')) }) },
     { method:'GET',path:'/api/agent-detail',run: u => ({ agent:service.detail(u.searchParams.get('agentId'),u.searchParams.get('scope')) }) },
     { method:'GET',path:'/api/agent-commands',run:u => ({ command:service.getCommand(u.searchParams.get('commandId'),u.searchParams.get('scope')) }) },
     { method:'POST',path:'/api/agent-conversations',run: body => service.conversation(body) },
-    { method:'POST',path:'/api/agent-messages',run:body => service.send(body) },
+    // ★ `quota: 'message'` 不是路由声明，是**策略声明**：这条路径每成功一次就
+    //    往 `messages` 表插一行，所以它要过按账号的用量配额（见 server.mjs 的
+    //    `requireAccountQuota` 与 DEPLOY.md §2.5）。
+    //    放在路由表上而不是写在 `service.send` 里，是因为配额只该管**人**，
+    //    而 `service.send` 与 Agent 自己的汇报共用底层写入。
+    { method:'POST',path:'/api/agent-messages',run:body => service.send(body), quota:'message' },
     { method:'POST',path:'/api/agent-commands',run:body => service.command(body) },
     { method:'POST',path:'/api/agent-read-cursors',run:body => service.read(body) },
     { method:'POST',path:'/api/agent-runtime',run:body => service.runtime(body) },
@@ -55,11 +60,24 @@ export function createAgentsRoutes({ service, json, authorized, readBody, requir
         // 以及一个确定的失败出口。`requireSpace` 未注入时**不做判定**，
         // 与 `authorized` 在无 token 时的既有语义一致（远程通道未启用时不注册判定）。
         if (typeof requireSpace === 'function') requireSpace(req, scope)
+        // ★ 按账号的用量配额。与 `requireSpace` 同样放在**解析完 body 之后** ——
+        //   配额被拒时不该先白解析一遍正文（那本身就是一个便宜的放大点）。
+        //   顺序：先空间授权（403），再配额（429）。反过来会把"你无权碰这个空间"
+        //   说成"你建得太多了"，而那是两句完全不同的话。
+        if (typeof r.quota === 'string' && typeof requireQuota === 'function') requireQuota(req, r.quota)
         input={ ...body,by:requireMember(body),scope }
       }
       const result=r.run(input)
       json(res,req.method==='POST' && path==='/api/agent-commands' && result.status==='queued' ? 202 : 200,{ ok:true,...result })
-    } catch(e) { json(res,e.status ?? e.statusCode ?? 400,{ ok:false,code:e.code ?? 'AGENT_REQUEST_FAILED',error:e.message }) }
+    } catch(e) {
+      // ★ `Retry-After` 是 HTTP 语义的一部分，而配额/限速把它算出来了 ——
+      //   不落到响应头上就等于让客户端自己猜一个重试间隔，
+      //   而那正是配额最想避免的行为（它会让用户反复试，把窗口一直占住）。
+      if (Number.isFinite(e?.retryAfterSec) && e.retryAfterSec > 0) {
+        try { res.setHeader('retry-after', String(e.retryAfterSec)) } catch { /* 适配层没有 setHeader */ }
+      }
+      json(res,e.status ?? e.statusCode ?? 400,{ ok:false,code:e.code ?? 'AGENT_REQUEST_FAILED',error:e.message,...(Number.isFinite(e?.retryAfterSec) ? { retryAfterSec: e.retryAfterSec } : {}) })
+    }
     return true
   } }
 }

@@ -33,7 +33,7 @@ import { createHmac, randomBytes, scrypt as scryptCb, timingSafeEqual, createHas
 import { promisify } from 'node:util'
 // 按来源（IP）限速的**纯决策**。窗口边界与 `Retry-After` 的算法在那边，
 // 这里只负责存与取 —— 那样边界逻辑可以在没有 SQLite 的情况下被逐条钉住。
-import { limitDecision } from './rate-limit.mjs'
+import { limitDecision, quotaDecision } from './rate-limit.mjs'
 
 const scrypt = promisify(scryptCb)
 
@@ -697,6 +697,61 @@ export function createUserStore({ db, withTx, clock = Date.now, key = '', audit 
     return { ...decision, effective: true }
   }
 
+  /**
+   * 一个键在窗口内的**用量**：条数 + 最早那条的时间。
+   *
+   * ★ 与 `rateTimes` 分开是**性能**上的必然，不是整洁：短窗口限速的上限是几十，
+   *   把窗口内的行取回来无所谓；而配额的上限是几百，每次写消息都取回 300 个数字
+   *   纯属浪费。`COUNT(*) + MIN(at_ms)` 在 `(bucket,key,at_ms)` 索引上是一次
+   *   单行返回的查询，然后交给 `quotaDecision` 判 —— 边界的算法仍是**同一份**。
+   */
+  function rateUsage(bucket, keyValue, windowMs) {
+    if (typeof bucket !== 'string' || bucket.length === 0) return { count: 0, oldestMs: null }
+    if (typeof keyValue !== 'string' || keyValue.length === 0) return { count: 0, oldestMs: null }
+    try {
+      const row = db.prepare('SELECT COUNT(*) AS n, MIN(at_ms) AS oldest FROM hub_rate_events WHERE bucket=? AND key=? AND at_ms > ?')
+        .get(bucket, keyValue, now() - windowMs)
+      const count = Number(row?.n ?? 0)
+      const oldest = row?.oldest === null || row?.oldest === undefined ? null : Number(row.oldest)
+      return { count: Number.isFinite(count) ? count : 0, oldestMs: Number.isFinite(oldest) ? oldest : null }
+    } catch {
+      // 读不出来就当没用过 —— 与 `rateTimes` 同一个方向的取舍：
+      // "配额读不出来"绝不该变成"谁都不能写"。
+      return { count: 0, oldestMs: null }
+    }
+  }
+
+  /**
+   * 按**账号**的用量配额：判断 + 记账一步。
+   *
+   * ★ 与按来源限速的三个差别，每一个都是刻意的：
+   *
+   *   ① **键是 userId**，不是 IP。配额问的是"这个账号建了多少资源"，
+   *      而这与"从哪来的"无关 —— 换个网络不该重置配额（那正是攻击者会做的）。
+   *      所以这一层**没有** `effective` 那个开关：userId 不可能是回环、
+   *      不可能是 CGNAT、也不依赖可信代理的配置。
+   *
+   *   ② **成功也记且从不清零** —— 与按来源限速同一条理由，但更直接：
+   *      这里记的就是"资源被创建了"这个事实本身。
+   *
+   *   ③ **被拒时不记**：否则一个卡在配额上的客户端持续重试会把窗口无限延长，
+   *      变成"只要一直试，就永远解不开"。
+   *
+   * @param {{bucket: string, userId: string, max: number, windowMs: number}} input
+   */
+  function accountQuota({ bucket, userId, max, windowMs } = {}) {
+    if (typeof userId !== 'string' || userId.length === 0) {
+      // 没有账号身份就不适用这一层（机器令牌 / 本机无鉴权）。
+      // 这与 `requireSpaceAccess` 在 `__legionUser` 缺失时的既有语义一致。
+      return { allowed: true, count: 0, max, retryAfterSec: 0, disabled: false, applicable: false }
+    }
+    const keyValue = 'user:' + userId
+    const { count, oldestMs } = rateUsage(bucket, keyValue, windowMs)
+    const decision = quotaDecision({ count, oldestMs, atMs: now(), max, windowMs })
+    if (decision.allowed) noteRate(bucket, keyValue)
+    return { ...decision, applicable: true }
+  }
+
   /** 清掉窗口外的旧流水（避免这张表无限增长）。返回删掉的条数。 */
   function sweepRateEvents(olderThanMs) {
     const cutoff = now() - Math.max(0, Number(olderThanMs) || 0)
@@ -1202,6 +1257,8 @@ export function createUserStore({ db, withTx, clock = Date.now, key = '', audit 
     registrationGate: () => registrationAllowed(),
     // 按来源（IP）限速：判断+记账是一步；诊断与用例也用它。
     rateLimit, rateTimes, noteRate, sweepRateEvents,
+    // 按**账号**的用量配额（键是 userId，与来源限速是两件事）。
+    accountQuota, rateUsage,
     login, refresh, upgradePassword,
     verifyAccessToken, touchSession,
     revokeSession, revokeAllSessions, listSessions,

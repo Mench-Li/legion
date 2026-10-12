@@ -188,6 +188,32 @@ body:not([data-screen="app"]) #btn-lang { display:none; }
  *
  * ★ `bottom` 比 `#popup-host`（+74px）高一个弹框身位，两者同时出现时不叠在一起：
  *   一个"提醒"压在一条"错误"上面，用户会只看到上面那条。 */
+/* ── 离线待发横幅（`outbox.mjs`）────────────────────────────────────────────
+ *
+ * ★ 它**不是浮层**，而是 `#main` 顶部的一段普通内容（`position:static`）。
+ *   理由：浮层会盖住时间线，而用户此时最想看的恰恰是"我刚才说了什么、
+ *   哪些还在等"。把它做成浮层，等于让"确认自己说了话"这个动作变得要抢。
+ *
+ * 空队列时整个元素 `hidden` —— 一块常驻的"0 条待发"会让用户学会忽略这里。 */
+#outbox { margin:0 0 8px; padding:9px 11px; border-radius:9px;
+  background:var(--panel-2); border:1px solid rgba(255,196,0,.45);
+  font-size:12.5px; line-height:1.5; }
+/* 永久失败要用**错误**的调子，不是警告 —— 它不会自己好，要人动手。 */
+#outbox.error { border-color: rgba(255,92,92,.55); }
+.outbox-row { display:flex; align-items:center; gap:8px; }
+#outbox-text { flex:1; min-width:0; font-weight:600; }
+/* 「查看 / 重试」是**文字按钮**，不是大按钮：它们不该比"发送"更抢眼。 */
+.link-btn { min-height:28px; padding:0 8px; font-size:12px; border-radius:6px;
+  background:transparent; border:1px solid var(--line, rgba(255,255,255,.18)); color:var(--text); }
+.outbox-detail { margin:5px 0 0; color:var(--muted-2); font-size:12px; }
+.outbox-list { list-style:none; margin:7px 0 0; padding:0;
+  max-height:34vh; overflow-y:auto; }
+.outbox-list li { display:flex; align-items:flex-start; gap:7px; padding:5px 0;
+  border-top:1px solid var(--line, rgba(255,255,255,.1)); font-size:12px; }
+.outbox-list .ob-body { flex:1; min-width:0; word-break:break-word; }
+.outbox-list .ob-err { color:var(--muted-2); font-size:11.5px; }
+.outbox-list button { flex:none; min-height:26px; padding:0 7px; font-size:11.5px; border-radius:6px; }
+
 #toast-host { position:fixed; left:10px; right:10px;
   bottom: calc(var(--safe-bottom) + 132px); display:flex; align-items:center; gap:8px;
   z-index:40; padding:10px 12px; border-radius:10px; font-size:13px; line-height:1.5;
@@ -272,9 +298,31 @@ body:not([data-screen="app"]) #btn-lang { display:none; }
   <div class="hint" id="bootstrap-hint" hidden data-i18n>这台 Hub 还没有初始化：请在服务器上建第一个管理员账号。</div>
   <div id="login-error" class="error-box hidden"></div>
   <div id="login-notice" class="notice-box hidden"></div>
+  <!-- ★ 待发消息也要在**登录屏**上说一声。
+       理由是一个很具体的场景：用户在地铁里打完字、消息进了队列，然后 PWA 被
+       系统回收。他再打开时**连不上 Hub**，于是停在登录屏 —— 而横幅住在 `#main`
+       里，他看不到。那正是他最担心"我的字还在吗"的一刻。
+       > 只在登录成功后才告诉他"你的消息还在"，等于在最需要那句话的时候不说。 -->
+  <div id="outbox-login" class="hidden" role="status" aria-live="polite"></div>
 </section>
 
 <main id="main">
+  <!-- 离线待发横幅。
+       ★ 为什么它必须存在（而不是"队列在后台默默工作就好"）：
+         一个**用户看不见的**待发队列，与"消息根本没发出去"在用户眼里是同一个东西
+         —— 他说了话、屏幕上也清空了输入框，然后什么都没有。
+         只有把"有几条还在等"摆在他眼前，那个队列才是他能信任的东西。
+       ★ 空队列时整个元素 `hidden`（`outboxBanner` 返回 null）：
+         一块常驻的"0 条待发"会让用户学会忽略这块区域，真有待发时他也看不见。 -->
+  <div id="outbox" class="hidden" role="status" aria-live="polite">
+    <div class="outbox-row">
+      <span id="outbox-text"></span>
+      <button id="outbox-detail" class="link-btn" data-i18n>查看</button>
+      <button id="outbox-retry" class="link-btn hidden" data-i18n>重试</button>
+    </div>
+    <p id="outbox-detail-text" class="outbox-detail"></p>
+    <ul id="outbox-list" class="outbox-list hidden"></ul>
+  </div>
   <div id="view-chat">
     <div id="agent-chips" class="agent-chips hidden" role="list" aria-label="成员选择" data-i18n-attr="aria-label"></div>
     <div id="agent-picker"></div>

@@ -72,6 +72,9 @@ export function createChatRoutes({
   cleanupChatAttachments, uploadChatAttachment, readChatAttachmentContent, chatHealth,
   getReplySettings, saveReplySettings, listAwaitingReplies, postAiReply,
   failAiReply, retryAiReply,
+  // 按**账号**的用量配额（`requireAccountQuota`，见 server.mjs）。
+  // 未注入时**不做判定** —— 与 `requireSpace` 在本机部署下的既有语义一致。
+  requireQuota = null,
 }) {
   const deps = {
     json, handleWrite, authorized, readRawBody,
@@ -84,6 +87,36 @@ export function createChatRoutes({
     if (typeof fn !== 'function') throw new TypeError(`createChatRoutes 缺注入项：${name}`)
   }
   if (!Number.isFinite(CHAT_ATTACH_MAX_BYTES)) throw new TypeError('createChatRoutes 缺注入项：CHAT_ATTACH_MAX_BYTES')
+
+  /**
+   * 过一遍按账号的用量配额。**已经答复了就返回 true**，调用方直接 return。
+   *
+   * 抽成一个小函数是因为这个文件里**有两条**消息写入路径
+   * （`POST /api/chat/messages` 与 `POST /api/chat/ai-replies`），
+   * 而两处抄一遍判断必然漂 —— 漏掉的那一条就是攻击者会走的那一条。
+   */
+  function quotaBlocked(req, res, resource) {
+    if (typeof requireQuota !== 'function') return false
+    try {
+      requireQuota(req, resource)
+      return false
+    } catch (e) {
+      // ★ `Retry-After` 是 HTTP 语义的一部分：客户端应当照它退避。
+      //   丢了它就等于让用户自己猜一个间隔，而猜的结果通常是**反复重试** ——
+      //   那正好把窗口一直占住，是配额最不希望看到的反应。
+      if (Number.isFinite(e?.retryAfterSec) && e.retryAfterSec > 0) {
+        try { res.setHeader('retry-after', String(e.retryAfterSec)) } catch { /* 适配层没有 setHeader */ }
+      }
+      const status = Number(e?.status) >= 400 ? Number(e.status) : 400
+      json(res, status, {
+        ok: false,
+        code: e?.code ?? 'CHAT_REQUEST_FAILED',
+        error: e instanceof Error ? e.message : String(e),
+        ...(Number.isFinite(e?.retryAfterSec) ? { retryAfterSec: e.retryAfterSec } : {}),
+      })
+      return true
+    }
+  }
 
   const routes = [
     {
@@ -109,6 +142,9 @@ export function createChatRoutes({
       method: 'POST',
       path: '/api/chat/messages',
       async run(req, res) {
+        // ★ 配额在**最前面**：在解析 body、查库之前。放在后面的话，
+        //   被拒的请求仍然会付出一次正文解析与一次会话查找。
+        if (quotaBlocked(req, res, 'message')) return
         await handleWrite(req, res, (body, by) => postMessage({ ...body, by }))
       },
     },
@@ -230,6 +266,20 @@ export function createChatRoutes({
       path: '/api/chat/replies/answer',
       async run(req, res) {
         // 回复方应答：body { msgId, body, model?, kind? }；by 须为回复方身份（author=by 防冒名在 DAO 内绑定）。
+        //
+        // ★ 这里**刻意不过**消息配额，理由是它**已经被配额间接约束**了：
+        //   `postAiReply` 开头就判 `meta2.aiStatus !== 'awaiting'` 并直接返回
+        //   `{skipped:true}` —— 一条待回复的用户消息**最多只能产生一条回复**。
+        //   用户消息的条数已经被 `POST /api/chat/messages` 那一层限住，
+        //   所以回复的条数 ≤ 用户消息的条数。
+        //
+        //   在这里再扣一次会变成**双重计数**：用户发一条消息被扣一次，
+        //   系统替它自动回复又被扣一次 —— 于是"我一小时只发了 150 条，
+        //   为什么说满了"变成了一个没人能解释的现象。
+        //
+        //   > 一个把"用户做的事"与"系统对它的反应"记进同一份配额的账本，
+        //   > 会让配额的实际含义变成"用户看到的动作数"——
+        //   > 而那不是一个用户能自己数清楚、也不该由他承担的数目。
         await handleWrite(req, res, (body, by) => postAiReply({ ...body, by }))
       },
     },

@@ -24,7 +24,11 @@ const HERE = dirname(fileURLToPath(import.meta.url))
 const read = (f) => readFileSync(join(HERE, f), 'utf8')
 const HTML = read('index.html')
 /** 参与覆盖率判据的源文件（用户可见文案住在这里）。 */
-const SOURCES = ['app.mjs', 'board.mjs', 'popup.mjs', 'timeline.mjs', 'notice.mjs', 'notify-plan.mjs', 'screen-plan.mjs']
+const SOURCES = ['app.mjs', 'board.mjs', 'popup.mjs', 'timeline.mjs', 'notice.mjs', 'notify-plan.mjs', 'screen-plan.mjs',
+  // ★ `outbox.mjs` 必须在列表里：离线那条路径上的文案全都住在它这里
+  //   （横幅的键、失败的说法）。而这些文案只在**断网**时出现 ——
+  //   也就是用户最需要看懂屏幕上写了什么、而开发者最难顺手试到的那一刻。
+  'outbox.mjs']
 
 const CJK = /[\u4e00-\u9fff]/
 

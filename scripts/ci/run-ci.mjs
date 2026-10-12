@@ -931,6 +931,13 @@ async function stageTest() {
         //                       攻击者失败几次就能把全部用户挡在门外）
         'team-hub/identity-rate-limit.test.mjs',
         'team-hub/identity-rate-limit-noproxy.test.mjs',
+        // ★ 按**账号**的用量配额（防库被灌满）。与上面的来源限速是**两件事**：
+        //   限速问"这个来源试了多少次"（键是 IP），配额问"这个账号建了多少资源"
+        //   （键是 userId）。两个方向都要有 —— 一个攻破的账号能完全绕开来源限速
+        //   （它本来就是合法请求），而一台被灌满的库会让所有账号一起不可用。
+        //   这一族的重点在两条：**按账号隔离**、以及**只管人不管 Agent**
+        //   （把 Agent 的汇报也算进去，会在它最忙时把用户锁住）。
+        'team-hub/account-quota.test.mjs',
         'team-hub/user-store.test.mjs',
         'team-hub/portal-routes.test.mjs',
         'team-hub/releases-routes.test.mjs',
@@ -968,6 +975,10 @@ async function stageTest() {
         // 语言层：决策 + 插值 + 静态替换，以及**覆盖率差集**
         // （`t('…')` 与 `data-i18n` 的中文都必须有英文 —— 漏译不会以任何其他形式暴露）。
         'workbench/mobile/i18n.test.mjs',
+        // 离线待发队列。守的是"用户打的字不许因为网不好而消失"——
+        // 而那条路径**只在断网时**被走到，也就是测试最难复现、生产上最常发生的状态。
+        // 抽成纯决策正是为了在正常网络下把断网行为逐条钉死。
+        'workbench/mobile/outbox.test.mjs',
         'workbench/scripts/mobile-board-parity.test.mjs',
       ],
       cwd: ROOT,

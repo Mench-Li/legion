@@ -92,6 +92,37 @@ export const EN = Object.freeze({
   '取消': 'Cancel',
   '空间': 'Space: ',
 
+  // ── 离线待发队列（`outbox.mjs` / 横幅 / 登录屏提示）─────────────────────────
+  //
+  // ★ 这一组**必须在表里**，而且比别处更要紧：它们只在**断网**时出现，
+  //   而断网正是用户最需要看懂屏幕上写了什么的时候。
+  //   一句没翻的中文在这里的代价不是"不美观"，是"他不知道自己的字去哪了"。
+  '查看': 'View',
+  '删掉': 'Delete',
+  '发不出去：{message}': 'Cannot send: {message}',
+  '上次失败：{message}': 'Last attempt failed: {message}',
+  '有一条待发消息在等你重新登录。': 'One queued message is waiting for you to sign in again.',
+  '已发出去 {n} 条待发消息。': 'Sent {n} queued message(s).',
+  '网络不通，这条已经放进待发队列，连上后会自动发出。':
+    'No network. This message is queued and will be sent automatically once you are back online.',
+  '待发队列存不进本机存储（可能是隐私模式或空间已满）。请保持这一页打开，或清一点空间。':
+    'The outgoing queue could not be saved on this device (private mode, or storage is full). '
+    + 'Keep this page open, or free up some space.',
+  '你还有 {n} 条消息没发出去（存在这台设备上，登录并连上网络后会自动发出）。':
+    'You still have {n} unsent message(s). They are stored on this device and will be sent '
+    + 'automatically once you sign in and are back online.',
+  // 横幅的**键**（`outboxBanner` 返回的就是这几个字面量，带占位符）。
+  '{n} 条待发': '{n} queued',
+  '{n} 条发不出去': '{n} could not be sent',
+  '断网中，连上网络后会自动发出。': 'Offline. They will be sent automatically once you are back online.',
+  '最早的一条已经等了约 {mins} 分钟。连上网络后会自动发出。':
+    'The oldest has been waiting about {mins} minute(s). They will be sent once you are back online.',
+  '正在重试…': 'Retrying…',
+  '正在重试，最早的一条已经等了约 {mins} 分钟。':
+    'Retrying; the oldest has been waiting about {mins} minute(s).',
+  '这些消息服务端拒绝了，需要你处理（改一下或删掉）。':
+    'The server rejected these messages. They need your attention (edit or delete).',
+
   // ── 时间线：作者与来源标签 ────────────────────────────────────────────────
   //
   // ★ 这几个**不在** `t('…')` 里出现：`timelineMetaFor()` 返回它们，

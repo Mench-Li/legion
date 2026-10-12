@@ -110,6 +110,29 @@ export const SCHEMA = defineSchema({
       default: 10, min: 0, max: 100000,
       doc: '同一来源 15 分钟内允许的口令重置尝试次数；0 = 关掉这一层。重置码是短字符串，这一层挡的是枚举',
     },
+    // ── 按账号的用量配额 ──────────────────────────────────────────────────────
+    //
+    // 与上面三条**来源**限速是两件不同的事，两张表都别混：
+    //
+    //   · 来源限速（上面）：问"这个**来源**试了多少次"，防的是口令爆破与
+    //     credential stuffing。键是 IP，窗口 15 分钟，只在配了可信代理时生效。
+    //   · 用量配额（这条）：问"这个**账号**建了多少资源"，防的是**库被灌满**
+    //     （磁盘/内存/SQLite 写放大）。键是 userId，窗口 1 小时，
+    //     **不依赖任何部署配置**，一直生效。
+    //
+    // 为什么两个都要有：一个攻破的账号可以完全绕开来源限速（它本来就是合法请求），
+    // 而一台被灌满的库会让**所有**账号一起不可用。
+    //
+    // 为什么默认是 300 而不是更小：一个真人一小时打不出 300 条消息（打得出也读不过来），
+    // 而一个脚本几分钟就能打出几千条 —— 这条线上限把两者分得很开。
+    // 另外 **Agent 自己的汇报不占这个配额**（它们走内部 `insertMessage`，
+    // 不经过用户身份那一层）。这一条很重要：把 Agent 的汇报也算进去，
+    // 会在 Agent 干活最忙的时候把用户锁住，而那正是他最需要看到进展的时候。
+    {
+      key: 'quotaMessagesPerHour', env: 'LEGION_QUOTA_MESSAGES_PER_HOUR', type: 'int',
+      default: 300, min: 0, max: 10_000_000,
+      doc: '每个账号每小时能创建的聊天消息数（防库被灌满）；0 = 关掉这一层。Agent 的汇报不计入',
+    },
     {
       key: 'downloadUrl', env: 'LEGION_DOWNLOAD_URL', type: 'string', default: '',
       doc: '桌面版安装包的下载地址（显示在 Hub 首页）；留空 = 首页如实显示"尚未发布"',
@@ -848,6 +871,14 @@ export const SCHEMA = defineSchema({
     //   · `IDENTITY_RATE_LIMITED`              = 来源窗口（"这个来源试得太频了"）
     // 分开是刻意的：前端与运维要采取的动作不同（前者找管理员，后者等一下或换网络）。
     'IDENTITY_RATE_LIMITED',
+    // 按**账号**的用量配额被触发时的错误码。第三个，同样必须与上面两个分开：
+    //   · 来源限速  → "换一个网络通常可以立即继续"（受限的是 IP）
+    //   · 账号配额  → **换网络完全没用**（受限的是这个账号自己建的资源数）
+    // 写成同一个码会让前端把"你建得太多了"渲染成"你的网络有问题"，
+    // 于是用户按错误的方向自救：换网络、换设备、反复重试 —— 全都不会好。
+    'ACCOUNT_QUOTA_EXCEEDED',
+    // `routes/chat.mjs` 的通用失败码（配额守卫与既有写路径共用的兜底）。
+    'CHAT_REQUEST_FAILED',
     'IDENTITY_RESET_CONSUMED', 'IDENTITY_RESET_EXPIRED', 'IDENTITY_RESET_NOT_FOUND',
     'IDENTITY_SPACE_NOT_FOUND', 'IDENTITY_SPACE_REQUIRED', 'IDENTITY_WRONG_PASSWORD',
     'SPACE_FORBIDDEN', 'BAD_RECOVERY_STATES',

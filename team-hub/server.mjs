@@ -6993,7 +6993,9 @@ const router = createRouter([
     //   与真实凭证核验（问密钥库，而不是信那个从 DSH 导入的标记）。
     providerStore, credentialStatus,
   }),
-  createModelProvidersRoutes({ json, handleRun, providerStore, credentialStatus }),  createUsageRoutes({
+  // ★ `modelStore` 是"从供应商派生档案"要用的：判断"哪些模型还没有档案"
+  //   要读档案表（含墓碑，见 `profile-derivation.mjs` 的纪律 ①）。
+  createModelProvidersRoutes({ json, handleRun, providerStore, credentialStatus, modelStore }),  createUsageRoutes({
     json,
     authorized, usageRollup, optionalIntParam,
     db, ROLLUP_DIMENSIONS, evaluateBudgetAlert,

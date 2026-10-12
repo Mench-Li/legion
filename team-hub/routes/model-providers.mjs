@@ -33,6 +33,8 @@
 // ============================================================================
 
 import { ModelError, MODEL_ERRORS } from '../model-store.mjs'
+import { describeDerivation, matchProviderModels, planProfileDerivation } from '../profile-derivation.mjs'
+import { profileIdFor } from '../model-migration.mjs'
 
 /**
  * @param json         写 JSON 响应的注入件（属于 server.mjs）
@@ -47,7 +49,16 @@ export function createModelProvidersRoutes({
   //   省略时行为与从前逐字相同（响应里没有 `credential` 字段）——但那会让面板
   //   重新有资格说"已配置凭证"。
   credentialStatus = null,
+  // ★ 从供应商派生档案（"我还有必要新建档案嘛"）：需要读档案表以判断
+  //   "哪些模型还没有档案"。省略时那一列不出现、派生端点回 503（**不猜**）。
+  modelStore = null,
 }) {
+  /** 读一次档案表（含墓碑：id 占用判定要用）。读不出来 ⇒ null（**不是**空表）。 */
+  const profilesSnapshot = () => {
+    if (modelStore === null || typeof modelStore.list !== 'function') return null
+    try { return modelStore.list({ includeDeleted: true }) } catch { return null }
+  }
+
   const routes = [
     {
       method: 'GET',
@@ -60,11 +71,21 @@ export function createModelProvidersRoutes({
         if (credentialStatus !== null && typeof credentialStatus.snapshot === 'function') {
           snapshot = await credentialStatus.snapshot()
         }
+        // 档案对账也**只读一遍**，然后每个供应商各算各的。
+        // 读不出来时**不给这一列**：一个"还有 0 个模型没有档案"的读数会让用户
+        // 以为都已经建好了，而真相是我们没读到档案表。
+        const profiles = profilesSnapshot()
         // `credential` 是**核验结果**；`credentialConfigured` 保留原样（它是 P1 导入的标记，
         // 别的消费者还在用）。界面必须读前者 —— 两者在"钥匙其实不在库里"时说的不是一回事。
-        const enriched = snapshot === null
-          ? providers
-          : providers.map((p) => ({ ...p, credential: snapshot.of(p.secretRef) }))
+        const enriched = providers.map((p) => {
+          const out = { ...p }
+          if (snapshot !== null) out.credential = snapshot.of(p.secretRef)
+          if (profiles !== null) {
+            const m = matchProviderModels({ provider: p, profiles })
+            out.profiles = Object.freeze({ existing: m.existing.length, missing: m.missing.length, orphaned: m.orphaned.length })
+          }
+          return out
+        })
         json(res, 200, { ok: true, providers: enriched, empty: providerStore.isEmpty() })
       },
     },
@@ -107,6 +128,84 @@ export function createModelProvidersRoutes({
             baseURL: body.baseURL, apiKey: body.apiKey ?? null, fetchImpl: fetch,
           })
           return { models: ids.map((id) => ({ id })) }
+        })
+      },
+    },
+    // ★★ 从供应商派生模型档案（"我还有必要新建档案嘛，直接来源于模型与供应商才对啊"）。
+    //
+    // 为什么是一个**具名端点**而不是"保存供应商时顺手建"：与 `/import` 同一条理由 ——
+    // 供应商该不该自动长出一堆档案，是一次**用户的决定**，不是一个副作用。
+    // 顺手的后果是"我改了一下模型的显示名，怎么多了三条档案"，而没有任何读数说话。
+    //
+    // ★ 位置：必须排在下面那批通配 `prefix` 之前 —— 否则
+    //   `/api/model-providers/fjd-ds/derive-profiles` 会被当成 id=`fjd-ds/derive-profiles`
+    //   去 update，然后以一个方向完全错误的 404/409 结束（`/discover` 踩过同一个坑）。
+    {
+      method: 'POST',
+      match: 'prefix+suffix',
+      path: '/api/model-providers/',
+      suffix: '/derive-profiles',
+      async run(req, res, { path }) {
+        const raw = path.slice('/api/model-providers/'.length, path.length - '/derive-profiles'.length)
+        let id = null
+        try { id = decodeURIComponent(raw) } catch {
+          json(res, 400, { ok: false, error: '供应商 id 不是合法的 URL 编码', code: 'BAD_ID_ENCODING' }); return
+        }
+        if (id === '') { json(res, 400, { ok: false, error: '缺少供应商 id', code: 'MISSING_PARAM' }); return }
+        if (id.includes('/')) { json(res, 400, { ok: false, error: '供应商 id 不能包含斜杠', code: 'BAD_ID_ENCODING' }); return }
+        await handleRun(req, res, async (body) => {
+          if (modelStore === null) {
+            const err = new Error('这个中枢没有接档案表，因此无法派生模型档案（**什么都没改**）。')
+            err.statusCode = 503
+            err.code = 'DERIVE_UNAVAILABLE'
+            throw err
+          }
+          const provider = providerStore.get(id)
+          if (provider === null) {
+            const err = new Error('没有这个模型供应商：' + id)
+            err.statusCode = 404
+            err.code = MODEL_ERRORS.PROFILE_NOT_FOUND
+            throw err
+          }
+          const profiles = modelStore.list({ includeDeleted: true })
+          const plan = planProfileDerivation({
+            provider, profiles, runtimeType: body.runtimeType, profileIdOf: profileIdFor,
+          })
+          if (plan.ok !== true) {
+            // 「没算出计划」不能被表示成「建了 0 条」：那是两件不同的事。
+            const err = new Error(plan.message)
+            err.statusCode = 400
+            err.code = plan.code
+            throw err
+          }
+          // 只算不写（面板先展示"将要建 N 条"）——与 P3 物化同一套"先看计划再落笔"。
+          if (body.dryRun === true) {
+            return { dryRun: true, providerId: id, summary: describeDerivation(plan), plan }
+          }
+          const created = []
+          const failed = []
+          for (const input of plan.create) {
+            try {
+              modelStore.create(input, { actor: body.actor })
+              created.push(input.id)
+            } catch (e) {
+              // 部分失败要**逐条记账**：一条撞了不该把已经建好的说成没建。
+              failed.push({ id: input.id, code: e?.code ?? null, message: e?.message ?? String(e) })
+            }
+          }
+          return {
+            providerId: id,
+            created,
+            failed,
+            existing: plan.existing.map((e) => e.profileId),
+            conflicts: plan.conflicts,
+            orphaned: plan.orphaned,
+            // 读数按**实际写成的**算（`created` 是逐条 append 的），措辞仍走
+            // `describeDerivation` —— 面板/日志/这里只有一份口径。
+            summary: describeDerivation({
+              ok: true, create: created, existing: plan.existing, conflicts: plan.conflicts, orphaned: plan.orphaned,
+            }),
+          }
         })
       },
     },

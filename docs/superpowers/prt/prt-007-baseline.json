@@ -2,7 +2,7 @@
   "$comment": "PRT-007 旧系统平台契约基线。由 scripts/prt/baseline-snapshot.mjs 生成；不含时间戳以便逐字节 diff。漂移由 sources 的 sha256 归因。",
   "version": 1,
   "sources": {
-    "team-hub/server.mjs": "2eafa6503c7bacf696e5ce1461ef984dd987537057d074c19d38396f427239b5",
+    "team-hub/server.mjs": "2ee7db5224437c3adcecd5c37604cdc1105cfc0db4c6aba690010a86fc35d2a2",
     "team-hub/permission-engine.mjs": "ad399442a1bb50f5a5796126caf402f114462e6b9f60735e24380d7a8672350f",
     "team-hub/run-store.mjs": "e85d607cd411823f8c83e6fa83baaae12d52849fbda2e89af2f6386e19b81775",
     "team-hub/model-store.mjs": "2d2cc90f9a4d357e9138b7e9933ce68215fd32d4d5cfe7179d63cf8f015d78e8",
@@ -45,6 +45,7 @@
     "team-hub/routes/usage.mjs": "9a24c553d29bea1d5c658f10d4f9ea12276389a606f04aa9d935f657139937ec",
     "team-hub/routes/context-snapshots.mjs": "957c307f350636bfc406f12bccde8cbf38a7dcb26c8ea24ea089d60dff6bc206",
     "team-hub/routes/price-tables.mjs": "14a7973eafa538599fdf9295aebafb07102dcef9798c9307fae0f6c63be303d4",
+    "team-hub/routes/model-materialization.mjs": "4d879d95ddb802ee5efd37eca5c5576431b0b304fce34cc72cd29e37ae349ace",
     "team-hub/routes/config.mjs": "8811c50c52112abefd17fba3c3b560e0bb7763c3d42fcf914a734a63feff54e7",
     "team-hub/routes/create.mjs": "ba758280f402fd925efc797807148cb88e6712bff0723889232d8fc7b35a27de",
     "team-hub/routes/comment.mjs": "e60274de5f244f0ceff145c5e26c75d4c76b31f8424a29efcc1e138636d091c8",
@@ -84,7 +85,7 @@
     "team-hub/routes/channels.mjs": "cc688b75162b1cede56a3a7e0d98eeb4309ba7743d64b84245265a337e384dc1",
     "team-hub/routes/harness.mjs": "463913a769186dd2e0c4a34886b36981978dc3fa4d503edea26ee5a265291117",
     "team-hub/routes/agent-workflow.mjs": "d25d62e586d7771882303741718993b843f714c2e16a4715708c6c10d6f5e90a",
-    "team-hub/routes/identity.mjs": "2ee1aeaa8fe2b99acda9e46f4fc4939ee294c78dd76965cc24814cf8b49e66f1",
+    "team-hub/routes/identity.mjs": "8634dad819ad7fd1ad3f1781f2a03bbb0bb748eb37b48e74b2ab18d4d7040255",
     "team-hub/experience-store.mjs": "6b10c0b844a02fa4bd60e2acdaefca2193d385a4c294e0655800d63c2509bdd0"
   },
   "httpRoutes": [
@@ -164,6 +165,7 @@
     "GET /api/model-bindings",
     "GET /api/model-bindings/",
     "GET /api/model-bindings/resolve",
+    "GET /api/model-materialization",
     "GET /api/model-profiles",
     "GET /api/model-profiles/",
     "GET /api/model-providers",
@@ -303,6 +305,7 @@
     "POST /api/integration/recover",
     "POST /api/integration/transition",
     "POST /api/model-bindings",
+    "POST /api/model-materialization/reading",
     "POST /api/model-profiles",
     "POST /api/model-profiles/",
     "POST /api/model-providers",

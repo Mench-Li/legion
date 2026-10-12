@@ -798,7 +798,7 @@ async function stageTest() {
       //   把参数拼进 ssh 命令串，远端 shell 再分词一次，带空格的参数在第一个空格处
       //   被切开——任务照建、照跑、照完成，只是目标少了一半（服务器上看板留着的
       //   标题就是截断后的样子）。它现在跑子进程断言"坏参数当场具名退出"。
-      label: 'server-scripts（口令取值 / 异地备份 / 替手机做动作的参数解码 / 备份"拿得回来"的关键表清单）',
+      label: 'server-scripts（口令取值 / 异地备份 / 替手机做动作的参数解码 / 备份"拿得回来"的关键表清单 / 存储体检）',
       files: [
         'product/server/read-credentials.test.mjs',
         'product/server/offsite.test.mjs',
@@ -807,6 +807,10 @@ async function stageTest() {
         //   一直不在 `EXPECTED_TABLES` 里而没人发现（详见该文件与 BACKUP.md 的那两段）。
         //   这一套现在钉住两个方向：表都在 / **缺一张必须报不 ok 并点名**（后者才是这次事故的成因）。
         'product/server/backup.test.mjs',
+        // 存储体检 CLI。它会被挂到监控上周期性地跑，所以"退出码必须分档"
+        // 与"它是只读的"两件事都要有判据 —— 一个会顺手删旧备份的监控脚本，
+        // 会在没人注意的时候删数据。
+        'scripts/ops/storage-check.test.mjs',
       ],
       cwd: ROOT,
     },
@@ -919,6 +923,16 @@ async function stageTest() {
         // 都不算数"），以及滑窗的边界与 `Retry-After`。
         'team-hub/client-ip.test.mjs',
         'team-hub/rate-limit.test.mjs',
+        // 存储健康：**磁盘满的时候用户看到什么**。
+        // 实测（`PRAGMA max_page_count` 确定性复现 `SQLITE_FULL`）：原本回的是
+        // `400 { error: "database or disk is full" }` —— 而 400 会被手机端的
+        // 离线待发队列判成**永久失败**、停止自动重试。所以这一族守的是一条
+        // **跨模块**的链：状态码选错 → 另一个模块里用户的字被卡住。
+        'team-hub/storage-health.test.mjs',
+        // 磁盘满的**端到端**：真 HTTP + 真 `SQLITE_FULL`（`PRAGMA max_page_count`
+        // 确定性复现，不需要填满一块真盘）。它多守一条**跨模块**的链：
+        // 响应形状会被喂进手机端离线队列的分类器，断言它判成"可重试"。
+        'team-hub/storage-full-http.test.mjs',
       ],
       cwd: ROOT,
     },

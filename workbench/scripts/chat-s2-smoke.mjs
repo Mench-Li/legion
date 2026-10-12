@@ -23,6 +23,8 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
+// 实例识别用指纹（不再是 db 绝对路径）：见 team-hub/routes/config.mjs 文件头 2026-10-12 那段。
+import { dbFingerprintOf } from '../../team-hub/routes/config.mjs'
 
 const HERE = dirname(fileURLToPath(import.meta.url)) // …/workbench/scripts
 const REPO = join(HERE, '..', '..')
@@ -58,7 +60,7 @@ async function startHub() {
     for (let i = 0; i < 100; i += 1) {
       try {
         const r = await fetch(base + '/api/config')
-        if (r.ok && (await r.json()).db === dbFile) return { child, base }
+        if (r.ok && (await r.json()).dbFingerprint === dbFingerprintOf(dbFile)) return { child, base }
       } catch { /* 未就绪 */ }
       await sleep(100)
     }

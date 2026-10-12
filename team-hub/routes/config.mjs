@@ -1,6 +1,19 @@
 // team-hub/routes/config.mjs
 // ============================================================================
-// 路由层第 18 族：**能力发现（免鉴权探测：auth / db / port / runPlane / tokenizer / eventDelivery）** —— PRT-316 切片 19
+// 路由层第 18 族：**能力发现（免鉴权探测：auth / dbFingerprint / port / runPlane / tokenizer / eventDelivery）** —— PRT-316 切片 19
+//
+// ★ 2026-10-12：`db`（数据库**绝对路径**）改为 `dbFingerprint`（该路径的 sha256 前 16 位）。
+//
+//   这个端点是**免鉴权**的，而它原先回的是 `/var/lib/legion-hub/team.db` 这样的
+//   绝对路径 —— 等于把部署布局与运行账户名告诉任何能发 HTTP 的人。不必要。
+//
+//   但那个字段**有真实用途**：多个脚本用它做实例识别
+//   （`(await r.json()).db === dbFile` —— "确认我连到的是我自己刚起的那个实例，
+//   而不是随机端口上恰好占着的别的服务"）。指纹一样能回答这个问题，
+//   而且不泄露它住在哪。
+//
+//   ⚠️ 不能用 Host 头来区分"公开请求 / 本地探测"：Host 是**攻击者可控**的，
+//      伪造 `Host: 127.0.0.1` 就能把这个端点变成泄露源。所以只能换值，不能加条件。
 //
 // 缝在 `team-hub/router.mjs`（切片 1 立的）；本文件是搬进那个家的第 18 族。
 //
@@ -35,8 +48,26 @@
 // 依赖全部由调用方注入，本模块不 import 任何 hub 内部件。
 // ============================================================================
 
+import { createHash } from 'node:crypto'
+
 /**
- * 造能力发现（免鉴权探测：auth / db / port / runPlane / tokenizer / eventDelivery）族路由。
+ * 实例指纹：`sha256(dbFile)` 的前 16 位十六进制。
+ *
+ * 用途是**实例识别**，不是鉴权：`/api/config` 是免鉴权端点，而"我连到的是不是
+ * 我自己刚起的那个实例"这个问题必须能在**不带令牌**的情况下回答
+ * （探测发生在拿到令牌之前）。多个 smoke 脚本原本拿 `db` 的绝对路径来比，
+ * 换成指纹后问题照样答得出，而部署布局不再外泄。
+ *
+ * ★ 它是**不可逆**的（sha256），但**不是密钥** —— 别把它当凭据用。
+ *   它的强度只够防"顺手看到路径"，挡不住知道路径的人算出同一个值。
+ */
+export function dbFingerprintOf(dbFile) {
+  if (typeof dbFile !== 'string' || dbFile === '') throw new TypeError('dbFingerprintOf 需要非空 dbFile')
+  return createHash('sha256').update(dbFile).digest('hex').slice(0, 16)
+}
+
+/**
+ * 造能力发现（免鉴权探测：auth / dbFingerprint / port / runPlane / tokenizer / eventDelivery）族路由。
  *
  * @param {object} deps 全部由 `server.mjs` 注入
  */
@@ -86,8 +117,10 @@ export function createConfigRoutes({
         // F-05 加一栏 `eventDelivery`：投递记账是**旁路**，它的失败被刻意设计成
         // 不影响审计。一个被刻意设计成"不影响主流程"的失败，若没有任何地方能看见，
         // 就会永远没人知道——所以它必须在这里有一个读数。
+        // ★ `dbFingerprint`（而不是 `db`）：见文件头 2026-10-12 那段。
+        //   这个端点是免鉴权的，回绝对路径等于对外公布部署布局。
         json(res, 200, {
-          auth: TOKEN !== '', db: DB_FILE, port: PORT, runPlane: true,
+          auth: TOKEN !== '', dbFingerprint: dbFingerprintOf(DB_FILE), port: PORT, runPlane: true,
           tokenizer: tokenizerRegistryStatus(),
           eventDelivery: {
             // 能力发现位：老客户端不认识它就不传 `clientId`，退化成匿名订阅者（不共用游标）。

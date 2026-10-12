@@ -1601,12 +1601,17 @@ export interface HubModelProfile {
    *   `state`: none | ready | missing | unavailable —— `unavailable` 是"读不到密钥库，
    *   因此无法判断"，**不是**"没有"。界面必须读这个，而不是 `hasCredential`
    *   （后者只表示"引用了一个名字"）。
+   *
+   *   ★★ **这里没有引用名**（2026-10-12）：`ref` 曾经在这个形状里，而本仓的纪律是
+   *   "读出去的东西不含 `secretRef`"（引用名也是可枚举的攻击面）。带名字的那一版
+   *   被 `config-bundle-routes.test.mjs` 的用例 ④ 在**原始字节**上当场抓住。
+   *   要显示"缺哪把钥匙"用 `hasRef` + `state`，不要说槽位名。
    */
-  credential?: { state?: string; ref?: string | null; detail?: string | null }
-  /** ★ 连接信息（地址/凭证）来自哪里：档案自带还是继承供应商。 */
+  credential?: { state?: string; hasRef?: boolean; detail?: string | null }
+  /** ★ 连接信息（地址/凭证）来自哪里：档案自带还是继承供应商。**同样不含引用名。** */
   connection?: {
     endpoint?: { value?: string | null; from?: 'profile' | 'provider' | null }
-    credential?: { ref?: string | null; from?: 'profile' | 'provider' | null }
+    credential?: { from?: 'profile' | 'provider' | null }
     providerMissing?: boolean
   }
   /** ★ 与供应商逐字相同的字段（可以留空；留空即继承）。 */
@@ -1620,22 +1625,6 @@ export interface HubModelBinding {
   primaryProfile: string
   fallbackProfiles: string[]
   perRunBudget?: unknown
-}
-
-/** 一份迁移计划（PRT-506）。注意 `ok` 说的是"这份计划能不能执行"。 */
-export interface HubMigrationPlan {
-  ok: boolean
-  code: string
-  message: string | null
-  toCreate: HubModelProfile[]
-  toBind: Array<{ scope: string; employeeRole: string; primaryProfile: string; fallbackProfiles: string[] }>
-  needsAttention: Array<{ id: string; missing: string[]; why: string }>
-  skipped: Array<Record<string, unknown>>
-  refused: Array<Record<string, unknown>>
-  conflicts: Array<Record<string, unknown>>
-  empty: boolean
-  hasAttention: boolean
-  digest: string
 }
 
 /** 通用 JSON 请求。**写请求都带 20s 超时**（与 hubPost 一致：界面不能无感卡住）。 */
@@ -1753,44 +1742,13 @@ export function deleteModelBinding(scope: string, role: string, actor: string): 
   return hubRequest('DELETE', `/api/model-bindings/${encodeURIComponent(scope)}/${encodeURIComponent(role)}`, { actor })
 }
 
-// ── 迁移老配置（PRT-506）──────────────────────────────────────────────────
-
-/**
- * 迁移计划。
- *
- * `runtimeType` 不给时服务端返回 **200 + 一份 `ok:false` 的计划**（说"必须选一种协议"），
- * 不是 400——所以这里**不把缺参数当异常**：那正是界面要渲染的第一件事。
- */
-export async function fetchMigrationPlan(runtimeType?: string): Promise<{
-  plan: HubMigrationPlan
-  summary: string
-  legacyRowCount: number
-}> {
-  const qs = runtimeType ? `?runtimeType=${encodeURIComponent(runtimeType)}` : ''
-  return hubGet(`/api/model-migration/plan${qs}`).then((r) =>
-    readJson<{ plan: HubMigrationPlan; summary: string; legacyRowCount: number }>(r))
-}
-
-/**
- * 执行迁移。
- *
- * **必须回传用户确认过的 `expectedDigest`**：服务端会重新算一遍计划并要求两者一致，
- * 不一致报 409（`MIGRATION_PLAN_STALE`）。不回传就等于跳过这道对齐——
- * 服务端允许 `null`，但那意味着"执行一份用户可能没看过的计划"。
- */
-export function applyMigration(input: {
-  runtimeType: string
-  expectedDigest: string
-  actor: string
-}): Promise<unknown> {
-  return hubPost('/api/model-migration/apply', {
-    runtimeType: input.runtimeType,
-    expectedDigest: input.expectedDigest,
-    actor: input.actor,
-  })
-}
-
 // ── 配置导入导出（PRT-508）────────────────────────────────────────────────
+//
+// ★ 2026-10-12：这一节上面原本还有「迁移老配置（PRT-506）」的两个函数
+//   （`fetchMigrationPlan` / `applyMigration`）。那个功能连同它的后端一起删了：
+//   它把 `agent_models` 搬成岗位绑定，而绑定当时没有活的消费者；
+//   那批意图已用一次迁移搬完，消费者也已接上（`plugins/src/dispatchModel.ts`）。
+//   详见 `docs/bugs/BUG-026` / `BUG-027`。
 
 export async function fetchConfigBundle(kind: 'full' | 'model-profiles' | 'model-bindings' = 'full'): Promise<unknown> {
   const qs = kind === 'full' ? '' : `?kind=${encodeURIComponent(kind)}`

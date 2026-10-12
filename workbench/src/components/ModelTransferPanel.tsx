@@ -1,15 +1,28 @@
 // workbench/src/components/ModelTransferPanel.tsx
 // ============================================================================
-// 「配置搬家」面板：迁移老配置（PRT-506）+ 配置包导入导出（PRT-508）
+// 「配置包」面板：导出 / 导入模型档案与岗位绑定（PRT-508）
 //
-// 两件事放在一起，是因为它们共用同一条产品纪律：
-// **先预演、再执行**，而且执行时要回传"用户看过的那一份"的凭证。
+// ## 2026-10-12：另一半（「配置迁移」，PRT-506）被删掉了
 //
-//   · 迁移：`plan` 是只读的；`apply` 必须回传用户确认过的 `expectedDigest`，
-//     服务端会重新算一遍并要求两者一致，不一致报 409 `MIGRATION_PLAN_STALE`。
-//     不回传就等于"执行一份用户可能没看过的计划"。
-//   · 导入：`plan` 什么都不写；`apply` 只写计划里 create/update 的那些，
-//     **不删除**包里没有的档案（否则一份不完整的包会清空这台机器）。
+// 曾经这里有**两件事**：① 把老表 `agent_models` 迁成模型档案 + 岗位绑定；
+// ② 导出/导入配置包。① 被删了，理由不是"没人用"，而是**它做的那件事没有下游**：
+//
+//   · 迁移的产物是 `employee_model_bindings` 的行，而那张表当时**没有任何活的消费者**
+//     （`plugins/src/**` 里 0 处引用，`run_attempts` 0 行）⇒ 搬完 17 行不改变任何行为；
+//   · 而那 17 行**真实意图**已经用一次迁移搬完，消费者也接上了
+//     （`plugins/src/dispatchModel.ts`：守护派工前按 (空间, 岗位) 读绑定）。
+//
+//   > 一座通往还没建好的房间的桥，
+//   > 在房间建好、并且已经走过一次之后，就是**脚手架**。
+//
+// 所以这个面板只剩 ②：它服务的是"换一台机器"（导出 → 在另一台导入），
+// 而**导出物永远不含密钥，也不含引用名**（契约层强制，见下面的说明）。
+//
+// ## 产品纪律：先预演、再执行
+//
+//   · `plan` 什么都不写；
+//   · `apply` 只写计划里 create/update 的那些，**不删除**包里没有的档案
+//     （否则一份不完整的包会清空这台机器）。
 //
 // 三处必须分开渲染的东西（合并任何两个都会让用户做错事）：
 //   ① 「包里没有需要变更的内容」≠「包不合法」；
@@ -19,11 +32,9 @@
 // ============================================================================
 
 import { useState } from 'react'
-import { applyConfigBundle, applyMigration, fetchConfigBundle, fetchMigrationPlan, planConfigBundle } from '../api'
-import type { HubMigrationPlan } from '../api'
-import { bundlePlanView, migrationPlanView, panelErrorFrom } from '../modelSettingsUi'
+import { applyConfigBundle, fetchConfigBundle, planConfigBundle } from '../api'
+import { bundlePlanView, panelErrorFrom } from '../modelSettingsUi'
 import type { BundlePlanView, PanelError } from '../modelSettingsUi'
-import type { ImportPlanView } from '../modelSettings'
 import { Notice } from './settingsBits'
 
 const ACTOR = 'general'
@@ -32,15 +43,6 @@ type Policy = 'fail' | 'skip' | 'overwrite'
 type Kind = 'full' | 'model-profiles' | 'model-bindings'
 
 export function ModelTransferPanel(): React.JSX.Element {
-  // ── 迁移 ──
-  const [runtimeType, setRuntimeType] = useState('')
-  const [plan, setPlan] = useState<{ plan: HubMigrationPlan; summary: string; legacyRowCount: number } | null>(null)
-  const [planView, setPlanView] = useState<ImportPlanView | null>(null)
-  const [planErr, setPlanErr] = useState<PanelError | null>(null)
-  const [applyMsg, setApplyMsg] = useState<{ tone: 'ok' | 'bad'; title: string; text: string } | null>(null)
-  const [busy, setBusy] = useState(false)
-
-  // ── 配置包 ──
   const [kind, setKind] = useState<Kind>('full')
   const [exported, setExported] = useState<string>('')
   const [exportErr, setExportErr] = useState<PanelError | null>(null)
@@ -50,57 +52,7 @@ export function ModelTransferPanel(): React.JSX.Element {
   const [bundleView, setBundleView] = useState<BundlePlanView | null>(null)
   const [bundleErr, setBundleErr] = useState<PanelError | null>(null)
   const [bundleResult, setBundleResult] = useState<{ tone: 'ok' | 'bad'; title: string; text: string } | null>(null)
-
-  const runPlan = async (): Promise<void> => {
-    setBusy(true)
-    setPlanErr(null)
-    setApplyMsg(null)
-    setPlan(null)
-    setPlanView(null)
-    try {
-      const r = await fetchMigrationPlan(runtimeType.trim() === '' ? undefined : runtimeType.trim())
-      setPlan(r)
-      // 形状适配 + 判定都在 `modelSettingsUi.migrationPlanView`（复用 importPlanView）。
-      setPlanView(migrationPlanView(r.plan))
-    } catch (e) {
-      setPlanErr(panelErrorFrom(e))
-    } finally {
-      setBusy(false)
-    }
-  }
-
-  const runApply = async (): Promise<void> => {
-    if (plan === null) return
-    const rt = runtimeType.trim()
-    if (rt === '') {
-      // 只有"协议已选"时才可能走到这里（服务端对缺协议的计划回 `ok:false`，
-      // 那种计划根本不会渲染出执行按钮）。仍然显式拦住，不猜协议。
-      setApplyMsg({ tone: 'bad', title: '不能执行迁移', text: '还没有选协议（runtimeType）：源数据里没有它，猜一个会让档案看起来配好了直到第一次运行。' })
-      return
-    }
-    setBusy(true)
-    setApplyMsg(null)
-    try {
-      const r = await applyMigration({
-        runtimeType: rt,
-        // **必须**回传用户确认过的指纹。不回传＝执行一份可能用户没看过的计划。
-        expectedDigest: plan.plan.digest,
-        actor: ACTOR,
-      })
-      setApplyMsg({ tone: 'ok', title: '迁移已执行', text: JSON.stringify(r).slice(0, 400) })
-      setPlan(null)
-      setPlanView(null)
-    } catch (e) {
-      const p = panelErrorFrom(e)
-      setApplyMsg({
-        tone: 'bad',
-        title: '迁移执行失败',
-        text: `${p.text}${p.code === null ? '' : ` 服务端码：${p.code}`}${p.hint === null ? '' : ` ${p.hint}`}`,
-      })
-    } finally {
-      setBusy(false)
-    }
-  }
+  const [busy, setBusy] = useState(false)
 
   const doExport = async (): Promise<void> => {
     setExportErr(null)
@@ -171,48 +123,16 @@ export function ModelTransferPanel(): React.JSX.Element {
   return (
     <div className="set-panel">
       <div className="mc-tip">
-        💡 两件事都**先预演、再执行**。执行时会回传"你看过的那一份"的指纹；中间源数据变了，
-        服务端会以 409 拒绝，而不是按一份可能已经过期的计划动手。
+        💡 换机器用：在这一台**导出**，到那一台**导入**。导入也**先预演、再执行** ——
+        预演只读，执行时只写计划里那些，**不会删除**本机多出来的东西。
       </div>
 
       <div className="set-section">
-        <div className="set-form-title">① 迁移老配置（`agent_models` 表 → 模型档案 + 岗位绑定）</div>
-        <div className="mc-legend">
-          它**只增不改**：已存在的档案与绑定一律跳过。协议（runtimeType）**必须选**：源数据里没有它，猜错会让档案看起来配好了直到第一次运行。
-        </div>
-        <div className="set-row-space">
-          <input className="set-input" value={runtimeType} onChange={e => setRuntimeType(e.target.value)}
-            placeholder="runtimeType，例如 openai-compatible（留空 = 让服务端告诉你要选一种）" style={{ minWidth: 360 }} />
-          <button className="btn" disabled={busy} onClick={() => void runPlan()}>预演迁移</button>
-        </div>
-
-        {planErr !== null && (
-          <Notice tone="bad" title="预演失败（不是「没有需要迁移的东西」）" text={planErr.text} action={planErr.hint} field={planErr.field} />
-        )}
-
-        {plan !== null && planView !== null && (
-          <Notice
-            tone={planView.ok ? 'ok' : 'warn'}
-            title={plan.summary}
-            text={`源数据 ${plan.legacyRowCount} 行。`}
-            lines={planView.lines}
-            action={planView.blocked}
-          />
-        )}
-        {plan !== null && planView !== null && planView.ok && planView.needsConfirm && (
-          <div className="set-row-space">
-            <button className="btn primary" disabled={busy} onClick={() => void runApply()}>确认并执行迁移</button>
-            <span className="mc-legend">指纹：{plan.plan.digest}</span>
-          </div>
-        )}
-        {applyMsg !== null && <Notice tone={applyMsg.tone} title={applyMsg.title} text={applyMsg.text} />}
-      </div>
-
-      <div className="set-section">
-        <div className="set-form-title">② 导出配置包</div>
+        <div className="set-form-title">① 导出配置包</div>
         <div className="mc-legend">
           导出物**永远不含密钥，也不含 `secretRef`**（契约层强制）：`credentialRequired` 只说"这条档案需要凭证"，
-          不说"从哪台机器的哪个槽位取"——后者跨机器没有意义。
+          不说"从哪台机器的哪个槽位取"——后者跨机器没有意义。所以到新机器上要**重新填一次密钥**，
+          这是**有意**的代价：少一次点击，换"跨机器导入时不会悄悄接上一把无关的钥匙"。
         </div>
         <div className="set-row-space">
           <select className="set-input" value={kind} onChange={e => setKind(e.target.value as Kind)}>
@@ -232,7 +152,7 @@ export function ModelTransferPanel(): React.JSX.Element {
       </div>
 
       <div className="set-section">
-        <div className="set-form-title">③ 导入配置包</div>
+        <div className="set-form-title">② 导入配置包</div>
         <div className="mc-legend">
           导入**不会删除**包里没有的档案：一份不完整的包（比如只导出一条做灰度）不该清空这台机器。
           `fail` 遇到冲突就拒绝；`skip` 保留本机；`overwrite` 用包里那份覆盖。

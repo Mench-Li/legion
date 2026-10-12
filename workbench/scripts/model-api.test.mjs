@@ -121,19 +121,9 @@ describe('① 每条客户端调用都打到正确的 method + 路径（错法�
     assert.match(lastCall().url, /\/api\/model-bindings\/default\/reviewer$/)
   })
 
-  test('迁移：计划（带/不带协议）与执行', async () => {
-    await api.fetchMigrationPlan()
-    assert.equal(lastCall().method, 'GET')
-    assert.match(lastCall().url, /\/api\/model-migration\/plan$/, '不给协议时不带查询串')
-
-    await api.fetchMigrationPlan('openai-compatible')
-    assert.match(lastCall().url, /\/api\/model-migration\/plan\?runtimeType=openai-compatible$/)
-
-    await api.applyMigration({ runtimeType: 'openai-compatible', expectedDigest: 'd1', actor: 'general' })
-    assert.equal(lastCall().method, 'POST')
-    assert.match(lastCall().url, /\/api\/model-migration\/apply$/)
-    assert.equal(lastCall().body.expectedDigest, 'd1', '确认过的指纹必须回传（服务端用它对齐）')
-  })
+  // ★ 2026-10-12：这里原有「迁移：计划（带/不带协议）与执行」一条 —— 随「配置迁移」
+  //   整个功能（PRT-506）删掉了：`fetchMigrationPlan` / `applyMigration` 与
+  //   `/api/model-migration/*` 都不再存在。理由见 `docs/bugs/BUG-026` / `BUG-027`。
 
   test('配置包：导出 / 计划导入 / 执行导入', async () => {
     await api.fetchConfigBundle()
@@ -389,7 +379,7 @@ describe('③ 每条路径都必须在平台契约里真实存在（交叉校验
 
     // 本轮新增的那一族**必须**在集合里——否则上面的阈值可能被既有调用凑够，
     // 而新写的路径一条都没被检查到。
-    for (const p of ['/api/model-profiles', '/api/model-bindings', '/api/model-migration/plan', '/api/config-bundle/plan',
+    for (const p of ['/api/model-profiles', '/api/model-bindings', '/api/config-bundle/plan',
       '/api/secrets', '/api/secrets/status']) {
       assert.ok(found.some((f) => f.path === p || f.path.startsWith(p + '/')), `抽取结果里缺少 ${p}`)
     }

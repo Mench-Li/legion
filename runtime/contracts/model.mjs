@@ -37,9 +37,11 @@ export const MODEL_PROFILE_FIELDS = Object.freeze([
  * ## 为什么 `validateProfile` **不**据此拒绝
  *
  * `runtimeType` 在契约里是一个**声明**（"这批模型按哪种协议说话"），
- * 而 `model-migration.mjs` 的整条路就是"让调用方声明它"——
- * 迁移的用例合法地声明 `openai-compatible` / `anthropic`，并把它们原样写进档案。
+ * 而**配置包导入**那条路就是"让调用方声明它"——导入的包合法地带着
+ * `openai-compatible` / `anthropic`，并把它们原样写进档案。
  * 收紧成白名单会把那条路一起关掉，而它关掉的东西（"先记下来，将来接上"）是真实的。
+ *
+ * （同一个理由此前也适用于「配置迁移」，但那条路 2026-10-12 已拆除 —— 见 `docs/bugs/BUG-026`。）
  *
  * 所以这个常量服务的是**另一件事**：当某处要"替用户定一个默认值"时，
  * **只有恰好一个候选时才可以**（见 `team-hub/profile-derivation.mjs` 的 `resolveRuntimeType`）。

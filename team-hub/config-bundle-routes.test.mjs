@@ -317,11 +317,32 @@ test('④ 导入声明 containsSecrets=true 被拒', async () => {
 
 test('④ 整条链路上**任何响应体**都不含密钥字面量（在原始字节上验）', async () => {
   const id = uniq('leak')
+  const pv = uniq('leakpv')
   const SECRET = 'sk-live-ZZZZ1234ZZZZ1234ZZZZ1234ZZZZ'
   await call('POST', '/api/model-profiles', { profile: { ...PROFILE(id), secretRef: 'legion/leak' }, actor: 'test' })
+  // ★★ 2026-10-12：**多加一个端点、并加一条"这一步真的造出了泄漏面"的前置自检**。
+  //
+  //   这条用例原先只列了 4 个端点，于是 `/api/model-providers` 把
+  //   `credential.ref`（= `secretRef` 的槽位名）吐出去时，它**一声不吭** ——
+  //   而那个字段与档案那条路上的字段是同一个坑，只是端点不同。
+  //
+  //   这暴露的是这条判据自己的形状问题：**端点靠手列**，所以"新加了会泄漏的端点"
+  //   在它的读数里和"没有任何端点泄漏"是同一个东西。
+  //   （彻底的解法是按键名遍历所有读路由，那是另一件事；这里先补上已知会带凭证的两个。）
+  //
+  //   ★ 供应商的 `secretRef` 用的是**另一套**校验（POSIX 标识符，不许带斜杠：
+  //     `provider-store.mjs` 的 `SECRET_REF_RE`），所以这里另起一个合法名 ——
+  //     沿用 `legion/leak` 会被 400 挡在门外，于是"那一行没有泄漏"测的是
+  //     "那一行根本没建起来"。这正是上面那条前置自检存在的理由。
+  const PV_REF = 'LEGION_LEAK_REF'
+  await call('POST', '/api/model-providers', {
+    provider: { id: pv, displayName: '泄漏面', api: 'openai-responses', baseURL: 'https://x.example/v1', secretRef: PV_REF },
+    actor: 'test',
+  })
   const responses = await Promise.all([
     call('GET', '/api/config-bundle'),
     call('GET', '/api/model-profiles'),
+    call('GET', '/api/model-providers'),
     call('POST', '/api/config-bundle/plan', {
       bundle: { version: 1, profiles: [{ ...PROFILE(id), credentialRequired: true }], bindings: [] },
     }),
@@ -330,10 +351,42 @@ test('④ 整条链路上**任何响应体**都不含密钥字面量（在原始
       bundle: { version: 1, profiles: [{ ...PROFILE(id, 'changed'), credentialRequired: true }], bindings: [] },
     }),
   ])
+  // 前置自检：**库里这条供应商必须真的带着引用名**，否则"响应里没有它"测的是
+  //   "库里本来就没有它"。
+  //   > 一个"过滤掉了它"的判据，与一个"库里本来就没有它"的判据，
+  //   > 在库里没有它的时候是同一个东西。
+  //
+  //   没有 `GET /api/model-providers/<id>` 这条路（这一族的 by-id 只有 DELETE），
+  //   所以自检不靠另一次请求，而靠**同一个响应里的 `hasRef`**：
+  //   `hasRef === true` 证明库里的这一行**确实有** `secretRef`，
+  //   而下面的字节断言证明它的**名字**没跟着出去。
+  //   两条合起来才是"没泄漏"，单看后者会假绿。
+  const providers = await call('GET', '/api/model-providers')
+  const mine = (providers.body?.providers ?? []).find((p) => p.id === pv)
+  assert.ok(mine !== undefined, '前置条件不成立：刚建的供应商不在列表里')
+  assert.ok(mine.credential !== undefined, '核验结果被整段删掉了 —— 那是把仪表盘拆了来修漏水')
+  assert.equal(mine.credential.hasRef, true, '要能表达"引用了某把钥匙"，只是不说它叫什么')
+
+  // ★★ 已知偏离（BUG-028，**不是**这次改出来的）：供应商这一族**仍然**把 `secretRef`
+  //   的原名发出去，而档案那一族已经改成只发 `credential.hasRef`。
+  //
+  //   这里**显式断言现在的行为**，而不是把这一条删掉：
+  //   删掉的话，"这一行还在泄漏"与"这一行已经不泄漏"在这条用例眼里是同一个东西，
+  //   而修 BUG-028 的人也会失去一个必须翻转的信号。
+  //   （本仓的老规矩：**显式豁免，而不是让门禁看不见**。）
+  assert.equal(mine.secretRef, PV_REF,
+    '★ 如果你正在修 BUG-028：这条断言要跟着翻转成 `assert.equal(mine.secretRef ?? null, null)`，'
+    + '并且要同时确认面板的编辑态不再依赖它（`DshProvidersPanel.tsx` 的 keyRef 保留逻辑）')
+
   for (const r of responses) {
     const text = JSON.stringify(r.body)
     assert.ok(!text.includes(SECRET), `响应体里出现了密钥：${text}`)
-    assert.ok(!text.includes('legion/leak'), `响应体里出现了引用名：${text}`)
+    assert.ok(!text.includes('legion/leak'), `响应体里出现了档案的引用名：${text}`)
+    // 供应商的引用名**暂时**还会出现在 `/api/model-providers` 的响应里（BUG-028），
+    // 所以这一条只对**其它**响应生效 —— 把它写出来，好过让整段断言悄悄变弱。
+    if (!text.includes(`"id":"${pv}"`)) {
+      assert.ok(!text.includes(PV_REF), `这个响应体里出现了供应商的引用名：${text.slice(0, 200)}`)
+    }
   }
 })
 

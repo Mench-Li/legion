@@ -935,11 +935,15 @@ async function stageTest() {
     },
     {
       // 手机端看板与场景：与 web/桌面端**同源**的看板投影 + 场景状态机。
-      label: 'workbench-mobile（手机看板投影/时间线/刷新循环/与 web 的看板一致性）',
+      label: 'workbench-mobile（手机看板投影/时间线/刷新循环/提示去处/与 web 的看板一致性）',
       files: [
         'workbench/mobile/board.test.mjs',
         'workbench/mobile/timeline.test.mjs',
         'workbench/mobile/refresh-loop.test.mjs',
+        // 提示去处与会话清理的两个**纯决策**。它们从 `app.mjs` 里抽出来，正是因为
+        // `app.mjs` 在 Node 里不可 import —— 于是那 1300 行里的错误路径此前
+        // **一条直接判据都没有**（只有别处对它的源码做正则扫描）。
+        'workbench/mobile/notice.test.mjs',
         'workbench/scripts/mobile-board-parity.test.mjs',
       ],
       cwd: ROOT,

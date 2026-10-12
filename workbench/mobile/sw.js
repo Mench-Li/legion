@@ -40,8 +40,10 @@ const CACHE = 'legion-mobile-v4'
 //   `index.html` 的 `<script>` 与各模块的 import 语句核对，不靠人记得同步。
 const SHELL = [
   './', './index.html', './manifest.webmanifest',
-  // 入口 + 它的直接依赖（合并时**取并集**：提醒的 popup.mjs 与头像的 avatar.mjs 都要在）
+  // 入口 + 它的直接依赖（合并时**取并集**：提醒的 popup.mjs、头像的 avatar.mjs、
+  // 提示去处的 notice.mjs 都要在）
   './app.mjs', './board.mjs', './timeline.mjs', './refresh-loop.mjs', './popup.mjs', './avatar.mjs',
+  './notice.mjs',
 ]
 const CODE_EXT = /\.(?:mjs|js|html|webmanifest)$/
 

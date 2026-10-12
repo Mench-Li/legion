@@ -651,17 +651,67 @@ systemctl list-timers legion-hub-storage-check.timer    # 看 LAST 那一列
 > 一个"看起来只是还没接的接口"，与一个"接上去就是远程任意文件读写"的接口，
 > 在缺失清单里长得一模一样。
 
-**当前的诚实状态**：浏览器里那些面板会**静默 404**。前端目前**没有**任何能力标志
-可以让它显示"这个功能需要桌面端"（`workbench/src` 里的 `capabilities` 只覆盖
-Agent 工具的四个开关，与本机能力无关）。最后两个数字（`/api/dsh-models` 等 4 条）
-尚未逐条判过，**可能是抽取出来的路径片段**（bundle 里路径是拼接的，
-裸 `/api/reject` / `/api/tasks` 可能是片段），**未核实**。
+**现在的状态（2026-10-12 部署）**：Hub 把这些面**说出来**了 —— 回
 
-两条路，随手册一起记下：
+```
+501 { code: 'DESKTOP_ONLY', desktopOnly: true,
+      error: '「文件中心」需要在**桌面端**（你本机）使用 —— …', hint: '…' }
+```
 
-- **显式声明能力**：让 Hub 在 `/api/config` 里报出"本机面不可用"，
-  前端据此把那些面板显示成"需要桌面端"而不是静默 404。**这一半还没做。**
-- **不做**：那些面在本机（`serve.mjs`）上继续可用 —— 它们本来就是**桌面端**的能力。
+★ 为什么是 **501**：`404` 是"没有这个接口"（暗示一处 bug，而这是**有意**的）；
+`500` 是"我们不知道哪里错了"（而这里我们**知道**）；`501` 恰恰是
+"服务器**不实现**这个功能" —— 与事实一字不差。
+
+★ 那句话**不许**说"请联系管理员"（管理员**修不好**这件事：它不是故障，是设计），
+也不许说"暂不支持"（用户会一直等）。
+
+★★ **一条结构性保证：绝不遮蔽真路由**。判定放在 `server.mjs` 的 **404 兜底处**，
+即**所有路由族 dispatch 之后**，于是前缀表可以写得宽（`/api/web/` 在表里）而
+**绝不可能**抢走真接口（`/api/web/history` 是真路由，真路由先赢）。
+这条性质**只能靠位置**撑着，所以有一条**结构性判据**盯着它。
+
+生产实测（2026-10-12）：
+
+| 路径 | 结果 |
+| --- | --- |
+| `/api/fs/list` `/api/files/read` `/api/web/fetch` `/api/dsh-models` `/api/skills/import` | **501** + `DESKTOP_ONLY` + 那句话 |
+| `/api/web/history`（真路由，且落在 `/api/web/` 前缀之下） | **400**（参数不足）—— 真路由赢了，**没被抢走** |
+| `/api/chat/conversations` `/api/identity/status` `/api/config` | 200 |
+| `/api/nonexistent-xyz` `/api/fsharp` | **404**（兜底没把 404 变成 501） |
+| `GET/POST/PUT/DELETE /api/files/list` | 全部 **501**（不是只认 GET） |
+
+**仍未做**：最后那几条（`/api/reject` / `/api/repositories` / `/api/tasks`）
+**没有**进表 —— 它们可能是 bundle 里拼接路径的**片段**（裸 `/api/reject`
+看着不像一个完整端点）。**未核实**，所以宁可不说，也不说错。
+
+### ★★ 6.4b 一个必须记下的事：生产上的 SPA **无法从仓库复现**
+
+部署里的 `/workbench/` 产物是 `assets/index-BjYkts4m.js`。为了知道"重建它会不会
+连带带上别的改动"，我把动过 `workbench/src` 的提交**各自构建了一遍**：
+
+| 来源 | 产出的 bundle |
+| --- | --- |
+| `f9a1b4b3` | `index-ClRLzxPM.js` |
+| `260cc742` | `index-MNOx9ITs.js` |
+| `833546e7` | `index-CdCnA807.js` |
+| `2c67dfb6` | `index-CVFe7rHD.js` |
+| `ca7589c9`（该目录的最后一个提交） | `index-SGdYgfb7.js` |
+| `origin/main`（41ee12f3） | `index-SGdYgfb7.js` |
+| **生产上的** | **`index-BjYkts4m.js`** ← 没有一个候选对得上 |
+
+换 `--base=/workbench/` 也不对（产出 `index-BTUIzIla.js`）；产物里没有绝对路径。
+
+> **结论：部署里的那份 SPA 不是从当前历史里的任何提交构建的。**
+
+后果很实际：**下一次重建会把若干提交的前端改动一起带上** ——
+而它们的后端配对未经验证。所以这一轮**没有**部署重建的 SPA（那是"假验证"）。
+
+`workbench/src/api.ts` 里 `readJson` 的那处修复（让它保留后端的
+`code`/`error`/`hint`，而不是只抛 `statusText`）**已经在源码里、`tsc --noEmit` 通过**，
+但**没有部署** —— 它会随下一次**有出处的** SPA 发布一起生效。
+
+在那之前，浏览器里的界面显示的是 `501 Not Implemented`
+（比 `not found` 好，但还不是那句中文）。
 
 ---
 

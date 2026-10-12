@@ -1,13 +1,14 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   fetchHubTasks,
-  hubComment,
   hubTransition,
   subscribeHubAudit,
 } from '../api'
 import type { CardComment, CardStatus, HubTask, SpaceInfo } from '../types'
 import { toast } from './Toast'
 import { deliveryBadgeOf, schedulingBadgeOf } from '../deliveryBadge.ts'
+import { planDrop } from '../reworkPlan.ts'
+import { ReworkModal } from './ReworkModal'
 import { TaskDetailModal } from './TaskDetailModal'
 
 /**
@@ -15,6 +16,11 @@ import { TaskDetailModal } from './TaskDetailModal'
  *
  *  - 主体 = Kanban 泳道（待批准→待认领→进行中→待验收→受阻→已完成），支持拖拽卡片跨列迁移
  *    状态（服务端状态机校验，非法迁移被拒并提示）。
+ *  - **往回拖**有两条各说各话的路（判定收在 `planDrop` 里，见 `../reworkPlan.ts`）：
+ *      · 已验收 → 待认领/进行中/待验收 = **重做**（改动点必填）：旧链上这一环与下游一起作废、
+ *        另发一个新目标承接重做链（本岗位 → 审查 → 测试 → 部署，`POST /api/rework`）；
+ *      · 待验收 → 待认领/进行中 = **打回**（改动点必填）：同一目标内退回，评论即下一轮的输入。
+ *    「已取消」是唯一拖不动的状态。
  *  - 「指挥总览」不再是第二个 Tab：它的将军视角分组语义（⚡ 工作中 / ⏳ 待我决定 / ⚪ 待办 / ✅ 已完成）
  *    并进泳道顶部的**视角过滤**——点选即按该语义筛卡片，泳道结构与拖拽目标始终完整可见，
  *    「待我决定」（in_review + blocked）仍是一眼可点的将军待办清单。
@@ -193,6 +199,8 @@ export function TaskCenterView({ scope, hubMode, spaces = [], onSelectScope, onD
   const [dragId, setDragId] = useState<string | null>(null)
   const [dropCol, setDropCol] = useState<CardStatus | null>(null)
   const [busyDrop, setBusyDrop] = useState(false)
+  /** 往回拖的待确认项：重做（发新目标 + 重建下游）或同一目标内打回；由 ReworkModal 收改动点。 */
+  const [dropAsk, setDropAsk] = useState<{ item: TcRow; intent: 'rework' | 'return' } | null>(null)
 
   const isAll = hubMode && scope === null
   /** 泳道容器：切视角时把「第一个有匹配的列」滚进视野（受阻/已完成 默认在横向滚动区外侧）。 */
@@ -317,26 +325,28 @@ export function TaskCenterView({ scope, hubMode, spaces = [], onSelectScope, onD
     done: summary.done,
   }), [summary])
 
-  /** 拖拽迁移：先按服务端状态机预检，语义特例（验收/打回/解阻）走确认/填因，再写 /api/transition。 */
+  /**
+   * 拖拽迁移：先按服务端状态机预检，语义特例（验收/重做/打回/解阻）走确认或填改动点，
+   * 再写 `/api/transition`（重做走 `/api/rework`）。
+   *
+   * ★ 判定的**去向**收在 `planDrop` 这个纯函数里（见 `../reworkPlan.ts` 的文件头）：
+   *   `done → todo` 这条边服务端状态机里没有，而 `done → in_progress` 有——
+   *   只按状态机走的话，"验收不满意"会从一条**合法但静默**的回退里溜过去：
+   *   卡片挪回去了、评论没写、下游一条都不重建，而界面看起来是成功的。
+   */
   const moveTo = async (item: TcRow, to: CardStatus): Promise<void> => {
-    if (item.status === to) return
-    const allowed = TRANSITIONS[item.status] ?? []
-    if (!allowed.includes(to)) {
-      toast('err', `非法迁移 ${item.id}：${STATUS_TEXT[item.status]} → ${STATUS_TEXT[to]}（服务端状态机不允许）`)
+    const plan = planDrop(item.status, to, TRANSITIONS[item.status] ?? [])
+    if (plan.kind === 'illegal') {
+      toast('err', `非法迁移 ${item.id}：${STATUS_TEXT[item.status]} → ${STATUS_TEXT[to]}（${plan.hint}）`)
+      return
+    }
+    // 重做 / 打回都要先给出改动点（必填）——由对话框收集后自己发请求，这里只负责把弹框叫起来
+    if (plan.kind === 'rework' || plan.kind === 'return') {
+      setDropAsk({ item, intent: plan.kind })
       return
     }
     if (to === 'done') {
       if (!window.confirm(`验收通过 ${item.id}「${item.title}」？\n（in_review → done，仅将军可执行，验收后进入完成态）`)) return
-    }
-    if (to === 'todo' && item.status === 'in_review') {
-      const reason = window.prompt(`打回 ${item.id} 的原因（将写评论并归还待办）`)
-      if (reason === null) return
-      try {
-        await hubComment(item.id, `↩ 打回重做：${reason.trim() || '无理由'}`)
-      } catch (e) {
-        toast('err', e instanceof Error ? e.message : String(e))
-        return
-      }
     }
     setBusyDrop(true)
     try {
@@ -396,7 +406,15 @@ export function TaskCenterView({ scope, hubMode, spaces = [], onSelectScope, onD
     [filtered, view, viewStatuses],
   )
 
-  const doneOpen = (r: TcRow): boolean => r.status !== 'done' && r.status !== 'canceled'
+  /**
+   * 这张卡能不能拖。
+   *
+   * ★ 从前的判据是 `status !== 'done' && status !== 'canceled'` —— 也就是**已完成的任务拖不动**。
+   *   那正是"验收不满意要重做"被挡在门外的地方：卡片根本没长拖拽手柄，
+   *   而界面上没有任何东西说明为什么拖不动。
+   *   现在只有「已取消」拖不动（终态，没有任何往回走的语义）。
+   */
+  const draggableCard = (r: TcRow): boolean => r.status !== 'canceled'
 
   const renderCard = (r: TcRow): React.JSX.Element => {
     const actor = r.soldier ?? r.role ?? '未指派'
@@ -433,12 +451,12 @@ export function TaskCenterView({ scope, hubMode, spaces = [], onSelectScope, onD
       <div
         key={r.id}
         className={`tc-card${hubMode ? ' clickable' : ''}`}
-        draggable={hubMode && doneOpen(r)}
+        draggable={hubMode && draggableCard(r)}
         data-id={r.id}
         onClick={() => openDetail(r.id)}
         onDragStart={e => onDragStart(e, r.id)}
         onDragEnd={() => { setDragId(null); setDropCol(null) }}
-        title={hubMode ? `${r.id} · ${r.title}（点击查看详情/AI 执行过程${doneOpen(r) ? '；拖拽到其它列迁移状态' : ''}）` : `${r.id} · ${r.title}`}
+        title={hubMode ? `${r.id} · ${r.title}（点击查看详情/AI 执行过程${draggableCard(r) ? '；拖拽到其它列迁移状态' : ''}）` : `${r.id} · ${r.title}`}
       >
         <div className="tc-card-title">
           <span className="tc-tid">{r.id}</span>
@@ -487,7 +505,7 @@ export function TaskCenterView({ scope, hubMode, spaces = [], onSelectScope, onD
       <div className="panel tc-head">
         <span className="tc-head-title">📋 任务中心</span>
         <span className="tc-head-hint">
-          Scrum 泳道 · 拖拽卡片跨列迁移状态 · 点卡片看详情与 AI 执行过程
+          Scrum 泳道 · 拖拽卡片跨列迁移状态（已完成/待验收往回拖 = 重做，会要求填写改动点）· 点卡片看详情与 AI 执行过程
         </span>
         <div className="tc-head-right">
           {hubMode && onSelectScope && (
@@ -614,6 +632,18 @@ export function TaskCenterView({ scope, hubMode, spaces = [], onSelectScope, onD
           onClose={() => setDetailId(null)}
           onChanged={reload}
           onContactAgent={onContactAgent}
+        />
+      )}
+
+      {/* 往回拖（重做 / 打回）：改动点必填，收齐后由对话框自己发 /api/rework 或 comment+transition */}
+      {dropAsk && (
+        <ReworkModal
+          task={{ id: dropAsk.item.id, title: dropAsk.item.title, role: dropAsk.item.role }}
+          intent={dropAsk.intent}
+          scope={dropAsk.item.scope ?? scope}
+          ifVersion={dropAsk.item.version}
+          onClose={() => setDropAsk(null)}
+          onDone={reload}
         />
       )}
     </div>

@@ -678,6 +678,30 @@ export function hubComment(id: string, text: string): Promise<unknown> {
   return hubPost('/api/comment', { id, text })
 }
 
+/**
+ * team-hub v2：**重做**（验收不满意 → 打回重做 + 重建下游链）。
+ *
+ * 一次做四件事（全部在一个事务里，见 `team-hub/routes/rework.mjs` 的文件头）：
+ * 作废旧链上本环与下游 → 发一个新目标承接重做链 → 按 `blockedBy` 串好建出来 → 回填改动点。
+ *
+ * ★ 响应是**展平**的报告（不是 `{ ok, task }`）：调用方要拿 `created` 的 id 与新目标
+ *   去刷新泳道，也要拿 `superseded` 在回执里说清"哪些旧卡片被作废了"。
+ *   `reason` 必填——空着等于让执行者按原样再交一次。
+ */
+export async function hubRework(input: {
+  id: string
+  reason: string
+  ifVersion?: number
+  scope?: string | null
+}): Promise<unknown> {
+  return hubPost('/api/rework', {
+    id: input.id,
+    reason: input.reason,
+    ...(input.ifVersion === undefined ? {} : { ifVersion: input.ifVersion }),
+    ...(input.scope ? { scope: input.scope } : {}),
+  })
+}
+
 /** team-hub v2：L3 跨任务改动重叠检测（scope 内改到同一文件的任务分组；id 过滤出涉及本任务的分组）。 */
 export async function fetchHubOverlaps(scope?: string | null, id?: string): Promise<{ scope: string; groups: OverlapGroup[] }> {
   const qs = new URLSearchParams()

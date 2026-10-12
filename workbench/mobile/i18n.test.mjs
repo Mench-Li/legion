@@ -28,7 +28,11 @@ const SOURCES = ['app.mjs', 'board.mjs', 'popup.mjs', 'timeline.mjs', 'notice.mj
   // ★ `outbox.mjs` 必须在列表里：离线那条路径上的文案全都住在它这里
   //   （横幅的键、失败的说法）。而这些文案只在**断网**时出现 ——
   //   也就是用户最需要看懂屏幕上写了什么、而开发者最难顺手试到的那一刻。
-  'outbox.mjs']
+  'outbox.mjs',
+  // ★ `read-cache.mjs` 同理：离线**读**那条路径上的文案全在它这里
+  //   （"这是几小时前的消息"、"看板是旧的"）。它比 `outbox.mjs` 更要紧一点：
+  //   写队列发不出去用户看得见（输入框没清空），而看板标错了他看不出来。
+  'read-cache.mjs']
 
 const CJK = /[\u4e00-\u9fff]/
 

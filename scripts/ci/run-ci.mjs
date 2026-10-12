@@ -979,6 +979,12 @@ async function stageTest() {
         // 而那条路径**只在断网时**被走到，也就是测试最难复现、生产上最常发生的状态。
         // 抽成纯决策正是为了在正常网络下把断网行为逐条钉死。
         'workbench/mobile/outbox.test.mjs',
+        // 离线**读**缓存。守两句话：
+        //   ① **消息是文本，看板是状态** —— 前者只会变旧，后者会变**错**
+        //      （所以看板窗口只有一小时，消息有七天）；
+        //   ② **缓存键必须含用户身份** —— 否则共享设备上会把上一个人的对话
+        //      显示给下一个人，而那是不可见、不可撤销的那种错。
+        'workbench/mobile/read-cache.test.mjs',
         'workbench/scripts/mobile-board-parity.test.mjs',
       ],
       cwd: ROOT,

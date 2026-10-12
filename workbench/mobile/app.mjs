@@ -72,6 +72,11 @@ import {
   isQueueable, classifyFailure, makeEntry, appendEntry, nextEntry, markResult,
   drainPlan, outboxSummary, outboxBanner, OUTBOX_LIMIT, ENTRY_STATE,
 } from './outbox.mjs'
+// 离线**读**的缓存决策。同样抽成纯函数：这条路径只在断网时被走到。
+import {
+  cacheKey, usability, packPayload, unpackPayload, shouldClearReadCacheOnLogout,
+  offlineNotice, trimToBudget, CACHE_MAX_BYTES, READ_CACHE_CODES,
+} from './read-cache.mjs'
 
 const $ = (id) => document.getElementById(id)
 const LS_REFRESH = 'legion.mobile.refresh'
@@ -96,6 +101,20 @@ const LS_POPUP_ARMED = 'legion.mobile.popuparmed'
  *   两小时 —— 这些都会清掉内存与 sessionStorage，而待发的消息必须还在。
  */
 const LS_OUTBOX = 'legion.mobile.outbox'
+/**
+ * 离线**读**缓存（"上次看到的那些东西"）在 localStorage 里的键。
+ *
+ * ★ 与 `LS_OUTBOX` 的**存法不同**：这是**一个对象**，里面若干条按
+ *   `read-cache.mjs` 的键索引；而队列是一个数组。
+ *   理由：读缓存需要**按字节裁剪**（`localStorage` 只有几 MB，
+ *   而消息正文可能很长），裁剪是按 `savedAtMs` 排序做的 ——
+ *   一个带时间戳索引的对象比一个数组更容易做这件事，也更容易看清"哪条最新"。
+ *
+ * ★ 与 `LS_OUTBOX` 的**清理规矩也不同**（故意的）：登出时这份**要清**，
+ *   队列**不清**。一个是服务端的数据（下一个人不该看到），
+ *   一个是用户自己打的字（清掉等于删掉他的话）。
+ */
+const LS_READCACHE = 'legion.mobile.readcache'
 function popupArmedShown() {
   try { return localStorage.getItem(LS_POPUP_ARMED) === '1' } catch { return true }
 }
@@ -151,6 +170,24 @@ const state = {
   identity: { bootstrapped: null, registration: 'closed' },
   /** `/api/identity/me` 的结果（「我的」那一页用）。 */
   authMode: 'login',
+  /**
+   * 当前用户的 id（`/api/identity/me` 的 `user.userId`）。
+   *
+   * ★ 它存在的**唯一**理由是离线读缓存的键要含用户身份 —— 见 `read-cache.mjs`
+   *   文件头那段安全判断：缓存落在 `localStorage` 里（共享设备），
+   *   而一个"不含用户"的键会让下一个人看到上一个人的对话。
+   *   在这之前应用压根没记过它（只用了 `name`，而 `name` 是**显示名**、
+   *   可以改、也不保证唯一 —— 拿它当隔离维度是不行的）。
+   */
+  userId: null,
+  /**
+   * 两块数据各自的"这是缓存数据，年龄 N 毫秒"（`null` = 这块是实时的）。
+   *
+   * ★ 两块**分开记**：消息是文本（可以旧），看板是状态（旧了会让人做错决定），
+   *   两者的过期窗口不同（见 `read-cache.mjs`）。
+   *   合成一个字段的话，切视图时就没法说清"你现在看的这块是不是旧的"。
+   */
+  offline: { messages: null, board: null },
 }
 
 // ── HTTP ────────────────────────────────────────────────────────────────────
@@ -214,6 +251,20 @@ function clearSession() {
   state.refresh = null
   sessionStorage.removeItem(SS_ACCESS)
   localStorage.removeItem(LS_REFRESH)
+  // ★ 登出时清掉**读缓存** —— 与待发队列**故意相反**。
+  //
+  //   读缓存里是**服务端的数据**（对话正文、任务清单）。浏览器是共享设备
+  //   （家人、同事、借用一下），留着它意味着**下一个人在同一个浏览器里
+  //   看到上一个人的对话** —— 那是安全问题：不可见、不可撤销。
+  //
+  //   而待发队列里是**用户自己打的、还没发出去的字**。清掉它等于静默删掉
+  //   他的话 —— 那是体验问题：可见、可修（他会看到几条"发不出去"并自己删）。
+  //
+  //   > 两个方向的代价不对等，所以两条规矩相反。
+  //
+  //   （`state.userId` 也一起清：它同时是缓存键的第一段。）
+  clearReadCache()
+  state.userId = null
 }
 
 // ── 渲染：状态条 ────────────────────────────────────────────────────────────
@@ -589,6 +640,11 @@ function showView(view) {
   $('view-tasks').classList.toggle('hidden', view !== 'tasks')
   $('tab-chat').setAttribute('aria-selected', String(view === 'chat'))
   $('tab-tasks').setAttribute('aria-selected', String(view === 'tasks'))
+  // ★ 切视图时**重画离线标记**：两块数据的年龄是各自记的，
+  //   而标记说的是"你**现在看的这块**是不是旧的"。
+  //   不重画的话，从"消息是旧的"切到看板会继续显示那句话 ——
+  //   一句与屏幕无关的话，用户读两次之后就再也不读了。
+  renderOfflineNote()
   if (view === 'tasks') void refreshTasks()
 }
 
@@ -670,13 +726,35 @@ async function refreshTimeline() {
   const gen = state.scopeGen
   const conv = state.convId
   // 读当前投影（**不是**从事件流拼出来）：事件只是通知，真相在 Hub。
-  const r = await api(`/api/chat/messages?conv=${conv}&scope=${encodeURIComponent(state.scope)}&limit=200`)
+  //
+  // ★ 离线回退：失败时回落到上次缓存，并**标出它的年龄**。
+  //   消息是**文本**，只会变旧、不会变错 —— 所以它可以显示得久（7 天），
+  //   只要如实说清"这是几小时前的"。这一点与看板**故意不同**：
+  //   那边是**状态**，会变错，所以窗口只有一小时。
+  let r
+  try {
+    r = await api(`/api/chat/messages?conv=${conv}&scope=${encodeURIComponent(state.scope)}&limit=200`)
+  } catch (e) {
+    const cached = getReadCache('messages', conv)
+    if (cached === null) throw e
+    // 切了空间或换了会话 → 这批缓存已经不属于当前界面，丢掉。
+    if (gen !== state.scopeGen || conv !== state.convId) return
+    state.timeline = cached.payload
+    renderTimeline()
+    markOffline('messages', cached.ageMs)
+    return
+  }
   // 同上：切了空间或换了会话，这批消息就不该往界面上写。
   if (gen !== state.scopeGen || conv !== state.convId) return
   const entries = (r.messages ?? []).map(timelineEntry)
   const merged = mergeTimeline(state.timeline, entries)
   state.timeline = merged.entries
   state.cursor = merged.cursor
+  markOffline('messages', null)
+  // ★ 缓存的是**合并后**的那一份（而不是刚取回的那一批）：
+  //   用户离线时想看到的是他刚才在屏幕上看到的完整时间线，
+  //   而不是"上一次请求恰好返回的那 200 条"。`packPayload` 自己会截到上限。
+  putReadCache('messages', state.timeline, conv)
   renderTimeline()
 }
 
@@ -703,8 +781,30 @@ async function refreshTasks() {
   //   （每个任务存着完整 git diff），而手机这张看板只读 id/title/status/role/soldier/priority。
   //   不过隧道时那是"45 秒 / 直接超时"，加了 compact 之后是三百多 KB。
   //   > 一个"把 git diff 也发给手机"的接口，与一个"看板要 45 秒才出来"，是同一件事的两面。
-  const board = await api(`/api/board?scope=${encodeURIComponent(state.scope)}&compact=1`)
-  const agents = await api(`/api/agents?scope=${encodeURIComponent(state.scope)}`)
+  //
+  // ★ 离线回退：两个端点都可能因为断网失败。失败时**不抛**，而是回落到
+  //   上次缓存 —— 但**必须**标出这是旧的（见下面 `markOffline('board', …)`），
+  //   因为看板是**状态**：一个三天前的「进行中」会让用户去催一个早就完成的任务。
+  let board
+  let agents
+  try {
+    board = await api(`/api/board?scope=${encodeURIComponent(state.scope)}&compact=1`)
+    agents = await api(`/api/agents?scope=${encodeURIComponent(state.scope)}`)
+  } catch (e) {
+    const cached = getReadCache('board')
+    if (cached === null) throw e   // 没有缓存 → 照旧把错误抛给调用方
+    const { payload } = cached
+    state.agents = payload?.agents ?? []
+    state.tasks = payload?.tasks ?? []
+    renderBoardViews()
+    renderBoard()
+    renderTargets()
+    // ★ 由 `read-cache.mjs` 判过：超过一小时的看板**根本不会**走到这里
+    //   （`getReadCache` 对过期数据返回 null）。所以这里能显示的就一定是
+    //   "一小时以内"的，而不是一个三天前的世界。
+    markOffline('board', cached.ageMs)
+    return
+  }
   // ★ 空间在这一段里被切走了 → 这批数据已经不属于当前界面，丢掉。
   if (gen !== state.scopeGen) return
   state.agents = agents.agents ?? []
@@ -714,6 +814,9 @@ async function refreshTasks() {
   }
   const detail = state.agents.flatMap((a) => a.tasks ?? [])
   state.tasks = mergeAttempts(Array.isArray(board) ? board : (board.tasks ?? []), detail)
+  // ★ 实时数据到手 → 清掉"这是旧的"的标记，并把它缓存下来备用。
+  markOffline('board', null)
+  putReadCache('board', { tasks: state.tasks, agents: state.agents })
   renderBoardViews()
   renderBoard()
   renderTargets()
@@ -857,6 +960,147 @@ function saveOutbox() {
 /** 入队失败时的统一处理：**说清为什么，并且不吞掉用户的字**。 */
 function outboxReject(reason) {
   showError(reason)
+}
+
+// ── 离线读缓存 ──────────────────────────────────────────────────────────────
+//
+// 决策全在 `read-cache.mjs`（纯函数、34 条判据）。这里只做存取与回退。
+//
+// ★ 为什么不能交给 Service Worker —— `sw.js` 里那条 `/api/` 一律不缓存的规则
+//   是**对的**：API 响应是认证过的、与具体用户相关的，进一个按 URL 索引的共享
+//   缓存意味着"换个人登录，可能拿到上一个人的响应"。所以离线读只能在应用层做：
+//   **只有应用知道自己是谁**（SW 只看得到 URL）。
+
+/** 读缓存本体（一个对象：`cacheKey` → `{kind, savedAtMs, entries|payload}`）。 */
+let readCache = null
+
+function loadReadCache() {
+  if (readCache !== null) return readCache
+  try {
+    const raw = localStorage.getItem(LS_READCACHE)
+    const parsed = raw === null ? {} : JSON.parse(raw)
+    readCache = (parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed)) ? parsed : {}
+  } catch {
+    // 坏 JSON 当没有。与队列那边同一个取舍：**不删键** ——
+    // 一次读取失败不该抹掉用户全部缓存。
+    readCache = {}
+  }
+  return readCache
+}
+
+/**
+ * 落盘（**带字节裁剪**）。
+ *
+ * ★ 为什么要裁剪：`localStorage` 通常只有约 5MB，满了之后 `setItem` 会**抛**
+ *   `QuotaExceededError` —— 于是**新的缓存一条都写不进去**，
+ *   而现象是"离线读忽然什么都没有了"，看起来像功能坏了。
+ *   裁剪的方向是"丢最旧的"（与待发队列**相反**，理由见 `read-cache.mjs`）。
+ */
+function saveReadCache() {
+  const all = readCache ?? {}
+  try {
+    // 按 `savedAtMs` 倒序（最新在前），让 `trimToBudget` 保住新的。
+    const items = Object.entries(all)
+      .map(([key, entry]) => ({ key, entry, bytes: JSON.stringify(entry).length, at: Number(entry?.savedAtMs) || 0 }))
+      .sort((a, b) => b.at - a.at)
+    const { keep, drop } = trimToBudget(items, { maxBytes: CACHE_MAX_BYTES })
+    if (drop.length > 0) {
+      const next = {}
+      for (const it of keep) next[it.key] = it.entry
+      readCache = next
+      console.warn(`[mobile] 读缓存超出字节预算，丢弃 ${drop.length} 条最旧的`)
+    }
+    localStorage.setItem(LS_READCACHE, JSON.stringify(readCache))
+  } catch {
+    // 写不进去（配额满 / 隐私模式）：**离线读会不可用**，但那不是数据丢失
+    // （服务端还有），所以不值得弹一个错误打断用户。留一行警告给排查。
+    console.warn('[mobile] 读缓存写不进本机存储（隐私模式或空间已满）—— 离线读不可用')
+  }
+}
+
+/** 当前用户的身份（读缓存键的第一段）。没登录时为 `null`。 */
+function currentUserId() {
+  const id = state.userId
+  return typeof id === 'string' && id.length > 0 ? id : null
+}
+
+/** 这份缓存的键；任何一段缺失都返回 `null`（于是**不缓存**，而不是共用一条）。 */
+function readCacheKey(kind, convId = null) {
+  return cacheKey({ userId: currentUserId(), scope: state.scope, kind, convId })
+}
+
+/** 写一份缓存（只在**成功拿到实时数据**之后调）。 */
+function putReadCache(kind, payload, convId = null) {
+  const key = readCacheKey(kind, convId)
+  // `key === null` 说明还没解析出用户（或空间没定）—— 此时**不写**。
+  // 一个"少一段的键"会与所有人共用同一条缓存，那正是这段设计要防的事。
+  if (key === null) return
+  const { entry } = packPayload({ kind, payload, savedAtMs: Date.now() })
+  loadReadCache()[key] = entry
+  saveReadCache()
+}
+
+/**
+ * 读一份缓存。**不可用就返回 `null`**（而不是返回过期的数据）。
+ *
+ * @returns {{payload: any, ageMs: number, stale: boolean}|null}
+ */
+function getReadCache(kind, convId = null) {
+  const key = readCacheKey(kind, convId)
+  if (key === null) return null
+  const entry = loadReadCache()[key]
+  if (entry === undefined) return null
+  const u = usability({ savedAtMs: entry?.savedAtMs, nowMs: Date.now(), kind })
+  if (u.usable !== true) return null
+  const payload = unpackPayload(entry, kind)
+  if (payload === null) return null
+  return { payload, ageMs: u.ageMs, stale: u.stale }
+}
+
+/**
+ * 登出时清掉整份读缓存。
+ *
+ * ★ 与待发队列**故意相反**（见 `read-cache.mjs` 的 `shouldClearReadCacheOnLogout`）：
+ *   读缓存里是**服务端的数据**，留着意味着下一个人在共享设备上看到上一个人的对话。
+ *   那是安全问题（不可见、不可撤销），而队列那个只是体验问题（可见、可修）。
+ */
+function clearReadCache() {
+  if (shouldClearReadCacheOnLogout() !== true) return
+  readCache = {}
+  try { localStorage.removeItem(LS_READCACHE) } catch { /* 隐私模式：本来就写不进去 */ }
+}
+
+/**
+ * 画"你正在看的东西是旧的"这一句。
+ *
+ * ★ 按**当前显示的是哪一块**决定说什么。`state.offline` 里两块各自记着
+ *   自己那份数据的年龄（`null` = 这份是实时的）。
+ *   说"消息是旧的"而用户正在看看板，是一句与屏幕无关的话 ——
+ *   而一句与屏幕无关的话，用户读两次之后就再也不读了。
+ */
+function renderOfflineNote() {
+  const host = $('offline-note')
+  if (host === null) return
+  // 看板那一块与消息那一块是互斥的（`showView` 切 `state.view`）。
+  const kind = state.view === 'tasks' ? 'board' : 'messages'
+  const ageMs = state.offline?.[kind]
+  if (ageMs === null || ageMs === undefined) {
+    host.classList.add('hidden')
+    return
+  }
+  const n = offlineNotice({ kind, ageMs, nowMs: Date.now() })
+  host.classList.remove('hidden')
+  host.classList.toggle('error', n.tone === 'error')
+  // 两层键：外层拿 `{ago}`，`ago` 自己是另一句话。两层都是字面量，都翻得到。
+  $('offline-text').textContent = t(n.textKey, { ago: t(n.agoKey, n.agoVars) })
+  $('offline-detail').textContent = t(n.detailKey)
+}
+
+/** 记下/清掉某一块的"这是缓存数据，年龄 N 毫秒"。 */
+function markOffline(kind, ageMs) {
+  if (state.offline === undefined || state.offline === null) state.offline = { messages: null, board: null }
+  state.offline[kind] = Number.isFinite(Number(ageMs)) ? Number(ageMs) : null
+  renderOfflineNote()
 }
 
 /**
@@ -1693,6 +1937,11 @@ async function enterApp(me) {
   // ★ 这里**不**先落主界面：那六个串行请求（空间→任务→提醒→会话→消息）跑完之前
   //   内容区是空的，修复前就是"先亮主区、再 await"，弱网下看起来像卡死。
   //   留在启动屏（它有骨架）直到有东西可显示 —— 顺序是刻意的。
+  //
+  // ★ `userId` 必须在**任何读缓存之前**定下来：它是读缓存键的第一段，
+  //   缺了它 `cacheKey` 会返回 null（于是不缓存 —— 见 `read-cache.mjs` 那段安全判断）。
+  //   修好前它压根没被记录过，所以这一步同时是"新字段的引入点"。
+  state.userId = typeof me?.userId === 'string' && me.userId.length > 0 ? me.userId : null
   $('title').textContent = `Legion · ${me.name ?? ''}`
   // 空间：**由 refreshSpaces 统一解析**（它读 /api/identity/me 的 roles，
   // 并在多于一个时渲染成可切换的下拉框）。原来在这里自己算一次，
@@ -1898,7 +2147,7 @@ async function main() {
       // 已有会话：直接进（令牌可能过期，`api` 会自动刷新一次）。
       try {
         const me = await api('/api/identity/me')
-        await enterApp({ name: me.user?.name })
+        await enterApp({ name: me.user?.name, userId: me.user?.userId })
         return
       } catch (err) {
         if (shouldClearSession(err)) clearSession()
@@ -1908,7 +2157,7 @@ async function main() {
     if (state.refresh !== null && await refreshSession()) {
       try {
         const me = await api('/api/identity/me')
-        await enterApp({ name: me.user?.name })
+        await enterApp({ name: me.user?.name, userId: me.user?.userId })
         return
       } catch (err) {
         if (shouldClearSession(err)) clearSession()

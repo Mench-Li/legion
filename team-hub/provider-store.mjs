@@ -12,6 +12,19 @@
 //   > provider 是实体，model 是它的成员。把成员当成实体来存，
 //   > 与把实体存下来，在只有一个型号的供应商上是同一个东西。
 //
+// ## ★ `runtimeType` 为什么在这里（2026-10-10）
+//
+// 将军："档案必然由供应商与模型来，且添加完**自动生成**档案"。
+// 自动生成缺一个信息：`runtimeType`（"这批模型按哪种协议跑"）。
+// 它原来是**每条档案**各写一遍 —— 而它是**跟这个供应商说话的方式**，
+// 与 `baseURL` / `secretRef` 同一条轴，于是同一次"上移"把它一起移到这里：
+//
+//   · `baseURL` / `secretRef` / `runtimeType` 各自**一份**，在供应商行上；
+//   · 模型档案只声明"我选了哪个模型"，连接信息留空即继承。
+//
+// 它**不是**"又给用户加了一个要填的字段"：新建供应商时面板预填好（今天只有 `dsh` 能跑，
+// 见 `runtime/contracts/model.mjs` 的 `SUPPORTED_RUNTIME_TYPES`），用户可以不动它。
+//
 // ## 方向
 //
 //   DSH 活配置 --导入(P1)--> 本表（`source='dsh-import'`）--物化(P3)--> DSH 活配置
@@ -41,12 +54,39 @@
 // ============================================================================
 
 import { assertAuditClean, ModelError, MODEL_ERRORS } from './model-store.mjs'
+import { ensureColumn as ensureColumnImpl } from './schema-util.mjs'
 
 /** 供应商的来源：`legion` = 用户在指挥台里建的；`dsh-import` = 从 DSH 活配置收进来的。 */
 export const PROVIDER_SOURCES = Object.freeze(['legion', 'dsh-import'])
 
 /** 一条供应商允许出现的字段。**枚举**而不是透传：见文件头的密钥纪律。 */
-const PROVIDER_FIELDS = Object.freeze(['id', 'displayName', 'api', 'baseURL', 'secretRef', 'credentialConfigured', 'models'])
+const PROVIDER_FIELDS = Object.freeze([
+  'id', 'displayName', 'api', 'baseURL', 'secretRef', 'runtimeType', 'credentialConfigured', 'models',
+])
+
+/**
+ * 把一条**读出来的**供应商行收窄成一份**写回去能用**的输入。
+ *
+ * 为什么需要它：`get()` / `list()` 的产物带着簿记字段（`source` / `version` / `createdAtMs` …），
+ * 而 `normalizeProvider` 对未知字段是**拒绝**（那是密钥纪律的一部分，不能放松）。
+ * 于是"读出来、改一个字段、写回去"这个最自然的动作会被自己的校验挡住 ——
+ * 实测踩到：`供应商不合法：未知字段：source, version, createdAtMs…`。
+ *
+ *   > 一个"读出什么就能写回什么"的仓储，
+ *   > 与一个"读出来的形状比能写回去的形状多几个字段"的仓储，
+ *   > 在**只有手工构造输入**的那些路径上是同一个东西 ——
+ *   > 直到有人真的想读改写一次。
+ */
+export function toProviderInput(provider) {
+  if (provider === null || typeof provider !== 'object') {
+    throw new TypeError('toProviderInput 需要一条供应商行')
+  }
+  const out = {}
+  for (const k of PROVIDER_FIELDS) {
+    if (provider[k] !== undefined) out[k] = provider[k]
+  }
+  return out
+}
 
 /**
  * 型号条目里允许保留的字段。
@@ -66,6 +106,7 @@ export function ensureProviderSchema(db) {
       api TEXT,
       base_url TEXT,
       secret_ref TEXT,
+      runtime_type TEXT,
       credential_configured INTEGER NOT NULL DEFAULT 0,
       models_json TEXT NOT NULL DEFAULT '[]',
       source TEXT NOT NULL DEFAULT 'legion',
@@ -75,6 +116,11 @@ export function ensureProviderSchema(db) {
       deleted_at_ms INTEGER
     )
   `)
+  // ★ 老库补列（`runtime_type` 是后加的，见 `PROVIDER_FIELDS` 上方那段注释）。
+  //   走 `schema-util.mjs` 的原子原语而不是 `if (!cols.includes(...)) ALTER`：
+  //   本仓库的部署形态是**两进程同时打开同一个库**，非原子写法会让其中一个在启动期崩掉
+  //   （`schema-util.mjs` 记着那次真实复现）。
+  ensureColumnImpl(db, 'model_providers', 'runtime_type', 'TEXT')
   db.exec('CREATE INDEX IF NOT EXISTS idx_model_providers_live ON model_providers(deleted_at_ms)')
 }
 
@@ -144,6 +190,14 @@ function normalizeProvider(input, dropped) {
     : id
   const api = input.api === undefined || input.api === null || input.api === '' ? null
     : (typeof input.api === 'string' && input.api.trim().length <= 64 ? input.api.trim() : invalid('api 必须是不超过 64 字符的字符串'))
+  // `runtimeType` 与档案同形（可选、非空字符串、≤64）：它是"跟这个供应商说话用哪个运行时"。
+  // ★ 空值**保留为 null**（而不是在这里补默认）：默认值的判定在派生那一侧
+  //   （`profile-derivation.mjs` 的 `resolveRuntimeType`），因为它需要知道
+  //   "当前能跑的运行时是否唯一" —— 那件事不属于仓储。
+  const runtimeType = input.runtimeType === undefined || input.runtimeType === null || input.runtimeType === '' ? null
+    : (typeof input.runtimeType === 'string' && input.runtimeType.trim().length <= 64
+        ? input.runtimeType.trim()
+        : invalid('runtimeType 必须是不超过 64 字符的字符串'))
   const baseURL = normalizeBaseUrl(input.baseURL)
   let secretRef = null
   if (input.secretRef !== undefined && input.secretRef !== null && input.secretRef !== '') {
@@ -158,13 +212,14 @@ function normalizeProvider(input, dropped) {
     api,
     baseURL,
     secretRef,
+    runtimeType,
     credentialConfigured: input.credentialConfigured === true,
     models: normalizeModels(input.models, dropped),
   }
 }
 
 function fingerprint(p) {
-  return JSON.stringify([p.id, p.displayName, p.api, p.baseURL, p.secretRef, p.credentialConfigured, p.models])
+  return JSON.stringify([p.id, p.displayName, p.api, p.baseURL, p.secretRef, p.runtimeType, p.credentialConfigured, p.models])
 }
 
 function rowToProvider(r) {
@@ -180,6 +235,9 @@ function rowToProvider(r) {
     api: r.api ?? null,
     baseURL: r.base_url ?? null,
     secretRef: r.secret_ref ?? null,
+    // 老库里这一列是 NULL（补列时只加了列、没回填）——**保留 null 而不补一个默认值**：
+    // 派生那一侧会用"能跑的运行时是否唯一"来定，那件事这里答不了。
+    runtimeType: r.runtime_type ?? null,
     credentialConfigured: Number(r.credential_configured) === 1,
     models,
     source: r.source,
@@ -260,15 +318,21 @@ export function createProviderStore({ db, clock = () => Date.now(), writeAudit =
     const nowMs = clock()
     for (const p of normalized) {
       const existing = rowToProvider(db.prepare('SELECT * FROM model_providers WHERE id = ?').get(p.id))
-      const next = fingerprint(p)
       if (existing !== null && existing.deletedAtMs === null) {
+        // ★ `runtimeType` **不被快照清掉**：DSH 的目录里没有这个概念（它的 provider 是
+        //   `api`/`baseURL`/`models`），所以快照对这一列**没有意见**。
+        //   直接用 `p.runtimeType`（null）覆盖，会让"从 DSH 再导入一次"把用户选的运行时抹掉
+        //   —— 而指纹判定还会把它读成"内容变了"，于是每次导入都推进一版 version。
+        const rt = p.runtimeType ?? existing.runtimeType ?? null
+        const merged = { ...p, runtimeType: rt }
+        const next = fingerprint(merged)
         if (fingerprint(existing) === next) { unchanged += 1; continue }
         // ★ 只有**内容真的变了**才推进 version。漂移一次就推进一版，
         //   会让 P2 的影子 diff 每轮都报"有人改过"，把真变化淹掉。
         db.prepare(
-          `UPDATE model_providers SET display_name=?, api=?, base_url=?, secret_ref=?, credential_configured=?,
-             models_json=?, source=?, version=version+1, updated_at_ms=? WHERE id=?`,
-        ).run(p.displayName, p.api, p.baseURL, p.secretRef, p.credentialConfigured ? 1 : 0,
+          `UPDATE model_providers SET display_name=?, api=?, base_url=?, secret_ref=?, runtime_type=?,
+             credential_configured=?, models_json=?, source=?, version=version+1, updated_at_ms=? WHERE id=?`,
+        ).run(p.displayName, p.api, p.baseURL, p.secretRef, rt, p.credentialConfigured ? 1 : 0,
           JSON.stringify(p.models), source, nowMs, p.id)
         updated += 1
         continue
@@ -277,19 +341,19 @@ export function createProviderStore({ db, clock = () => Date.now(), writeAudit =
         // 墓碑行重见：**复活**并留痕。删除后再导入同名，是"它又回来了"，
         // 不是"新建"——把两者混起来会让审计里出现两条 created 而中间那次删除消失。
         db.prepare(
-          `UPDATE model_providers SET display_name=?, api=?, base_url=?, secret_ref=?, credential_configured=?,
-             models_json=?, source=?, version=version+1, updated_at_ms=?, deleted_at_ms=NULL WHERE id=?`,
-        ).run(p.displayName, p.api, p.baseURL, p.secretRef, p.credentialConfigured ? 1 : 0,
-          JSON.stringify(p.models), source, nowMs, p.id)
+          `UPDATE model_providers SET display_name=?, api=?, base_url=?, secret_ref=?, runtime_type=?,
+             credential_configured=?, models_json=?, source=?, version=version+1, updated_at_ms=?, deleted_at_ms=NULL WHERE id=?`,
+        ).run(p.displayName, p.api, p.baseURL, p.secretRef, p.runtimeType ?? existing.runtimeType ?? null,
+          p.credentialConfigured ? 1 : 0, JSON.stringify(p.models), source, nowMs, p.id)
         updated += 1
         continue
       }
       db.prepare(
         `INSERT INTO model_providers
-           (id, display_name, api, base_url, secret_ref, credential_configured, models_json, source, version, created_at_ms, updated_at_ms, deleted_at_ms)
-         VALUES (?,?,?,?,?,?,?,?,1,?,?,NULL)`,
-      ).run(p.id, p.displayName, p.api, p.baseURL, p.secretRef, p.credentialConfigured ? 1 : 0,
-        JSON.stringify(p.models), source, nowMs, nowMs)
+           (id, display_name, api, base_url, secret_ref, runtime_type, credential_configured, models_json, source, version, created_at_ms, updated_at_ms, deleted_at_ms)
+         VALUES (?,?,?,?,?,?,?,?,?,1,?,?,NULL)`,
+      ).run(p.id, p.displayName, p.api, p.baseURL, p.secretRef, p.runtimeType,
+        p.credentialConfigured ? 1 : 0, JSON.stringify(p.models), source, nowMs, nowMs)
       created += 1
     }
 
@@ -368,10 +432,10 @@ export function createProviderStore({ db, clock = () => Date.now(), writeAudit =
     if (existing !== null) {
       // ── 墓碑 ⇒ 复活 ──
       db.prepare(
-        `UPDATE model_providers SET display_name=?, api=?, base_url=?, secret_ref=?, credential_configured=?,
-           models_json=?, source=?, version=version+1, updated_at_ms=?, deleted_at_ms=NULL WHERE id=?`,
-      ).run(p.displayName, p.api, p.baseURL, p.secretRef, p.credentialConfigured ? 1 : 0,
-        JSON.stringify(p.models), source, nowMs, p.id)
+        `UPDATE model_providers SET display_name=?, api=?, base_url=?, secret_ref=?, runtime_type=?,
+           credential_configured=?, models_json=?, source=?, version=version+1, updated_at_ms=?, deleted_at_ms=NULL WHERE id=?`,
+      ).run(p.displayName, p.api, p.baseURL, p.secretRef, p.runtimeType ?? existing.runtimeType ?? null,
+        p.credentialConfigured ? 1 : 0, JSON.stringify(p.models), source, nowMs, p.id)
       audit({
         action: 'model-provider.revive', id: p.id, actor,
         detail: { source, previousVersion: existing.version, api: p.api, modelCount: p.models.length, hasCredential: p.secretRef !== null, droppedFields: dropped },
@@ -380,10 +444,10 @@ export function createProviderStore({ db, clock = () => Date.now(), writeAudit =
     }
     db.prepare(
       `INSERT INTO model_providers
-         (id, display_name, api, base_url, secret_ref, credential_configured, models_json, source, version, created_at_ms, updated_at_ms, deleted_at_ms)
-       VALUES (?,?,?,?,?,?,?,?,1,?,?,NULL)`,
-    ).run(p.id, p.displayName, p.api, p.baseURL, p.secretRef, p.credentialConfigured ? 1 : 0,
-      JSON.stringify(p.models), source, nowMs, nowMs)
+         (id, display_name, api, base_url, secret_ref, runtime_type, credential_configured, models_json, source, version, created_at_ms, updated_at_ms, deleted_at_ms)
+       VALUES (?,?,?,?,?,?,?,?,?,1,?,?,NULL)`,
+    ).run(p.id, p.displayName, p.api, p.baseURL, p.secretRef, p.runtimeType,
+      p.credentialConfigured ? 1 : 0, JSON.stringify(p.models), source, nowMs, nowMs)
     audit({ action: 'model-provider.create', id: p.id, actor, detail: { source, api: p.api, modelCount: p.models.length, hasCredential: p.secretRef !== null, droppedFields: dropped } })
     return { provider: get(p.id), revived: false }
   }
@@ -418,6 +482,13 @@ export function createProviderStore({ db, clock = () => Date.now(), writeAudit =
         { statusCode: 409, currentVersion: existing.version })
     }
     const { p, dropped } = normalizeOne({ ...input, id })
+    // ★ `runtimeType` 缺省 ⇒ **保留原值**，不是清空。
+    //
+    //   其余字段是整体替换语义（要改就得把整条发回来），但这一条不同：它在**老行**上
+    //   可能本来就是 NULL（补列时没回填），而"没给"在老客户端/脚本那里读起来是
+    //   "我对它没意见"，不是"我要把它清掉"。清掉它的后果很具体 ——
+    //   下一次自动派生就不知道该给新档案写哪个运行时了，而那正是这一轮要修的东西。
+    const runtimeType = p.runtimeType ?? existing.runtimeType ?? null
     const nowMs = clock()
     const changed = []
     for (const [col, next, prev] of [
@@ -425,12 +496,13 @@ export function createProviderStore({ db, clock = () => Date.now(), writeAudit =
       ['api', p.api, existing.api],
       ['base_url', p.baseURL, existing.baseURL],
       ['secret_ref', p.secretRef, existing.secretRef],
+      ['runtime_type', runtimeType, existing.runtimeType],
       ['models_json', JSON.stringify(p.models), JSON.stringify(existing.models)],
     ]) { if (next !== prev) changed.push(col) }
     db.prepare(
-      `UPDATE model_providers SET display_name=?, api=?, base_url=?, secret_ref=?, credential_configured=?,
-         models_json=?, source=?, version=version+1, updated_at_ms=? WHERE id=?`,
-    ).run(p.displayName, p.api, p.baseURL, p.secretRef, p.credentialConfigured ? 1 : 0,
+      `UPDATE model_providers SET display_name=?, api=?, base_url=?, secret_ref=?, runtime_type=?,
+         credential_configured=?, models_json=?, source=?, version=version+1, updated_at_ms=? WHERE id=?`,
+    ).run(p.displayName, p.api, p.baseURL, p.secretRef, runtimeType, p.credentialConfigured ? 1 : 0,
       JSON.stringify(p.models), source, nowMs, id)
     audit({ action: 'model-provider.update', id, actor, detail: { fields: changed, modelCount: p.models.length, droppedFields: dropped } })
     return get(id)

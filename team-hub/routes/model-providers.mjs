@@ -33,8 +33,10 @@
 // ============================================================================
 
 import { ModelError, MODEL_ERRORS } from '../model-store.mjs'
-import { describeDerivation, matchProviderModels, planProfileDerivation } from '../profile-derivation.mjs'
+import { toProviderInput } from '../provider-store.mjs'
+import { describeDerivation, matchProviderModels, planProfileDerivation, resolveRuntimeType } from '../profile-derivation.mjs'
 import { profileIdFor } from '../model-migration.mjs'
+import { SUPPORTED_RUNTIME_TYPES } from '../../runtime/contracts/model.mjs'
 
 /**
  * @param json         写 JSON 响应的注入件（属于 server.mjs）
@@ -59,12 +61,102 @@ export function createModelProvidersRoutes({
     try { return modelStore.list({ includeDeleted: true }) } catch { return null }
   }
 
+  /**
+   * ★★ 一条供应商落库之后，**立刻**把它清单里的模型补成档案。
+   *
+   * 将军："档案必然由供应商与模型来，且**添加完自动生成**。"
+   * 上一版把这件事做成了一个按钮 —— 那还是把机器已经知道的事交给用户点。
+   *
+   * ## 为什么落在**写路径之后**，而不是"保存供应商时顺手校验一下"
+   *
+   * 派生要读刚写下去的那一行（`runtimeType` 在它身上），所以顺序是
+   * **先写供应商、再派生**。于是就有"供应商写成功、派生失败"这个中间态 ——
+   * 它**不被隐藏**：返回值里带 `profilesDerived`（`ok` / `summary` / `code`），
+   * 面板据此照实说，而不是让用户以为都好了。
+   *
+   *   > 一个"保存成功后安静地什么也没生成"的按钮，
+   *   > 与一个"保存成功且生成完成"的按钮，在用户按下后的那一秒是同一个东西 ——
+   *   > 只不过前者的差别要在第一次派工时才出现。
+   *
+   * @returns `{ok, summary, created?…}`；不可派生时 `ok:false` + `code` + `message`（**不抛**）
+   */
+  const deriveForProvider = (providerId, { actor, requestedRuntimeType = null } = {}) => {
+    if (modelStore === null || typeof modelStore.list !== 'function') {
+      return { ok: false, code: 'DERIVE_UNAVAILABLE', message: '这个中枢没有接档案表，因此没有自动生成模型档案（**什么都没改**）。' }
+    }
+    const provider = providerStore.get(providerId)
+    if (provider === null) {
+      return { ok: false, code: 'PROFILE_NOT_FOUND', message: `供应商 ${providerId} 不在目录里（刚删除？），因此没有生成档案。` }
+    }
+    const resolved = resolveRuntimeType({
+      providerRuntimeType: provider.runtimeType,
+      requested: requestedRuntimeType,
+      supported: SUPPORTED_RUNTIME_TYPES,
+    })
+    if (resolved.ok !== true) return { ok: false, code: resolved.code, message: resolved.message }
+
+    const profiles = modelStore.list({ includeDeleted: true })
+    const plan = planProfileDerivation({
+      provider, profiles, runtimeType: resolved.runtimeType, profileIdOf: profileIdFor,
+    })
+    if (plan.ok !== true) return { ok: false, code: plan.code, message: plan.message }
+
+    const created = []
+    const failed = []
+    for (const input of plan.create) {
+      try {
+        modelStore.create(input, { actor })
+        created.push(input.id)
+      } catch (e) {
+        // 逐条记账：一条撞了不该把已经建好的说成没建。
+        failed.push({ id: input.id, code: e?.code ?? null, message: e?.message ?? String(e) })
+      }
+    }
+    return {
+      ok: true,
+      runtimeType: resolved.runtimeType,
+      runtimeTypeFrom: resolved.from,
+      created,
+      failed,
+      existing: plan.existing.map((e) => e.profileId),
+      conflicts: plan.conflicts,
+      orphaned: plan.orphaned,
+      summary: describeDerivation({
+        ok: true, create: created, existing: plan.existing, conflicts: plan.conflicts, orphaned: plan.orphaned,
+      }),
+    }
+  }
+
+  /**
+   * 把请求里的 `runtimeType` 定下来，**在写库之前**。
+   *
+   * 为什么要在写之前：定不下来时（比如将来有多个能跑的运行时、而用户没选）
+   * 应当是**整次保存被拒**，而不是"供应商写进去了、档案没生成"——
+   * 后者会让目录与档案就此不一致，而用户看到的是"保存成功"。
+   */
+  const resolveIncomingRuntimeType = (input) => resolveRuntimeType({
+    providerRuntimeType: input?.runtimeType,
+    supported: SUPPORTED_RUNTIME_TYPES,
+  })
+
+  /**
+   * 把"定不下运行时"变成一次**具名 400**（而不是一个 500 或一句"保存失败"）。
+   *
+   * 用 `INVALID_PROFILE` 那个既有码：调用方要区分的是「我这次请求有问题」与
+   * 「服务器崩了」，而 `code` 字段已经把具体原因（`DERIVE_RUNTIME_TYPE_AMBIGUOUS`）
+   * 单独带出来了 —— 两件事各占一个字段，不挤在一个字符串里。
+   */
+  const invalidInput = (code, message) => {
+    const err = new ModelError(MODEL_ERRORS.INVALID_PROFILE, message, { statusCode: 400 })
+    err.code = code ?? err.code
+    return err
+  }
+
   const routes = [
     {
       method: 'GET',
       match: 'exact',
-      path: '/api/model-providers',
-      async run(req, res) {
+      path: '/api/model-providers',      async run(req, res) {
         const providers = providerStore.list()
         // ★ 一次列表只问密钥库**一遍**（20 个供应商不该产生 20 次 DPAPI 打开）。
         let snapshot = null
@@ -86,7 +178,18 @@ export function createModelProvidersRoutes({
           }
           return out
         })
-        json(res, 200, { ok: true, providers: enriched, empty: providerStore.isEmpty() })
+        json(res, 200, {
+          ok: true,
+          providers: enriched,
+          empty: providerStore.isEmpty(),
+          // ★ 面板的"运行时"下拉从这里取选项，而不是自己写死一个 `dsh`：
+          //   写死的那一份在**加上第二个适配器的那天**会静默落后，
+          //   而它的表现是"新运行时永远选不到"（看起来像没做这个功能）。
+          runtimeTypes: SUPPORTED_RUNTIME_TYPES.map((id) => ({
+            id,
+            label: id === 'dsh' ? 'dsh（Legion 原生的运行时）' : id,
+          })),
+        })
       },
     },
     {
@@ -101,8 +204,14 @@ export function createModelProvidersRoutes({
         //   是用户的正常动作；拒绝只会逼他发明 `xxx-1` 这种与 DSH 配置 id 不一致的别名。
         //   响应里带 `revived`，好让面板说"已恢复"而不是"已创建"。
         await handleRun(req, res, (body) => {
-          const r = providerStore.create(body.provider ?? body, { actor: body.actor })
-          return { ...r.provider, revived: r.revived }
+          const input = body.provider ?? body
+          // ★ 先把 `runtimeType` 定下来（写库之前）：定不下来就整次拒，不留"供应商在、档案没生成"的中间态。
+          const rt = resolveIncomingRuntimeType(input)
+          if (rt.ok !== true) throw invalidInput(rt.code, rt.message)
+          const r = providerStore.create({ ...input, runtimeType: rt.runtimeType }, { actor: body.actor })
+          // ★★ 添加完**立刻自动生成**模型档案（将军："添加完自动生成供应商档案"）。
+          const profilesDerived = deriveForProvider(r.provider.id, { actor: body.actor, requestedRuntimeType: rt.runtimeType })
+          return { ...r.provider, revived: r.revived, profilesDerived }
         })
       },
     },
@@ -111,9 +220,20 @@ export function createModelProvidersRoutes({
       match: 'exact',
       path: '/api/model-providers/import',
       async run(req, res) {
-        await handleRun(req, res, (body) => providerStore.importSnapshot(body.providers ?? [], {
-          actor: body.actor, source: body.source ?? 'dsh-import',
-        }))
+        await handleRun(req, res, (body) => {
+          const r = providerStore.importSnapshot(body.providers ?? [], {
+            actor: body.actor, source: body.source ?? 'dsh-import',
+          })
+          // ★ 导入也是一次"添加"：从 DSH 收进来的供应商同样要长出档案来。
+          //   否则引导导入之后目录里有一堆供应商、而档案是空的 —— 那正是将军看到的那一幕。
+          //   对**全部**供应商跑一遍（而不是只跑刚变的那几条）：派生本身是幂等的，
+          //   只建缺的；而"只跑变化的那几条"会让一次失败的派生永远修不回来。
+          const derived = r.providers.map((p) => ({
+            providerId: p.id,
+            ...deriveForProvider(p.id, { actor: body.actor, requestedRuntimeType: body.runtimeType ?? null }),
+          }))
+          return { ...r, profilesDerived: derived }
+        })
       },
     },
     {
@@ -131,11 +251,14 @@ export function createModelProvidersRoutes({
         })
       },
     },
-    // ★★ 从供应商派生模型档案（"我还有必要新建档案嘛，直接来源于模型与供应商才对啊"）。
+    // ★★ 从供应商派生模型档案 —— **现在是"补齐/修复"那条路**，不再是正常流程。
     //
-    // 为什么是一个**具名端点**而不是"保存供应商时顺手建"：与 `/import` 同一条理由 ——
-    // 供应商该不该自动长出一堆档案，是一次**用户的决定**，不是一个副作用。
-    // 顺手的后果是"我改了一下模型的显示名，怎么多了三条档案"，而没有任何读数说话。
+    // 2026-10-10 改了定位（将军："档案必然由供应商与模型来，且添加完**自动生成**供应商档案，
+    // 而不是：1.需要手工点生成"）：保存/导入供应商时已经**自动**派生了（见上面的
+    // `deriveForProvider`），所以这个端点剩下两个正当用途：
+    //   · **补历史**：本次改动之前建的供应商还没有档案（它们的那次保存没有这段逻辑）；
+    //   · **修复**：某一次派生部分失败（`failed` 非空），或中枢当时没接档案表。
+    // 它保持幂等（只建缺的），所以"多点一次"没有代价。
     //
     // ★ 位置：必须排在下面那批通配 `prefix` 之前 —— 否则
     //   `/api/model-providers/fjd-ds/derive-profiles` 会被当成 id=`fjd-ds/derive-profiles`
@@ -168,8 +291,30 @@ export function createModelProvidersRoutes({
             throw err
           }
           const profiles = modelStore.list({ includeDeleted: true })
+          // `runtimeType` 缺省时走**供应商自己的**（保存时已经写进去了），
+          // 再退到"唯一能跑的那个"。与自动派生用**同一个** `resolveRuntimeType`。
+          const resolved = resolveRuntimeType({
+            providerRuntimeType: provider.runtimeType,
+            requested: body.runtimeType,
+            supported: SUPPORTED_RUNTIME_TYPES,
+          })
+          if (resolved.ok !== true) throw invalidInput(resolved.code, resolved.message)
+          // ★ 补齐历史供应商时把定下来的运行时**写回那一行**。
+          //
+          //   为什么值得多写一次：这一行是老数据（补列时是 NULL），而"NULL 就用唯一能跑的那个"
+          //   这个判定**只在'唯一'成立时**才对。今天只有 `dsh`，所以它成立；
+          //   加上第二个适配器的那一天，这一行就会突然变成"说不清"——
+          //   而现在写下它，那一天来临时这些行已经是明确的。
+          //
+          //   > 一个"每次读的时候重新推断同一个结论"的实现，
+          //   > 与一个"推断一次并记下来"的实现，在推断规则不变时是同一个东西 ——
+          //   > 只不过规则变的那一天，前者会让一批老行同时失去答案。
+          if (provider.runtimeType === null && body.dryRun !== true) {
+            providerStore.update(id, { ...toProviderInput(provider), runtimeType: resolved.runtimeType },
+              { actor: body.actor, version: provider.version })
+          }
           const plan = planProfileDerivation({
-            provider, profiles, runtimeType: body.runtimeType, profileIdOf: profileIdFor,
+            provider, profiles, runtimeType: resolved.runtimeType, profileIdOf: profileIdFor,
           })
           if (plan.ok !== true) {
             // 「没算出计划」不能被表示成「建了 0 条」：那是两件不同的事。
@@ -217,7 +362,27 @@ export function createModelProvidersRoutes({
       async run(req, res, { path }) {
         const id = decodeURIComponent(path.slice('/api/model-providers/'.length))
         if (id === '') { json(res, 400, { ok: false, error: '缺少供应商 id', code: 'MISSING_PARAM' }); return }
-        await handleRun(req, res, (body) => providerStore.update(id, body.provider ?? body, { actor: body.actor, version: body.version }))
+        await handleRun(req, res, (body) => {
+          const input = body.provider ?? body
+          // 改的时候没给 `runtimeType` ⇒ **保留原来那个**（老行上它可能是 NULL）。
+          // 这一条与 `providerStore.update` 里的 `?? existing.runtimeType` 是同一条规则，
+          // 在这里再取一次是为了让"定不下来的运行时"能在**写库之前**被拒。
+          const existing = providerStore.get(id)
+          const rt = existing === null
+            ? resolveIncomingRuntimeType(input)
+            : (() => {
+                const r = resolveRuntimeType({
+                  providerRuntimeType: input.runtimeType ?? existing.runtimeType,
+                  supported: SUPPORTED_RUNTIME_TYPES,
+                })
+                return r
+              })()
+          if (rt.ok !== true) throw invalidInput(rt.code, rt.message)
+          const updated = providerStore.update(id, { ...input, runtimeType: rt.runtimeType }, { actor: body.actor, version: body.version })
+          // ★ 改了清单（比如加了一个模型）⇒ 新模型**立刻**有档案；去掉的模型只**报**不删。
+          const profilesDerived = deriveForProvider(id, { actor: body.actor, requestedRuntimeType: rt.runtimeType })
+          return { ...updated, profilesDerived }
+        })
       },
     },
     {

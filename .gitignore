@@ -105,3 +105,14 @@ scratch/
 
 # check-pwa.sh 的产物（运行时生成，不入库）
 .pwa-check/
+
+# 中枢数据库与它的一切副本（运行期生成；库里有业务数据）
+#
+# 实测 2026-10-10：`git add -A -- team-hub` 把 7 个 `team.db.bak-t*` / `-shm` / `-wal`
+# 扫进了一次提交 —— 它们是排查时的临时副本、单个 33MB，而这里原本**一条都没有**。
+# 与 BUG-013 那次「34MB 的 .bak 差点被打进公开安装包」是同一类事。
+# `team.db` 本身一直没被跟踪，所以这三条补的是副本与 SQLite 的旁文件。
+team-hub/team.db
+team-hub/team.db.*
+team-hub/team.db-*
+

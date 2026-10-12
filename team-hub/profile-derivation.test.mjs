@@ -12,8 +12,9 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 
-import { DERIVE_CODES, DERIVE_CONFLICT_REASONS, describeDerivation, planProfileDerivation } from './profile-derivation.mjs'
+import { DERIVE_CODES, DERIVE_CONFLICT_REASONS, describeDerivation, planProfileDerivation, resolveRuntimeType } from './profile-derivation.mjs'
 import { profileIdFor } from './model-migration.mjs'
+import { SUPPORTED_RUNTIME_TYPES } from '../runtime/contracts/model.mjs'
 
 const PROVIDER = Object.freeze({
   id: 'fjd-ds',
@@ -139,4 +140,57 @@ test('⑪ 读数是一句话，且把"未动"说清楚（不许读成"已清理"
   assert.match(text, /未动/, '★ 用户必须看得出"这几条我没动"')
   assert.match(describeDerivation({ ok: false, message: 'x' }), /派生未执行/)
   assert.match(describeDerivation(null), /派生未执行/)
+})
+
+// ---------------------------------------------------------------------------
+// 运行时类型：**只有恰好一个候选时**才允许替用户定
+//
+// 这是"添加完自动生成档案"唯一的障碍：派生需要 `runtimeType`。
+// 把默认值随便给一个，就是 `model-migration.mjs` 那条纪律说的"猜错会让请求
+// 以错误的协议发出去"；而**只有一个能跑的时候**，选它不需要用户任何信息。
+// ---------------------------------------------------------------------------
+
+test('★★ ⑫ 供应商自己有 ⇒ 用它（第一顺位，连"唯一候选"都不用判）', () => {
+  const r = resolveRuntimeType({ providerRuntimeType: 'dsh', requested: 'openai-compatible', supported: SUPPORTED_RUNTIME_TYPES })
+  assert.deepEqual(r, { ok: true, runtimeType: 'dsh', from: 'provider' })
+})
+
+test('★★ ⑬ 供应商没有、请求里有 ⇒ 用它（第二顺位）', () => {
+  const r = resolveRuntimeType({ providerRuntimeType: null, requested: 'openai-compatible', supported: ['dsh'] })
+  assert.deepEqual(r, { ok: true, runtimeType: 'openai-compatible', from: 'request' })
+})
+
+test('★★★ ⑭ 两个都没有、而**只有一个能跑** ⇒ 用它，并留下 `only-supported` 这个出处', () => {
+  // 依据是 `runtime/contracts/model.mjs` 的 `SUPPORTED_RUNTIME_TYPES`：
+  // Legion 今天只有一个适配器，`server.mjs` 的模型覆盖检查也只接受 dsh。
+  const r = resolveRuntimeType({ supported: SUPPORTED_RUNTIME_TYPES })
+  assert.deepEqual(r, { ok: true, runtimeType: 'dsh', from: 'only-supported' })
+  assert.equal(SUPPORTED_RUNTIME_TYPES.length, 1, '这条判据的前提就是"只有一个"；多于一个时下面那条会响')
+})
+
+test('★★★ ⑮ **有第二个能跑的运行时 ⇒ 必须拒绝**（那时"挑第一个"就是猜）', () => {
+  const r = resolveRuntimeType({ supported: ['dsh', 'codex'] })
+  assert.equal(r.ok, false)
+  assert.equal(r.code, DERIVE_CODES.RUNTIME_TYPE_AMBIGUOUS)
+  assert.match(r.message, /多个能跑的运行时/)
+  assert.match(r.message, /我没选过/, '要说明为什么不能替你选')
+  // 与"一个候选都没有"分开报：两者的修法不同
+  const none = resolveRuntimeType({ supported: [] })
+  assert.equal(none.ok, false)
+  assert.equal(none.code, DERIVE_CODES.RUNTIME_TYPE_REQUIRED)
+})
+
+test('⑯ 空白串当作"没给"（否则一个空格会静默变成一个运行时名）', () => {
+  assert.deepEqual(resolveRuntimeType({ providerRuntimeType: '  ', requested: '   ', supported: ['dsh'] }),
+    { ok: true, runtimeType: 'dsh', from: 'only-supported' })
+})
+
+test('⑰ `supported` 里的重复项与空项不改变"是否唯一"的判定', () => {
+  assert.equal(resolveRuntimeType({ supported: ['dsh', 'dsh', '', '  ', null] }).ok, true)
+  assert.equal(resolveRuntimeType({ supported: ['dsh', 'dsh', '', '  ', null] }).runtimeType, 'dsh')
+})
+
+test('⑱ 坏输入：没给 `supported` ⇒ 构造期就拒绝（"没判断过"不许被当成"唯一"）', () => {
+  assert.throws(() => resolveRuntimeType({}), /supported/)
+  assert.throws(() => resolveRuntimeType({ supported: 'dsh' }), /supported/)
 })

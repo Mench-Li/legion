@@ -384,121 +384,198 @@ test('⑰ ★ 没有引用名的供应商 ⇒ `none`（不是错误，也不需�
 })
 
 // ============================================================================
-// 从供应商派生档案 —— "我还有必要新建档案嘛，直接来源于模型与供应商才对啊"
+// 档案**自动**由供应商与模型生成 —— 将军的两次原话
 //
-// 档案**必须存在**（岗位绑定与 Run 历史要一个稳定的引用），但**不该手工新建**：
-// provider/model/displayName/id 全都能从"供应商 + 它清单里的第几个模型"算出来。
+//   第一次："我还有必要新建档案嘛，直接来源于模型与供应商才对啊"
+//   第二次："档案必然由供应商与模型来，且**添加完自动生成**供应商档案，
+//            而不是：1.需要手工点生成；2.在模型档案这要手工填写"
+//
+// 所以这一节的主判据是"**保存完就有了**"，而不是"有一个能用的生成端点"。
+// 手工端点退化成**补历史 / 修复**那条路（幂等，多点一次没有代价）。
 // ============================================================================
 
-test('⑱ ★★ 列表里每个供应商带 `profiles.missing`（还有几个模型没有档案）', async () => {
-  const r = await get('/api/model-providers')
-  const fjd = r.body.providers.find((p) => p.id === 'fjd-ds')
-  assert.ok(fjd.profiles, '面板要靠这一列说话；没有它用户只能一条条自己数')
-  assert.equal(fjd.profiles.existing, 0, '这一套里还没建过档案')
-  // 夹具（本文件顶部的 `SNAPSHOT`）里 fjd-ds 是 **2** 个模型；真实库里是 3 个。按夹具写。
-  assert.equal(fjd.profiles.missing, 2, 'fjd-ds 的夹具清单里有 2 个模型')
-  assert.equal(typeof fjd.profiles.orphaned, 'number')
-})
-
-test('⑲ ★★ dryRun：给出计划但**一条都不写**（先看计划再落笔）', async () => {
-  const r = await post('/api/model-providers/fjd-ds/derive-profiles', { actor: 'general', runtimeType: 'dsh', dryRun: true })
+test('⑱ ★★★ 保存供应商 ⇒ 它的模型**立刻**有档案（不用点任何按钮）', async () => {
+  const r = await post('/api/model-providers', {
+    actor: 'general',
+    provider: { id: 'auto-15', displayName: '自动', baseURL: 'https://auto.example/v1', models: [{ id: 'a' }, { id: 'b' }] },
+  })
   assert.equal(r.status, 200, JSON.stringify(r.body))
-  assert.equal(r.body.dryRun, true)
-  assert.equal(r.body.plan.create.length, 2)
-  assert.match(r.body.summary, /新增 2/)
-  // ★ 真的没写：档案列表仍然是空的
-  const after = await get('/api/model-profiles')
-  assert.equal(after.body.profiles.length, 0, '★ dryRun 不许写任何东西')
-})
+  // 响应里就带着这件事的读数（面板据此说话，而不是让用户自己去档案页数）
+  assert.equal(r.body.profilesDerived.ok, true, JSON.stringify(r.body.profilesDerived))
+  assert.equal(r.body.profilesDerived.created.length, 2, '★ 两条模型 ⇒ 两条档案，**这一次请求就完成**')
+  assert.match(r.body.profilesDerived.summary, /新增 2/)
+  assert.equal(r.body.runtimeType, 'dsh', '运行时由服务端定下来并**记在供应商行上**（不是每条档案猜一遍）')
 
-test('⑳ ★★ 真跑：建出三条，且 `endpoint`/`secretRef` **留空**（留空即继承供应商）', async () => {
-  const r = await post('/api/model-providers/fjd-ds/derive-profiles', { actor: 'general', runtimeType: 'dsh' })
-  assert.equal(r.status, 200, JSON.stringify(r.body))
-  assert.equal(r.body.created.length, 2, JSON.stringify(r.body))
-  assert.deepEqual(r.body.conflicts, [])
-  const after = await get('/api/model-profiles')
-  const rows = after.body.profiles
+  const rows = (await get('/api/model-profiles')).body.profiles.filter((p) => p.provider === 'auto-15')
   assert.equal(rows.length, 2)
   for (const p of rows) {
-    assert.equal(p.provider, 'fjd-ds')
     assert.equal(p.runtimeType, 'dsh')
-    // ★★ 派生的档案不许抄一份供应商的连接信息进去 —— 那正是上一轮刚收敛掉的重复
-    assert.equal(p.endpoint, null, `${p.id} 的 endpoint 必须留空（留空即继承供应商）`)
-    assert.equal(p.hasCredential, false, `${p.id} 不该自带凭证引用`)
-    assert.match(p.displayName, /^FJD · /, '显示名按"供应商显示名 · 模型"')
+    assert.equal(p.endpoint, null, '★ 地址留空 ⇒ 继承供应商（不抄第二份）')
+    assert.equal(p.hasCredential, false, '★ 凭证引用同理')
   }
 })
 
-test('㉑ ★★ 幂等：再跑一遍 ⇒ 新增 0 / 已存在 3，且**已有档案一个字都没变**', async () => {
-  const before = await get('/api/model-profiles')
-  const snapshot = before.body.profiles.map((p) => ({ id: p.id, version: p.version, displayName: p.displayName }))
-  const r = await post('/api/model-providers/fjd-ds/derive-profiles', { actor: 'general', runtimeType: 'dsh' })
-  assert.equal(r.status, 200)
-  assert.equal(r.body.created.length, 0)
-  assert.equal(r.body.existing.length, 2)
-  assert.match(r.body.summary, /新增 0/)
-  const after = await get('/api/model-profiles')
+test('⑲ ★★★ 改供应商加一个模型 ⇒ **只有新模型**多出档案，老档案一个字都不动', async () => {
+  const before = (await get('/api/model-profiles')).body.profiles
+  const snapshot = before.map((p) => ({ id: p.id, version: p.version }))
+  const cur = (await get('/api/model-providers')).body.providers.find((p) => p.id === 'auto-15')
+  const r = await post('/api/model-providers/auto-15', {
+    actor: 'general', version: cur.version,
+    provider: { id: 'auto-15', displayName: '自动', baseURL: 'https://auto.example/v1', models: [{ id: 'a' }, { id: 'b' }, { id: 'c' }] },
+  })
+  assert.equal(r.status, 200, JSON.stringify(r.body))
+  assert.deepEqual(r.body.profilesDerived.created, ['auto-15.c'], '只建缺的那一条')
+  assert.equal(r.body.profilesDerived.existing.length, 2)
+  const after = (await get('/api/model-profiles')).body.profiles
   assert.deepEqual(
-    after.body.profiles.map((p) => ({ id: p.id, version: p.version, displayName: p.displayName })),
+    after.filter((p) => p.provider !== 'auto-15' || p.model !== 'c').map((p) => ({ id: p.id, version: p.version })),
     snapshot,
-    '★ 已存在的档案连 version 都不该动（派生只 create，不改）',
+    '★ 已存在的档案连 version 都不该动（自动派生只 create，不改）',
   )
 })
 
-test('㉒ ★★ 没给 runtimeType ⇒ 400 DERIVE_RUNTIME_TYPE_REQUIRED，且**不猜也不写**', async () => {
-  const before = (await get('/api/model-profiles')).body.profiles.length
-  const r = await post('/api/model-providers/svea-ds/derive-profiles', { actor: 'general' })
-  assert.equal(r.status, 400, JSON.stringify(r.body))
-  assert.equal(r.body.code, 'DERIVE_RUNTIME_TYPE_REQUIRED')
-  assert.match(r.body.error, /不猜|第一次运行才失败/)
-  assert.equal((await get('/api/model-profiles')).body.profiles.length, before, '★ 拒绝时不许写任何东西')
+test('⑳ ★★ 派生的档案：地址与凭证**留空继承**，显示名按"供应商 · 模型"', async () => {
+  const rows = (await get('/api/model-profiles')).body.profiles.filter((p) => p.provider === 'auto-15')
+  assert.equal(rows.length, 3)
+  for (const p of rows) {
+    assert.equal(p.endpoint, null, `${p.id} 的 endpoint 必须留空（留空即继承供应商）`)
+    assert.equal(p.hasCredential, false, `${p.id} 不该自带凭证引用`)
+    assert.match(p.displayName, /^自动 · /)
+  }
 })
 
-test('㉓ ★★ 路由顺序：`/derive-profiles` **不能**被通配 id 吞掉（否则 id 会变成 `X/derive-profiles`）', async () => {
+test('㉑ ★★ 幂等：对同一个供应商再跑一次"补齐" ⇒ 新增 0，已有档案连 version 都不动', async () => {
+  const before = (await get('/api/model-profiles')).body.profiles
+  const snapshot = before.map((p) => ({ id: p.id, version: p.version }))
+  const r = await post('/api/model-providers/auto-15/derive-profiles', { actor: 'general' })
+  assert.equal(r.status, 200, JSON.stringify(r.body))
+  assert.equal(r.body.created.length, 0)
+  assert.equal(r.body.existing.length, 3)
+  assert.match(r.body.summary, /新增 0/)
+  const after = (await get('/api/model-profiles')).body.profiles
+  assert.deepEqual(after.map((p) => ({ id: p.id, version: p.version })), snapshot)
+})
+
+test('㉒ ★★★ 保存时不给 `runtimeType` 也照样自动生成（只有唯一能跑的运行时 ⇒ 这不是猜）', async () => {
+  // 面板/脚本不会总是带这个字段；而 Legion 只有 `dsh` 一个适配器
+  // （`runtime/contracts/model.mjs` 的 `SUPPORTED_RUNTIME_TYPES`）⇒ 选它不需要用户任何信息。
+  const r = await post('/api/model-providers', {
+    actor: 'general',
+    provider: { id: 'auto-rt-15', displayName: 'RT', baseURL: 'https://rt.example/v1', models: [{ id: 'm' }] },
+  })
+  assert.equal(r.status, 200, JSON.stringify(r.body))
+  assert.equal(r.body.runtimeType, 'dsh')
+  assert.equal(r.body.profilesDerived.created.length, 1)
+  // `runtimeTypeFrom` 在**创建**这条路上是 `provider`：路由先在写库前定值、写进那一行，
+  // 派生再读那一行。`only-supported` 出现在**补齐历史行**那条路上（见 ㉔）。
+  assert.equal(r.body.profilesDerived.runtimeTypeFrom, 'provider', '读数要说明这个值是哪来的')
+})
+
+test('㉓ ★★★ 导入（从运行环境收进来）同样**自动生成** —— 否则引导之后目录一堆、档案为空', async () => {
+  // 这正是将军那台机器上的那一幕：供应商 4 个、档案只有 3 条（都是更早那条路建的）。
+  const r = await post('/api/model-providers/import', {
+    actor: 'general',
+    providers: [{
+      id: 'imported-15', displayName: '导入的', api: 'openai-completions',
+      baseURL: 'https://imp.example/v1', secretRef: 'IMPORTED_KEY_15', credentialConfigured: true,
+      models: [{ id: 'i1' }, { id: 'i2' }],
+    }],
+  })
+  assert.equal(r.status, 200, JSON.stringify(r.body))
+  assert.equal(r.body.created, 1)
+  const one = r.body.profilesDerived.find((d) => d.providerId === 'imported-15')
+  assert.ok(one, '导入的供应商也要出现在派生读数里')
+  assert.equal(one.created.length, 2, '★ 导入完就有两条档案，不用再点')
+  const rows = (await get('/api/model-profiles')).body.profiles.filter((p) => p.provider === 'imported-15')
+  assert.equal(rows.length, 2)
+})
+
+test('㉔ ★★ 老供应商（本轮之前建的、没有 runtimeType）⇒ 走"补齐"这条路，且先给计划再落笔', async () => {
+  // 模拟历史数据：直接插一行**没有 runtime_type** 的供应商，且没有任何档案。
+  // 这是真实部署里那 4 个供应商的样子（它们的"保存"发生在这段逻辑存在之前）。
+  mod.db.prepare(
+    `INSERT INTO model_providers (id, display_name, api, base_url, secret_ref, runtime_type, credential_configured,
+       models_json, source, version, created_at_ms, updated_at_ms, deleted_at_ms)
+     VALUES ('legacy-15','历史', 'openai-completions','https://legacy.example/v1', NULL, NULL, 0,
+       '[{"id":"l1"},{"id":"l2"}]','dsh-import',1,?,?,NULL)`,
+  ).run(Date.now(), Date.now())
+
+  // ① 列表如实报"还缺 2 个"（面板据此提示"补齐"）
+  const fjd = (await get('/api/model-providers')).body.providers.find((p) => p.id === 'legacy-15')
+  assert.equal(fjd.profiles.missing, 2, '缺的数目要说出来，否则用户不知道还有没有没生成的')
+  assert.equal(fjd.profiles.existing, 0)
+
+  // ② dryRun 给计划，但**一条都不写**
+  const before = (await get('/api/model-profiles')).body.profiles.length
+  const dry = await post('/api/model-providers/legacy-15/derive-profiles', { actor: 'general', dryRun: true })
+  assert.equal(dry.status, 200, JSON.stringify(dry.body))
+  assert.equal(dry.body.plan.create.length, 2)
+  assert.match(dry.body.summary, /新增 2/)
+  assert.equal((await get('/api/model-profiles')).body.profiles.length, before, '★ dryRun 不许写任何东西')
+
+  // ③ 真补齐：新增 2，且运行时被**写回供应商行**（这一行本来是 NULL）
+  const ran = await post('/api/model-providers/legacy-15/derive-profiles', { actor: 'general' })
+  assert.equal(ran.status, 200, JSON.stringify(ran.body))
+  assert.equal(ran.body.created.length, 2)
+  const rows = (await get('/api/model-profiles')).body.profiles.filter((p) => p.provider === 'legacy-15')
+  assert.equal(rows.length, 2)
+  const after = (await get('/api/model-providers')).body.providers.find((p) => p.id === 'legacy-15')
+  assert.equal(after.profiles.missing, 0)
+  assert.equal(after.runtimeType, 'dsh',
+    '★ 补历史时把推断出来的运行时**记在行上**：否则加上第二个适配器的那天，这批 NULL 行会同时"说不清"')
+})
+
+test('㉕ ★★ 路由顺序：`/derive-profiles` **不能**被通配 id 吞掉（否则 id 会变成 `X/derive-profiles`）', async () => {
   // 位置对了 ⇒ 供应商不存在时是干净的 404「没有这个模型供应商」
-  const missing = await post('/api/model-providers/never-existed-15/derive-profiles', { actor: 'general', runtimeType: 'dsh' })
+  const missing = await post('/api/model-providers/never-existed-15/derive-profiles', { actor: 'general' })
   assert.equal(missing.status, 404, JSON.stringify(missing.body))
   assert.match(String(missing.body.error), /没有这个模型供应商/)
   assert.equal(String(missing.body.error).includes('derive-profiles'), false,
     '★ 错误信息里出现 derive-profiles ⇒ 它被当成 id 去 update 了（顺序反了）')
-  // 404 而不是被 update 的 409/400：这条路由确实排在通配之前
-  const slash = await post('/api/model-providers/a%2Fb/derive-profiles', { actor: 'general', runtimeType: 'dsh' })
+  const slash = await post('/api/model-providers/a%2Fb/derive-profiles', { actor: 'general' })
   assert.equal(slash.status, 400)
   assert.equal(slash.body.code, 'BAD_ID_ENCODING')
 })
 
-test('㉔ ★★ 算出来的 id 被**另一个模型**占用 ⇒ 报冲突、跳过、不覆盖别人的档案', async () => {
-  await post('/api/model-providers', {
-    actor: 'general',
-    provider: { id: 'derive-c-15', displayName: 'C', baseURL: 'https://c.example/v1', models: [{ id: 'x' }] },
-  })
-  // 手工建一条 id 恰好是派生 id、但配的是**别的模型**的档案
+test('㉖ ★★ 算出来的 id 被**另一个模型**占用 ⇒ 报冲突、跳过、不覆盖别人的档案（自动那条路也一样）', async () => {
+  // 先手工占住那个 id：`derive-c-15.x` 属于**别的**模型
   await post('/api/model-profiles', {
     actor: 'general',
     profile: { id: 'derive-c-15.x', displayName: '别的', runtimeType: 'dsh', provider: 'derive-c-15', model: 'other' },
   })
-  const r = await post('/api/model-providers/derive-c-15/derive-profiles', { actor: 'general', runtimeType: 'dsh' })
+  // 再建供应商，它的模型 `x` 会折叠到同一个 id
+  const r = await post('/api/model-providers', {
+    actor: 'general',
+    provider: { id: 'derive-c-15', displayName: 'C', baseURL: 'https://c.example/v1', models: [{ id: 'x' }] },
+  })
   assert.equal(r.status, 200, JSON.stringify(r.body))
-  assert.equal(r.body.created.length, 0)
-  assert.equal(r.body.conflicts.length, 1)
-  assert.equal(r.body.conflicts[0].reason, 'ID_TAKEN_BY_OTHER')
-  // 那条被占用的档案仍然是它自己
+  assert.equal(r.body.profilesDerived.created.length, 0, '★ 自动派生也不许覆盖别人的档案')
+  assert.equal(r.body.profilesDerived.conflicts.length, 1)
+  assert.equal(r.body.profilesDerived.conflicts[0].reason, 'ID_TAKEN_BY_OTHER')
   const rows = (await get('/api/model-profiles')).body.profiles
   const taken = rows.find((p) => p.id === 'derive-c-15.x')
   assert.equal(taken.model, 'other', '★ 绝不能把别人的档案改写成 x')
+  // 冲突**不静默**：列表上仍然显示"缺 1"，用户点"补齐"还是同一条冲突读数
+  const p = (await get('/api/model-providers')).body.providers.find((x) => x.id === 'derive-c-15')
+  assert.equal(p.profiles.missing, 1)
 })
 
-test('㉕ ★ 供应商清单里没有的模型 ⇒ 只报 `orphaned`，**绝不自动删**', async () => {
-  // 把 derive-c-15 的清单换成 y（x 那条档案就"孤儿"了）
+test('㉗ ★ 供应商清单里没有的模型 ⇒ 只报 `orphaned`，**绝不自动删**', async () => {
   const cur = (await get('/api/model-providers')).body.providers.find((p) => p.id === 'derive-c-15')
   await post('/api/model-providers/derive-c-15', {
     actor: 'general', version: cur.version,
     provider: { id: 'derive-c-15', displayName: 'C', baseURL: 'https://c.example/v1', models: [{ id: 'y' }] },
   })
-  const r = await post('/api/model-providers/derive-c-15/derive-profiles', { actor: 'general', runtimeType: 'dsh' })
-  assert.equal(r.status, 200, JSON.stringify(r.body))
-  assert.deepEqual(r.body.orphaned.map((o) => o.model), ['other'])
-  assert.match(r.body.summary, /未动/)
+  const p = (await get('/api/model-providers')).body.providers.find((x) => x.id === 'derive-c-15')
+  assert.equal(p.profiles.orphaned, 1, '孤儿要在列表上看得见')
+  assert.match(p.credential !== undefined ? 'x' : 'y', /x|y/)   // 这一行只是保证上面那次 update 成功
   const rows = (await get('/api/model-profiles')).body.profiles
-  assert.ok(rows.some((p) => p.model === 'other'), '★ 孤儿档案必须还在（删是不可逆方向的动作，该由人决定）')
+  assert.ok(rows.some((x) => x.provider === 'derive-c-15' && x.model === 'other'),
+    '★ 清单里没有的模型对应的档案必须还在（删是不可逆方向的动作，该由人决定）')
+})
+
+test('㉘ ★★ 列表带 `runtimeTypes`（面板的下拉从这里取，不写死一个 dsh）', async () => {
+  const r = await get('/api/model-providers')
+  assert.ok(Array.isArray(r.body.runtimeTypes), '没有它面板只能自己写死，而写死的那份会在加第二个适配器时静默落后')
+  assert.ok(r.body.runtimeTypes.some((t) => t.id === 'dsh'))
 })

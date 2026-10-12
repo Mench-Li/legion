@@ -37,8 +37,8 @@
 // ============================================================================
 
 import { asHubError } from './hub-errors.ts'
-import { chainView, fieldErrorFrom, importPlanView, probeBadge } from './modelSettings.ts'
-import type { ChainEntryLike, ChainEntryView, ImportPlanLike, ImportPlanView, ProbeBadge, ProbeVerdictLike } from './modelSettings.ts'
+import { chainView, fieldErrorFrom, probeBadge } from './modelSettings.ts'
+import type { ChainEntryLike, ChainEntryView, ProbeBadge, ProbeVerdictLike } from './modelSettings.ts'
 
 /** 从任意值里取一个非空字符串，否则 `null`（**不把 0 / false 转成字符串**）。 */
 function str(v: unknown): string | null {
@@ -514,10 +514,9 @@ export function secretStatusView(status: unknown): SecretStatusView {
 /**
  * `POST /api/config-bundle/plan` 的计划视图。
  *
- * 与 `modelSettings.ts` 的 `importPlanView` **不是**同一份计划：那边是
- * `model-migration.mjs` 的 `toCreate/toUpdate/refused`，这边是
- * `runtime/contracts/config-bundle.mjs` 的 `actions/summary`。两份都读一遍
- * 才是"看得懂"的，混用会让字段名对不上而**静默**少列一行。
+ * 它读的是 `runtime/contracts/config-bundle.mjs` 的 `actions/summary`。
+ * （这里原本还有一句"与 `modelSettings.ts` 的 `importPlanView` 不是同一份计划"——
+ * 那个函数服务的是「配置迁移」，2026-10-12 随它一起删了，见 `docs/bugs/BUG-026`。）
  *
  * 两个容易漏的点：
  *   · `keptLocal`（策略 `keep` 下因为内容不同被跳过）与 `conflicts` 相加
@@ -586,13 +585,9 @@ export function bundlePlanView(plan: unknown, applicable: unknown): BundlePlanVi
   }
 }
 
-/** 迁移计划的视图：**复用** `modelSettings.ts` 的 `importPlanView`（同一份后端计划形状）。 */
-export function migrationPlanView(plan: unknown): ImportPlanView {
-  // `planModelMigration` 的产物就是 `ImportPlanLike`：`toCreate`/`toBind`/
-  // `needsAttention`/`refused`/`conflicts`/`ok`/`code`/`message`。
-  // 这里只做一次形状收窄，**不重新解释字段**——两份读法必然漂移。
-  return importPlanView(obj(plan) as ImportPlanLike | null)
-}
+// ★ 2026-10-12：`migrationPlanView` 已删除 —— 「配置迁移」整个功能被拆掉了
+//   （它把 `agent_models` 搬成岗位绑定，而绑定当时没有活的消费者；那批意图已用一次迁移
+//   搬完，消费者也接上了 `plugins/src/dispatchModel.ts`）。理由见 `docs/bugs/BUG-026`/`BUG-027`。
 
 // ────────────────────────── ⑤ 改档案时「留空 secretRef」到底意味着什么
 

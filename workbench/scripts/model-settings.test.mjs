@@ -20,7 +20,7 @@ import { test, describe } from 'node:test'
 import assert from 'node:assert/strict'
 
 import {
-  chainView, fieldErrorFrom, importPlanView, probeBadge, profileRowView, suggestCandidates,
+  chainView, fieldErrorFrom, probeBadge, profileRowView, suggestCandidates,
 } from '../src/modelSettings.ts'
 
 const verdicts = (over = {}) => ({ ok: false, code: 'AUTH_FAILED', class: 'config', ...over })
@@ -248,89 +248,8 @@ describe('⑥ fallback 链：不可用的候选也要显示，并带上原因', 
   })
 })
 
-describe('⑦ 导入计划：拒绝优先，跳过也要说', () => {
-  test('**拒绝优先**：包不可用时不再列"将会更新 N 项"（那会让人以为反正能导）', () => {
-    const v = importPlanView({
-      ok: false, message: '包里含密钥字段，已拒绝导入', toUpdate: ['a', 'b', 'c'],
-    })
-    assert.equal(v.ok, false)
-    assert.match(v.blocked, /含密钥/)
-    assert.deepEqual(v.lines, [], '被拒绝时不该再列变更项')
-    assert.equal(v.needsConfirm, false)
-  })
-
-  test('可用时把新建/更新/**保留本机**都列出来', () => {
-    const v = importPlanView({ ok: true, toCreate: ['a'], toUpdate: ['b', 'c'], keptLocal: ['x'] })
-    assert.equal(v.ok, true)
-    assert.equal(v.needsConfirm, true)
-    assert.ok(v.lines.some((l) => /新建 1/.test(l)))
-    assert.ok(v.lines.some((l) => /更新 2/.test(l)))
-    // 跳过的必须说出来，否则用户以为导入把一切都覆盖了
-    assert.ok(v.lines.some((l) => /保留本机现有设置 1/.test(l)), v.lines.join(' | '))
-  })
-
-  test('冲突数被与"更新"分开报（冲突不等于会更新）', () => {
-    const v = importPlanView({ ok: true, toUpdate: ['b'], conflicts: ['x', 'y'] })
-    assert.ok(v.lines.some((l) => /冲突 2/.test(l)))
-  })
-
-  test('没有任何变更时**不需要确认**（别让用户点一个什么也不做的按钮）', () => {
-    const v = importPlanView({ ok: true, toCreate: [], toUpdate: [] })
-    assert.equal(v.needsConfirm, false)
-    assert.match(v.headline, /没有需要变更的内容/)
-  })
-
-  test('没有计划时不崩，并要求先选文件', () => {
-    for (const bad of [null, undefined]) {
-      const v = importPlanView(bad)
-      assert.equal(v.ok, false)
-      assert.match(v.blocked, /先选择/)
-    }
-  })
-
-  test('**被拒绝的行必须说出来**（否则一次静默的部分导入看起来像全成功）', () => {
-    // 后端形状：`ok: true` 与 `refused` 非空**可以同时成立**——
-    // `model-migration.mjs` 只在"源里出现密钥"时才因 refused 拒绝整个计划，
-    // 单纯的行级拒绝（不是对象、档案字段非法）会与 OK 并存。
-    // 之前 `importPlanView` 读了 `refused` 却从不使用（TS6133 指的就是这里），
-    // 于是界面会说"可以导入 · 新建 7 个"，而另外 3 行**无声消失**。
-    const v = importPlanView({
-      ok: true,
-      toCreate: ['a', 'b', 'c', 'd', 'e', 'f', 'g'],
-      refused: [
-        { index: 2, code: 'MIGRATION_BAD_SOURCE', reason: '这一行不是对象' },
-        { index: 5, code: 'MIGRATION_INVALID_PROFILE', reason: 'runtimeType 缺失' },
-      ],
-    })
-    assert.equal(v.ok, true, '整包仍然可用')
-    const refusedLines = v.lines.filter((l) => /被拒绝/.test(l))
-    assert.equal(refusedLines.length, 2, `两条拒绝各要说一次；实际：${v.lines.join(' | ')}`)
-    assert.ok(refusedLines.some((l) => /不是对象/.test(l)), '理由要带出来')
-    assert.ok(refusedLines.some((l) => /runtimeType 缺失/.test(l)))
-    assert.ok(refusedLines.every((l) => /不会导入/.test(l)), '必须说清这些行不会进去')
-    // 有拒绝行时仍然需要确认——确认框是用户看到这些硬话的最后机会
-    assert.equal(v.needsConfirm, true)
-  })
-
-  test('拒绝项是字符串（旧数据）时也能读，且空理由不产生空话', () => {
-    const v = importPlanView({ ok: true, toUpdate: ['a'], refused: ['字段非法', ''] })
-    const lines = v.lines.filter((l) => /被拒绝/.test(l))
-    assert.equal(lines.length, 2)
-    assert.ok(lines.some((l) => /字段非法/.test(l)))
-    // 没有理由时只说"有 1 行被拒绝"，而不是拼出一个冒号后面什么都没有的句子
-    assert.ok(lines.some((l) => l === '有 1 行被拒绝，不会导入'), lines.join(' | '))
-  })
-
-  test('**每一行都被拒绝时，标题不能说"没有需要变更的内容"**', () => {
-    // 这是 `refused.length` 参与 `needsConfirm` 唯一真正起作用的场景：
-    // 没有任何可导入项、但每一行都被拒绝。少算 `refused` 的话，
-    // `needsConfirm` 变成 false，界面就成了"没有变更要确认"的样子——
-    // 用户以为包是空的，而真实情况是他给的每一行都没能进来。
-    const v = importPlanView({ ok: true, toCreate: [], toUpdate: [], refused: [{ reason: '不是对象' }] })
-    assert.equal(v.ok, true)
-    assert.equal(v.needsConfirm, true, '有被拒绝的行时必须让用户确认')
-    assert.doesNotMatch(v.headline, /没有需要变更的内容/, `标题在说谎：${v.headline}`)
-    assert.match(v.headline, /被拒绝/)
-    assert.ok(v.lines.some((l) => /不是对象/.test(l)))
-  })
-})
+// ★ 2026-10-12：这里原有整块「⑦ 导入计划：拒绝优先，跳过也要说」——它测的是
+//   `modelSettings.ts` 的 `importPlanView`，而那个函数**只**服务于「配置迁移」的界面。
+//   迁移功能已拆除（`docs/bugs/BUG-026` / `BUG-027`），函数与它的用例一起去掉。
+//   配置包导入那条路的展示件在 `modelSettingsUi.ts` 的 `bundlePlanView`，用例在
+//   `model-settings-ui.test.mjs`。

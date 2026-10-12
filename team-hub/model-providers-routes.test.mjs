@@ -352,7 +352,14 @@ test('⑮ ★★ 列表里每一行都带 `credential`（核验结果），且�
       ['none', 'ready', 'missing', 'unavailable'].includes(p.credential.state),
       `${p.id} 的状态不认识：${p.credential.state}`,
     )
-    assert.equal(p.credential.ref, p.secretRef ?? null, '核验的必须是这一行自己的引用名')
+    // ★★ 2026-10-12：核验结果里**不再有引用名**（`ref` → `hasRef`）。
+    //   这一条原先写 `assert.equal(p.credential.ref, p.secretRef ?? null, '核验的必须是这一行自己的引用名')`，
+    //   而那句话把"核验了这一行的凭证"与"把这一行的引用名发出去"当成了同一件事。
+    //   引用名是可枚举的攻击面（`model-store.mjs` 文件头 ②），所以改成断言**有没有**
+    //   引用（`hasRef`）与**是不是这一行自己的那个**（用 `secretRef` 在测试进程里比对 ——
+    //   测试能看到库里的值，客户端不该看到）。
+    assert.equal(p.credential.hasRef, typeof p.secretRef === 'string' && p.secretRef !== '',
+      '核验的必须是这一行自己的引用名（说"有没有"，不说"叫什么"）')
     // 兼容：原来的标记原样保留（别的消费者还在用）
     assert.equal(typeof p.credentialConfigured, 'boolean')
   }
@@ -380,7 +387,8 @@ test('⑰ ★ 没有引用名的供应商 ⇒ `none`（不是错误，也不需�
   const r = await get('/api/model-providers')
   const p = r.body.providers.find((x) => x.id === 'local-only-15')
   assert.equal(p.credential.state, 'none')
-  assert.equal(p.credential.ref, null)
+  // ★ 2026-10-12：`state: 'none'` 与 `hasRef: false` 是同一件事的两种说法（原来断言的是 `ref: null`）。
+  assert.equal(p.credential.hasRef, false)
 })
 
 // ============================================================================

@@ -97,6 +97,23 @@ export function createModelProfilesRoutes({
    *
    * 只在两个注入件都在时补：缺了就不补，而不是补一个猜测的值
    * （界面据此显示"凭证状态未知"，而不是"已配置"）。
+   *
+   * ★★ 2026-10-12（当场被一条既有判据抓住）：**不把引用名放进响应**。
+   *
+   *   第一版把 `credentialSources()` 的产物**原样**塞了进去，于是
+   *   `credential.ref` / `connection.credential.ref` 把 `secretRef` 一起带出去了 ——
+   *   而本族的纪律写得很清楚（`model-store.mjs` 的文件头 ②）：**读出去的东西不含
+   *   `secretRef`**，"引用名也是可枚举的攻击面"。`config-bundle-routes.test.mjs` 的
+   *   用例 ④ 在**原始字节**上验这件事，当场变红：
+   *
+   *       响应体里出现了引用名：…"credential":{"state":"unavailable","ref":"legion/leak"…
+   *
+   *   > 一个"顺便把引用名也带上，界面好显示"的字段，
+   *   > 与一个"把密钥库的槽位名交给任何能读这一页的人"的字段，
+   *   > 在响应体里长得一模一样。
+   *
+   *   所以这里只放**状态与来源**（`state` / `hasRef` / `from`），不放名字：
+   *   用户要的动作是"去补这把钥匙"，而那句话不需要知道槽位叫什么。
    */
   const enrich = (descriptor, snapshot) => {
     if (providerStore === null && credentialStatus === null) return descriptor
@@ -105,9 +122,17 @@ export function createModelProfilesRoutes({
     const provider = providerOf(internal.provider)
     const sources = connectionSources(internal, provider)
     const out = { ...descriptor }
-    if (sources !== null) out.connection = sources
+    if (sources !== null) {
+      // 只留 `from`（这份连接信息是档案自带的还是继承供应商的），**去掉 `ref`**。
+      out.connection = {
+        endpoint: sources.endpoint,
+        credential: { from: sources.credential.from },
+        providerMissing: sources.providerMissing,
+      }
+    }
     if (snapshot !== null && snapshot !== undefined) {
-      out.credential = snapshot.of(sources?.credential?.ref ?? internal.secretRef)
+      const verified = snapshot.of(sources?.credential?.ref ?? internal.secretRef)
+      out.credential = { state: verified.state, hasRef: verified.ref !== null, detail: verified.detail }
       out.connectionRedundant = connectionIsRedundant(internal, provider)
     }
     return out

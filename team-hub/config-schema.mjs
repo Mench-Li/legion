@@ -357,20 +357,10 @@ export const SCHEMA = defineSchema({
     //   PROBE_SECRETS_UNAVAILABLE — 密钥库打不开（DPAPI/损坏/平台不支持）
     //   PROBE_NO_CREDENTIAL_REF — 没给出档案 / 档案没有 endpoint
     'PROBE_LAYOUT_BLOCKED', 'PROBE_SECRETS_UNAVAILABLE', 'PROBE_NO_CREDENTIAL_REF',
-    // PRT-506 迁移（team-hub/model-migration.mjs 的 MIGRATION_CODES / 一处 refused 码）：
-    //   MIGRATION_OK                  — 计划可执行
-    //   MIGRATION_RUNTIME_TYPE_REQUIRED — 没给 runtimeType。老数据里没有这个字段，
-    //                                    猜它会让请求以错误的协议发出去
-    //   MIGRATION_ID_COLLISION        — 归一化后两个不同的模型落到同一个 id。
-    //                                    这是一次**静默合并**，必须拒绝整个计划
-    //   MIGRATION_SECRET_IN_SOURCE    — 源数据里出现疑似密钥。非敏感迁移不该看到密钥
-    //   MIGRATION_BAD_SOURCE          — 源不是数组
-    //   MIGRATION_PLAN_STALE          — 用户确认的计划与服务端现在算出来的不一致
-    //   MIGRATION_INVALID_PROFILE     — 构造出的档案没通过权威校验（res.right 是 errors）
-    //   MIGRATION_PARTIAL             — 执行中途失败（会带上已完成的部分）
-    'MIGRATION_OK', 'MIGRATION_RUNTIME_TYPE_REQUIRED', 'MIGRATION_ID_COLLISION',
-    'MIGRATION_SECRET_IN_SOURCE', 'MIGRATION_BAD_SOURCE', 'MIGRATION_PLAN_STALE',
-    'MIGRATION_INVALID_PROFILE', 'MIGRATION_PARTIAL',
+    // ★ 2026-10-12：`MIGRATION_*` 那一组**已随「配置迁移」拆除**（`docs/bugs/BUG-026`）。
+    //   它们曾是 `team-hub/model-migration.mjs` 的具名码，只是长得像 env 名；
+    //   模块删掉之后，留着这批白名单条目会让扫描器**继续放行**一组不再存在的字面量 ——
+    //   而"放过一个不存在的名字"与"这里本来就没事"在读扫描结果时是一样的。
     // PRT-409 上下文快照（team-hub/context-store.mjs）与 PRT-407 装配路由：
     //   CONTEXT_ATTEMPT_REQUIRED   — 快照没带 attemptId（它是主键）
     //   CONTEXT_NOT_FOUND          — 查不到这份快照

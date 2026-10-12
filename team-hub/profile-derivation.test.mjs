@@ -12,8 +12,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 
-import { DERIVE_CODES, DERIVE_CONFLICT_REASONS, describeDerivation, planProfileDerivation, resolveRuntimeType } from './profile-derivation.mjs'
-import { profileIdFor } from './model-migration.mjs'
+import { DERIVE_CODES, DERIVE_CONFLICT_REASONS, describeDerivation, planProfileDerivation, profileIdFor, resolveRuntimeType } from './profile-derivation.mjs'
 import { SUPPORTED_RUNTIME_TYPES } from '../runtime/contracts/model.mjs'
 
 const PROVIDER = Object.freeze({

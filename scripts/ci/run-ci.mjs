@@ -3310,7 +3310,6 @@ async function stageTest() {
         'team-hub/members-routes.test.mjs',
         'team-hub/model-bindings-by-path-routes.test.mjs',
         'team-hub/model-bindings-routes.test.mjs',
-        'team-hub/model-migration-routes.test.mjs',
         'team-hub/models-routes.test.mjs',
         'team-hub/read-models-routes.test.mjs',
         'team-hub/run-budget-may-switch-model-routes.test.mjs',
@@ -4161,14 +4160,10 @@ async function stageTest() {
       files: ['workbench/scripts/model-settings.test.mjs'],
       cwd: ROOT,
     },
-    {
-      // PRT-506：迁移老的非敏感模型配置。这一组守的是一次迁移最危险的产物——
-      // **一份看起来可用的配置**。老数据里没有 runtimeType、endpoint、凭证，
-      // 三样都不许猜；迁移的正确产物是「确定的部分 + 待补清单」。
-      label: 'model-migration（PRT-506：迁移不猜协议/地址/凭证，产出的是待补清单而非"迁移完成"）',
-      files: ['team-hub/model-migration.test.mjs'],
-      cwd: ROOT,
-    },
+    // ★ 2026-10-12：`model-migration` 这一族（PRT-506）**已拆除** ——
+    //   连同它的两套判据一起删。拆除理由：它把 `agent_models` 搬成岗位绑定，
+    //   而绑定当时没有任何活的消费者；那 17 行意图已用一次迁移搬完，
+    //   消费者也已接上（`plugins/src/dispatchModel.ts`，判据见 `plugins/tests/dispatch-model.test.mjs`）。
     {
       // PRT-507 后端：把 PRT-504 的探测接上 Workbench。
       // 在此之前 `git grep createModelProbe` 的非测试命中**只有它自己的实现文件**：

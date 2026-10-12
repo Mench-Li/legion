@@ -119,6 +119,39 @@ export const DERIVE_CONFLICT_REASONS = Object.freeze({
 const isNonEmptyString = (v) => typeof v === 'string' && v.trim() !== ''
 const pairKey = (provider, model) => `${provider}\u0000${model}`
 
+/** 归一化后 id 的最大长度（契约是 64，这里留出几个字符给消歧后缀）。 */
+const MAX_ID_LEN = 60
+
+/**
+ * 把一个 `(provider, model)` 归一化成合法档案 id。
+ *
+ * 只做**字符集折叠**，不做任何"聪明"的缩写：`custom-ds` + `deepseek-v4-pro` →
+ * `custom-ds.deepseek-v4-pro`。折叠掉非 `[a-zA-Z0-9._-]` 的字符为 `-`。
+ *
+ * **它可能撞车**（两个不同的模型可能折叠成同一个 id），所以调用方必须配合撞车检查使用
+ * （`planProfileDerivation` 会把它报成 `ID_TAKEN_BY_OTHER` / `TOMBSTONED_ID`）。
+ *
+ * ★ 2026-10-12：这个函数**从 `model-migration.mjs` 搬来这里**。它此前只被"配置迁移"调用；
+ *   自动派生出现之后它成了**派生**的一部分，而"配置迁移"整个功能被拆除了
+ *   （理由见 `docs/bugs/BUG-026` 与 `BUG-027`）。搬过来是为了让"派生"不再依赖一个
+ *   已被拆除的模块 ——
+ *
+ *   > 一个函数活着，不是因为它是谁写的，
+ *   > 而是因为**还在调用它的那条路活着**。
+ */
+export function profileIdFor(provider, model) {
+  const raw = `${String(provider ?? '').trim()}.${String(model ?? '').trim()}`
+  const folded = raw.replace(/[^a-zA-Z0-9._-]/g, '-').replace(/^[^a-zA-Z0-9]+/, '')
+  if (folded.length <= MAX_ID_LEN) return folded
+  // 截断会**必然**制造撞车（长名的前缀往往相同），所以截断时附加一个短哈希，
+  // 让"截断后仍然不同"这件事成立。
+  let hash = 0
+  for (let i = 0; i < folded.length; i += 1) {
+    hash = (hash * 31 + folded.charCodeAt(i)) >>> 0
+  }
+  return `${folded.slice(0, MAX_ID_LEN - 7)}-${hash.toString(36).slice(0, 6)}`
+}
+
 /** 一行档案是不是墓碑（容忍 `deleted` 布尔与 `deletedAtMs` 两种形状）。 */
 function isDeleted(p) {
   if (p === null || typeof p !== 'object') return false

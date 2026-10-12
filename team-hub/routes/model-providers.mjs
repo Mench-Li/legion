@@ -34,8 +34,8 @@
 
 import { ModelError, MODEL_ERRORS } from '../model-store.mjs'
 import { toProviderInput } from '../provider-store.mjs'
-import { describeDerivation, matchProviderModels, planProfileDerivation, resolveRuntimeType } from '../profile-derivation.mjs'
-import { profileIdFor } from '../model-migration.mjs'
+// `profileIdFor` 与判定同住一个模块（它 2026-10-12 从已拆除的 `model-migration.mjs` 搬来）。
+import { describeDerivation, matchProviderModels, planProfileDerivation, profileIdFor, resolveRuntimeType } from '../profile-derivation.mjs'
 import { SUPPORTED_RUNTIME_TYPES } from '../../runtime/contracts/model.mjs'
 
 /**
@@ -169,9 +169,19 @@ export function createModelProvidersRoutes({
         const profiles = profilesSnapshot()
         // `credential` 是**核验结果**；`credentialConfigured` 保留原样（它是 P1 导入的标记，
         // 别的消费者还在用）。界面必须读前者 —— 两者在"钥匙其实不在库里"时说的不是一回事。
+        //
+        // ★★ 2026-10-12：**不把引用名放进响应**。`snapshot.of(ref)` 的产物里带 `ref`，
+        //   直接塞进去就等于把 `secretRef`（密钥库的槽位名）交给任何能读这一页的人 ——
+        //   而 `model-store.mjs` 的文件头写着"引用名也是可枚举的攻击面，读出去不含它"。
+        //   档案那条路已经因此被 `config-bundle-routes.test.mjs` 用例 ④ 抓住过一次
+        //   （在**原始字节**上验），这里是同一个坑、只是端点不同。
+        //   要表达"缺哪把钥匙"用 `hasRef` + `state`，不说槽位名。
         const enriched = providers.map((p) => {
           const out = { ...p }
-          if (snapshot !== null) out.credential = snapshot.of(p.secretRef)
+          if (snapshot !== null) {
+            const verified = snapshot.of(p.secretRef)
+            out.credential = { state: verified.state, hasRef: verified.ref !== null, detail: verified.detail }
+          }
           if (profiles !== null) {
             const m = matchProviderModels({ provider: p, profiles })
             out.profiles = Object.freeze({ existing: m.existing.length, missing: m.missing.length, orphaned: m.orphaned.length })

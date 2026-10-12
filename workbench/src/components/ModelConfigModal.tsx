@@ -25,7 +25,11 @@ const TABS: Array<{ id: Tab; label: string }> = [
   { id: 'quick', label: '⚡ 快速分配' },
   { id: 'profiles', label: '🗂 模型档案' },
   { id: 'bindings', label: '🔗 岗位绑定' },
-  { id: 'transfer', label: '📦 配置搬家' },
+  // ★ 2026-10-12：这个页签原本叫「配置搬家」，里面有**两件事**：① 迁移老配置（PRT-506）
+  //   与 ② 导出/导入配置包（PRT-508）。① 已拆除（它把 `agent_models` 搬成岗位绑定，
+  //   而绑定当时没有任何活的消费者）。现在只剩 ②，名字随之改成它实际做的事：
+  //   一个叫"搬家"的页签里只放着"导出/导入"，会让人以为迁移还在。
+  { id: 'transfer', label: '📦 配置包' },
   { id: 'secrets', label: '🔑 凭证库' },
 ]
 

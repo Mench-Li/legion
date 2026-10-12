@@ -302,7 +302,10 @@ SOURCES.routesEmployeeManifests = join(ROOT, 'team-hub', 'routes', 'employee-man
 SOURCES.routesExec = join(ROOT, 'team-hub', 'routes', 'exec.mjs')
 SOURCES.routesModels = join(ROOT, 'team-hub', 'routes', 'models.mjs')
 SOURCES.routesWeb = join(ROOT, 'team-hub', 'routes', 'web.mjs')
-SOURCES.routesModelMigration = join(ROOT, 'team-hub', 'routes', 'model-migration.mjs')
+// ★ 2026-10-12：`SOURCES.routesModelMigration` 已移除 —— `team-hub/routes/model-migration.mjs`
+//   连同「配置迁移」整个功能一起删了（理由见 `docs/bugs/BUG-026`/`BUG-027`）。
+//   一个指向**已不存在文件**的源条目会让这一门禁报"源文件读不到"，
+//   而那个读数与"契约真的漂了"长得一样。
 SOURCES.routesSkillSource = join(ROOT, 'team-hub', 'routes', 'skill-source.mjs')
 SOURCES.routesRunBudget = join(ROOT, 'team-hub', 'routes', 'run-budget.mjs')
 SOURCES.routesSkillsDocuments = join(ROOT, 'team-hub', 'routes', 'skills-documents.mjs')
@@ -384,7 +387,6 @@ export const ROUTE_FAMILY_SOURCES = Object.freeze([
   { module: 'routesExec', family: 'exec', factory: 'createExecRoutes' },
   { module: 'routesModels', family: 'models', factory: 'createModelsRoutes' },
   { module: 'routesWeb', family: 'web', factory: 'createWebRoutes' },
-  { module: 'routesModelMigration', family: 'model-migration', factory: 'createModelMigrationRoutes' },
   { module: 'routesSkillSource', family: 'skill-source', factory: 'createSkillSourceRoutes' },
   { module: 'routesRunBudget', family: 'run-budget', factory: 'createRunBudgetRoutes' },
   { module: 'routesSkillsDocuments', family: 'skills-documents', factory: 'createSkillsDocumentsRoutes' },
@@ -748,6 +750,25 @@ export const NON_API_DEFERRED_ROUTE_FACTORIES = Object.freeze([
   'createMobileRoutes',
   'createPortalRoutes',
   'createReleaseRoutes',
+  // ★★ 2026-10-12（BUG-027 续）：`createWorkbenchRoutes` / `createSiteRoutes` 补进豁免。
+  //
+  //   它们同样是延迟装配（`router.families.unshift(createWorkbenchRoutes({...}))` /
+  //   `createSiteRoutes({...})`），而且**一条 `/api/` 路由都没有**：
+  //   workbench 那一族把 SPA 产物当静态资源发（`team-hub/routes/workbench.mjs`），
+  //   site 那一族发的是站点页面（`/`、`/en`、`${prefix}/*`，
+  //   `team-hub/routes/site.mjs:521-530`）。
+  //
+  //   它们是**更早的提交**加进来的（`16580dcc` 工作台托管 / `84c70f5b` 站点主入口），
+  //   而当时没有一起登记 ⇒ 从那以后 `prt-baseline` 就是**红的**：
+  //   提取器直接拒绝运行（`assertRouteFamilyCoverage` 报"装配了未登记的路由族"），
+  //   于是**任何人都无法重录基线** —— 包括本次拆除迁移所必须的那一次重录。
+  //
+  //   > 一个"让门禁直接报错退出"的漏登记，
+  //   > 比一个"悄悄漏看一族"更难被忽略，但也更彻底地卡住了所有后续改动。
+  //
+  //   与上面三族同一条纪律：**显式豁免，而不是让它们对门禁不可见**。
+  'createWorkbenchRoutes',
+  'createSiteRoutes',
 ])
 
 /**

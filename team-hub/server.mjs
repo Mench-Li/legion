@@ -124,10 +124,9 @@ import { createCredentialStatus } from './credential-status.mjs'
 // spec §6.7 的写一半：凭证的新增/更新/轮换/删除。读路径早已接上
 // （`runtime/probe/secret-resolver.mjs`），写路径此前**零调用方**。
 import { createSecretAdmin } from './secret-admin.mjs'
-// PRT-506：把老的非敏感模型配置（agent_models）迁到档案 + 岗位绑定。
-// **只搬能确定的东西**：老数据里没有 runtimeType、没有 endpoint、没有凭证，
-// 三者都**不猜**——猜出来的档案会看起来可用，直到第一次运行才失败。
-import { applyModelMigration, describeMigration, planModelMigration } from './model-migration.mjs'
+// ★ 2026-10-12：「配置迁移」（PRT-506）已拆除 —— 它把 `agent_models` 搬成岗位绑定，
+//   而绑定当时没有任何活的消费者。那 17 行意图已用一次迁移搬完，消费者也已接上
+//   （`plugins/src/dispatchModel.ts`）。详见 `docs/bugs/BUG-026` / `BUG-027`。
 // PRT-409：上下文快照的持久化与查看。
 //
 // 阶段 4 的完成标准是「任一员工运行都能还原其实际输入、来源版本、过滤和裁剪原因」。
@@ -281,7 +280,6 @@ import { createReadModelsRoutes } from './routes/read-models.mjs'
 import { createSkillsDocumentsRoutes } from './routes/skills-documents.mjs'
 import { createRunBudgetRoutes } from './routes/run-budget.mjs'
 import { createSkillSourceRoutes } from './routes/skill-source.mjs'
-import { createModelMigrationRoutes } from './routes/model-migration.mjs'
 import { createEmployeeManifestsRoutes } from './routes/employee-manifests.mjs'
 import { createTeamPlansRoutes } from './routes/team-plans.mjs'
 import { createPriceTablesRoutes } from './routes/price-tables.mjs'
@@ -7062,12 +7060,12 @@ const router = createRouter([
     json,
     db, readBody,
   }),
-  createModelMigrationRoutes({
-    json,
-    db, modelStore, bindingStore,
-    planModelMigration, describeMigration, applyModelMigration,
-    handleRun,
-  }),
+  // ★ 2026-10-12：`createModelMigrationRoutes` 这一段**被拆除**了。
+  //   「配置迁移」整个功能（`team-hub/model-migration.mjs` + 这一族路由 + 面板页签 ①）
+  //   已删：它做的事情是"把 `agent_models` 搬成岗位绑定"，而绑定当时**没有任何活的消费者**
+  //   （`plugins/src/**` 里 0 处引用），搬完 17 行也不改变任何行为。
+  //   那 17 行意图已经**用一次迁移搬完**，消费者也已接上（`plugins/src/dispatchModel.ts`）——
+  //   桥用过了，所以拆掉。理由与判据见 `docs/bugs/BUG-026` 与 `BUG-027`。
   createSkillSourceRoutes({
     json,
     getSkillSource, setSkillSource, handleWrite,
@@ -7275,9 +7273,10 @@ async function handle(req, res, stripPrefix) {
     // 本族这 3 条已全部搬进模块，`server.mjs` 里不再有它们。
     // 归属 /api/model-bindings 的那 3 条都在这里了。
     if (await router.dispatch(req, res, { path, url })) return
-    // ── 迁移老的非敏感模型配置（算一份计划 / 按确认过的指纹执行） —— 已提取到 `./routes/model-migration.mjs`（PRT-316 第 27 族 / 切片 28）──
-    // 整段搬走：`server.mjs` 里现在**不再有** `/api/model-migration` 路由，该命名空间只住一个地方。
-    if (await router.dispatch(req, res, { path, url })) return
+    // ── 迁移老的非敏感模型配置 —— **已拆除（2026-10-12）** ──
+    // 它曾住在这里、后来提取到 `./routes/model-migration.mjs`（PRT-316 第 27 族 / 切片 28），
+    // 现在整族连同模块一起删掉了（理由见上面 `createModelMigrationRoutes` 那段注释）。
+    // `/api/model-migration` 这个命名空间**不再存在**。
     // ── 岗位模型绑定（GET 读一个绑定 / DELETE 删一个绑定） —— 已提取到 `./routes/model-bindings-by-path.mjs`（PRT-316 第 34 族 / 切片 36）──
     // 本族这 2 条已全部搬进模块，`server.mjs` 里不再有它们。
     // 归属 /api/model-bindings 的那 2 条都在这里了。

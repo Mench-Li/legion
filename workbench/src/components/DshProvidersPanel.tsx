@@ -25,8 +25,12 @@ interface Provider {
    * ★ hub **核验过**的凭证状态：`none | ready | missing | unavailable`。
    *   `unavailable` 是"读不到密钥库，因此无法判断"，**不是**"没有"。
    *   老 hub（没这个字段）时保持 `undefined` ⇒ 界面说"无法核验"，也不猜。
+   *
+   *   ★★ **这里没有引用名**（2026-10-12）：档案那一族已经改成只发 `hasRef`，
+   *   引用名是可枚举的攻击面。供应商这一族的 `secretRef` 还在（见 `docs/bugs/BUG-028`），
+   *   但界面**不许**依赖核验结果里的名字 —— 它只说"引用了某把钥匙"。
    */
-  credential?: { state?: string; ref?: string | null; detail?: string | null }
+  credential?: { state?: string; hasRef?: boolean; detail?: string | null }
   /**
    * ★ `runtimeType`：跟这个供应商说话用哪个运行时。
    *   它**已经上移到供应商一份**（原来每条档案各写一遍）—— 所以模型档案那边不用填。
@@ -64,20 +68,25 @@ interface DeriveResult {
 /** 凭证状态 → 界面读法（与 `team-hub/credential-status.mjs` 同口径）。 */
 function credentialView(p: Provider): { cls: string; label: string; title: string; ready: boolean } {
   const state = p.credential?.state
-  const ref = p.credential?.ref ?? p.secretRef
+  // ★ 2026-10-12：核验结果里**不再有引用名**（`credential.ref` 已从两端点去掉）——
+  //   引用名是可枚举的攻击面，界面要表达的是"引用了某把钥匙"（`hasRef`）而不是它叫什么。
+  //   `p.secretRef` 仍在（供应商那一族还没红色action，见 `docs/bugs/BUG-028`），
+  //   保留它只是为了在标题里给一个可读的名字；两者都没有时说"还没有填密钥"。
+  const ref = p.secretRef
+  const hasRef = p.credential?.hasRef === true || (typeof ref === 'string' && ref !== '')
   if (state === 'ready') {
-    return { cls: ' ready', label: '密钥已核验', title: `本机密钥库里已有 ${String(ref)} · ${p.models.length} 个模型`, ready: true }
+    return { cls: ' ready', label: '密钥已核验', title: `${hasRef ? '本机密钥库里已有这条凭证' : '这条凭证已核验'} · ${p.models.length} 个模型`, ready: true }
   }
   if (state === 'missing') {
     return {
       cls: ' missing', label: '密钥不在库里', ready: false,
-      title: `引用了 ${String(ref)}，但本机密钥库里**没有**它：钥匙从未存进来，或者它被删掉了（面板会显示"已配置"是另一件事，那是从运行环境导入的标记）`,
+      title: `引用了${ref === null ? '一个凭证名' : ` ${ref}`}，但本机密钥库里**没有**它：钥匙从未存进来，或者它被删掉了（面板会显示"已配置"是另一件事，那是从运行环境导入的标记）`,
     }
   }
   if (state === 'unavailable') {
     return {
       cls: ' unknown', label: '无法核验', ready: false,
-      title: `读不到本机密钥库，因此**无法判断** ${String(ref)} 在不在（这不等于"没有"）`,
+      title: `读不到本机密钥库，因此**无法判断**${ref === null ? '这条凭证' : ` ${ref}`}在不在（这不等于"没有"）`,
     }
   }
   if (state === 'none') {

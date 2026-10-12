@@ -2,7 +2,7 @@
   "$comment": "PRT-007 旧系统平台契约基线。由 scripts/prt/baseline-snapshot.mjs 生成；不含时间戳以便逐字节 diff。漂移由 sources 的 sha256 归因。",
   "version": 1,
   "sources": {
-    "team-hub/server.mjs": "c6cca49c61aeecb12580d554ccdcc4e71b027f73f58124e7375ac2d9b8bf1f4e",
+    "team-hub/server.mjs": "2eafa6503c7bacf696e5ce1461ef984dd987537057d074c19d38396f427239b5",
     "team-hub/permission-engine.mjs": "ad399442a1bb50f5a5796126caf402f114462e6b9f60735e24380d7a8672350f",
     "team-hub/run-store.mjs": "e85d607cd411823f8c83e6fa83baaae12d52849fbda2e89af2f6386e19b81775",
     "team-hub/model-store.mjs": "2d2cc90f9a4d357e9138b7e9933ce68215fd32d4d5cfe7179d63cf8f015d78e8",
@@ -84,7 +84,7 @@
     "team-hub/routes/channels.mjs": "cc688b75162b1cede56a3a7e0d98eeb4309ba7743d64b84245265a337e384dc1",
     "team-hub/routes/harness.mjs": "463913a769186dd2e0c4a34886b36981978dc3fa4d503edea26ee5a265291117",
     "team-hub/routes/agent-workflow.mjs": "d25d62e586d7771882303741718993b843f714c2e16a4715708c6c10d6f5e90a",
-    "team-hub/routes/identity.mjs": "aae78f11446e928f2f80ea5f414f1d79630fa59f4fb5bf9dda85786a81dd9e57",
+    "team-hub/routes/identity.mjs": "2ee1aeaa8fe2b99acda9e46f4fc4939ee294c78dd76965cc24814cf8b49e66f1",
     "team-hub/experience-store.mjs": "6b10c0b844a02fa4bd60e2acdaefca2193d385a4c294e0655800d63c2509bdd0"
   },
   "httpRoutes": [
@@ -155,6 +155,7 @@
     "GET /api/identity/rate-limits",
     "GET /api/identity/sessions",
     "GET /api/identity/status",
+    "GET /api/identity/storage-state",
     "GET /api/identity/users",
     "GET /api/inbox",
     "GET /api/members",

@@ -260,16 +260,32 @@ export function ModelProfilesPanel(): React.JSX.Element {
         )
       })}
 
-      <div className="set-form">
-        <div className="set-form-title">{editing === null ? '新建档案' : `编辑档案 ${editing.id}`}</div>
-        {/* ★ 这一句是回答"我还有必要新建档案嘛"：常规情况下**不用**在这儿手填 ——
-            档案的 provider / model / id / 显示名全都能从供应商算出来，
-            在「模型」页对一个供应商点「生成 N 个档案」即可（地址与凭证会留空继承供应商）。
-            这个表单留着是为了**真正的偏离**（例如同一个供应商的某个模型走另一个网关）。 */}
+      {/* ★★ 这里**没有"新建档案"表单** —— 档案由供应商与模型自动生成。
+          将军："档案必然由供应商与模型来，且添加完自动生成供应商档案，
+          而不是：1.需要手工点生成；2.在模型档案这要手工填写。"
+
+          这个表单只在**编辑**时出现，且它的用途是**偏离**：某一条档案要用另一个网关、
+          另一把钥匙或另一个推理档位时，才在这里写。其余字段（provider / model / id /
+          显示名 / runtimeType）在新建时由供应商算出，在这里只作为只读的上下文。 */}
+      {editing === null && (
+        <div className="set-notice muted">
+          <div className="set-notice-text">
+            模型档案由**供应商 + 它的模型清单**自动生成：在「模型」页保存一个供应商，
+            它清单里的每个模型就会自动得到一条档案（<code>provider</code> / <code>model</code> /
+            <code>id</code> / 显示名都算出来，地址、凭证与运行时留空继承供应商）。
+            所以这里**不需要手工新建**。要改某一条（例如换成另一个网关、另一把钥匙、调推理档位），
+            在下面那一行点「编辑」。
+          </div>
+        </div>
+      )}
+
+      {editing !== null && <div className="set-form">
+        <div className="set-form-title">{`编辑档案 ${editing.id}`}</div>
         <p className="set-form-hint">
-          通常不用在这里手填：「模型」页对某个供应商点「生成 N 个档案」就能把它清单里的模型补成档案
-          （provider / model / id / 显示名都从供应商算出来，地址与凭证留空继承供应商）。
-          这里留给**要偏离**的场合：某一条档案要用另一个网关或另一把钥匙时，才在这里写。
+          这条档案是**自动生成**的：<code>provider</code> / <code>model</code> / <code>id</code> /
+          显示名来自供应商，改它们要去「模型」页改供应商。
+          这里能改的是**这条档案自己的偏离** —— 地址与凭证**留空即继承供应商**，
+          只有真要偏离时才填。
         </p>
         <div className="set-grid">
           <label className="field"><span>id</span>
@@ -326,11 +342,9 @@ export function ModelProfilesPanel(): React.JSX.Element {
 
         <div className="set-row-space">
           <button className="btn primary" disabled={busy || clearBlocked} onClick={() => void submit()}>
-            {busy ? '提交中…' : editing === null ? '创建档案' : '保存修改'}
+            {busy ? '提交中…' : '保存修改'}
           </button>
-          {editing !== null && (
-            <button className="btn" onClick={() => { setEditing(null); setForm(EMPTY_FORM); setFormError(null); setClearCred(false) }}>取消编辑</button>
-          )}
+          <button className="btn" onClick={() => { setEditing(null); setForm(EMPTY_FORM); setFormError(null); setClearCred(false) }}>取消编辑</button>
         </div>
         {editView !== null && (
           <div className={editView.tone === 'warn' ? 'set-notice warn' : 'set-notice muted'}>
@@ -343,7 +357,7 @@ export function ModelProfilesPanel(): React.JSX.Element {
             )}
           </div>
         )}
-      </div>
+      </div>}
 
       {notice !== null && <Notice tone={notice.tone} title={notice.title} text={notice.text} />}
     </div>

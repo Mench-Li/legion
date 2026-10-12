@@ -46,7 +46,67 @@ export const DERIVE_CODES = Object.freeze({
    * 所以**不猜**——猜出来的档案会看起来可用，直到第一次运行才失败。
    */
   RUNTIME_TYPE_REQUIRED: 'DERIVE_RUNTIME_TYPE_REQUIRED',
+  /**
+   * ★ 供应商自己没有 `runtimeType`，而**当前能跑的运行时不唯一** ⇒ 必须由人指定。
+   *
+   * 与 `RUNTIME_TYPE_REQUIRED` 分开报：那条是"根本没这个信息"，
+   * 这条是"有多个候选、任何一个都说得通"——两者的修法不同
+   * （前者去补字段，后者去做一次**选择**）。今天只有 `dsh` 一个候选，所以它不会出现；
+   * 它的存在是为了**将来加第二个适配器的那一天**：那时默认值必须是"问一次"，
+   * 而不是"挑第一个"。
+   */
+  RUNTIME_TYPE_AMBIGUOUS: 'DERIVE_RUNTIME_TYPE_AMBIGUOUS',
 })
+
+/**
+ * 定一个 `runtimeType`：**只有恰好一个候选时**才允许替用户定。
+ *
+ * 候选按优先级：供应商自己声明的 → 请求里显式给的 → `supported` 里唯一的那个。
+ *
+ * ★ 为什么"唯一候选"不是猜：`runtime/contracts/model.mjs` 的
+ *   `SUPPORTED_RUNTIME_TYPES` 说的是"Legion 真能跑起来的运行时"（今天只有 `dsh`，
+ *   依据是 `server.mjs` 里那个唯一的检查点与 `runtime/adapters/` 里唯一的适配器）。
+ *   只有一个能跑的时候，选它不需要用户的任何信息。
+ *
+ *   反过来，**有第二个候选时这个函数必须拒绝**：那时"挑第一个"会让
+ *   "我没选过"与"我选了 dsh"在库里同形，而猜错的那个会以错误的协议发请求。
+ *
+ * @param {object} args
+ * @param {string|null} [args.providerRuntimeType] 供应商行上的值（第一顺位）
+ * @param {string|null} [args.requested] 请求里显式给的值（第二顺位）
+ * @param {readonly string[]} args.supported 能跑的运行时（调用方注入，便于判据用 2 个候选来验）
+ * @returns {{ok: true, runtimeType: string, from: 'provider'|'request'|'only-supported'} | {ok: false, code: string, message: string}}
+ */
+export function resolveRuntimeType({ providerRuntimeType = null, requested = null, supported } = {}) {
+  // ★ `supported` **没有默认值**：默认成 `[]` 会让"调用方忘了传"与
+  //   "这台机器上一个能跑的运行时都没有"产生**同一句话**，而后者是一句会被信以为真的假话。
+  if (!Array.isArray(supported)) {
+    throw new TypeError('resolveRuntimeType 需要 supported 数组：没有它就无从判断"唯一候选"是否成立')
+  }
+  const clean = (v) => (isNonEmptyString(v) ? v.trim() : null)
+  const fromProvider = clean(providerRuntimeType)
+  if (fromProvider !== null) return Object.freeze({ ok: true, runtimeType: fromProvider, from: 'provider' })
+  const fromRequest = clean(requested)
+  if (fromRequest !== null) return Object.freeze({ ok: true, runtimeType: fromRequest, from: 'request' })
+
+  const candidates = [...new Set(supported.map(clean).filter((v) => v !== null))]
+  if (candidates.length === 1) {
+    return Object.freeze({ ok: true, runtimeType: candidates[0], from: 'only-supported' })
+  }
+  if (candidates.length === 0) {
+    return Object.freeze({
+      ok: false,
+      code: DERIVE_CODES.RUNTIME_TYPE_REQUIRED,
+      message: '这台机器上没有任何"能跑的运行时"，因此无法为派生出来的模型档案定 runtimeType。',
+    })
+  }
+  return Object.freeze({
+    ok: false,
+    code: DERIVE_CODES.RUNTIME_TYPE_AMBIGUOUS,
+    message: `这台机器上有多个能跑的运行时（${candidates.join(' / ')}），因此必须显式选一个：` +
+      '默认挑第一个会让"我没选过"与"我选了它"在库里同形，而猜错的那个会以错误的协议发请求。',
+  })
+}
 
 /** 冲突原因。 */
 export const DERIVE_CONFLICT_REASONS = Object.freeze({

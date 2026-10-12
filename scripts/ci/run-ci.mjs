@@ -1991,6 +1991,9 @@ async function stageTest() {
     //   （连字符 vs 点号），按 id 认身份会一次多建三条重复档案，而它们看起来完全正常。
     //   另外两条：只建缺的（绝不改已存在的）；清单里没有的模型只**报**不删。
     { label: 'profile-derivation（从供应商派生档案：按 (provider,model) 认身份 / 只建缺的 / 不自动删）', files: ['team-hub/profile-derivation.test.mjs'], cwd: ROOT, nodeArgs: ['--experimental-strip-types'] },
+    // ★ 供应商仓储自己的那一层：`runtimeType` 的往返（读出来的行能不能直接写回去）、
+    //   老行上的 NULL 代表"我对它没意见"而不是"清掉"、以及老库幂等补列。
+    { label: 'provider-store（runtimeType 往返 / 导入不抹掉它 / 老库幂等补列）', files: ['team-hub/provider-store.test.mjs'], cwd: ROOT, nodeArgs: ['--experimental-strip-types'] },
     // ── P2（DECISION-legion-owns-model-config）：**影子物化 —— 只报告，不写** ──
     //   守三件在别处会被读成"没事"的事：
     //   ① 它真的一个字节都没写（夹具把 mutate/set/unset 换成"一调用就记名+抛"的探针）；

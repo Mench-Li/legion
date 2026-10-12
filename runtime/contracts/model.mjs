@@ -23,6 +23,31 @@ export const MODEL_PROFILE_FIELDS = Object.freeze([
   'limits',
 ])
 
+/**
+ * **Legion 真能跑的运行时类型**。
+ *
+ * 这不是"我们支持的协议清单"（那是一个开放的声明空间，见下），而是
+ * "拿这个 `runtimeType` 交给 Legion 去跑，它真的会跑起来"的那个集合。
+ *
+ * 依据是代码里唯一的那个分派点：`team-hub/server.mjs` 的
+ * `resolveFrozenAgentModelConfig` —— 它要求 `profile.runtimeType === 'dsh'`，
+ * 否则 409 `AGENT_MODEL_CONFIG_UNSUPPORTED`；而执行面也只有
+ * `runtime/adapters/dsh/` 一个适配器（`orchestrator/worker/executor.mjs` 直接 import 它）。
+ *
+ * ## 为什么 `validateProfile` **不**据此拒绝
+ *
+ * `runtimeType` 在契约里是一个**声明**（"这批模型按哪种协议说话"），
+ * 而 `model-migration.mjs` 的整条路就是"让调用方声明它"——
+ * 迁移的用例合法地声明 `openai-compatible` / `anthropic`，并把它们原样写进档案。
+ * 收紧成白名单会把那条路一起关掉，而它关掉的东西（"先记下来，将来接上"）是真实的。
+ *
+ * 所以这个常量服务的是**另一件事**：当某处要"替用户定一个默认值"时，
+ * **只有恰好一个候选时才可以**（见 `team-hub/profile-derivation.mjs` 的 `resolveRuntimeType`）。
+ * 那时它不是猜 —— 它是"只有它跑得起来"这个事实。
+ */
+export const SUPPORTED_RUNTIME_TYPES = Object.freeze(['dsh'])
+
+
 /** 推测为「明文密钥载体」的字段名（大小写与分隔符无关）。 */
 const SECRET_LIKE_KEY_RE =
   /(api[-_]?key|apikey|secret|password|passwd|token|credential|bearer|private[-_]?key|access[-_]?key)/i

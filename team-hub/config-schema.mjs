@@ -207,8 +207,12 @@ export const SCHEMA = defineSchema({
     //     `MIGRATION_RUNTIME_TYPE_REQUIRED` 同一条纪律）；
     //   · `DERIVE_UNAVAILABLE` —— 这个中枢没接档案表（`routes/model-providers.mjs`）；
     //   · `ID_TAKEN_BY_OTHER` / `TOMBSTONED_ID` —— 算出来的档案 id 被别人占用 / 是墓碑，
-    //     于是**跳过并报出来**（绝不静默复用别人的 id）。
+    //     于是**跳过并报出来**（绝不静默复用别人的 id）；
+    //   · `DERIVE_RUNTIME_TYPE_AMBIGUOUS` —— 供应商没声明运行时、而**能跑的运行时不唯一**，
+    //     于是必须由人指定（今天只有 `dsh` 一个候选，所以它不会出现；它存在是为了
+    //     加上第二个适配器的那一天：那时"挑第一个"就是猜）。
     'DERIVE_RUNTIME_TYPE_REQUIRED', 'DERIVE_UNAVAILABLE', 'ID_TAKEN_BY_OTHER', 'TOMBSTONED_ID',
+    'DERIVE_RUNTIME_TYPE_AMBIGUOUS',
     // ── 远程 Agent 通道（S-B / S-D）的具名错误码 ──
     //
     // 三个来源，都**不是**环境变量读取点，只是长得像（全大写）：

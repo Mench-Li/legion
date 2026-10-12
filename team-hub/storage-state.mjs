@@ -252,12 +252,40 @@ export function writeStateAtomic({ fs, path, state, dir = null } = {}) {
  */
 export function stateSummary(input = {}) {
   const r = readStateLevel(input)
-  const hrs = r.stateAgeMs === null ? null : Math.max(1, Math.round(r.stateAgeMs / 3600000))
-  return withText(buildSummary(r, hrs))
+  return withText(buildSummary(r))
+}
+
+/**
+ * 把"多久之前"说成人话：`25 分钟` / `3 小时` / `刚刚`（`''`）。
+ *
+ * ## ★★ 为什么这个函数必须存在（而不是 `Math.max(1, round(hours))`）
+ *
+ * 第一版就是那么写的，而它在**生产上**立刻说了一句假话：
+ *
+ *     状态文件 15 秒前刚写好 → 读数说「存储余量充足（1 小时前测过）」
+ *
+ * 因为 `Math.max(1, Math.round(15000 / 3600000))` = `Math.max(1, 0)` = `1`。
+ * 那个 `Math.max(1, …)` 是为了避免印出"0 小时前"，代价却是
+ * **把"刚刚"说成了"一小时前"** —— 而这两件事给运维的信心完全不同。
+ *
+ *   > 一个为了避免出现"0"而写下的 `Math.max(1, …)`，
+ *   > 会把"刚刚"变成"一小时前" —— 而那句话看起来完全正常。
+ *
+ * 一小时以内按**分钟**报；不到一分钟回空串（由调用方说成"刚刚"）。
+ */
+export function humanAge(ageMs) {
+  if (!Number.isFinite(Number(ageMs)) || ageMs === null || ageMs < 0) return ''
+  const ms = Number(ageMs)
+  if (ms < 60_000) return ''
+  const mins = Math.floor(ms / 60_000)
+  if (mins < 60) return `${mins} 分钟`
+  const hours = Math.floor(ms / 3_600_000)
+  if (hours < 48) return `${hours} 小时`
+  return `${Math.floor(ms / 86_400_000)} 天`
 }
 
 /** 造 `{key, vars}`（内部用，便于把"渲染"这一步单独收口）。 */
-function buildSummary(r, hrs) {
+function buildSummary(r) {
   if (r.reason === STATE_REASONS.NO_STATE) {
     return { key: '这台 Hub **没有**在定时体检存储 —— 没人会提前发现盘快满了。', vars: {} }
   }
@@ -268,9 +296,12 @@ function buildSummary(r, hrs) {
     return { key: '存储体检的状态文件版本不认识 —— 体检脚本与 Hub 版本不一致。', vars: {} }
   }
   if (r.reason === STATE_REASONS.STALE) {
+    const ago = humanAge(r.stateAgeMs)
     return {
-      key: '存储体检已经 {hours} 小时没跑了（上次的结论是 {last}，但已经不作为现在的判断）。',
-      vars: { hours: String(hrs), last: String(r.lastKnownLevel) },
+      key: '存储体检已经 {ago}没跑了（上次的结论是 {last}，但已经不作为现在的判断）。',
+      // 陈旧门槛可以被覆盖成很短（判据里就会），那时 `ago` 是空串 ——
+      // 用「不到 1 分钟」而不是让它渲染成一个空洞。
+      vars: { ago: ago === '' ? '不到 1 分钟' : ago, last: String(r.lastKnownLevel) },
     }
   }
   if (r.reason === STATE_REASONS.CHECK_COULD_NOT_READ) {
@@ -278,7 +309,10 @@ function buildSummary(r, hrs) {
   }
   if (r.level === 'critical') return { key: '存储余量危险：写入随时会失败，备份也已经做不成。', vars: {} }
   if (r.level === 'warn') return { key: '存储余量偏低：备份需要的空间快不够了。', vars: {} }
-  return { key: '存储余量充足（{hours} 小时前测过）。', vars: { hours: String(hrs) } }
+  // ★ 充足时**也要**说清"多久前测的" —— 一个没有时间的"充足"是不可核对的话。
+  const ago = humanAge(r.stateAgeMs)
+  if (ago === '') return { key: '存储余量充足（刚刚测过）。', vars: {} }
+  return { key: '存储余量充足（{ago}前测过）。', vars: { ago } }
 }
 
 /**

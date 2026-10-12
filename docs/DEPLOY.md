@@ -485,11 +485,59 @@ node scripts/ops/storage-check.mjs \
 判定         OK（退出码 0）
 ```
 
-**它必须是只读的**：这个脚本会被挂到监控上周期性运行，一个"顺手清一下旧备份"
-的监控脚本会在没人注意的时候删数据（判据里有一条专门断言它不含任何写入调用）。
+**它必须是只读的**（除了写自己那份状态文件）：这个脚本会被挂到监控上周期性运行，
+一个"顺手清一下旧备份"的监控脚本会在没人注意的时候删数据。判据里有一条专门断言
+它不含整树删除/追加类调用，另一条断言状态写入**只**经过原子的 `writeStateAtomic`。
 
-**尚未接线**：定时器/cron **还没有**。也就是说"盘快满了"目前仍然不会主动告警 ——
-需要有人（或一台监控）去跑这个脚本。这是一个已知的缺口，不是已完成项。
+### 6.2b 定时器：`legion-hub-storage-check.{service,timer}`
+
+```bash
+systemctl enable --now legion-hub-storage-check.timer
+systemctl list-timers legion-hub-storage-check.timer    # 看 LAST 那一列
+```
+
+每小时的第 11 分跑一次（避开整点 —— 与备份单元同一条理由：整点最挤）。
+
+**两个必须显式写出来的键**，因为它们的**默认值都是错的**：
+
+| 键 | 为什么 |
+| --- | --- |
+| `--state /run/legion-hub/storage-state.json` | 写在库那块盘上，会在**盘满时连状态文件一起写不进去** —— 而那一刻正是最需要它的时候 |
+| `RuntimeDirectoryPreserve=yes` | systemd 默认 `no` = 单元**停止时删掉** `/run/…`。本单元是 `Type=oneshot`，`ExecStart` 一结束就停 → 刚写好的状态文件**当场被删**，Hub 永远报"没有在定时体检存储" |
+
+> 一个"每次跑完就把自己的结论删掉"的体检，
+> 与一个"从来没跑过"的体检，在读数上是同一个东西。
+
+**退出码 0/1/2/3 各是一个要报出来的结论**，所以**没有** `SuccessExitStatus` ——
+把 warn/critical 声明成"成功"，与没有告警是同一件事。
+
+### 6.2c 读数：`GET /api/identity/storage-state`
+
+需要**机器令牌或系统管理员**（与限速读数**共用**同一个守卫函数，避免两处漂）。
+回答一个 `systemctl list-timers` 答不了的问题：
+
+> 一个"配了定时器"的部署，与一个"定时器从来没跑成功过"的部署，
+> 在 `list-timers` 里长得一模一样 —— 只要没人去看 `LAST` 那一列。
+
+判定按**读数的新鲜度**：
+
+| `reason` | 含义 | 该做什么 |
+| --- | --- | --- |
+| `fresh` | 新鲜（≤6 小时） | 看 `level` |
+| `stale` | 跑过但很久没跑（>6 小时） | 去查定时器为什么停了 |
+| `no-state` | 文件不在 → **从来没跑过** | 去装定时器 |
+| `unreadable` | 文件在但读不出来 / 版本不认识 | 去查写入方 |
+
+★ **陈旧的 `ok` 会降级成 `unknown`**，但 `lastKnownLevel` 保留上次的结论：
+
+> 三天前测到"充足"，今天报"充足" → 你以为有人看着，其实**没有人在测**。
+
+生产实测（2026-10-12，逐条打真端点）：`fresh`/`stale`/`unreadable`/`no-state`
+四种读数与 `lastKnownLevel` 全部符合预期，改完**逐字节还原**。
+
+**尚未接线**：**没有接告警通道**（Alertmanager / 邮件）。四档退出码是给**已有的**
+监控用的（cron 的 `MAILTO`、systemd 的 `--failed`），而"谁被叫醒"还没定。
+也就是说：**读数现在是可查的，但没有人会被主动通知**。这是一个已知缺口。
 
 ### 6.3 盘满的时候用户看到什么（`team-hub/storage-health.mjs`）
 
@@ -906,6 +954,7 @@ esbuild 这类交互式子进程保持原样、如实 EPERM），据此真实直
 - [ ] L2 浏览器主路径走查并回填（§5.3）
 - [ ] team.db 备份完成（§6；推荐 `VACUUM INTO`，见 §6.1）
 - [ ] 存储余量体检过（§6.2：`node scripts/ops/storage-check.mjs` 退出码 0；`1`=警戒、`2`=危险、`3`=读不到）
+- [ ] `systemctl list-timers legion-hub-storage-check.timer` 的 **LAST** 列不是空的（§6.2b —— 空的 `LAST` 就是"从来没跑成功过"）
 - [ ] 备份可恢复性核对完成：`node scripts\prt\backup-restore-verify.mjs --source=<备份或现场库>`（§6.1）
 - [ ] 已知缺陷状态确认（§7.1：当前无未修复 P0/P1；§7.2 记录项知悉）
 - [ ] 发布记录登记（§4.4 模板）+ 快照 MANIFEST 留档

@@ -18,7 +18,7 @@ import { codeOnly } from '../scripts/lib/code-only.mjs'
 
 import {
   STATE_SCHEMA, STALE_AFTER_MS, DEFAULT_STATE_PATH, LEVELS, STATE_REASONS,
-  isAlarming, makeState, parseState, readStateLevel, writeStateAtomic, stateSummary, renderSummary,
+  isAlarming, makeState, parseState, readStateLevel, writeStateAtomic, stateSummary, renderSummary, humanAge,
 } from './storage-state.mjs'
 
 const MIN = 60_000
@@ -315,9 +315,51 @@ test('★★★ 四种原因四句不同的话（值班的人要照着它分派�
 
 test('★★★ 充足时也要说"多久前测的"（否则"充足"是个没有时间的话）', () => {
   const s = stateSummary({ raw: rawState({ level: 'ok' }), nowMs: T0 + 3 * HOUR })
-  assert.equal(s.vars.hours, '3', '要说清是几小时前测的')
-  assert.match(s.text, /3/, '渲染出来的句子里要有那个数')
+  assert.equal(s.vars.ago, '3 小时', '要说清是几小时前测的')
+  assert.match(s.text, /3 小时/, '渲染出来的句子里要有那个数')
   assert.match(s.text, /充足/)
+})
+
+test('★★★ 15 秒前测的**不许**说成"1 小时前"（这条在生产上真的错过）', () => {
+  // ★★ 这是**生产上实测到**的一个假话：
+  //
+  //     状态文件 15 秒前刚写好 → 读数说「存储余量充足（1 小时前测过）」
+  //
+  //   原因是 `Math.max(1, Math.round(15000 / 3600000))` = `1` ——
+  //   那个 `Math.max(1, …)` 为了避免印出"0 小时前"，却把"刚刚"说成了一小时前。
+  //
+  //   > 一个为了避免出现"0"而写下的 `Math.max(1, …)`，
+  //   > 会把"刚刚"变成"一小时前" —— 而那句话看起来完全正常。
+  const s = stateSummary({ raw: rawState({ level: 'ok' }), nowMs: T0 + 15_000 })
+  assert.doesNotMatch(s.text, /小时/, `15 秒前不许提到"小时"：${s.text}`)
+  assert.match(s.text, /刚刚/, `15 秒前应当说"刚刚"：${s.text}`)
+})
+
+test('★★★ 一小时以内按**分钟**报（1 小时以内都不该出现"小时"）', () => {
+  for (const [ms, want] of [[45_000, '刚刚'], [60_000, '1 分钟'], [25 * MIN, '25 分钟'], [59 * MIN, '59 分钟']]) {
+    const s = stateSummary({ raw: rawState({ level: 'ok' }), nowMs: T0 + ms })
+    assert.equal(s.vars.ago ?? '', want === '刚刚' ? '' : want, `${ms}ms -> ${JSON.stringify(s.vars)}`)
+    assert.match(s.text, new RegExp(want === '刚刚' ? '刚刚' : want))
+    assert.doesNotMatch(s.text, /小时/, `${ms}ms 时不该出现"小时"：${s.text}`)
+  }
+  // 而 1 小时**整**开始按小时报。
+  assert.equal(stateSummary({ raw: rawState(), nowMs: T0 + 60 * MIN }).vars.ago, '1 小时')
+  // 超过 48 小时按天报。
+  assert.equal(stateSummary({ raw: rawState(), nowMs: T0 + 72 * HOUR }).vars.ago, '3 天')
+})
+
+test('★★★ `humanAge` 的边界与畸形输入', () => {
+  assert.equal(humanAge(0), '')
+  assert.equal(humanAge(59_999), '')
+  assert.equal(humanAge(60_000), '1 分钟')
+  assert.equal(humanAge(3_599_999), '59 分钟')
+  assert.equal(humanAge(3_600_000), '1 小时')
+  assert.equal(humanAge(2 * 24 * HOUR - 1), '47 小时')
+  assert.equal(humanAge(2 * 24 * HOUR), '2 天')
+  for (const bad of [null, undefined, NaN, 'x', -1, {}]) {
+    assert.doesNotThrow(() => humanAge(bad))
+    assert.equal(humanAge(bad), '', `${String(bad)} 应当回空串`)
+  }
 })
 
 test('★★★ `text` 里不许剩占位符（它会被直接打印给值班的人）', () => {

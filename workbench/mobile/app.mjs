@@ -54,6 +54,9 @@ import { renderAvatar } from './avatar.mjs'
 import {
   pickNoticeHost, shouldClearSession, sessionExpiredMessage, HOST_INLINE,
 } from './notice.mjs'
+// 系统提醒的三个纯决策（机制 / 去重标签 / 按钮表现）。抽出来是为了可测 ——
+// 本文件在 Node 里不可 import，而这三个判断都不需要 DOM。
+import { notifyMechanism, notificationTag, notifyButtonPlan } from './notify-plan.mjs'
 
 const $ = (id) => document.getElementById(id)
 const LS_REFRESH = 'legion.mobile.refresh'
@@ -1016,7 +1019,7 @@ async function refreshPopups() {
     if (gen !== state.scopeGen) return
     // 页面不在前台时，页面里的弹框**看不见** —— 那是系统通知唯一能补的位。
     // （边界：这只在页面还活着时有效；页面被彻底关掉要靠 Web Push，本次没做。）
-    notifySystem(showPopup(p, reason))
+    void notifySystem(p.row?.taskId ?? null, showPopup(p, reason))
   }
 }
 
@@ -1043,23 +1046,93 @@ async function requestSystemNotifyPermission() {
   }
 }
 
-function notifySystem(body) {
+/**
+ * 发一条系统提醒。
+ *
+ * ★ 机制由 `notify-plan.mjs` 的 `notifyMechanism` 决定，**优先 Service Worker**：
+ *   Android Chrome 上 `new Notification()` 会抛 `Illegal constructor`，
+ *   iOS 16.4+ 的 Web Push 同样只能走 SW 通知 —— 移动端**只有这一条路**。
+ *   修复前只用了构造器，而异常被 `catch` 吞掉：界面写着「🔔 已开启系统提醒」，
+ *   实际上一条也收不到。
+ *
+ *   > 一个"点了开启、得到确认、然后一条也收不到"的功能，
+ *   > 与一个"还没做"的功能，在用户眼里是同一个东西。
+ *
+ * ★ 失败**必须有出口**：修复前是 `catch { return false }`，之后没有任何人管它。
+ *
+ * @param {string|null} taskId 去重标签的依据（**任务号**，不是文案）
+ * @param {string} body
+ * @returns {Promise<boolean>} 是否真的发出去了
+ */
+async function notifySystem(taskId, body) {
   const hidden = typeof document !== 'undefined' && document.visibilityState === 'hidden'
   if (!shouldUseSystemNotify({ hidden, permission: systemNotifyPermission() })) return false
+
+  const supported = typeof Notification !== 'undefined'
+  const registration = await readyServiceWorker()
+  const mechanism = notifyMechanism({ swReady: registration !== null, supported })
+  if (mechanism === 'none') return false
+
+  const tag = notificationTag(taskId, body)
+  const title = 'Legion 指挥台'
   try {
-    const n = new Notification('Legion 指挥台', { body, tag: 'legion-' + body.slice(0, 40) })
+    if (mechanism === 'service-worker') {
+      await registration.showNotification(title, { body, tag, data: { taskId: taskId ?? null } })
+      return true
+    }
+    const n = new Notification(title, { body, tag })
     n.onclick = () => { try { window.focus() } catch { /* 某些壳里不允许 */ } n.close() }
     return true
-  } catch {
+  } catch (e) {
+    // ★ 不静默：这一条以前是 `return false`，于是"发不出去"与"没开启"在界面上
+    //   完全一样。现在说出来，并说明页面内的提醒不受影响。
+    showError(`系统提醒发送失败：${e?.message ?? e}（页面内的提醒照常出现）`)
     return false
   }
 }
 
-/** 头部那个「🔔」按钮：只在"支持但还没授权"时出现（已授权无需按钮，不支持就别给假希望）。 */
+/**
+ * `navigator.serviceWorker.ready`，但**不无限等**：SW 还没接管时那条 promise
+ * 会一直挂着，而调用方要的是"现在能不能用 SW 发"。超时就当没有 ——
+ * 退回构造器（桌面端仍然能发），而不是让提醒静默消失。
+ */
+async function readyServiceWorker(timeoutMs = 1500) {
+  if (typeof navigator === 'undefined' || !('serviceWorker' in navigator)) return null
+  try {
+    const timeout = new Promise((resolve) => { setTimeout(() => resolve(null), timeoutMs) })
+    const reg = await Promise.race([navigator.serviceWorker.ready, timeout])
+    return reg !== null && typeof reg?.showNotification === 'function' ? reg : null
+  } catch {
+    return null
+  }
+}
+
+/**
+ * 头部那个「🔔」按钮：**始终可见**，按状态给一句能照着做的话。
+ *
+ * ★ 修复前的判据是 `!(supported && permission === 'default')` —— 只有"支持且还没问过"
+ *   才出现。于是用户点了「不允许」→ 按钮**消失**、没有解释、也再没有入口改回来。
+ *
+ *   > 一个"被拒绝之后就消失"的授权入口，
+ *   > 与一个"从来没提供过"的功能，在用户眼里是同一个东西。
+ */
 function renderNotifyButton() {
   const btn = $('btn-notify')
   if (btn === null) return
-  btn.classList.toggle('hidden', !(systemNotifySupported() && systemNotifyPermission() === 'default'))
+  const plan = notifyButtonPlan({
+    supported: systemNotifySupported(),
+    permission: systemNotifyPermission(),
+    // iOS 上"已加到主屏幕"与"还在浏览器标签里"是两种能力，文案要分开说。
+    standalone: typeof window !== 'undefined'
+      && (window.matchMedia?.('(display-mode: standalone)')?.matches === true
+        || navigator.standalone === true),
+  })
+  btn.classList.toggle('hidden', !plan.visible)
+  btn.title = plan.message
+  // 不可点（已授权/被拒/不支持）时用 `aria-disabled` 而不是 `disabled`：
+  // 仍然要能点开看那句话，只是不该再去请求授权。
+  btn.setAttribute('aria-disabled', plan.actionable ? 'false' : 'true')
+  btn.dataset.notifyActionable = plan.actionable ? '1' : '0'
 }
 
 // ── 事件流 ──────────────────────────────────────────────────────────────────
@@ -1289,12 +1362,25 @@ function bind() {
   })
   $('btn-logout').addEventListener('click', doLogout)
   // 系统提醒授权：请求必须在**用户手势**里发，所以只能挂在一个真实点击上。
+  //
+  // ★ 现在按钮**始终可见**，所以要按 `notifyButtonPlan` 的状态分流：
+  //   · 已授权 / 被拒 / 不支持 → **不请求**（被拒之后再问，浏览器会立刻返回 denied，
+  //     点了等于没点），改为把那句"该去哪儿改"的话说出来；
+  //   · 只有"还没问过"才真去请求。
   $('btn-notify').addEventListener('click', () => {
+    const plan = notifyButtonPlan({
+      supported: systemNotifySupported(),
+      permission: systemNotifyPermission(),
+    })
+    if (!plan.actionable) {
+      // 用浮层而不是页面内弹框：这条按钮在头部，用户点它是想要一个**解释**，
+      // 而解释必须落在他正在看的地方（页面内的提醒弹框可能被输入区挡着）。
+      showNotice(plan.message)
+      return
+    }
     void requestSystemNotifyPermission().then((p) => {
       renderNotifyButton()
-      showPopupText(p === 'granted'
-        ? '🔔 已开启系统提醒：页面不在前台时也会通知你'
-        : '未开启系统提醒（页面内的提醒照常出现）')
+      showNotice(notifyButtonPlan({ supported: true, permission: p }).message)
     })
   })
   // 用户显式点：立刻跑，不走去抖（他在等结果，不该再等 400ms）。

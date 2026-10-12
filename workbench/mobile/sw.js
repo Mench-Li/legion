@@ -41,9 +41,13 @@ const CACHE = 'legion-mobile-v4'
 const SHELL = [
   './', './index.html', './manifest.webmanifest',
   // 入口 + 它的直接依赖（合并时**取并集**：提醒的 popup.mjs、头像的 avatar.mjs、
-  // 提示去处的 notice.mjs 都要在）
+  // 提示去处的 notice.mjs、提醒决策的 notify-plan.mjs 都要在）
   './app.mjs', './board.mjs', './timeline.mjs', './refresh-loop.mjs', './popup.mjs', './avatar.mjs',
-  './notice.mjs',
+  './notice.mjs', './notify-plan.mjs',
+  // ★ 图标也进清单：它们**不是代码**，走 cacheFirst 那条路，于是"装好之后立刻离线"
+  //   打开时会缺图标 —— 而那正是 PWA 要守住的那一种情形。
+  //   （随包发布、几乎不变，进清单的成本只是首次安装多两个请求。）
+  './icon-192.png', './icon-512.png',
 ]
 const CODE_EXT = /\.(?:mjs|js|html|webmanifest)$/
 
@@ -104,4 +108,41 @@ self.addEventListener('fetch', (event) => {
   }
 
   event.respondWith(CODE_EXT.test(url.pathname) ? networkFirst(event) : cacheFirst(event))
+})
+
+// ── 系统提醒被点击 ──────────────────────────────────────────────────────────
+//
+// ★ 为什么必须由 Service Worker 接住：提醒是**用 SW 发出去的**
+//   （`registration.showNotification` —— 移动端唯一能通的通路），
+//   而由 SW 发出的通知，它的点击事件**只**回到 SW；
+//   `new Notification()` 那个 `onclick` 在这里根本不会被调用。
+//
+//   修复前没有这个监听，于是：用户收到"有任务待你验收"、点它、**什么都没发生**。
+//   一条点不动的通知比不通知更让人困惑 —— 它明确把人叫过来，然后什么也不给。
+//
+// 行为：优先**聚焦已打开的窗口**（不新开标签，否则用几次就一堆标签页）；
+// 没有窗口才新开。带上 `#task=<id>`，页面据此直接落到那条任务上。
+self.addEventListener('notificationclick', (event) => {
+  event.notification.close()
+  const taskId = event.notification?.data?.taskId
+  const hash = typeof taskId === 'string' && taskId.length > 0
+    ? `#task=${encodeURIComponent(taskId)}`
+    : ''
+
+  event.waitUntil((async () => {
+    const clientList = await self.clients.matchAll({ type: 'window', includeUncontrolled: true })
+    for (const client of clientList) {
+      if (typeof client.focus !== 'function') continue
+      try {
+        await client.focus()
+        if (hash.length > 0 && typeof client.navigate === 'function') {
+          await client.navigate(client.url.split('#')[0] + hash)
+        }
+        return
+      } catch { /* 这一个客户端聚焦失败不影响其余 */ }
+    }
+    if (typeof self.clients.openWindow === 'function') {
+      await self.clients.openWindow('./' + hash)
+    }
+  })())
 })

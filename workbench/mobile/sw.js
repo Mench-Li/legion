@@ -41,9 +41,9 @@ const CACHE = 'legion-mobile-v4'
 const SHELL = [
   './', './index.html', './manifest.webmanifest',
   // 入口 + 它的直接依赖（合并时**取并集**：提醒的 popup.mjs、头像的 avatar.mjs、
-  // 提示去处的 notice.mjs、提醒决策的 notify-plan.mjs 都要在）
+  // 提示去处的 notice.mjs、提醒决策的 notify-plan.mjs、首屏决策的 screen-plan.mjs）
   './app.mjs', './board.mjs', './timeline.mjs', './refresh-loop.mjs', './popup.mjs', './avatar.mjs',
-  './notice.mjs', './notify-plan.mjs',
+  './notice.mjs', './notify-plan.mjs', './screen-plan.mjs',
   // ★ 图标也进清单：它们**不是代码**，走 cacheFirst 那条路，于是"装好之后立刻离线"
   //   打开时会缺图标 —— 而那正是 PWA 要守住的那一种情形。
   //   （随包发布、几乎不变，进清单的成本只是首次安装多两个请求。）

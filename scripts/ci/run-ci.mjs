@@ -951,6 +951,9 @@ async function stageTest() {
         // 系统提醒的三个纯决策（机制/去重标签/按钮表现）。守的是一条**假承诺**：
         // 页面写「已开启系统提醒」而移动端那个 `new Notification()` 抛异常被吞掉。
         'workbench/mobile/notify-plan.test.mjs',
+        // 首屏：登录表单不许闪（每次打开都先看到登录页再被抽走），
+        // 且进主界面之后不许在六个串行请求期间是一片空白。
+        'workbench/mobile/screen-plan.test.mjs',
         'workbench/scripts/mobile-board-parity.test.mjs',
       ],
       cwd: ROOT,

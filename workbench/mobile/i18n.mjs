@@ -46,12 +46,18 @@ export const DYNAMIC_KEYS = Object.freeze({
   '@taskDispatched': { zh: '已派任务 {taskId}：电脑上线后会领取执行。', en: 'Task {taskId} dispatched — the computer will pick it up when online.' },
   '@feedbackRecorded': { zh: '要求已记到 {taskId}，下一轮执行时生效。', en: 'Requirement recorded on {taskId}; it takes effect next run.' },
   '@unsupportedIntent': { zh: '不支持的意图：{intent}', en: 'Unsupported intent: {intent}' },
-  '@popupTransition': { zh: '{icon} {head}状态变为「{state}」{tail}', en: '{icon} {head} moved to "{state}"{tail}' },
-  '@popupBlocked': { zh: '🖐 {head}被拦截：守护不再自动认领{tail}', en: '🖐 {head} held: the daemon will stop claiming automatically{tail}' },
-  '@popupResumed': { zh: '🚀 {head}已放行：守护恢复自动认领{tail}', en: '🚀 {head} released: the daemon resumes claiming{tail}' },
-  '@popupReassigned': { zh: '🔁 {head}被转派{tail}', en: '🔁 {head} reassigned{tail}' },
+  // ★ 下面这些模板的 zh **照抄 `popup.mjs` 里的模板字符串**，逐字一致。
+  //   我最初按"想象"写了 `@popupTransition` = `'{icon} {head}状态变为「{state}」{tail}'`，
+  //   而 `popupText` 实际产出的是 `` `${icon} ${head}${state}${tail}` ``（**没有**"状态变为「」"）。
+  //   一个与真实组合对不上的模板永远不会被用到 —— 而它看起来很正常。
+  '@popupStatus': { zh: '{icon} {head}{state}{tail}', en: '{icon} {head}{state}{tail}' },
+  '@popupTail': { zh: '（{who}）', en: ' ({who})' },
+  '@popupHold': { zh: '🖐 {head}被拦截：守护不再自动认领{tail}', en: '🖐 {head} held: the daemon will stop claiming automatically{tail}' },
+  '@popupUnhold': { zh: '🚀 {head}已放行：守护恢复自动认领{tail}', en: '🚀 {head} released: the daemon resumes claiming{tail}' },
+  '@popupReassign': { zh: '🔁 {head}被转派{tail}', en: '🔁 {head} reassigned{tail}' },
   '@popupTestReport': { zh: '🧪 {head}测试报告已提交{tail}', en: '🧪 {head} test report submitted{tail}' },
-  '@popupArtifact': { zh: '📦 {head}提交了证据{tail}', en: '📦 {head} submitted evidence{tail}' },
+  '@popupEvidence': { zh: '📦 {head}提交了证据{tail}', en: '📦 {head} submitted evidence{tail}' },
+  '@popupGeneric': { zh: '{icon} {head}{tail}', en: '{icon} {head}{tail}' },
   '@notifyUnsupported': { zh: '这个浏览器不支持系统提醒；页面内的提醒照常出现。', en: 'This browser does not support system notifications; in-page alerts still work.' },
   '@notifyIosInstall': { zh: '这台设备要先「添加到主屏幕」，之后才能开启系统提醒。', en: 'On this device, add Legion to your Home Screen first, then system notifications can be enabled.' },
   '@notifyGranted': { zh: '🔔 系统提醒已开启：页面不在前台时也会通知你。', en: '🔔 System notifications are on: you will be notified while the page is in the background.' },
@@ -59,6 +65,12 @@ export const DYNAMIC_KEYS = Object.freeze({
   '@notifyPrompt': { zh: '开启系统提醒：页面不在前台时也会通知你。', en: 'Enable system notifications: get notified while the page is in the background.' },
   '@notifySendFailed': { zh: '系统提醒发送失败：{message}（页面内的提醒照常出现）', en: 'Could not send the system notification: {message} (in-page alerts still work)' },
   '@sessionExpiredHint': { zh: '会话已过期，请重新登录。', en: 'Your session expired. Please sign in again.' },
+  // ★ 提醒正文是**界面文案**，而 `reason` 是任务评论里的**数据**（人或 Agent 写的），
+  //   两件事必须分开：整体拼完再查表一定匹配不上任何 key，于是英文模式下
+  //   弹框正文仍然是中文。这里翻 `base`、原样保留 `reason`，只让连接符按语言走。
+  '@popupWithReason': { zh: '{base} —— {reason}', en: '{base} — {reason}' },
+  // 多个空间时的下拉框标题（`空间：s1（owner）`）。
+  '@spaceLabel': { zh: '空间：{id}（{role}）', en: 'Space: {id} ({role})' },
 })
 
 /**
@@ -79,6 +91,18 @@ export const EN = Object.freeze({
   '发送': 'Send',
   '取消': 'Cancel',
   '空间': 'Space: ',
+
+  // ── 时间线：作者与来源标签 ────────────────────────────────────────────────
+  //
+  // ★ 这几个**不在** `t('…')` 里出现：`timelineMetaFor()` 返回它们，
+  //   调用处再用 `t(who)` / `t(tagText)` 翻。所以"`t()` 里的字面量"那支差集
+  //   **看不见**它们 —— 第一版就漏了这五条，英文模式下时间线的作者名仍是中文。
+  //   现在由一条**反向判据**盯着（见 `i18n.test.mjs` 的 UNWRAPPED_OK 清单）。
+  '我': 'Me',
+  '系统': 'System',
+  '我说': 'I said',
+  '进展': 'Progress',
+  '回复': 'Reply',
 
   // ── 头部 / 页签 ──────────────────────────────────────────────────────────
   '任务': 'Tasks',
@@ -196,6 +220,21 @@ export const EN = Object.freeze({
   // ── 提醒与通知 ───────────────────────────────────────────────────────────
   '🔔 提醒已就绪：有任务等你处理时会弹在这里': '🔔 Alerts ready: they will pop up here when a task needs you',
   'Legion 指挥台': 'Legion Console',
+
+  // ── 由**投影层的纯函数**产出的固定文案 ───────────────────────────────────
+  //
+  // ★ 这些不在 `app.mjs` 里，所以"找 `t('…')` 字面量"与"找未包 `t()` 的字面量"
+  //   两支判据都看不见它们 —— 它们住在 `notify-plan.mjs` / `notice.mjs` 里，
+  //   由函数返回、由渲染处翻。已补一条**闭环判据**（真的把那些函数跑一遍）。
+  //
+  //   注意 `开启系统提醒：…通知你。` **带句号**，而上面 HTML 属性用的那条**不带** ——
+  //   差一个字符，查表就落空。生产上的活体检查照出来的就是这个。
+  '开启系统提醒：页面不在前台时也会通知你。': 'Enable system notifications: get notified while the page is in the background.',
+  '🔔 系统提醒已开启：页面不在前台时也会通知你。': '🔔 System notifications are on: you will be notified while the page is in the background.',
+  '提醒被浏览器拒绝了。请在站点设置里把「通知」改为允许，然后刷新页面。': 'Notifications were blocked by the browser. Allow "Notifications" in site settings, then reload the page.',
+  '这个浏览器不支持系统提醒；页面内的提醒照常出现。': 'This browser does not support system notifications; in-page alerts still work.',
+  '这台设备要先「添加到主屏幕」，之后才能开启系统提醒。': 'On this device, add Legion to your Home Screen first, then system notifications can be enabled.',
+  '会话已过期，请重新登录。': 'Your session expired. Please sign in again.',
   '请填写用户名与口令': 'Enter a username and password',
 })
 

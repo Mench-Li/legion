@@ -158,6 +158,90 @@ try {
     served.planStatus === 200 && served.notifyPlanStatus === 200,
     `screen-plan=${served.planStatus} notify-plan=${served.notifyPlanStatus}`)
 
+  // ── D. 语言：真的点一下，看界面是不是真的换了语言 ─────────────────────────
+  //
+  // ★ 这一节是**被现实逼出来**的：第 213 轮做完中英双语之后，
+  //   44 条单元判据全绿，而**生产上**英文模式的输入框占位符、提醒按钮 title
+  //   仍然是中文 —— 因为那两处是**拼**出来的句子（含任务号/由函数产出），
+  //   "从源码里找字符串"的判据一个字都看不见它们。
+  //   是这条活体检查（点击 → 读 DOM）照出来的。
+  //
+  //   所以它检查的不是"英文表里有没有词条"，而是**用户看到的那一行字**。
+  const CJK = /[\u4e00-\u9fff]/
+  const langSnap = () => page.evaluate(() => ({
+    lang: document.documentElement.lang,
+    authTitle: document.getElementById('auth-title')?.textContent ?? null,
+    loginBtn: document.getElementById('btn-login')?.textContent ?? null,
+    userLabel: document.querySelector('#screen-login label span[data-i18n]')?.textContent ?? null,
+    sendBtn: document.getElementById('btn-send')?.textContent ?? null,
+    placeholder: document.getElementById('composer-input')?.getAttribute('placeholder') ?? null,
+    notifyTitle: document.getElementById('btn-notify')?.title ?? null,
+    langBtnNext: document.getElementById('btn-lang')?.dataset?.nextLocale ?? null,
+  }))
+
+  const zhSnap = await langSnap()
+  const beforeReload = await page.evaluate(() => {
+    try { return localStorage.getItem('legion.mobile.lang') } catch { return null }
+  })
+  // 语言按钮按 CSS 只在主界面可见；这里直接切屏以便点击（未登录状态）。
+  await page.evaluate(() => { document.body.dataset.screen = 'app' })
+  await new Promise((r) => setTimeout(r, 150))
+  await page.evaluate(() => { document.getElementById('btn-lang').click() })
+  await new Promise((r) => setTimeout(r, 400))
+  const enSnap = await langSnap()
+  console.log(`  lang: zh=${zhSnap.lang} -> en=${enSnap.lang}`)
+  console.log(`  authTitle: ${JSON.stringify(zhSnap.authTitle)} -> ${JSON.stringify(enSnap.authTitle)}`)
+
+  check('点语言按钮真的切到英文（html lang 跟着走）', enSnap.lang === 'en', `lang=${enSnap.lang}`)
+  check('静态文案翻了（登录标题/按钮/用户名/发送）',
+    enSnap.authTitle === 'Sign in to Legion' && enSnap.loginBtn === 'Sign in'
+    && enSnap.userLabel === 'Username' && enSnap.sendBtn === 'Send',
+    `${JSON.stringify(enSnap.authTitle)} / ${JSON.stringify(enSnap.loginBtn)}`)
+  check('★ 拼出来的文案也翻了（输入框占位符）',
+    enSnap.placeholder !== null && !CJK.test(enSnap.placeholder) && CJK.test(zhSnap.placeholder ?? ''),
+    `zh=${JSON.stringify(zhSnap.placeholder)} en=${JSON.stringify(enSnap.placeholder)}`)
+  check('★ 拼出来的文案也翻了（提醒按钮 title）',
+    enSnap.notifyTitle !== null && !CJK.test(enSnap.notifyTitle) && CJK.test(zhSnap.notifyTitle ?? ''),
+    `zh=${JSON.stringify(zhSnap.notifyTitle)} en=${JSON.stringify(enSnap.notifyTitle)}`)
+  check('英文模式下的可翻文本里没有残留中文', await page.evaluate(() => {
+    const bad = []
+    const re = /[\u4e00-\u9fff]/
+    for (const el of document.querySelectorAll('#screen-login [data-i18n], #screen-login [data-i18n-attr]')) {
+      const tx = (el.textContent ?? '').trim()
+      if (re.test(tx)) bad.push(tx)
+      for (const a of ['title', 'placeholder', 'aria-label']) {
+        const v = el.getAttribute?.(a)
+        if (v && re.test(v)) bad.push(`${a}=${v}`)
+      }
+    }
+    return bad
+  }).then((bad) => bad.length === 0))
+
+  // 切回中文：zh → en → zh 必须真的回到中文（否则原文没被记住）。
+  await page.evaluate(() => { document.getElementById('btn-lang').click() })
+  await new Promise((r) => setTimeout(r, 400))
+  const backSnap = await langSnap()
+  check('★★ 切回中文能真正回到中文（不是卡在英文）',
+    backSnap.lang === 'zh-CN' && backSnap.authTitle === '登录 Legion' && backSnap.loginBtn === '登录',
+    `lang=${backSnap.lang} authTitle=${JSON.stringify(backSnap.authTitle)}`)
+
+  // 刷新后保持用户的选择。
+  await page.evaluate(() => { document.getElementById('btn-lang').click() }) // -> en
+  await new Promise((r) => setTimeout(r, 300))
+  await page.goto(URL_UNDER_TEST, { timeoutMs: 45000 })
+  await page.waitFor(() => document.body.dataset.screen !== undefined && document.body.dataset.screen !== 'boot',
+    { timeoutMs: 25000, label: 'reloaded after language switch' })
+  const reloadSnap = await langSnap()
+  check('★★ 语言选择在刷新后保持（用户的选择压过浏览器语言）',
+    reloadSnap.lang === 'en' && reloadSnap.authTitle === 'Sign in to Legion',
+    `lang=${reloadSnap.lang} authTitle=${JSON.stringify(reloadSnap.authTitle)}`)
+
+  // 把生产恢复成访客默认状态，别给下一个访问者留下英文。
+  await page.evaluate(() => { try { localStorage.removeItem('legion.mobile.lang') } catch { /* 隐私模式 */ } })
+  check('检查结束后恢复了访客的默认语言（不给下一个访问者留下我的选择）',
+    beforeReload === null || beforeReload === 'zh',
+    `检查前 localStorage 里的语言=${JSON.stringify(beforeReload)}`)
+
   check('无未捕获异常 / console.error', (page.consoleErrors ?? []).length === 0,
     (page.consoleErrors ?? []).slice(0, 3).join(' | '))
 } finally {

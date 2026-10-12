@@ -82,28 +82,53 @@ export function shouldPopup(row) {
  *
  * `who` 可选（角色中文名，如「方案研究员」）。与桌面端 `popupText` 逐字一致。
  */
-export function popupText(row, who = null) {
+/**
+ * 弹框正文。
+ *
+ * ★ 第三个参数是**翻译器**（可选）。不传时逐字产出中文 —— 所以与桌面端的对等判据
+ *   一个字都不用改；传了就用 `@popup*` 模板产出对应语言。
+ *
+ *   为什么必须让它接受翻译器，而不是在渲染处 `t(整句)`：
+ *   这些话是**拼**出来的（`${icon} ${head}${state}${tail}`），而 `head` 里是任务号
+ *   （`T-1` / `T-2` / …）。**拼出来的句子不可能被枚举**，所以"整体查表"必然落空 ——
+ *   英文模式下弹框正文会原样显示中文，而任务号让它永远无法靠"多加点键"来修。
+ *
+ *   > 一个"把变量拼进句子再整体查表"的方案，在句子是常量时能用；
+ *   > 而它恰好在句子**需要**翻译（含变量）的时候失效。
+ *
+ * @param {object} row 审计行
+ * @param {string|null} who 相关成员名
+ * @param {((key: string, vars?: object) => string)|null} tr 翻译器
+ */
+export function popupText(row, who = null, tr = null) {
   const tid = validTaskId(row?.taskId)
   const head = tid === null ? '' : tid + ' '
-  const tail = typeof who === 'string' && who.length > 0 ? `（${who}）` : ''
+  const tailRaw = typeof who === 'string' && who.length > 0 ? `（${who}）` : ''
+  const tail = tr === null || tailRaw === '' ? tailRaw : tr('@popupTail', { who })
   const detail = row?.detail !== null && typeof row?.detail === 'object' ? row.detail : {}
+  /** 有翻译器就用模板，没有就逐字回落成中文原文。 */
+  const say = (key, zh, vars) => (tr === null ? zh : tr(key, vars))
   switch (row?.action) {
     case 'transition': {
       const to = typeof detail.to === 'string' ? detail.to : ''
-      const state = POPUP_STATUS_LABEL[to] ?? (to.length > 0 ? to : '状态变更')
+      const raw = POPUP_STATUS_LABEL[to] ?? (to.length > 0 ? to : '状态变更')
+      const state = tr === null ? raw : tr(raw)
       const icon = to === 'in_review' ? '⏳' : to === 'blocked' ? '⛔' : '🔄'
-      return `${icon} ${head}${state}${tail}`
+      return say('@popupStatus', `${icon} ${head}${state}${tail}`, { icon, head, state, tail })
     }
-    case 'hold': return `🖐 ${head}被拦截：守护不再自动认领${tail}`
-    case 'unhold': return `🚀 ${head}已放行：守护恢复自动认领${tail}`
-    case 'reassign': return `🔁 ${head}被转派${tail}`
-    case 'test-report': return `🧪 ${head}测试报告已提交${tail}`
-    case 'evidence': return `📦 ${head}提交了证据${tail}`
-    case 'goal:publish': return '🎯 目标已发布'
-    case 'goal:done': return '✅ 目标已完成'
-    case 'goal:cancel': return '✕ 目标已取消'
-    case 'goal:pause': return '⏸ 目标已暂停'
-    default: return `${ACTION_LABEL[row?.action] ?? ('⚡ ' + String(row?.action ?? ''))} ${head}${tail}`.trim()
+    case 'hold': return say('@popupHold', `🖐 ${head}被拦截：守护不再自动认领${tail}`, { head, tail })
+    case 'unhold': return say('@popupUnhold', `🚀 ${head}已放行：守护恢复自动认领${tail}`, { head, tail })
+    case 'reassign': return say('@popupReassign', `🔁 ${head}被转派${tail}`, { head, tail })
+    case 'test-report': return say('@popupTestReport', `🧪 ${head}测试报告已提交${tail}`, { head, tail })
+    case 'evidence': return say('@popupEvidence', `📦 ${head}提交了证据${tail}`, { head, tail })
+    case 'goal:publish': return tr === null ? '🎯 目标已发布' : tr('🎯 目标已发布')
+    case 'goal:done': return tr === null ? '✅ 目标已完成' : tr('✅ 目标已完成')
+    case 'goal:cancel': return tr === null ? '✕ 目标已取消' : tr('✕ 目标已取消')
+    case 'goal:pause': return tr === null ? '⏸ 目标已暂停' : tr('⏸ 目标已暂停')
+    default: {
+      const icon = ACTION_LABEL[row?.action] ?? ('⚡ ' + String(row?.action ?? ''))
+      return say('@popupGeneric', `${icon} ${head}${tail}`.trim(), { icon, head, tail })
+    }
   }
 }
 

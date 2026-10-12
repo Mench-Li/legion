@@ -7734,6 +7734,9 @@ function routeHarnessForTask(input) {
 // 见 `team-hub/remote-auth.mjs` 文件头。
 // ════════════════════════════════════════════════════════════════════════════
 import { createIdentityRoutes } from './routes/identity.mjs'
+// 可信代理表的解析。粘在这里（而不是在 `routes/identity.mjs` 里）是因为
+// "谁是可信代理"是**部署事实**，属于顶层装配，不属于某个路由族。
+import { parseTrustedProxies } from './client-ip.mjs'
 import { createMobileRoutes } from './routes/mobile.mjs'
 import { createPortalRoutes } from './routes/portal.mjs'
 import { createReleaseRoutes, latestInstaller, readReleaseManifest } from './routes/releases.mjs'
@@ -7912,6 +7915,17 @@ if (REMOTE_AGENT_ENABLED) {
     gateway: nodeGateway,
     // 注册策略从**配置**来，不从请求体来。见 `/api/identity/register` 的注释。
     registration: CFG.values.registration ?? 'closed',
+    // 按来源（IP）限速。**默认不信任何 `X-Forwarded-For`** ——
+    // 一个"没配就信"的默认值会让每个请求自带一个 IP，限速等于不存在。
+    // 部署时把反代那一跳写进 `LEGION_TRUSTED_PROXIES` 才生效；
+    // 没配时这一层会**如实**报成不生效（见 `/api/identity/rate-limits`），
+    // 而不是把所有人算成同一个人去限（那会变成对自己用户的 DoS）。
+    trustedProxies: parseTrustedProxies(CFG.values.trustedProxies ?? ''),
+    limits: {
+      login: CFG.values.rateLimitLogin,
+      register: CFG.values.rateLimitRegister,
+      'password-reset': CFG.values.rateLimitPasswordReset,
+    },
   }))
   router.list.push(
     { family: 'identity', method: 'GET', path: '/api/identity/status' },

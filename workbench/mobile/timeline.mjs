@@ -50,8 +50,11 @@ export const TIMELINE_CODES = Object.freeze({
  * 前者是"你还没登录"（Hub 好好的），后者是"服务端连不上"。
  * 实测踩过：未登录时界面显示"Hub 不可达"——而那正是把用户送去查网络的
  * 那种错话。他看到"服务器挂了"会去重启服务器，而其实只需要登录。
+ * ★ `t` 是**可选翻译器**。不传时逐字产出中文（对等判据与 `app.mjs` 之外的所有调用
+ *   行为完全不变）；传了就把**拼出来的那一句**（`Attempt 状态：…`，任务状态是变量）
+ *   按语言产出 —— 拼出来的句子不可能被枚举，整体查表必然落空。
  */
-export function deriveConnectionState({ hubReachable = false, signedIn = true, nodeOnline = null, runtimeHealthy = null, activeTaskState = null } = {}) {
+export function deriveConnectionState({ hubReachable = false, signedIn = true, nodeOnline = null, runtimeHealthy = null, activeTaskState = null, t: tr = null } = {}) {
   if (hubReachable !== true) {
     return Object.freeze({
       code: TIMELINE_CODES.HUB_UNREACHABLE, tone: 'error',
@@ -84,7 +87,10 @@ export function deriveConnectionState({ hubReachable = false, signedIn = true, n
     return Object.freeze({ code: TIMELINE_CODES.TASK_RESULT_UNCONFIRMED, tone: 'warn', label: '结果待确认', detail: '这次执行的结果无法自动判定，需要人工对账' })
   }
   if (activeTaskState !== null && activeTaskState !== undefined) {
-    return Object.freeze({ code: TIMELINE_CODES.TASK_RUNNING, tone: 'busy', label: '任务进行中', detail: `Attempt 状态：${activeTaskState}` })
+    return Object.freeze({
+      code: TIMELINE_CODES.TASK_RUNNING, tone: 'busy', label: '任务进行中',
+      detail: tr === null ? `Attempt 状态：${activeTaskState}` : tr('@attemptState', { state: activeTaskState }),
+    })
   }
   if (nodeOnline === null) {
     // 电脑状态未知：显示"未知"而不是默认"离线"，因为后者会让用户去开机，

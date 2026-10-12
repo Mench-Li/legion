@@ -911,6 +911,10 @@ async function stageTest() {
         // 而每一次 API 调用都 404，是这一族最容易假绿的形态。
         'team-hub/workbench-routes.test.mjs',
         'team-hub/identity-remote.test.mjs',
+        // 按来源（IP）限速的两个**纯决策**：真实来源的推导（守"不可信对端说的一切
+        // 都不算数"），以及滑窗的边界与 `Retry-After`。
+        'team-hub/client-ip.test.mjs',
+        'team-hub/rate-limit.test.mjs',
       ],
       cwd: ROOT,
     },
@@ -920,6 +924,13 @@ async function stageTest() {
       files: [
         'team-hub/identity-registration.test.mjs',
         'team-hub/identity-registration-limit.test.mjs',
+        // ★ 按来源限速的**端到端**接线。两个文件而不是一个，因为可信代理表在
+        //   `import server.mjs` 那一刻读进配置，同一进程里换不掉：
+        //     · 配了可信代理 → 这一层生效（登录/注册/口令重置都挡，且按来源隔离）
+        //     · 没配         → 必须**不启用**（否则所有人共用一个配额，
+        //                       攻击者失败几次就能把全部用户挡在门外）
+        'team-hub/identity-rate-limit.test.mjs',
+        'team-hub/identity-rate-limit-noproxy.test.mjs',
         'team-hub/user-store.test.mjs',
         'team-hub/portal-routes.test.mjs',
         'team-hub/releases-routes.test.mjs',

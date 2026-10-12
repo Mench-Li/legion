@@ -252,6 +252,13 @@ function inspectRepository(p) {
  * 测试注：设置 DSH_WORKBENCH_SPACES_JSON=<JSON 数组> 时走本地注入（免起中枢）；否则经
  * DSH_HUB_UPSTREAM（默认 http://127.0.0.1:8787）GET /api/spaces 实时解析。
  * 未绑定 → 抛出可理解错误（引导到空间设置），绝不静默落到仓库根以外的任意目录（TC-S3-03）。
+ *
+ * ★ 这条内部调用**必须带机器令牌**（`hubAuthHeaders()`），与 `/hub` 代理是同一条规矩。
+ *   中枢一旦启用远程门禁（`LEGION_REMOTE_AUTH=1`），匿名读 `/api/spaces` 就是 401——
+ *   这不是"中枢没启动"，而是"它不认这把凭证"（`product/launcher/desktop-security.test.mjs`
+ *   把"无令牌直连中枢 = 401"当作**应当成立**的契约）。曾经这里漏了令牌，错误信息又写死
+ *   "请先启动中枢"，于是"中枢好好跑着"被报成"中枢没启动"，排障方向整个反了：文件中心
+ *   每条请求都 400（见 `desktop-auth.test.mjs` 的第三条同源记录）。
  */
 export async function resolveScopeLocalDir(scope) {
   if (typeof scope !== 'string' || scope.trim().length === 0) throw new Error('缺少参数 scope')
@@ -261,9 +268,17 @@ export async function resolveScopeLocalDir(scope) {
   if (override) {
     try { spaces = JSON.parse(override) } catch { throw new Error('DSH_WORKBENCH_SPACES_JSON 不是合法 JSON') }
   } else {
-    const up = process.env.DSH_HUB_UPSTREAM ?? 'http://127.0.0.1:8787'
-    const resp = await fetch(up.replace(/\/+$/, '') + '/api/spaces')
-    if (!resp.ok) throw new Error('无法从 team-hub 读取工作空间列表（HTTP ' + resp.status + '），请先启动中枢 node team-hub/server.mjs')
+    const resp = await fetch(hubUpstream() + '/api/spaces', { headers: hubAuthHeaders() })
+    if (!resp.ok) {
+      // 401/403 与"连不上"要分开说：前者是凭证问题（两处 TEAM_HUB_TOKEN 不一致/未配置），
+      // 后者才是"中枢没起来"。混成一句话的代价是下一个人照着错方向查半天。
+      if (resp.status === 401 || resp.status === 403) {
+        const configured = String(process.env.TEAM_HUB_TOKEN ?? '') !== ''
+        throw new Error('team-hub 拒绝了工作空间读取（HTTP ' + resp.status + '）：中枢已启用鉴权，请确认 workbench 与 team-hub 使用同一个 TEAM_HUB_TOKEN（当前'
+          + (configured ? '已配置但未被中枢接受' : '未配置') + '）')
+      }
+      throw new Error('无法从 team-hub 读取工作空间列表（HTTP ' + resp.status + '），请先启动中枢 node team-hub/server.mjs')
+    }
     const data = await resp.json().catch(() => null)
     spaces = data?.spaces ?? []
   }

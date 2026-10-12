@@ -1,6 +1,9 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { createServer, request } from 'node:http'
+import { mkdtempSync, rmSync, realpathSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 
 test('desktop Workbench protects reads, writes, Host, Origin and proxy credentials', async () => {
   const upstream = createServer((req, res) => {
@@ -144,5 +147,60 @@ test('hub proxy replaces the *workbench* credential with the hub machine token',
     server.closeAllConnections(); upstream.closeAllConnections()
     await Promise.all([new Promise(resolve => server.close(resolve)), new Promise(resolve => upstream.close(resolve))])
     for (const key of ['LEGION_DESKTOP_MODE', 'DSH_WORKBENCH_TOKEN', 'TEAM_HUB_TOKEN', 'DSH_HUB_UPSTREAM']) delete process.env[key]
+  }
+})
+
+// ★★★★ 第四条规则：文件中心那条**内部**调用也要带令牌。
+//
+// 「scope → 空间 local_dir」走的是**中枢直连**（`GET /api/spaces`），不是 `/hub` 代理，
+// 所以上面三条规矩一条都替它兜不住底：代理替调用方附令牌，直连不会。
+// 漏掉令牌的症状与"中枢没启动"**逐字相同**——都是那句 `无法从 team-hub 读取工作空间列表（HTTP 401）`，
+// 而正确的修法一个在凭证、一个在进程，方向相反。
+//
+// 实测（2026-10，中枢启用远程门禁 `LEGION_REMOTE_AUTH=1` 后）：`/api/files/*` 全部 400，
+// 界面提示"请先启动中枢"，而中枢一直在跑（进程在、`/api/config` 200）——排障被这句错话带偏。
+test('file-center scope resolution sends the hub machine token to /api/spaces', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'legion-spaces-auth-'))
+  const seen = []
+  const upstream = createServer((req, res) => {
+    seen.push(req.headers.authorization ?? '(none)')
+    if (String(req.url ?? '').startsWith('/api/spaces')) {
+      // 与真实中枢同形：远程门禁没拿到令牌 → 401 + `REMOTE_AUTH_MISSING`（不是 404、也不是空列表）
+      if (req.headers.authorization !== 'Bearer private-hub-token') {
+        res.writeHead(401, { 'content-type': 'application/json' })
+        res.end('{"error":"缺少访问令牌","code":"REMOTE_AUTH_MISSING"}')
+        return
+      }
+      res.setHeader('content-type', 'application/json')
+      res.end(JSON.stringify({ spaces: [{ id: 'fx', name: '夹具空间', private: false, localDir: root }] }))
+      return
+    }
+    res.writeHead(404); res.end()
+  })
+  await new Promise(resolve => upstream.listen(0, '127.0.0.1', resolve))
+  process.env.DSH_HUB_UPSTREAM = `http://127.0.0.1:${upstream.address().port}`
+  delete process.env.DSH_WORKBENCH_SPACES_JSON // 强制走中枢（注入 JSON 是测试捷径，不是被测路径）
+  try {
+    // ① 没有机器令牌：必须报"凭证被拒"，且**不许**再把它说成"中枢没启动"
+    delete process.env.TEAM_HUB_TOKEN
+    const noToken = await import('./serve.mjs?spaces-no-token')
+    await assert.rejects(() => noToken.resolveScopeLocalDir('fx'), (e) => {
+      assert.match(e.message, /HTTP 401/)
+      assert.match(e.message, /TEAM_HUB_TOKEN/, '缺令牌时要说清是凭证问题')
+      assert.doesNotMatch(e.message, /请先启动中枢/, '★ 中枢在跑却被报成没启动，就是这次事故本身')
+      return true
+    })
+
+    // ② 有机器令牌：解析出该空间的 local_dir，且上游确实收到了这把令牌
+    seen.length = 0
+    process.env.TEAM_HUB_TOKEN = 'private-hub-token'
+    const withToken = await import('./serve.mjs?spaces-with-token')
+    assert.equal(await withToken.resolveScopeLocalDir('fx'), realpathSync(root))
+    assert.equal(seen.at(-1), 'Bearer private-hub-token', '★ 直连中枢的读接口必须自己带机器令牌')
+  } finally {
+    upstream.closeAllConnections()
+    await new Promise(resolve => upstream.close(resolve))
+    rmSync(root, { recursive: true, force: true })
+    for (const key of ['TEAM_HUB_TOKEN', 'DSH_HUB_UPSTREAM']) delete process.env[key]
   }
 })

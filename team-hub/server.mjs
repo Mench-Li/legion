@@ -337,6 +337,36 @@ const CFG = loadConfig(CONFIG_SCHEMA, { env: process.env, argv: process.argv.sli
  *   > 有 `/api/config` 之外的文档），于是没人会去怀疑它。
  */
 const APPROVAL_TTL_MS = resolveApprovalTtlMs(CFG.values.approvalTtlMs)
+
+/**
+ * 每种资源的**实际生效**上限（按账号、按窗口）。
+ *
+ * ★ 字段名与 `QUOTA_RESOURCES` 的键**必须一一对应**：`requireAccountQuota`
+ *   用资源名同时查这两张表，键对不上就会静默回落到 `undefined` →
+ *   `accountQuota` 收到 `max: undefined` → `decide` 判成"关掉" → **不限**。
+ *
+ *   那正是最坏的失败形态：日志里一切正常，只有攻击者知道它没生效。
+ *   所以下面有一段**启动期自检**（见 `checkQuotaLimits`），不匹配直接抛。
+ */
+const QUOTA_LIMITS = Object.freeze({
+  message: CFG.values.quotaMessagesPerHour,
+})
+
+/**
+ * 启动期自检：`QUOTA_LIMITS` 的键必须与 `QUOTA_RESOURCES` **完全一致**。
+ *
+ * ★ 这一条守的是一个**静默**的失败：键写错了（改名、拼错、两边只改了一边），
+ *   `requireAccountQuota` 里 `spec === undefined` 就 `return`（放行），
+ *   而 `QUOTA_LIMITS[resource]` 也是 `undefined` → `decide` 判成"关掉"。
+ *   两条路都通向**不限速**，而且都没有任何日志。
+ *
+ *   > 一个"配了但键对不上"的配额，与一个"根本没配"的配额，
+ *   > 在运行期是同一个东西 —— 除了前者让人觉得已经防住了。
+ *
+ *   判定本身在 `rate-limit.mjs` 里（可被用例直接钉住）；这里只负责**在启动时调用**，
+ *   于是问题变成一次响亮的启动失败，而不是一个安静的放行。
+ */
+checkQuotaLimitsMatch({ limits: QUOTA_LIMITS, resources: QUOTA_RESOURCES })
 /** 本模块是「被 node 直接运行」还是「被 import」。
  *  为什么必须区分：本文件既作 CLI 入口，也被宿主外壳 `team-hub/src/index.ts`（L70 `import('../server.mjs')`）
  *  与大量契约测试 import。若在 import 路径上 `process.exit(1)`，一处配置错误会**直接杀掉宿主进程/测试进程**，
@@ -6906,6 +6936,9 @@ const router = createRouter([
     //   直接读它会撞 TDZ 并在启动时抛 ReferenceError。
     //   `requireSpaceAccess` 自己在**调用时**才看 `userStore`，于是这里是延迟求值。
     requireSpace: (req, scope) => requireSpaceAccess(req, scope),
+    // 按**账号**的用量配额：`/api/agent-messages` 每成功一次就往 `messages` 插一行。
+    // 同样是延迟求值的箭头函数（`userStore` 在文件末尾声明）。
+    requireQuota: (req, resource) => requireAccountQuota(req, resource),
   }),
   // 冲突治理族放在最前：/api/tasks/:id/write-intent 等具体路径必须先于宽前缀匹配。
   createWriteIntentRoutes({
@@ -6928,6 +6961,9 @@ const router = createRouter([
     cleanupChatAttachments, uploadChatAttachment, readChatAttachmentContent, chatHealth,
     getReplySettings, saveReplySettings, listAwaitingReplies, postAiReply,
     failAiReply, retryAiReply,
+    // 按账号的用量配额：`POST /api/chat/messages` 每成功一次就往 `messages` 插一行。
+    // 延迟求值的箭头函数（`userStore` 在文件末尾声明，见 createAgentsRoutes 那段）。
+    requireQuota: (req, resource) => requireAccountQuota(req, resource),
   }),
   createCalendarRoutes({
     json, handleWrite,
@@ -7737,6 +7773,10 @@ import { createIdentityRoutes } from './routes/identity.mjs'
 // 可信代理表的解析。粘在这里（而不是在 `routes/identity.mjs` 里）是因为
 // "谁是可信代理"是**部署事实**，属于顶层装配，不属于某个路由族。
 import { parseTrustedProxies } from './client-ip.mjs'
+// 按**账号**的用量配额：资源定义 + 用户可见的那句话 + 具名错误码。
+// 与来源限速共用同一份边界规则（`rate-limit.mjs` 里的 `decide`），
+// 差别只在"问的问题"与"键是什么"。
+import { QUOTA_RESOURCES, quotaMessage, checkQuotaLimitsMatch, QUOTA_CODE, RATE_LIMIT_STATUS } from './rate-limit.mjs'
 import { createMobileRoutes } from './routes/mobile.mjs'
 import { createPortalRoutes } from './routes/portal.mjs'
 import { createReleaseRoutes, latestInstaller, readReleaseManifest } from './routes/releases.mjs'
@@ -7788,6 +7828,65 @@ function requireSpaceAccess(req, scope) {
   if (typeof scope !== 'string' || scope.length === 0) return
   if (userStore.hasRoleAtLeast(actor.userId, scope, 'viewer') === true) return
   throw Object.assign(new Error(`无权访问空间「${scope}」`), { code: 'SPACE_FORBIDDEN', status: 403 })
+}
+
+/**
+ * 按**账号**的用量配额：这个用户在窗口内还能不能再创建一条这种资源。
+ *
+ * ## 为什么在路由层，而不是在写 DAO 里
+ *
+ * 因为**要排除 Agent 自己**。
+ *
+ * 同一个 `messages` 表，有两种写入者：
+ *   · **人** —— 走 `/api/chat/messages`、`/api/agent-messages`（本函数守的两条）；
+ *   · **Agent/守护** —— 走 `insertMessage`（汇报进展、控制命令回执）。
+ *
+ * 把配额放进 DAO 会把第二类也算进去，于是：
+ *
+ *   > 一个把"Agent 汇报"也算进用户配额的配额，会在 Agent 干活最忙的时候
+ *   > 把用户锁住 —— 而那时正是他最需要看到进展的时候。
+ *
+ * 而"最忙的时候"恰恰是配额最容易被触发的时候，所以这不是一个罕见的坏运气，
+ * 是一个必然。所以判定放在**能拿到用户身份**的那一层：`req.__legionUser`
+ * 只在用户令牌请求上存在（见 `remote-auth-gate`），机器令牌与本机无鉴权都没有。
+ *
+ * ## 为什么键是 userId 而不是 IP
+ *
+ * 配额问的是"这个账号建了多少资源"，与"从哪来"无关。这一点与按来源限速
+ * **正好相反**，所以这一层没有 `effective` 那个开关：userId 不可能是回环、
+ * 不可能是 CGNAT、也不依赖可信代理配得对不对。
+ *
+ * 反过来说：**换一个网络不会重置配额**。那正是它要防的行为。
+ *
+ * 抛的是带 `status` 的普通错误，路由族把它翻成响应（与 `requireSpaceAccess` 同形）。
+ * 返回 `undefined` 表示放行。
+ */
+function requireAccountQuota(req, resource) {
+  if (REMOTE_AGENT_ENABLED !== true || userStore === null) return
+  const actor = req?.__legionUser
+  // 没有用户身份 → 这一层不适用（机器令牌 / 本机无鉴权）。
+  // 与 `requireSpaceAccess` 在 `__legionUser` 缺失时的既有语义一致：
+  // 不改变本机部署与守护的行为。
+  if (actor === undefined || actor === null) return
+  const spec = QUOTA_RESOURCES[resource]
+  if (spec === undefined) return
+  const max = QUOTA_LIMITS[resource]
+  const windowMs = spec.defaultWindowMs
+  const decision = userStore.accountQuota({
+    bucket: `quota:${resource}`,
+    userId: actor.userId,
+    max,
+    windowMs,
+  })
+  if (decision.allowed !== false) return
+  const windowSec = Math.round(windowMs / 1000)
+  // ★ `Retry-After` 只能由**路由族**写（这里拿不到 `res`）。
+  //   所以把秒数放在错误对象上，由各族的 catch 落到响应头 ——
+  //   丢了它就等于让客户端自己猜一个重试间隔，而那正是配额最想避免的行为。
+  throw Object.assign(
+    new Error(quotaMessage({ resource, max, windowSec, retryAfterSec: decision.retryAfterSec })),
+    { code: QUOTA_CODE, status: RATE_LIMIT_STATUS, retryAfterSec: decision.retryAfterSec },
+  )
 }
 
 /**
@@ -7926,6 +8025,9 @@ if (REMOTE_AGENT_ENABLED) {
       register: CFG.values.rateLimitRegister,
       'password-reset': CFG.values.rateLimitPasswordReset,
     },
+    // 按**账号**的用量配额（与上面的来源限速是两件事，见 DEPLOY.md §2.5）。
+    // 这里注入上限表；诊断端点据此**如实报出**，判定在 `requireAccountQuota`。
+    quotas: QUOTA_LIMITS,
   }))
   router.list.push(
     { family: 'identity', method: 'GET', path: '/api/identity/status' },

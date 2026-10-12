@@ -21,7 +21,7 @@
 // ============================================================================
 
 import { clientIpFrom, isLoopbackOrPrivate } from '../client-ip.mjs'
-import { limitMessage, RATE_LIMIT_CODE, RATE_LIMIT_STATUS } from '../rate-limit.mjs'
+import { limitMessage, RATE_LIMIT_CODE, RATE_LIMIT_STATUS, QUOTA_RESOURCES } from '../rate-limit.mjs'
 
 /** 把仓储抛出的具名错误映射成 HTTP。 */
 function errorResponse(store, e) {
@@ -41,6 +41,9 @@ export function createIdentityRoutes({
   trustedProxies = { rules: [], invalid: [] },
   // 上限。`<= 0` = 显式关掉。窗口统一 15 分钟（与按用户名的登录锁定同量级）。
   limits = {},
+  // 按**账号**的用量配额上限（键同 `QUOTA_RESOURCES`）。只用于**如实报出**读数 ——
+  // 判定在 `server.mjs` 的 `requireAccountQuota`，诊断在这里，两处读同一份注入值。
+  quotas = {},
 } = {}) {
   for (const [name, fn] of Object.entries({ json, readBody, authorized, requireString })) {
     if (typeof fn !== 'function') throw new TypeError(`createIdentityRoutes 缺注入项：${name}`)
@@ -57,6 +60,20 @@ export function createIdentityRoutes({
   const rateMax = (name) => {
     const v = Number(limits?.[name])
     return Number.isFinite(v) ? v : 0
+  }
+  /**
+   * 生效中的配额上限。**从注入的 `quotas` 读**，不在本文件里写死 ——
+   * 报出来的数与实际判定的数必须是同一个来源，否则"诊断说 300、实际不限"这种
+   * 最难查的偏差就会出现（而且只在被攻击时暴露）。
+   */
+  const quotaMax = {}
+  for (const [resource, spec] of Object.entries(QUOTA_RESOURCES)) {
+    const v = Number(quotas?.[resource])
+    quotaMax[resource] = Number.isFinite(v) ? v : (Number.isFinite(spec?.defaultMax) ? spec.defaultMax : 0)
+  }
+  const quotaWindowSec = () => {
+    const ms = Math.max(...Object.values(QUOTA_RESOURCES).map((s) => Number(s?.defaultWindowMs) || 0), 0)
+    return Math.round(ms / 1000)
   }
 
   /** 这次请求的"来源"长什么样，以及它能不能用来按来源限速。 */
@@ -125,6 +142,13 @@ export function createIdentityRoutes({
       windowSec: Math.round(RATE_WINDOW_MS / 1000),
       trustedProxyRules: Array.isArray(trustedProxies?.rules) ? trustedProxies.rules.length : 0,
       trustedProxiesInvalid: Array.isArray(trustedProxies?.invalid) ? trustedProxies.invalid : [],
+      // ── 按**账号**的用量配额（与上面的来源限速是**两套**读数）────────────────
+      //
+      // ★ 为什么两组必须分开报：它们问的问题不同，运维的动作也不同。
+      //   来源限速 → 去配 `LEGION_TRUSTED_PROXIES`；配额 → 去调 `LEGION_QUOTA_*`。
+      //   揉成一组的话，运维看到"限速已生效"就以为配额也配好了。
+      quotas: quotaMax,
+      quotaWindowSec: quotaWindowSec(),
     }
   }
 

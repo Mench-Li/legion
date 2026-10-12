@@ -931,6 +931,13 @@ async function stageTest() {
         //                       攻击者失败几次就能把全部用户挡在门外）
         'team-hub/identity-rate-limit.test.mjs',
         'team-hub/identity-rate-limit-noproxy.test.mjs',
+        // ★ 按**账号**的用量配额（防库被灌满）。与上面的来源限速是**两件事**：
+        //   限速问"这个来源试了多少次"（键是 IP），配额问"这个账号建了多少资源"
+        //   （键是 userId）。两个方向都要有 —— 一个攻破的账号能完全绕开来源限速
+        //   （它本来就是合法请求），而一台被灌满的库会让所有账号一起不可用。
+        //   这一族的重点在两条：**按账号隔离**、以及**只管人不管 Agent**
+        //   （把 Agent 的汇报也算进去，会在它最忙时把用户锁住）。
+        'team-hub/account-quota.test.mjs',
         'team-hub/user-store.test.mjs',
         'team-hub/portal-routes.test.mjs',
         'team-hub/releases-routes.test.mjs',

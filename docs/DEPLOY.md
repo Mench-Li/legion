@@ -91,6 +91,7 @@
 | LEGION_TRUSTED_PROXIES | env | **空** | 可信反向代理的地址/CIDR（逗号分隔）。**留空 = 不信任何 `X-Forwarded-For`，按来源限速不生效**。Hub 绑回环 + 隧道填 `127.0.0.1/32,::1/128`。见 §2.4 |
 | LEGION_RATE_LIMIT_LOGIN / _REGISTER / _PASSWORD_RESET | env | 30 / 10 / 10 | 同一来源 15 分钟内允许的尝试次数（登录 / 注册 / 口令重置）；`0` = 关掉那一层。见 §2.4 |
 | LEGION_REGISTRATION / LEGION_REGISTRATION_MAX | env | closed / 20 | 注册策略与**全局**每小时新账号上限 —— 与上面的来源限速是两件事，见 §2.4 |
+| LEGION_QUOTA_MESSAGES_PER_HOUR | env | 300 | 每个**账号**每小时的聊天消息数（防库被灌满）；`0` = 关掉。Agent 的汇报**不**计入。见 §2.5 |
 | DSH_KANBAN_PORT/HOST/TOKEN、--token | args/env | 4820 / 127.0.0.1 / 空 | v1 遗留 |
 | whiteboard | env（也可 `--port/--host/--token`） | PORT 8080 / HOST 127.0.0.1 / DB_PATH / WHITEBOARD_TOKEN | 非回环监听必须设置 WHITEBOARD_TOKEN；见 whiteboard/docs/DEPLOY.md |
 安全不变量（三中心与平台既有）：/api/files/*、/api/web/fetch、/api/fs/* 仅回环地址可访问；写操作 token 鉴权
@@ -154,6 +155,67 @@ curl -s -H "authorization: Bearer $TEAM_HUB_TOKEN" \
 **已知取舍（不假装消除）**：同一办公室 / 运营商 CGNAT 出口后面的人会**一起**被限。
 所以上限定得宽（登录 30/15 分钟），且 429 的消息明确说"这是**来源**级别的限速，
 不是账号被封；换一个网络通常可以立即继续"。
+
+### 2.5 按**账号**的用量配额：与上面的来源限速是两件事
+
+| | 问的是 | 键 | 默认 | 生效条件 |
+| --- | --- | --- | --- | --- |
+| 来源限速（§2.4） | 这个**来源**试了多少次 | IP | 30 / 10 / 10 per 15min | 配了 `LEGION_TRUSTED_PROXIES` |
+| **用量配额（本节）** | 这个**账号**建了多少资源 | userId | `LEGION_QUOTA_MESSAGES_PER_HOUR=300` | **一直生效** |
+| 按用户名的登录锁定 | **这个账号**是不是正在被猜 | userId | 15 分钟内失败若干次 | 一直生效 |
+
+**两个方向都要有**：一个**攻破的账号**能完全绕开来源限速 —— 它发的本来就是
+合法请求；而一台被灌满的库会让**所有**账号一起不可用。
+
+**三条刻意的设计**（改动前先读代码里的理由）：
+
+1. **换网络不会重置配额。** 键是 userId 不是 IP。这正是它要防的行为 ——
+   攻击者会换网络，而一个正常的用户不会因为换了 Wi-Fi 就被重置。
+2. **Agent 的汇报不计入。** 同一张 `messages` 表，人的写入走 HTTP（过配额），
+   Agent/守护的汇报走内部 `insertMessage`（不过配额）。
+   > 把 Agent 汇报算进用户配额，会在 Agent 干活最忙的时候把用户锁住 ——
+   > 而那时正是他最需要看到进展的时候。
+3. **被拒的尝试不记账。** 否则用户被拒后反复重试（人的自然反应）会把窗口
+   一直往后推，他**永远等不到恢复**，而界面每次都说"请约 X 分钟后继续"。
+
+`0` = 关掉这一层。同一个 429 语义：带 `Retry-After`，错误码
+`ACCOUNT_QUOTA_EXCEEDED`（与来源限速的 `IDENTITY_RATE_LIMITED` **不同码** ——
+前者要说"等一会儿或找管理员"，后者才说"换个网络"）。
+
+**启动期自检**：`QUOTA_LIMITS` 与 `QUOTA_RESOURCES` 的键必须完全一致，否则
+服务**拒绝启动**。守的是静默失败 —— 键写错时两条查表都落空，全都通向"不限"，
+且没有日志。一个"配了但键对不上"的配额，与一个"根本没配"的配额，
+在运行期是同一个东西。
+
+#### 在生产上验证配额时：**别用外键清理**
+
+```bash
+# 只读的诊断（不需要改配置、不需要写任何消息）
+curl -s -H "authorization: Bearer $TEAM_HUB_TOKEN" \
+  https://<域名>/api/identity/rate-limits
+# 期望看到两组：max（来源限速）与 quotas（账号配额），各自独立
+```
+
+要**真实触发**一次，正确做法是**预置满额流水**，而不是真发几百条消息：
+
+```js
+// 让这个账号看起来已经用满（不写任何业务数据、不改配置）
+for (let i = 0; i < 300; i++) ins.run(key, Date.now())   // bucket='quota:message', key='user:<id>'
+// 下一条消息必须 429，且 messages 表行数不变（配额在写之前）
+// 然后删除预置流水 → 同一条消息必须 200
+```
+
+> ★ **清理时只删你能证明是自己创建的行。**
+>
+> 我在这上面栽过一次：验证脚本用 `DELETE FROM messages WHERE conv_id=?` 清理，
+> 而那个 `conv_id` 是 `/api/agent-conversations` **返回**的 ——
+> 该端点会**收养**一条既有的岗位会话，而不是每次新建。
+> 于是我删掉了一条**既有会话**和它的 **27 条真实消息**。
+> （已用当晚 gpg 备份逐行恢复并核对：三张受影响的表与删除前完全一致。）
+>
+> `/api/agent-conversations` 返回的 `convId` **不保证**是新会话。
+> 清理要么按你自己插入时拿到的行 id 删，要么按一个只属于你的唯一标记删，
+> 永远不要按一个"你以为只属于你"的外键删。
 
 ---
 

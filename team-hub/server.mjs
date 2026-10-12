@@ -7207,6 +7207,20 @@ async function handle(req, res, stripPrefix) {
     if (path === stripPrefix) path = '/'
     else if (path.startsWith(`${stripPrefix}/`)) path = path.slice(stripPrefix.length)
   }
+  // 同源 `/hub/*` 前缀：**工作台对中枢的固定入口**。
+  //
+  // 工作台前端（`workbench/src/api.ts` 的 `hubBase()`）默认打到 `/hub`，它在本地是
+  // `serve.mjs` 提供的一条反向代理。把工作台交给 Hub 托管之后，那层代理不在了，
+  // 于是这条前缀必须由**中枢自己**接住 —— 否则页面加载出来之后，每一次 API 调用
+  // 都会 404，而界面表现为"连不上中枢"。
+  //
+  // ★ 做的是**改写 path**，不是再挂一套路由：改写之后身份门、空间授权、
+  //   公开名单看到的就是 `/api/…`，与直接访问完全同一套逻辑，只判一次。
+  //   再挂一套路由则意味着两套入口各自漂移 —— 而"哪一套的门禁更松"是
+  //   那种没人会去比、直到出事才发现的问题。
+  //   （`stripPrefix` 就是同一做法的既有先例。）
+  if (path === '/hub') path = '/'
+  else if (path.startsWith('/hub/')) path = path.slice('/hub'.length)
   res.setHeader('access-control-allow-origin', '*')
   if (req.method === 'OPTIONS') {
     res.writeHead(204, { 'access-control-allow-methods': 'GET, POST, PUT, OPTIONS', 'access-control-allow-headers': 'content-type, authorization, x-dsh-token, content-length' })
@@ -7725,6 +7739,7 @@ import { createMobileRoutes } from './routes/mobile.mjs'
 import { createPortalRoutes } from './routes/portal.mjs'
 import { createReleaseRoutes, latestInstaller, readReleaseManifest } from './routes/releases.mjs'
 import { createSiteRoutes } from './routes/site.mjs'
+import { createWorkbenchRoutes } from './routes/workbench.mjs'
 // T-196：安装包的**多线路**下载。线路表从文件读（配置系统没有 JSON 类型，
 // 而下载地址里天然带 `?`/`&`/`=`，用 csv 表达会歧义），按访客地区选一条。
 import { formatDownloadLineProblems, loadDownloadLines, selectDownloadLine } from './download-lines.mjs'
@@ -7972,6 +7987,21 @@ if (REMOTE_AGENT_ENABLED) {
   // 用户就永远拿不到那个能让他登录的页面。
   // 位置最后 unshift ⇒ 数组最前 ⇒ 最先派发。
   router.families.unshift(createMobileRoutes({ root: join(ROOT, 'workbench', 'mobile') }))
+
+  // 桌面工作台的构建产物（`GET /workbench/*`）。
+  //
+  // ★ 与手机端同一个理由排在门禁之前：它是**页面本身**，而鉴权发生在页面
+  //   发出的 API 调用上（工作台自己的登录门在 `src/App.tsx` 里探测
+  //   `/api/identity/status`，然后渲染 `LoginView`）。把页面挡在门禁后面，
+  //   用户就永远拿不到那个能让他登录的页面。
+  //
+  // ★ 只在**产物真的存在**时注册：没有 dist 就让它落到通用 404，
+  //   而不是挂一个空目录上去 —— "200 但是空的"与"还没构建"在界面上
+  //   长得一样，而前者会让排障的人去查缓存。（与 `releasesDir` 同一条纪律。）
+  const workbenchDist = join(ROOT, 'workbench', 'dist')
+  if (existsSync(join(workbenchDist, 'index.html'))) {
+    router.families.unshift(createWorkbenchRoutes({ root: workbenchDist }))
+  }
 
   // 发布目录托管（`GET /legion/*`）。
   //

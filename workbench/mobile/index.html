@@ -145,6 +145,36 @@ footer textarea { resize:none; max-height:110px; font-size:14px; }
   padding:9px 11px; border-radius:8px; font-size:13px; }
 .hidden { display:none !important; }
 
+/* ── 三块屏：由 `body[data-screen]` 决定显示哪一块 ──────────────────────────
+ *
+ * ★ 用**一个属性**而不是三处 `classList` 增删。三处各自 toggle 的那种写法，
+ *   漏掉一处就会同时显示两块、或者一块都不显示 —— 而两者在截图上都是"页面坏了"。
+ *   这里 `data-screen` 与三条规则一一对应，且只有四种状态（含"还没设"）。
+ *
+ * 还没设 `data-screen` 时（脚本尚未执行）默认显示 `#boot`：
+ * 那是**唯一**一个不含"断言"的屏 —— 它只说"正在连接"。 */
+#boot, #screen-login, #main, #composer { display:none; }
+body:not([data-screen]) #boot,
+body[data-screen="boot"] #boot { display:block; }
+body[data-screen="login"] #screen-login { display:flex; }
+body[data-screen="app"] #main { display:block; }
+body[data-screen="app"] #composer { display:flex; }
+/* 头部那组动作（页签 / 刷新 / 退出）只在主界面出现 —— 登录页上画着它们
+   等于给出一组看得见、点不动的控件。 */
+body:not([data-screen="app"]) #tabs,
+body:not([data-screen="app"]) #btn-refresh,
+body:not([data-screen="app"]) #btn-logout { display:none; }
+
+/* ── 启动骨架 ───────────────────────────────────────────────────────────── */
+.skeleton { display:flex; flex-direction:column; gap:11px; margin-top:16px; }
+.sk-line { height:14px; border-radius:6px; background:var(--panel-2, #1a1d23);
+  animation: sk-pulse 1.4s ease-in-out infinite; }
+.sk-line:nth-child(2n) { animation-delay:.2s; }
+.sk-line:nth-child(3n) { animation-delay:.4s; }
+@keyframes sk-pulse { 0%,100% { opacity:.45; } 50% { opacity:.9; } }
+/* 用户开了"减少动态效果"就别闪 —— 一条一直在动的占位在这个设置下是干扰。 */
+@media (prefers-reduced-motion: reduce) { .sk-line { animation:none; opacity:.6; } }
+
 /* ── 全局提示（错误 / 回执）────────────────────────────────────────────────
  *
  * 与 `#popup-host` 同一套定位思路（输入区上方＝拇指活动区、视线落点），
@@ -201,6 +231,24 @@ footer textarea { resize:none; max-height:110px; font-size:14px; }
   </div>
 </header>
 
+<section id="boot">
+  <p class="viewtitle" id="boot-title">正在连接…</p>
+  <!-- 骨架：进主界面后还要等六个串行请求（空间/任务/提醒/会话/消息），
+       那段时间内容区本来是**空的** —— 弱网下看起来就是卡死。
+       放在启动屏里，于是那段等待有一条"正在发生什么"的形状。 -->
+  <div class="skeleton" id="boot-skeleton" aria-hidden="true">
+    <div class="sk-line" style="width:92%"></div>
+    <div class="sk-line" style="width:78%"></div>
+    <div class="sk-line" style="width:88%"></div>
+    <div class="sk-line" style="width:64%"></div>
+    <div class="sk-line" style="width:84%"></div>
+    <div class="sk-line" style="width:71%"></div>
+  </div>
+</section>
+
+<!-- ★ 这三块**不用** `class="hidden"` 控制：`.hidden` 是 `!important`，会盖过
+     `body[data-screen=…]` 那几条规则。它们的可见性**只**由 `data-screen` 决定
+     （见上面那段 CSS），于是"同时显示两块"或"一块都不显示"在结构上不可能。 -->
 <section id="screen-login">
   <h2 id="auth-title">登录 Legion</h2>
   <div class="hint" id="auth-hint">用你的 Legion 账号登录。</div>
@@ -216,7 +264,7 @@ footer textarea { resize:none; max-height:110px; font-size:14px; }
   <div id="login-notice" class="notice-box hidden"></div>
 </section>
 
-<main id="main" class="hidden">
+<main id="main">
   <div id="view-chat">
     <div id="agent-chips" class="agent-chips hidden" role="list" aria-label="成员选择"></div>
     <div id="agent-picker"></div>
@@ -229,7 +277,7 @@ footer textarea { resize:none; max-height:110px; font-size:14px; }
   </div>
 </main>
 
-<footer id="composer" class="hidden">
+<footer id="composer">
   <div id="intents" role="group" aria-label="消息意图"></div>
   <div id="intent-hint"></div>
   <div id="target-row">

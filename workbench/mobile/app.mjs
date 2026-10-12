@@ -57,6 +57,8 @@ import {
 // 系统提醒的三个纯决策（机制 / 去重标签 / 按钮表现）。抽出来是为了可测 ——
 // 本文件在 Node 里不可 import，而这三个判断都不需要 DOM。
 import { notifyMechanism, notificationTag, notifyButtonPlan } from './notify-plan.mjs'
+// 首屏该显示哪一块。三块由 `body[data-screen]` 单点切换，见 `screen-plan.mjs` 文件头。
+import { isScreen, screenAfterProbe, chromeVisible } from './screen-plan.mjs'
 
 const $ = (id) => document.getElementById(id)
 const LS_REFRESH = 'legion.mobile.refresh'
@@ -1119,6 +1121,11 @@ async function readyServiceWorker(timeoutMs = 1500) {
 function renderNotifyButton() {
   const btn = $('btn-notify')
   if (btn === null) return
+  // ★ 只在主界面出现：登录页上它能做的最多是"为还没登录的状态开启提醒"，
+  //   而提醒只在登录后才会响 —— 那是一组看得见、点不出效果的控件。
+  //   （`body:not([data-screen=app])` 那几条 CSS 管着页签/刷新/退出；
+  //     这一个归脚本管，所以两处都要认 `chromeVisible` 这同一个判据。）
+  if (!chromeVisible(currentScreen())) { btn.classList.add('hidden'); return }
   const plan = notifyButtonPlan({
     supported: systemNotifySupported(),
     permission: systemNotifyPermission(),
@@ -1288,6 +1295,31 @@ async function doLogin() {
 }
 
 /**
+ * 切到某一块屏。**唯一的**入口 —— 三块的可见性只由 `body[data-screen]` 决定。
+ *
+ * ★ 修复前这里是两处各自 `classList.add/remove('hidden')`（`showLoginScreen` 与
+ *   `enterApp` 各一份，一共六次操作）。那种写法的问题不是啰嗦，是**漏一次就错**：
+ *   少 remove 一块会同时显示两块，少 add 一块会一块都不显示，而两者在截图上
+ *   都是"页面坏了"。现在只有这一个写入点。
+ */
+function setScreen(screen) {
+  if (!isScreen(screen)) {
+    // 写错值 ⇒ 三条 CSS 规则全不匹配 ⇒ 三块都不显示。当场炸比白屏好查。
+    throw new TypeError(`setScreen 收到未知的屏：${JSON.stringify(screen)}`)
+  }
+  document.body.dataset.screen = screen
+  // 头部那几个动作的可见性跟着屏走。页签/刷新/退出由 CSS 按 `data-screen` 收
+  // （见 index.html），而「🔔」是**脚本**控制的，所以这里要重画一次 ——
+  // 否则登录页上会挂着一个点不出任何效果的提醒按钮。
+  renderNotifyButton()
+}
+
+/** 当前是哪一块屏（读 `data-screen`，不另存一份状态）。 */
+function currentScreen() {
+  return document.body.dataset.screen ?? null
+}
+
+/**
  * 切回登录屏（`enterApp` 的逆向）。
  *
  * ★ 为什么需要它：会话在**使用中途**失效时（刷新令牌过期、被管理员撤销、
@@ -1296,18 +1328,16 @@ async function doLogin() {
  *   把登录屏切回来，本身就是最清楚的一句提示。
  */
 function showLoginScreen() {
-  $('screen-login').classList.remove('hidden')
-  $('main').classList.add('hidden')
-  $('composer').classList.add('hidden')
+  setScreen('login')
   $('title').textContent = 'Legion'
   // 浮层要收掉：它可能压着登录表单，而登录表单此刻才是用户该看的东西。
   hideToast()
 }
 
 async function enterApp(me) {
-  $('screen-login').classList.add('hidden')
-  $('main').classList.remove('hidden')
-  $('composer').classList.remove('hidden')
+  // ★ 这里**不**先落主界面：那六个串行请求（空间→任务→提醒→会话→消息）跑完之前
+  //   内容区是空的，修复前就是"先亮主区、再 await"，弱网下看起来像卡死。
+  //   留在启动屏（它有骨架）直到有东西可显示 —— 顺序是刻意的。
   $('title').textContent = `Legion · ${me.name ?? ''}`
   // 空间：**由 refreshSpaces 统一解析**（它读 /api/identity/me 的 roles，
   // 并在多于一个时渲染成可切换的下拉框）。原来在这里自己算一次，
@@ -1328,6 +1358,11 @@ async function enterApp(me) {
   } catch (e) {
     // 空间没有 Agent 不是致命错误：界面照常显示，让用户去任务页看。
     console.warn('初始化失败', e)
+  } finally {
+    // ★ 无论成功失败都**必须**落主界面。停在启动骨架上一个错误都没有，
+    //   比落进去少几块内容糟得多 —— 前者是"页面坏了"，后者只是"还没加载完"。
+    //   用 `finally` 而不是在末尾写一行：末尾那行会被将来任何一处 `return` 跳过。
+    setScreen('app')
   }
   // 登录后落在 **Agent**（聊天）——那是这个产品的主功能；
   // 「任务」是查账的地方，不是入口。
@@ -1437,39 +1472,53 @@ async function main() {
   registerServiceWorker()
   renderIntents()
   renderNotifyButton()
-  const reachable = await refreshStatus()
-  // ★ 只有"Hub **答复了**但拒绝"才算会话没了（`shouldClearSession`：看有没有
-  //   数字 `status`）。修复前这里是裸 `catch { clearSession() }` ——
-  //   于是**断网重开页面**就会把 localStorage 里那把 refresh 令牌删掉，
-  //   逼用户重新输口令。地铁、电梯、锁屏唤醒都会命中，而那是手机上
-  //   最高频的失败路径。
+  // ★ 起点是**启动屏**，不是登录屏。
   //
-  //   > 把"我连不上"读成"你被登出了"，代价是用户重新打一遍密码；
-  //   > 而这两件事在 `catch` 里长得一模一样。
-  if (state.access !== null) {
-    // 已有会话：直接进（令牌可能过期，`api` 会自动刷新一次）。
-    try {
-      const me = await api('/api/identity/me')
-      await enterApp({ name: me.user?.name })
-      return
-    } catch (err) {
-      if (shouldClearSession(err)) clearSession()
-      else setConnection({ hubReachable: false })
+  //   修复前模板里 `#screen-login` 没有 `hidden`，于是已经登录的人每次打开都先
+  //   看到一整张登录表单、几百毫秒后被抽走 ——
+  //   > 一个"先让你以为自己被登出了、再把你放进去"的首屏，
+  //   > 与一个"直接进去"的首屏，在功能上完全一样。
+  setScreen('boot')
+  try {
+    const reachable = await refreshStatus()
+    // ★ 只有"Hub **答复了**但拒绝"才算会话没了（`shouldClearSession`：看有没有
+    //   数字 `status`）。修复前这里是裸 `catch { clearSession() }` ——
+    //   于是**断网重开页面**就会把 localStorage 里那把 refresh 令牌删掉，
+    //   逼用户重新输口令。地铁、电梯、锁屏唤醒都会命中，而那是手机上
+    //   最高频的失败路径。
+    //
+    //   > 把"我连不上"读成"你被登出了"，代价是用户重新打一遍密码；
+    //   > 而这两件事在 `catch` 里长得一模一样。
+    if (state.access !== null) {
+      // 已有会话：直接进（令牌可能过期，`api` 会自动刷新一次）。
+      try {
+        const me = await api('/api/identity/me')
+        await enterApp({ name: me.user?.name })
+        return
+      } catch (err) {
+        if (shouldClearSession(err)) clearSession()
+        else setConnection({ hubReachable: false })
+      }
     }
-  }
-  if (state.refresh !== null && await refreshSession()) {
-    try {
-      const me = await api('/api/identity/me')
-      await enterApp({ name: me.user?.name })
-      return
-    } catch (err) {
-      if (shouldClearSession(err)) clearSession()
-      else setConnection({ hubReachable: false })
+    if (state.refresh !== null && await refreshSession()) {
+      try {
+        const me = await api('/api/identity/me')
+        await enterApp({ name: me.user?.name })
+        return
+      } catch (err) {
+        if (shouldClearSession(err)) clearSession()
+        else setConnection({ hubReachable: false })
+      }
     }
+    // ★ 没登录 ≠ Hub 不可达。用 `refreshStatus()` 的真实结果决定措辞——
+    //   一个把"你还没登录"说成"服务器连不上"的界面，会把用户送去查网络。
+    setConnection(reachable ? { hubReachable: true, signedIn: false } : { hubReachable: false })
+  } finally {
+    // ★ 兜底：`enterApp` 成功时已经落在 `'app'`，这里不动；任何**没落屏**的
+    //   退出路径（上面两个 `return` 之外的异常、将来新加的分支）都会到这里 ——
+    //   停在启动屏上一个错误都没有，比落在登录屏糟得多，因为用户不知道该做什么。
+    if (currentScreen() === 'boot') setScreen(screenAfterProbe({ signedIn: false }))
   }
-  // ★ 没登录 ≠ Hub 不可达。用 `refreshStatus()` 的真实结果决定措辞——
-  //   一个把"你还没登录"说成"服务器连不上"的界面，会把用户送去查网络。
-  setConnection(reachable ? { hubReachable: true, signedIn: false } : { hubReachable: false })
 }
 
 if (typeof document !== 'undefined' && document.getElementById('screen-login') !== null) {

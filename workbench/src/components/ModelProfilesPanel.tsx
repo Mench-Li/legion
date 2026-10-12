@@ -244,8 +244,9 @@ export function ModelProfilesPanel(): React.JSX.Element {
               {row.disabled && <span className="chip muted">已停用</span>}
               <ProbeChip tone={badge.tone} label={badge.label} />
             </div>
-            <div className="set-card-sub">{row.subtitle}　·　{row.endpointText}</div>
+            <div className="set-card-sub">{row.subtitle}　·　{row.endpointText}{row.sourceText}</div>
             <div className="set-card-sub">{row.credential.text}　·　版本 {typeof p.version === 'number' ? p.version : '未知'}</div>
+            {row.redundantHint !== '' && <div className="set-card-detail">{row.redundantHint}</div>}
             <div className="set-card-detail">{badge.detail}</div>
             {badge.action !== null && <div className="set-card-action">下一步：{badge.action}</div>}
             <div className="set-card-actions">

@@ -333,3 +333,52 @@ after(() => {
   //   临时目录由 OS 回收；这里失败不该影响判据。
   try { rmSync(dir, { recursive: true, force: true }) } catch { /* 句柄未放开：交给 OS */ }
 })
+
+// ============================================================================
+// BUG-023 的收敛：`GET /api/model-providers` 要带上**核验过**的凭证状态。
+//
+// 实测的假话：面板显示 `fjd-ds · 已配置凭证`，而它引用的 `FJD_DS_API_KEY`
+// 根本不在密钥库里 —— 那句"已配置"读的是 `credentialConfigured`
+// （**P1 从 DSH 导入的标记**），而不是"这把钥匙真的在不在"。
+// ============================================================================
+
+test('⑮ ★★ 列表里每一行都带 `credential`（核验结果），且状态是已知集合里的一个', async () => {
+  const r = await get('/api/model-providers')
+  assert.equal(r.status, 200)
+  assert.ok(r.body.providers.length > 0, '这一套前面已经导入过供应商')
+  for (const p of r.body.providers) {
+    assert.ok(p.credential !== undefined, `${p.id} 缺 credential：界面只能回去读那个导入标记`)
+    assert.ok(
+      ['none', 'ready', 'missing', 'unavailable'].includes(p.credential.state),
+      `${p.id} 的状态不认识：${p.credential.state}`,
+    )
+    assert.equal(p.credential.ref, p.secretRef ?? null, '核验的必须是这一行自己的引用名')
+    // 兼容：原来的标记原样保留（别的消费者还在用）
+    assert.equal(typeof p.credentialConfigured, 'boolean')
+  }
+})
+
+test('⑯ ★★★ 本环境读不到密钥库 ⇒ 必须是 `unavailable`，**绝不是** `missing`', async () => {
+  // 这一条是入口级的"读不出来 ≠ 没有"：测试进程没有 LEGION_* 布局，
+  // 密钥库必然打不开。把它报成 `missing` 会让用户去补一把**他可能早就存过**的钥匙，
+  // 而真因是"这次没核验成"。
+  const r = await get('/api/model-providers')
+  const withRef = r.body.providers.filter((p) => typeof p.secretRef === 'string' && p.secretRef !== '')
+  assert.ok(withRef.length > 0, '夹具里应当有带引用名的供应商')
+  for (const p of withRef) {
+    assert.equal(p.credential.state, 'unavailable',
+      `${p.id}：读不出来时不许说"没有"（实际：${p.credential.state}）`)
+    assert.match(p.credential.detail, /不等于"没有"/)
+  }
+})
+
+test('⑰ ★ 没有引用名的供应商 ⇒ `none`（不是错误，也不需要凭证）', async () => {
+  await post('/api/model-providers', {
+    actor: 'general',
+    provider: { id: 'local-only-15', displayName: '本地', baseURL: 'http://127.0.0.1:11434/v1', secretRef: null, models: [{ id: 'llama' }] },
+  })
+  const r = await get('/api/model-providers')
+  const p = r.body.providers.find((x) => x.id === 'local-only-15')
+  assert.equal(p.credential.state, 'none')
+  assert.equal(p.credential.ref, null)
+})

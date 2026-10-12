@@ -1977,6 +1977,15 @@ async function stageTest() {
     //   第二半（写入）：供应商目录的仓储与两条路由 —— 幂等（第二次写 0 行）/ 不删除 /
     //   未知字段拒绝（密钥纪律）/ secretRef 只收引用名 / 型号白名单要报出丢掉的字段名 / 墓碑复活。
     { label: 'model-providers（P1：供应商目录 —— 幂等导入、不删除、拒未知字段）', files: ['team-hub/model-providers-routes.test.mjs'], cwd: ROOT },
+    // ★ BUG-023 的收敛（两半，各有自己的纯模块与判据）：
+    //   ① **有效档案**：档案留空的 `endpoint`/`secretRef` 从它点名的供应商补上
+    //      —— 这是 DECISION §6 那句"`base_url` 从'每行都有'上移到'每个供应商一份'"的下半句。
+    //      用例同时钉住相反的两件事：留空 ⇒ 继承；写了 ⇒ **逐字用它**（真实偏离必须活下来）。
+    //   ② **真实凭证核验**：问本机密钥库，而不是信 `credential_configured` 那个从 DSH 导入的标记
+    //      （实测那台机器上它显示"已配置凭证"，而钥匙根本不在库里）。
+    //      最重要的一条：**读不出来 ⇒ unavailable，绝不是 missing**。
+    { label: 'model-resolution（BUG-023：留空继承供应商 / 写了就不被覆盖 / 纯复制识别）', files: ['team-hub/model-resolution.test.mjs'], cwd: ROOT, nodeArgs: ['--experimental-strip-types'] },
+    { label: 'credential-status（BUG-023：核验钥匙在不在库里；读不出来 ≠ 没有）', files: ['team-hub/credential-status.test.mjs'], cwd: ROOT, nodeArgs: ['--experimental-strip-types'] },
     // ── P2（DECISION-legion-owns-model-config）：**影子物化 —— 只报告，不写** ──
     //   守三件在别处会被读成"没事"的事：
     //   ① 它真的一个字节都没写（夹具把 mutate/set/unset 换成"一调用就记名+抛"的探针）；

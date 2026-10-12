@@ -119,6 +119,8 @@ import { modelConfigErrorFor, validateAgentModelSelection } from '../runtime/con
 // 整套实现 + 两个套件 + 文档都在，而没有任何入口能触发它——
 // **一个没有任何入口的功能，和一个不存在的功能，从用户角度看完全一样。**
 import { createProbeService } from './probe-service.mjs'
+// ★ BUG-023 的收敛：真实凭证核验（问密钥库）与有效档案（留空即继承供应商）。
+import { createCredentialStatus } from './credential-status.mjs'
 // spec §6.7 的写一半：凭证的新增/更新/轮换/删除。读路径早已接上
 // （`runtime/probe/secret-resolver.mjs`），写路径此前**零调用方**。
 import { createSecretAdmin } from './secret-admin.mjs'
@@ -876,6 +878,22 @@ function secretAdmin() {
   }
   return secretAdminInstance
 }
+
+/**
+ * 真实凭证状态：**问本机密钥库**，而不是信 `credential_configured` 那个导入标记。
+ *
+ * 实测（2026-10-10）：面板说 `fjd-ds · 已配置凭证`，而它引用的 `FJD_DS_API_KEY`
+ * 根本不在密钥库里 —— 于是"测试连接"永远失败，而界面上没有任何东西指向真因。
+ *
+ * 读一次库、对任意多条目判任意多次（见 `credential-status.mjs` 的纪律 ②）；
+ * 读失败 ⇒ `unavailable`，**绝不**降级成"没有"（纪律 ①）。
+ */
+const credentialStatus = createCredentialStatus({
+  listRefs: async () => {
+    const r = await secretAdmin().list()
+    return (r?.entries ?? []).map((e) => e?.ref).filter((ref) => typeof ref === 'string' && ref !== '')
+  },
+})
 
 /**
  * 装上凭证管理面，并把**「凭证变了 → 探测缓存失效」**这条线接起来。
@@ -6971,8 +6989,11 @@ const router = createRouter([
     json,
     handleRun, modelStore, probeService,
     MODEL_ERRORS,
+    // ★ BUG-023 的收敛：有效档案（留空的 endpoint/secretRef 从供应商补）
+    //   与真实凭证核验（问密钥库，而不是信那个从 DSH 导入的标记）。
+    providerStore, credentialStatus,
   }),
-  createModelProvidersRoutes({ json, handleRun, providerStore }),  createUsageRoutes({
+  createModelProvidersRoutes({ json, handleRun, providerStore, credentialStatus }),  createUsageRoutes({
     json,
     authorized, usageRollup, optionalIntParam,
     db, ROLLUP_DIMENSIONS, evaluateBudgetAlert,

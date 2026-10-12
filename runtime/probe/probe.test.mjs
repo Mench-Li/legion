@@ -202,6 +202,36 @@ test('③ 凭证解析失败 → SECRET_UNAVAILABLE，且**根本不发请求**'
   assert.match(v.message, /SecretStoreError\/DECRYPT_FAILED/, '但要能看出是哪一类失败')
 })
 
+test('★★ ③b 引用**不存在于库里**（SECRET_NOT_FOUND）→ 说法必须与"库打不开"不同', async () => {
+  // 实测那条（2026-10-10）：三条 fjd 档案引用的 `FJD_DS_API_KEY` 根本不在库里，
+  // 而统一文案说「无法访问或解密本机凭证库：请检查密钥库与当前 Windows 账户作用域」——
+  // 用户会去查账户/DPAPI，而真动作是"补这把钥匙"或"改指向已有的引用"。
+  const t1 = okTransport()
+  const missing = createModelProbe({
+    transport: t1,
+    resolveSecret: async () => { throw Object.assign(new Error('x'), { name: 'SecretStoreError', code: 'SECRET_NOT_FOUND' }) },
+  })
+  const v1 = await missing.probe({ profile: PROFILE })
+  assert.equal(v1.code, 'SECRET_UNAVAILABLE', '码不变：这是本地问题，不是供应商拒绝')
+  assert.equal(v1.class, 'fail-closed')
+  assert.match(v1.message, /不在本机密钥库里/, '要指向"库里没有这个引用"这个真动作')
+  assert.match(v1.message, /不必去供应商控制台/)
+  assert.doesNotMatch(v1.message, /Windows 账户作用域/,
+    '★ 库好好的、就是没有这个引用 —— 让人去查账户是错误方向')
+  assert.equal(t1.calls.length, 0, '取不到钥匙时不该去敲供应商的门')
+
+  // 对照：库打不开（解密失败）仍然说原来那句 —— 两种失败的**动作不同**
+  const t2 = okTransport()
+  const broken = createModelProbe({
+    transport: t2,
+    resolveSecret: async () => { throw Object.assign(new Error('x'), { name: 'SecretStoreError', code: 'DECRYPT_FAILED' }) },
+  })
+  const v2 = await broken.probe({ profile: PROFILE })
+  assert.equal(v2.code, 'SECRET_UNAVAILABLE')
+  assert.match(v2.message, /Windows 账户作用域/, '打不开库时那句是对的，不能被这条改掉')
+  assert.doesNotMatch(v2.message, /不在本机密钥库里/)
+})
+
 test('③ 需要凭证但没有解析器 → SECRET_UNAVAILABLE（不是 AUTH_FAILED）', async () => {
   const transport = okTransport()
   const probe = createModelProbe({ transport })

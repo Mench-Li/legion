@@ -1596,6 +1596,21 @@ export interface HubModelProfile {
   hasCredential?: boolean
   version?: number
   updatedAtMs?: number
+  /**
+   * ★ hub **核验过**的凭证状态（`/api/model-profiles` 新增）。
+   *   `state`: none | ready | missing | unavailable —— `unavailable` 是"读不到密钥库，
+   *   因此无法判断"，**不是**"没有"。界面必须读这个，而不是 `hasCredential`
+   *   （后者只表示"引用了一个名字"）。
+   */
+  credential?: { state?: string; ref?: string | null; detail?: string | null }
+  /** ★ 连接信息（地址/凭证）来自哪里：档案自带还是继承供应商。 */
+  connection?: {
+    endpoint?: { value?: string | null; from?: 'profile' | 'provider' | null }
+    credential?: { ref?: string | null; from?: 'profile' | 'provider' | null }
+    providerMissing?: boolean
+  }
+  /** ★ 与供应商逐字相同的字段（可以留空；留空即继承）。 */
+  connectionRedundant?: { endpoint?: boolean; credential?: boolean }
 }
 
 /** 岗位模型绑定（PRT-502）：`(scope, 岗位) → 主档案 + fallback 链`。 */

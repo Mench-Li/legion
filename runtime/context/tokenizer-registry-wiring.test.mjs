@@ -126,9 +126,17 @@ describe('① 没有配置目录 → 保守估算器（既有的、如实的行�
 
   test('★ description 说不清之外的键没被动过（一次改动的边界要小）', async () => {
     const r = await get('/api/config')
-    for (const k of ['auth', 'db', 'port', 'runPlane']) {
+    // ★ 2026-10-12：`db` → **`dbFingerprint`**。同一批改动里 `team-hub/routes/config.mjs`
+    //   把"数据库**绝对路径**"换成了它的 sha256 前 16 位 —— 理由是那一族是**免鉴权**探测端点，
+    //   回 `/var/lib/legion-hub/team.db` 这样的路径等于把本机布局告诉任何能访问它的人。
+    //   （同一天修的 `BUG-028` 是同一类事：引用名/路径这类"可枚举的本机信息"不出站。）
+    //
+    //   所以这一条跟着换成新键名 —— 它守的仍然是"这次改动的边界要小"：
+    //   除 `tokenizer` 那一栏之外，既有键一个都不许少。
+    for (const k of ['auth', 'dbFingerprint', 'port', 'runPlane']) {
       assert.ok(k in r.body, `既有键 ${k} 必须保留`)
     }
+    assert.ok(!('db' in r.body), '免鉴权端点不该再吐数据库绝对路径（已换成 dbFingerprint）')
   })
 })
 

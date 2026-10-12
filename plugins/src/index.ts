@@ -2495,13 +2495,20 @@ function spaceWorker(ctx: AppContext, config: Config): void {
             agentOptionsSupported: modelAgentOptions !== null || providerCaps?.agentOptions === true,
           })
           await beginWorkflowStageAttempt(selectedProvider)
+          // ★ 传下去的是**判定结果**（冻结 / 岗位绑定 / 回落），不是裸的冻结值 ——
+          //   判定全在 `dispatchModel.ts` 里（纯函数，14 例判据守着）。
+          //
+          //   ⚠ 这条注释**必须留在对象字面量之外**：`runtime/adapters/dsh/parity.mjs`
+          //   的对拍抽取器按**顶层段**读这个对象，而"段首是不是 `...`"决定它算不算
+          //   一个条件展开。注释落在某个段里，会让那一段既不是 `...` 也不是 `key:`，
+          //   于是被整段丢掉 —— 实测：`LEGACY_CALL_OPTIONS` 的两个 `...spread` 变成
+          //   一个，对拍报"复刻件不再代表旧路径"。（门禁说得对，这里就是它说的地方。）
           started = await ctx.subagents.start(selectedProvider, {
             label: `scrum:${t.id}`,
             prompt: [{ type: 'text', text: promptText }],
             parent,
             signal: controller.signal,
             outputSchema: WORKER_SCHEMA,
-            // ★ 用的是**判定结果**（绑定 / 冻结 / 回落），不是裸的冻结值。
             ...(dispatchModel.agentOptions === null ? {} : { agentOptions: dispatchModel.agentOptions }),
             ...(config.denyTools.length > 0 ? { toolFilter: { deny: config.denyTools } } : {}),
           })

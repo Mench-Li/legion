@@ -326,14 +326,76 @@ try {
   //
   //   登录屏上看不到 `#main`（它被 `data-screen` 藏着），但元素**在不在**能读。
   const outboxDom = await page.evaluate(() => {
-    const ids = ['outbox', 'outbox-text', 'outbox-detail-text', 'outbox-list', 'outbox-retry', 'outbox-detail', 'outbox-login']
+    const ids = ['outbox', 'outbox-text', 'outbox-detail-text', 'outbox-list', 'outbox-retry', 'outbox-detail', 'outbox-login',
+      // 离线读的标记（与待发横幅是两块，各自独立）。
+      'offline-note', 'offline-text', 'offline-detail']
     return { checked: ids.length, missing: ids.filter((id) => document.getElementById(id) === null) }
   })
-  check('★★★ 待发横幅的元素在部署的 index.html 里都在（缺一个就是静默不画）',
+  check('★★★ 待发横幅与离线标记的元素在部署的 index.html 里都在（缺一个就是静默不画）',
     // ★ `checked > 0` 不是多余的：一个空的 id 列表会让"没有缺失"**恒真** ——
     //   而那种判据在列表被误删之后仍然是绿的。
     outboxDom.checked > 0 && outboxDom.missing.length === 0,
     `查了 ${outboxDom.checked} 个 id，缺：${JSON.stringify(outboxDom.missing)}`)
+
+  // ── F. 离线**读**：拿**部署出去的**那个模块，验它的决策真的按设计走 ──────────
+  //
+  // ★ 为什么这不是"重复单元判据"：这里 import 的是**生产上那一份**
+  //   `read-cache.mjs`（经过隧道、经过缓存、经过部署）。单元判据跑的是
+  //   工作区里那一份 —— 而"部署本身出错"（传错文件、旧版本、被截断）
+  //   恰恰是这套检查在两天里抓到过两次的那类故障。
+  //
+  // ★ 为什么只验**决策**而不验界面：界面那一节需要登录会话，而这条检查
+  //   刻意不持有任何凭据（它打的是匿名能到的那一面）。决策是离线读的**全部**
+  //   判断所在，而它们是纯函数 —— 于是"不需要凭据"与"验的是真东西"能同时成立。
+  const rc = await page.evaluate(async () => {
+    try {
+      const m = await import('./read-cache.mjs')
+      const HOUR = 3600000
+      const DAY = 24 * HOUR
+      const T = 1_800_000_000_000
+      const keyA = m.cacheKey({ userId: 'user-A', scope: 's', kind: 'messages', convId: 7 })
+      const keyB = m.cacheKey({ userId: 'user-B', scope: 's', kind: 'messages', convId: 7 })
+      const notice = m.offlineNotice({ kind: 'messages', ageMs: 3 * HOUR, nowMs: T })
+      return {
+        loaded: true,
+        keysDiffer: keyA !== null && keyB !== null && keyA !== keyB,
+        noUserNoKey: m.cacheKey({ scope: 's', kind: 'messages', convId: 7 }) === null,
+        boardShorter: m.BOARD_MAX_AGE_MS < m.MESSAGES_MAX_AGE_MS,
+        boardExpired: m.usability({ savedAtMs: T - 2 * HOUR, nowMs: T, kind: 'board' }).usable === false,
+        msgsUsable: m.usability({ savedAtMs: T - 2 * HOUR, nowMs: T, kind: 'messages' }).usable === true,
+        board3dExpired: m.usability({ savedAtMs: T - 3 * DAY, nowMs: T, kind: 'board' }).usable === false,
+        msgs3dUsable: m.usability({ savedAtMs: T - 3 * DAY, nowMs: T, kind: 'messages' }).usable === true,
+        clearsOnLogout: m.shouldClearReadCacheOnLogout() === true,
+        noticeIsKey: typeof notice.textKey === 'string' && /\{ago\}/.test(notice.textKey)
+          && typeof notice.agoKey === 'string' && !/\d/.test(notice.textKey),
+        nullSafe: (() => {
+          try { m.cacheKey(null); m.usability(null); m.packPayload(null); m.offlineNotice(null); return true } catch { return false }
+        })(),
+      }
+    } catch (e) {
+      return { loaded: false, error: String(e && e.message) }
+    }
+  })
+  check('★★★ 生产上的 read-cache.mjs 真的能加载（离线读的全部决策都在它这里）',
+    rc.loaded === true, rc.loaded ? '' : `加载失败：${rc.error}`)
+  check('★★★ 用户隔离：两个用户的缓存键**必定不同**（否则 A 的对话会给 B）',
+    rc.keysDiffer === true, `keysDiffer=${rc.keysDiffer}`)
+  check('★★★ 缺 userId 时**不给键**（不缓存，而不是所有人共用一条）',
+    rc.noUserNoKey === true, `noUserNoKey=${rc.noUserNoKey}`)
+  check('★★★ 看板的过期窗口**远短于**消息（状态会变错，文本只会变旧）',
+    rc.boardShorter === true, `boardShorter=${rc.boardShorter}`)
+  check('★★★ 两小时前的看板**已过期**，而两小时前的消息**仍可读**',
+    rc.boardExpired === true && rc.msgsUsable === true,
+    `boardExpired=${rc.boardExpired} msgsUsable=${rc.msgsUsable}`)
+  check('★★★ 三天前的看板绝不能用；三天前的消息仍然可读',
+    rc.board3dExpired === true && rc.msgs3dUsable === true,
+    `board3dExpired=${rc.board3dExpired} msgs3dUsable=${rc.msgs3dUsable}`)
+  check('★★★ 登出要清读缓存（与待发队列**故意相反**：一个是别人的数据，一个是自己的字）',
+    rc.clearsOnLogout === true, `clearsOnLogout=${rc.clearsOnLogout}`)
+  check('★★★ 离线标记是**键 + 占位符**，不是拼好的句子（拼的句子永远查不到英文）',
+    rc.noticeIsKey === true, `noticeIsKey=${rc.noticeIsKey}`)
+  check('★ 畸形输入不抛（缓存状态来自 localStorage，可能是别人写坏的）',
+    rc.nullSafe === true, `nullSafe=${rc.nullSafe}`)
 
   // 收尾：把我的探针痕跡全部抹掉，并把语言恢复成访客默认。
   await page.evaluate(([k, prev]) => {

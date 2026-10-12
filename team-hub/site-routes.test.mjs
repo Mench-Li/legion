@@ -562,13 +562,99 @@ describe('官网：真实模板不漂移', () => {
     assert.doesNotMatch(r.body, /Smart App Control/, '三条处理说明已撤')
     assert.doesNotMatch(r.body, /sha256/, '摘要已撤')
     assert.doesNotMatch(r.body, /本次更新/, '更新条目已撤')
-    // 下载链接出现**两处**是设计要的：首屏第一个动作 + 部署卡里那一个按钮。
-    // 多出来就是有人又加了一个入口。
-    assert.equal((r.body.match(/Legion-Setup-win-x64\.exe/g) || []).length, 2, '下载链接只该有两处（首屏 + 部署卡）')
+    // 下载链接只出现**一处**（部署卡里那一个按钮）。
+    //
+    // ★ 2026-10-12：原来是**两处**（首屏主动作 + 部署卡）。首屏的主动作换成了
+    //   "打开就能用"（→ Web 端），所以它不再指向安装包。
+    //
+    //   这条断言的**用意**没变、而且更该留着：它防的是"有人又加了一个入口"。
+    //   2 变 1 是**行为变化的结果**，不是把判据放松 —— 所以下面同时钉住
+    //   "首屏出现的是 Web 入口、不是安装包"，两者合起来才等于原来的不变式。
+    assert.equal((r.body.match(/Legion-Setup-win-x64\.exe/g) || []).length, 1,
+      '安装包链接只该有一处（部署卡）；首屏的主动作已经是 Web 入口')
 
     const en = await call(routes, { path: '/en' })
     assert.match(en.body, /href="https:\/\/github\.com\/Mench-Li\/legion"/)
     assert.doesNotMatch(en.body, /sha256/)
+  })
+
+  // ══════════════════════════════════════════════════════════════════════════
+  // ★★★ 2026-10-12：主入口从"下载电脑版"改成"打开就能用"（Web 端）
+  //
+  // 理由不是文案偏好，是一个实测事实：Windows 11 的 Smart App Control 在**默认开启**
+  // 的新装机上会拒绝运行**未签名**的安装包（原文：`was blocked by your organization's
+  // Device Guard policy`）。也就是说首屏那个主按钮，对相当一部分访客**点了装不上**。
+  //
+  //   > 一个"点了装不上"的主按钮，
+  //   > 与一个"能用的入口"，在页面截图上长得一模一样——
+  //   > 只不过前者让访客以为是自己机器坏了。
+  //
+  // Web 端不需要安装、不需要签名、也不受 SAC 影响，所以它才是主入口。
+  // ══════════════════════════════════════════════════════════════════════════
+
+  test('★★★ 首屏主动作是 Web 入口，且**与有没有发布无关**', async (t) => {
+    // "与发布无关"是这条判据的重点：旧实现里主动作在"没发布"时会退回 `#workflow`，
+    // 于是同一条端点在不同部署上给出不同的主入口。现在它必须恒为 Web 入口 ——
+    // 少一个会随部署漂移的分支。
+    for (const [label, release] of [['有发布', FIXED], ['没发布', () => null]]) {
+      const routes = createSiteRoutes({ root: makeSite(t), readRelease: release })
+      const r = await call(routes, { path: '/' })
+      const hero = r.body.slice(r.body.indexOf('class="actions"'), r.body.indexOf('</div>', r.body.indexOf('class="actions"')))
+      assert.match(hero, /class="btn primary"[^>]*href="\/mobile\/"|href="\/mobile\/"[^>]*class="btn primary"/,
+        `${label}：首屏主按钮必须指向 Web 入口 /mobile/，实际：${hero.slice(0, 160)}`)
+      assert.match(hero, /打开就能用/, `${label}：主按钮文案`)
+      // 首屏**不许**出现安装包链接（它是次要入口，只在部署卡里出现一次）。
+      assert.doesNotMatch(hero, /Legion-Setup/, `${label}：首屏不该再挂安装包`)
+      assert.doesNotMatch(hero, /\.exe/, `${label}：首屏不该出现任何可执行文件链接`)
+    }
+  })
+
+  test('★★ 部署卡的 Web 一路也指向**同一个** Web 入口（两处不许互相矛盾）', async (t) => {
+    const routes = createSiteRoutes({ root: makeSite(t), readRelease: FIXED })
+    const r = await call(routes, { path: '/' })
+    // 用**独立 class** 定位，不靠文档顺序。
+    const i = r.body.indexOf('class="hub-actions"')
+    assert.notEqual(i, -1, '部署卡必须有一个 Web 入口动作块（class="hub-actions"）')
+    const block = r.body.slice(i, r.body.indexOf('</div>', i))
+    assert.match(block, /href="\/mobile\/"/, '部署卡的 Web 按钮必须指向与首屏同一个地址')
+    assert.match(block, /打开就能用/)
+    // 两块各自只有一个按钮：多一个就是有人又加了入口。
+    assert.equal((block.match(/<a /g) || []).length, 1, 'Web 入口块里只该有一个按钮')
+  })
+
+  test('★★ `mobilePath` 可覆盖：官网能把人送去**另一台** Hub', async (t) => {
+    // ★ 为什么这一条重要：官网由哪台 Hub 服务，与"用户该用哪台 Hub"可以是两件事。
+    //   实测就是这个形态 —— `legion-si.online`（服务器，空库）服务官网，而真正在
+    //   干活的中枢在 `home.legion-si.online`。写死相对 `/mobile/` 时，访客从官网
+    //   点进去落到**另一个库**：每一步都对，地方错了。
+    const routes = createSiteRoutes({
+      root: makeSite(t), readRelease: FIXED, mobilePath: 'https://home.example.test/mobile/',
+    })
+    const zh = await call(routes, { path: '/' })
+    const en = await call(routes, { path: '/en' })
+    // 三类位置都要跟着走：首屏主按钮、部署卡 Web 按钮。
+    assert.equal((zh.body.match(/https:\/\/home\.example\.test\/mobile\//g) || []).length, 2,
+      '首屏 + 部署卡两处都必须指向覆盖后的地址')
+    assert.doesNotMatch(zh.body, /href="\/mobile\/"/, '不该还留着相对的 /mobile/')
+    assert.equal((en.body.match(/https:\/\/home\.example\.test\/mobile\//g) || []).length, 2, '英文页同样')
+  })
+
+  test('★★ `mobilePath` 里的引号/尖括号被转义（它是可配值，会进 href）', () => {
+    // 覆盖值来自配置（运维可写），所以它必须走 `esc()`。这条与
+    // "所有插值都转义"那条同源，但那个用的是 downloadUrl —— 这是另一个入口。
+    const evil = renderLiveBlocks({
+      lang: 'zh', downloadUrl: '', mobilePath: '/x" onmouseover="alert(1)',
+    })
+    assert.doesNotMatch(evil.cta, /onmouseover="alert\(1\)"/, '注入的引号不许闭合 href 属性')
+    assert.doesNotMatch(evil.hub, /onmouseover="alert\(1\)"/)
+    assert.match(evil.cta, /&quot;|&#x27;/, '引号必须被转义成实体')
+  })
+
+  test('★ 反例守卫：上面那些"首屏不许出现安装包"的断言不是恒真', () => {
+    // 证明判据真的能发现回归：把旧的 hero 形态喂给它，必须被判红。
+    const oldHero = '<div class="actions">\n  <a href="/legion/releases/r-1/Legion-Setup-win-x64.exe" class="btn primary">下载电脑版</a>\n</div>'
+    assert.match(oldHero, /Legion-Setup/, '反例本身应当被"不许出现安装包"抓住')
+    assert.doesNotMatch(oldHero, /href="\/mobile\/"/, '反例本身应当被"必须指向 Web 入口"抓住')
   })
 
   test('★ 部署卡：Windows 一路只有徽标——签名状态由它承担，不再展开三条处理说明', () => {

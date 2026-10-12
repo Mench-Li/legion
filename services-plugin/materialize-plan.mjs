@@ -117,18 +117,45 @@ export function planMaterialization({ desired = [], actual = [], actualCredentia
     rawActual.set(n.id, raw)
   }
 
+  /**
+   * ★★ 2026-10-12：**不接管**的那一类 —— DSH 那边"没有声明节点"的供应商。
+   *
+   * 实测背景（将军打开"写入 DSH"之前算差异时抓到的）：影子对账每一轮都报
+   * `修改 3`，而其中 **2 处是幻影** —— `deepseek-official` / `deepseek-account`
+   * 的 `api`/`baseURL` 在 DSH 那边来自**内置插件的默认值**（不在 `settings` 里），
+   * 于是 Legion 侧读到 `null`。两边一对比就是"差异"，而真相是：
+   * **那个值 Legion 根本读不到，也不该去写**（写进去等于把内置默认值改成空）。
+   *
+   *   > 一处"我读不到它"的缺口，与一处"它真的不一样"的差异，
+   *   > 在对比表上是同一行 —— 而处置正好相反：前者什么都不该做，后者要写。
+   *
+   * 所以这一类**不进 create / update / unchanged**，也**不进 delete 候选**
+   * （`delete` 是"Legion 里没有、DSH 里活着 ⇒ 接管会删掉"，而对一个我们读不全的
+   * 条目下这种判断，会删掉一个本来正常工作的供应商）。
+   *
+   * ⚠ 判据是 DSH 侧给的 `declaredInSettings === false`（见 `dsh-snapshot.mjs`）。
+   *   它**只**对 DSH 侧成立：Legion 侧的同一字段没有任何含义。
+   */
+  // ★ "不接管"的那些从 **DSH 侧**先收齐（它们可能只存在于 DSH，也可能两侧都有）——
+  //   只在"两侧都有"时才收集会漏掉前者，而漏掉的那一条**会进删除候选**。
+  const engineInternal = [...a.keys()]
+    .filter((id) => rawActual.get(id)?.declaredInSettings === false)
+    .sort()
+  const engineInternalSet = new Set(engineInternal)
+
   const create = []
   const update = []
   const unchanged = []
   for (const [id, want] of d) {
+    if (engineInternalSet.has(id)) continue   // 不接管：任何动作都不做（连"未变"也不算）
     const have = a.get(id)
     if (have === undefined) { create.push(id); continue }
     if (fingerprint(have) === fingerprint(want)) { unchanged.push(id); continue }
     update.push({ id, fields: changedFields(have, want) })
   }
   // ★ 这一行是 P2 的全部重点：**Legion 里没有、而 DSH 里活着的**会被删。
-  const remove = [...a.keys()].filter((id) => !d.has(id)).sort()
-
+  //   "不接管"的那些**不进这个候选集**（理由见上）。
+  const remove = [...a.keys()].filter((id) => !d.has(id) && !engineInternalSet.has(id)).sort()
   // 凭证：只报"这些引用名在 DSH 侧还没配"。**不认识值**。
   const credentialsNeeded = []
   for (const [id, want] of d) {
@@ -147,6 +174,10 @@ export function planMaterialization({ desired = [], actual = [], actualCredentia
     delete: remove.length,
     unchanged: unchanged.length,
   }
+  // ★ `counts` **只有这四个动作**（不把"不接管"算进来）：它的语义是
+  //   "接管这一轮会做哪些动作"，而"不接管"的意思正是**不动它**。
+  //   把它塞进 counts 还会让"四个数加起来等于总数"这个隐含约定失效。
+  //   ⇒ "不接管"单列成数组（`engineInternal`），要看数量就 `.length`。
   return Object.freeze({
     ok: true,
     clean: counts.create === 0 && counts.update === 0 && counts.delete === 0,
@@ -155,6 +186,8 @@ export function planMaterialization({ desired = [], actual = [], actualCredentia
     update: Object.freeze(update.slice().sort((x, y) => x.id.localeCompare(y.id))),
     delete: Object.freeze(remove),
     unchanged: Object.freeze(unchanged.slice().sort()),
+    /** ★ 端点由引擎内置、Legion 读不到声明的那些（**任何东西都不许写它们**）。 */
+    engineInternal: Object.freeze(engineInternal.slice().sort()),
     credentialsNeeded: Object.freeze([...new Set(credentialsNeeded)].sort()),
   })
 }
@@ -175,6 +208,11 @@ export function describeMaterializationPlan(plan, { actualReadOk = true, actualR
   const bits = [`新增 ${c.create}`, `修改 ${c.update}`, `删除 ${c.delete}`, `未变 ${c.unchanged}`]
   let line = `供应商影子对账：${bits.join(' / ')}（clean=${plan.clean}）`
   if (c.delete > 0) line += `；**接管会删掉**：${plan.delete.join(', ')}`
+  // ★ "不接管"的那一类要**说出来**：不说的话，`未变 1` 会让人以为只有 1 条一致，
+  //   而另外 2 条（端点由引擎内置）既不在"未变"也不在任何差异里 —— 那读起来像丢了。
+  if ((plan.engineInternal?.length ?? 0) > 0) {
+    line += `；**不接管**（端点由引擎内置、Legion 读不到，**任何东西都不许写它们**）：${plan.engineInternal.join(', ')}`
+  }
   if (plan.credentialsNeeded.length > 0) line += `；**缺凭证**：${plan.credentialsNeeded.join(', ')}`
   return line
 }

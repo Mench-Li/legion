@@ -667,6 +667,11 @@ export const SCHEMA = defineSchema({
     //     · CREDENTIAL_DELETE_FAILED    — 供应商删掉了、钥匙没删掉（表没登记的内部码收敛到这里）
     //   两个都是"动作成功了一半"的具名结果：删除那条路**不允许**出现含糊的失败。
     'CREDENTIAL_STILL_REFERENCED', 'CREDENTIAL_DELETE_FAILED',
+    // ★★ 2026-10-12（物化读数那一族）两个码：
+    //     · READING_REQUIRES_TOKEN — 上报读数没过令牌（外部进程写中枢状态，不是公开只读数据）
+    //     · READING_INVALID        — 上报的形状不合法（**具名拒**：静默存下一份坏读数
+    //       的表现是面板显示"没有差异"，而那正好是最危险的那种假绿）
+    'READING_REQUIRES_TOKEN', 'READING_INVALID',
     // PRT-212 审批端口（team-hub/approval-port.mjs）的失败码。
     //
     // 它们是**这个端口**对外可见的名字，而端口要回答的问题恰恰是

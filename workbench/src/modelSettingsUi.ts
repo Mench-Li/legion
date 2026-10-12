@@ -27,8 +27,13 @@
 //    "这次没有探测过"，但 `server.mjs` 在 503 分支只把 `error`/`code` 放进错误体
 //    （见 `api.ts` 的 `probeModelProfile`）。HTTP 层收不到那个判别字段，
 //    所以这里按 **503** 分类，并且**绝不**给它编一个失败分类。
-// ③ **写回执的两种"没变化"**：删除一个不存在的引用是**幂等**（`removed:false`），
-//    轮换一个不存在的引用是**错误**（404 `SECRET_NOT_FOUND`）。两者的下一步动作相反。
+// ③ **档案上留空 `secretRef` 的两种含义**（`secretRefEditView`）：服务端把"没带
+//    这个字段"落成 `null` ⇒ **留空 = 清掉引用**，不是"保持原样"。
+//
+// ★★ 2026-10-12：这里原本还有一个 ③ —— **写回执的两种"没变化"**（删一个不存在的
+//    引用是幂等 `removed:false`，轮换一个不存在的引用是错误 404 `SECRET_NOT_FOUND`）。
+//    它随「🔑 凭证库」页签一起删掉了（那一族视图只被那个面板用），
+//    但那条**后端语义**没有变，判据留在 `team-hub/secret-routes.test.mjs` 里。
 //
 // ## 不猜
 //
@@ -216,322 +221,25 @@ export function probeViewFrom(input: { verdict?: ProbeVerdictLike | null; error?
   return probeBadge(verdict ?? null)
 }
 
-// ────────────────────────────────────────── ③ 凭证：只有元数据，永远没有值
+// ────────────────────────────────────────── ③ 凭证：面板已拆 ⇒ 视图随之删除
 
-/**
- * 一条凭证在列表里长什么样。
- *
- * ## 这个函数的结构本身就是纪律
- *
- * 它从输入里**逐字段取**（ref/purpose/scheme/时间戳），而不是展开整行——
- * 于是即使响应里混进了 `value` / `blob` / `token`，也**结构上不可能**出现在
- * 返回值里。用例把这一点钉住：喂一条带 `value` 的输入，断言整个视图的
- * JSON 里不含那个值。
- *
- * `rotatedAt: null` 是**从未轮换**，不是"轮换失败"——两者都显示成空
- * 会让用户以为自己轮换过。
- */
-export interface SecretRowView {
-  /** 引用名；缺失时为空串（**不猜一个名字**）。 */
-  ref: string
-  refText: string
-  purposeText: string
-  schemeText: string
-  /** 轮换状态：`null` 表示从未轮换。 */
-  rotatedText: string | null
-  timesText: string
-  /**
-   * ★ 2026-10-12：这一条有没有**供应商**指着它。
-   * `null` = 服务端没给这一格（老 hub）——**不猜**，界面就不显示那一栏。
-   */
-  orphanText: string | null
-  /** 是不是孤儿（没有任何供应商指向它）。用来上警示色。 */
-  isOrphan: boolean
-}
-
-/** 只取 `YYYY-MM-DD HH:mm` 这一段；格式不认识就原样返回（不编造时间）。 */
-function shortTime(v: unknown): string | null {
-  const s = str(v)
-  if (s === null) return null
-  const m = /^(\d{4}-\d{2}-\d{2})T(\d{2}:\d{2})/.exec(s)
-  return m === null ? s : `${m[1]} ${m[2]}`
-}
-
-export function secretRowView(entry: unknown): SecretRowView {
-  const e = obj(entry) ?? {}
-  const ref = str(e.ref) ?? ''
-  const purpose = str(e.purpose)
-  const scheme = str(e.scheme)
-  const created = shortTime(e.createdAt)
-  const updated = shortTime(e.updatedAt)
-  const rotated = shortTime(e.rotatedAt)
-
-  const times: string[] = []
-  if (created !== null) times.push(`录入于 ${created}`)
-  if (updated !== null && updated !== created) times.push(`更新于 ${updated}`)
-
-  // ★★ 2026-10-12：「**没有任何供应商指向它**」是单独一栏，而不是让人自己去比对。
-  //
-  //   它来自一次实测：库里有一条钥匙，供应商目录里没有任何一条指着它
-  //   （那是删供应商时留下的 —— 那个动作**默认不碰密钥**）。不标出来时，
-  //   它与"正在被用的那把"在列表上长得一模一样，而它是可以被清掉的那个。
-  //
-  //   ⚠ 措辞是"没有供应商指向它"，**不是**"没人在用"：那把钥匙也可能正被别的东西
-  //   （手工脚本、DSH 自己的配置）用着，而 Legion 看不到那些地方。
-  const claimed = e.claimedByProvider
-  const orphanText = claimed === false
-    ? '没有任何供应商指向它（删供应商留下的；但可能有别的东西在用，删之前先确认）'
-    : claimed === true
-      ? '有供应商指向它'
-      : null
-
-  return {
-    ref,
-    refText: ref === '' ? '（响应里没有引用名）' : ref,
-    purposeText: purpose ?? '（没有用途说明）',
-    schemeText: scheme ?? '（没有保护方案信息）',
-    rotatedText: rotated === null ? null : `最近轮换：${rotated}`,
-    timesText: times.length === 0 ? '（没有时间戳）' : times.join('　'),
-    orphanText,
-    isOrphan: claimed === false,
-  }
-}
-
-/** 文件权限的核验结果。`aclVerified:false` 的**两种**原因必须分开说。 */
-export interface AclView {
-  tone: 'ok' | 'warn' | 'muted'
-  text: string
-}
-
-/**
- * `aclVerified` / `aclExists` / `aclNote` → 一句话。
- *
- * `product/secrets.mjs` 把 `aclExists` 单独回出来，就是为了区分：
- *   · `aclVerified:false` + `aclExists:false` → 全新安装还没建文件，
- *     **没什么可保护的**（不是告警；把它渲染成黄色警告会让用户去查一个不存在的问题）
- *   · `aclVerified:false` + `aclExists:true`  → 文件在，但没能确认它只有所有者可读
- *     （**这才是要提醒的**：写入会重置权限，所以这确实可能发生）
- */
-export function aclView(r: { aclVerified?: unknown; aclExists?: unknown; aclNote?: unknown } | null | undefined): AclView {
-  const src = obj(r) ?? {}
-  const note = str(src.aclNote)
-  if (src.aclVerified === true) {
-    return { tone: 'ok', text: '文件权限已核验（仅所有者可读）。' }
-  }
-  if (src.aclExists === false) {
-    return { tone: 'muted', text: '密钥库文件还不存在，因此没有可核验的权限（全新安装的常态，不是故障）。' }
-  }
-  if (src.aclExists === true) {
-    return {
-      tone: 'warn',
-      text: `密钥库文件在，但**没能确认**它只有所有者可读。${note ?? ''}`.trim(),
-    }
-  }
-  return { tone: 'warn', text: `没能核验密钥库文件的权限，而且响应里没有说文件是否存在。${note ?? ''}`.trim() }
-}
-
-/** 一次写入（新增/轮换）的回执视图。 */
-export interface SecretWriteView {
-  op: 'put' | 'rotate'
-  kind: 'written' | 'rotated'
-  headline: string
-  detail: string
-  acl: AclView
-}
-
-/**
- * 写回执。
- *
- * 轮换的后果必须**说出来**：`spec §6.7` 的语义是"只影响轮换之后创建的 Run"。
- * 一句"已轮换"会让用户以为正在跑的那次运行也换了钥匙。
- *
- * `aclVerified:false` 时**仍然算成功**（凭证已经写进去了；此时报"失败"会让人
- * 以为要重做一遍），但"没核验过"这件事必须出现在回执里——
- * 一条默认静默的检查等于没有检查。
- */
-export function secretWriteResultView(op: 'put' | 'rotate', result: unknown): SecretWriteView {
-  const r = obj(result) ?? {}
-  const meta = obj(r.secret)
-  const ref = str(meta?.ref) ?? '（响应里没有引用名）'
-  const acl = aclView(r)
-  if (op === 'rotate') {
-    return {
-      op, kind: 'rotated',
-      headline: `已轮换凭证 ${ref}`,
-      detail: '引用名不变，值已替换。**只影响轮换之后创建的运行**：已经在跑的那一次仍然用它开始时取到的那把。',
-      acl,
-    }
-  }
-  return {
-    op, kind: 'written',
-    headline: `已保存凭证 ${ref}`,
-    detail: '同名的引用是**更新**（值被替换），不会新建第二条。',
-    acl,
-  }
-}
-
-/** 一次删除的回执视图。 */
-export interface SecretDeleteView {
-  kind: 'removed' | 'already-absent'
-  headline: string
-  detail: string
-  acl: AclView
-}
-
-/**
- * 删除回执。
- *
- * `removed:false`（引用本来就不存在）**不是错误**：删除的意图是"让它不存在"，
- * 而它已经不存在了。把它渲染成红色失败，用户会重试一次注定同样结果的删除。
- * 代码里刻意与轮换分开（轮换一个不存在的引用**是**错误，见 `secretErrorView`）。
- */
-export function secretDeleteResultView(result: unknown): SecretDeleteView {
-  const r = obj(result) ?? {}
-  const acl = aclView(r)
-  if (r.removed === false) {
-    return {
-      kind: 'already-absent',
-      headline: '这个引用本来就不存在（不是失败）',
-      detail: '删除是幂等的：目标是「让它不存在」，而它已经不存在了。这次没有删掉任何东西，**不需要重试**。',
-      acl,
-    }
-  }
-  if (r.removed !== true) {
-    // 既不是 true 也不是 false：响应里没有这个字段。**不猜**是哪一种。
-    return {
-      kind: 'already-absent',
-      headline: '响应里没有说删掉了没有',
-      detail: '这既不是"删掉了"也不是"本来就不存在"：**不猜**。请刷新列表确认当前状态。',
-      acl,
-    }
-  }
-  return {
-    kind: 'removed',
-    headline: '已删除引用',
-    detail: '这**不会**去检查有没有模型档案在用这个引用——用它取凭证的档案会在运行时取不到，而不是在这里报错。',
-    acl,
-  }
-}
-
-/** 凭证管理面的错误视图。`kind` 决定下一步动作，`code` 保留后端原码。 */
-export interface SecretErrorView {
-  status: number | null
-  code: string | null
-  kind: 'store-unavailable' | 'not-found' | 'bad-request' | 'write-failed' | 'unclassified'
-  headline: string
-  detail: string
-  action: string
-  field: string | null
-}
-
-/** 后端码 → 类别。**合并其中任何两个都会让两种修法看起来一样。** */
-const SECRET_CODE_KIND: Record<string, SecretErrorView['kind']> = {
-  SECRET_ADMIN_STORE_UNAVAILABLE: 'store-unavailable',
-  SECRET_NOT_FOUND: 'not-found',
-  SECRET_REF_INVALID: 'bad-request',
-  SECRET_VALUE_EMPTY: 'bad-request',
-  SECRET_STORE_WRITE_FAILED: 'write-failed',
-}
-
-/** 类别 → 该做什么。这张表就是"用户下一步"的全部来源。 */
-const SECRET_KIND_ACTION: Record<SecretErrorView['kind'], string> = {
-  // 本机的问题：**不要去重新录入一把其实好端端躺着的钥匙**
-  'store-unavailable': '这是**本机密钥库**的问题（布局不合法 / 平台不支持 / 明文后端被拒 / 文件坏）。不要把它当成"这把钥匙不存在"，也不要重新录入一遍——录入会同样失败。',
-  'not-found': '要轮换的那个引用从来没录入过。改用「新增凭证」把它建出来；轮换只对已存在的引用有意义（删除才是幂等的）。',
-  'bad-request': '请求里的引用名或值不合法。判据在密钥库（`assertSecretRef` 是唯一判据），请按后端给出的说明改，不要在客户端再猜一套规则。',
-  'write-failed': '写入密钥库失败（磁盘/权限）。凭证**没有**写进去，重试之前先确认密钥库文件所在目录可写。',
-  unclassified: '这个码没有对应的界面说明——**不猜**它属于上面哪一类。请看详细信息与中枢日志。',
-}
-
-const SECRET_KIND_HEADLINE: Record<SecretErrorView['kind'], string> = {
-  'store-unavailable': '密钥库不可用（不是「这个引用不存在」）',
-  'not-found': '没有这个引用',
-  'bad-request': '请求不合法',
-  'write-failed': '写入失败',
-  unclassified: '未归类的失败',
-}
-
-/**
- * 凭证操作失败 → 可渲染的错误。
- *
- * 这正是本仓库反复记的那条纪律的落点：**后端加了码、前端还是笼统提示，
- * 那条码就等于没加**。所以 `code` 原样保留、类别由码决定、
- * 而 `field`/`hint` 来自 PRT-252 的结构化响应体（`panelErrorFrom`）。
- */
-export function secretErrorView(e: unknown): SecretErrorView {
-  const p = panelErrorFrom(e)
-  const kind = p.code === null ? 'unclassified' : (SECRET_CODE_KIND[p.code] ?? 'unclassified')
-  const parts = [
-    p.text,
-    p.hint,
-    p.code === null ? null : `服务端码：${p.code}`,
-    p.status === null ? null : `HTTP ${p.status}`,
-  ].filter((x): x is string => typeof x === 'string' && x !== '')
-  return {
-    status: p.status,
-    code: p.code,
-    kind,
-    headline: SECRET_KIND_HEADLINE[kind],
-    detail: parts.join('  '),
-    action: SECRET_KIND_ACTION[kind],
-    field: p.field,
-  }
-}
-
-/** 密钥库自检视图。三态：可用 / 明确不可用 / 读不出结论。 */
-export interface SecretStatusView {
-  kind: 'available' | 'unavailable' | 'unknown'
-  available: boolean
-  headline: string
-  detail: string
-  code: string | null
-  /**
-   * 条目数文案。**`count: null` 与 `count: 0` 必须不同**：
-   * 前者是"自检没给计数"，后者是"确实一条都没有"。
-   */
-  countText: string
-}
-
-/**
- * 自检结果 → 视图。
- *
- * `GET /api/secrets/status` 的失败是 **HTTP 200 + `ok:false`**（它是"报告"，
- * 不是一次失败请求）。读成"空"就完了：一次密钥库故障会显示成
- * "你还没有任何凭证"，用户会照着提示重新录入。
- */
-export function secretStatusView(status: unknown): SecretStatusView {
-  const s = obj(status)
-  if (s === null) {
-    return {
-      kind: 'unknown', available: false,
-      headline: '读不出密钥库状态',
-      detail: '没有收到自检结果。**这不等于「密钥库是好的」，也不等于「密钥库里没有凭证」**——两件事都不知道。',
-      code: null, countText: '条目数未知',
-    }
-  }
-  if (s.ok !== true) {
-    const code = str(s.code)
-    const message = str(s.message)
-    return {
-      kind: 'unavailable', available: false,
-      headline: '密钥库不可用（不是「没有凭证」）',
-      detail: [message ?? '自检说密钥库打不开。', code === null ? null : `服务端码：${code}`]
-        .filter((x): x is string => x !== null).join('  '),
-      code,
-      countText: '条目数未知（密钥库打不开）',
-    }
-  }
-  const protection = obj(s.protection)
-  const scheme = str(protection?.scheme)
-  const acl = aclView(s)
-  return {
-    kind: 'available', available: true,
-    headline: '密钥库可用',
-    detail: [scheme === null ? '保护方案未知' : `保护方案：${scheme}`, acl.text].join('  '),
-    code: str(s.code),
-    countText: typeof s.count === 'number' ? `已录入 ${s.count} 条` : '条目数未知（自检没有给计数）',
-  }
-}
+// ★★ 2026-10-12：「🔑 凭证库」页签（`SecretVaultPanel.tsx`）拆除了，这一节原本的
+//   六个视图 —— `secretRowView` / `aclView` / `secretWriteResultView` /
+//   `secretDeleteResultView` / `secretErrorView` / `secretStatusView` —— **只被它一个消费者用**，
+//   因此一并删除；六个接口（`SecretRowView` / `AclView` / `SecretWriteView` /
+//   `SecretDeleteView` / `SecretErrorView` / `SecretStatusView`）与只服务于 `secretRowView`
+//   的 `shortTime` 同去。
+//
+//   为什么拆：架构决定变了 —— 钥匙由用户在「供应商与模型」页**填一次**，Legion 存下来后
+//   写进 DSH（运行时），用户**不需要再看见**那个库。这一页是"写进 DSH"还没接通时的脚手架。
+//
+//   ⚠ 删的只是**界面这一层**：底层存储与后端路由原样保留（写入正要用它），
+//     所以这些视图描述的**后端语义**（删除幂等、`SECRET_*` 码、`aclExists` 的两种 false）
+//     仍然成立 —— 它们现在由 `team-hub/secret-routes.test.mjs`（含 `BUG-029` 的判据）守着，
+//     而不是由这一层界面守着。
+//
+//   ⑤ 的 `secretRefEditView` 与这一节无关（它讲的是**档案**上留空 `secretRef` 意味着什么，
+//   消费者是 `ModelProfilesPanel.tsx`），因此保留。
 
 // ★★ 2026-10-12：这一节原本是「④ 配置包导入计划」（`BundlePlanView` / `bundlePlanView`），
 //   随「配置包」（PRT-508）整体删除。理由不是"没人用"，而是**它在单机部署里没有用**：
@@ -607,8 +315,8 @@ export function secretRefEditView(input: { hasCredential: boolean; secretRefInpu
     tone: 'warn',
     notice: '⚠️ 留空 = **清掉**这条档案上的凭证引用：服务端把「没有 secretRef」当成 null 落库，' +
       '不是「保持原样」。清掉之后这条档案在运行时会取不到凭证。' +
-      '要保留它，请先取消编辑、去「凭证库」页核对引用名，再在这里填回来——' +
-      '列表**不显示**引用名（只给「有没有」），所以编辑框里永远是空的。',
+      '要保留它，请先取消编辑——引用名在界面上**不显示**（只给「有没有」），所以编辑框里永远是空的，' +
+      '填不回来；留空保存就会清掉它。',
   }
 }
 

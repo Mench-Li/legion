@@ -2075,6 +2075,12 @@ async function stageTest() {
     //   一个凭证字段都没有；Legion → DSH 的写路径"物化"门默认关着）。
     //   这一套是那个**并列**的读数：运行侧到底有没有这把钥匙（三值，读不出来 ≠ 没有）。
     { label: 'runtime-credential（运行侧有没有这把钥匙：宿主环境 / DSH 凭证文件；读失败 ≠ 没有）', files: ['team-hub/runtime-credential.test.mjs'], cwd: ROOT, nodeArgs: ['--experimental-strip-types'] },
+    // ★★ 2026-10-12：「**打开写入会改 DSH 的什么**」那一份读数（决策文档 P2→P3 的放行读数）。
+    //   从前它只活在一行**乱码**日志里（`修改 3`，而没有"改哪几个字段"），
+    //   于是"能不能打开物化"这个决定没有任何人能看着数据下。两套：
+    //   存放/校验（"没收到过 ≠ 没有差异" + 新鲜度）与路由面（上报必须过令牌）。
+    { label: 'materialization-reading（物化读数：没收到过 ≠ 没有差异；过期要能看出来）', files: ['team-hub/materialization-reading.test.mjs'], cwd: ROOT, nodeArgs: ['--experimental-strip-types'] },
+    { label: 'model-materialization-routes（物化读数上报/读取：上报要令牌、坏形状具名 400）', files: ['team-hub/model-materialization.test.mjs'], cwd: ROOT, nodeArgs: ['--experimental-strip-types'] },
     // ★ 从供应商派生档案（将军："那我还有必要新建档案嘛，直接来源于模型与供应商才对啊"）：
     //   身份是 **(供应商, 模型)** 而不是 `id` —— 库里既有档案的 id 与派生规则**不一致**
     //   （连字符 vs 点号），按 id 认身份会一次多建三条重复档案，而它们看起来完全正常。

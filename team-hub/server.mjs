@@ -290,6 +290,11 @@ import { createTaskLifecycleRoutes } from './routes/task-lifecycle.mjs'
 import { createReadModelsRoutes } from './routes/read-models.mjs'
 import { createSkillsDocumentsRoutes } from './routes/skills-documents.mjs'
 import { createRunBudgetRoutes } from './routes/run-budget.mjs'
+// ★★ 2026-10-12：**物化读数**（"打开写入会改 DSH 的什么"）那一族。
+//   读 DSH 现状的只有插件（它跑在宿主进程里），所以读数由插件算完 POST 进来，
+//   中枢只存最后一份并让面板读到 —— 比较逻辑只有一份（插件那边，有用例）。
+import { createModelMaterializationRoutes } from './routes/model-materialization.mjs'
+import { createMaterializationReadingStore } from './materialization-reading.mjs'
 import { createSkillSourceRoutes } from './routes/skill-source.mjs'
 import { createEmployeeManifestsRoutes } from './routes/employee-manifests.mjs'
 import { createTeamPlansRoutes } from './routes/team-plans.mjs'
@@ -973,6 +978,18 @@ const runtimeCredentialStatus = createRuntimeCredentialProbe({
   // 操作系统家目录：与 `probe-service.mjs` 用 `osHomeFacts` 的做法同一处来源。
   osHome: osHomeFacts(process.env).homeDir,
 })
+
+/**
+ * ★★ 2026-10-12：**物化读数**（"打开写入会改 DSH 的什么"）的存放处。
+ *
+ * 读 DSH 现状的只有插件（它跑在宿主进程里，能拿到 `ctx.llm` / `ctx.settings`），
+ * 而拥有配置的是中枢。所以每轮对账由插件算完 POST 过来，这里只**存最后一份**：
+ * 比较逻辑只有一份（`services-plugin/materialize-plan.mjs`，有用例），中枢不重算。
+ *
+ * 不落库：它是每 5 分钟覆盖一次的**观测**，不是产品状态；落库要多一张表 + 数据表基线，
+ * 换来的只是"重启后还能看到上一轮"。重启后下一轮会重新上报。
+ */
+const materializationReading = createMaterializationReadingStore()
 
 /**
  * 装上凭证管理面，并把**「凭证变了 → 探测缓存失效」**这条线接起来。
@@ -7143,6 +7160,9 @@ const router = createRouter([
   }),
   // ★ 2026-10-12：配置包那一族的装配段已随「配置包」整体删除（理由见文件头那段）。
   //   `/api/config-bundle` 这个命名空间**不再存在**。⚠ 同上：注释里不写那个工厂名。
+  // ★★ 物化读数（"打开写入会改 DSH 的什么"）：插件上报、面板读。
+  //   它是打开 `LEGION_APPLY_MODEL_CONFIG` 之前的**放行读数**（决策文档 P2→P3 的门）。
+  createModelMaterializationRoutes({ json, handleRun, reading: materializationReading, authorized }),
   createPriceTablesRoutes({
     json,
     budgetPriceTables, createPriceTable, BUDGET_ERRORS,

@@ -8,8 +8,8 @@
 // 从不问"这个岗位用哪个模型"**：
 //
 //   · DSH 插件守护（本文件所在的那个，`plugins/src/index.ts`）—— 在跑，
-//     但它取模型只走 `ctx.agentDefaultModel.currentSelection()`（DSH 的
-//     `agent-default-model`），于是**所有岗位用同一个模型**；
+//     但它取模型只走宿主的"默认模型"服务（DSH 的 `agent-default-model`），
+//     于是**所有岗位用同一个模型**；
 //   · Legion orchestrator worker（`product/orchestrator/worker.mjs`）—— 会读
 //     `employee_model_bindings`，但它**没在跑**（`run_attempts` 0 行）。
 //
@@ -69,7 +69,7 @@ export interface BindingReading {
  * 形状与**既有的冻结那条路**逐字一致（`agentOptionsForFrozenModel` 的产物在
  * `plugins/src/index.ts` 里就被声明为 `Record<string, string> | null`）：
  * 不在这里另立一个更严的类型 —— 那会让"冻结的"和"绑定的"两条路在
- * `ctx.subagents.start` 那里长得不一样，而它们本该是同一个东西。
+ * 启动子代理的那一处长得不一样，而它们本该是同一个东西。
  */
 export type AgentModelOptions = Record<string, string>
 

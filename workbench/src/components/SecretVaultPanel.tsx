@@ -186,8 +186,13 @@ export function SecretVaultPanel(): React.JSX.Element {
             <div className="set-card-head">
               <span className="mc-name">{row.refText}</span>
               {row.rotatedText === null && <span className="chip muted">从未轮换</span>}
+              {/* ★★ 2026-10-12：孤儿标记。删供应商**默认不动密钥**，所以库里会攒下
+                  "没有任何供应商指向它"的条目；不标出来时它与正在被用的那把长得一样。 */}
+              {row.isOrphan && <span className="chip warn" title={row.orphanText ?? ''}>没有供应商指向它</span>}
             </div>
             <div className="set-card-sub">用途：{row.purposeText}　·　保护方案：{row.schemeText}</div>
+            {row.orphanText !== null && !row.isOrphan && <div className="set-card-sub">{row.orphanText}</div>}
+            {row.isOrphan && <div className="set-card-sub">{row.orphanText}</div>}
             {row.rotatedText !== null && <div className="set-card-sub">{row.rotatedText}</div>}
             <div className="set-card-sub">{row.timesText}</div>
             <div className="set-card-actions">

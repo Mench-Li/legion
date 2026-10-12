@@ -513,3 +513,48 @@ test('⑤ 状态/列表两条只读路由不许互换（引用名不能漏进自
   assert.ok(last(li.calls, 'list'), 'GET /api/secrets 没有调 list')
   assert.equal(li.calls.filter((c) => c[0] === 'describe').length, 0)
 })
+
+// ══════════════════════════════════════════════════════════════════════════
+// ⑤b ★★ 孤儿标记：库里那些**没有任何供应商指向它**的条目（2026-10-12）
+//
+// 背景（实测）：删一个供应商**默认不碰它的钥匙**（那个动作不可逆），于是库里攒下了一条
+// `SVEA_DS_1_API_KEY` —— 没有供应商指着它、DSH 那边也没有。不标出来时，它与
+// "正在被用的那把"在列表上长得一模一样，而只有它是可以被清掉的。
+//
+// ⚠ 这一格**不能**在真 hub 上测：那台机器上密钥库打不开（`GET /api/secrets` 503），
+//   于是"有没有这一格"在 HTTP 面**不可观测** —— 所以打在缝上（注入 `claimedRefs`）。
+// ══════════════════════════════════════════════════════════════════════════
+
+test('⑤b ★★ 有 `claimedRefs` 时：被指向的标 true、没人指向的标 false、**引用名照旧在**', async () => {
+  const s = secSpy({
+    admin: {
+      // 两个条目：一个被供应商指着，一个是孤儿。
+      list: async () => ({ entries: [{ ref: 'USED_REF' }, { ref: 'ORPHAN_REF' }], aclVerified: true }),
+    },
+    deps: { claimedRefs: () => new Set(['USED_REF']) },
+  })
+  assert.equal(await s.dispatch('GET', '/api/secrets'), true)
+  const body = s.sent.at(-1)?.[1]
+  const byRef = Object.fromEntries((body?.secrets ?? []).map((e) => [e.ref, e.claimedByProvider]))
+  assert.deepEqual(byRef, { USED_REF: true, ORPHAN_REF: false })
+})
+
+test('⑤b ★★ 没有 `claimedRefs` 时**一格都不加**（老 hub 的行为逐字保留）', async () => {
+  const s = secSpy()
+  await s.dispatch('GET', '/api/secrets')
+  const entries = s.sent.at(-1)?.[1]?.secrets ?? []
+  assert.ok(entries.length > 0, '夹具要真的返回条目，否则这条测的是空集合')
+  for (const e of entries) {
+    assert.equal('claimedByProvider' in e, false, '没注入时不许多出这一格')
+  }
+})
+
+test('⑤b ★★ `claimedRefs` 抛错 ⇒ **不弄坏列表**（那一格不出现，而不是 500）', async () => {
+  // 供应商目录读不出来时，凭证库列表必须照旧能用 —— 一个"附属信息读不到"
+  // 不该把"列出你的凭证"这件事整个打掉。
+  const s = secSpy({ deps: { claimedRefs: () => { throw new Error('catalog down') } } })
+  assert.equal(await s.dispatch('GET', '/api/secrets'), true)
+  const body = s.sent.at(-1)?.[1]
+  assert.equal(s.sent.at(-1)?.[0], 200)
+  for (const e of body?.secrets ?? []) assert.equal('claimedByProvider' in e, false)
+})

@@ -408,3 +408,37 @@ describe('⑥ 自检：ok:false 走 HTTP 200，它不是「没有凭证」', () 
 // ★ 2026-10-12：这里原有「⑦b 迁移计划复用 importPlanView」两块用例 —— 随「配置迁移」
 //   一起删掉了（`migrationPlanView` 与它复用的 `importPlanView` 都已移除）。
 //   理由见 `docs/bugs/BUG-026` / `BUG-027`。
+
+// ─────────────────────────────────────── ⑧ 凭证库里的"孤儿"标记
+
+describe('⑧ 凭证库：**没有任何供应商指向它**的条目要标出来', () => {
+  test('服务端说 `claimedByProvider:false` ⇒ 标成孤儿，并说清"也可能有别的东西在用"', () => {
+    const v = secretRowView({ ref: 'ORPHAN_REF', claimedByProvider: false })
+    assert.equal(v.isOrphan, true)
+    assert.match(v.orphanText, /没有任何供应商指向它/)
+    // ★ 措辞不许越权说成"没人在用"：那把钥匙也可能正被手工脚本或 DSH 自己的配置用着，
+    //   而那两处 Legion 看不到。
+    assert.match(v.orphanText, /可能有别的东西在用/)
+  })
+
+  test('`claimedByProvider:true` ⇒ 不是孤儿，且照实说"有供应商指向它"', () => {
+    const v = secretRowView({ ref: 'USED_REF', claimedByProvider: true })
+    assert.equal(v.isOrphan, false)
+    assert.match(v.orphanText, /有供应商指向它/)
+  })
+
+  test('★ 服务端没给这一格（老 hub）⇒ `null`：**不猜**，界面就不显示那一栏', () => {
+    const v = secretRowView({ ref: 'X' })
+    assert.equal(v.orphanText, null)
+    assert.equal(v.isOrphan, false)
+  })
+
+  test('★★ 引用名缺失与孤儿标记是两件事，不许混', () => {
+    // 引用名缺失时那一格仍然是 `''`（不编一个名字），而孤儿标记独立成立：
+    // "它叫什么"与"有没有人指着它"是两个读数。
+    const v = secretRowView({ claimedByProvider: false })
+    assert.equal(v.ref, '')
+    assert.equal(v.refText, '（响应里没有引用名）')
+    assert.equal(v.isOrphan, true)
+  })
+})

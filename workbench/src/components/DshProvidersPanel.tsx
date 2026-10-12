@@ -41,7 +41,25 @@ interface Provider {
    *   引用名是可枚举的攻击面。供应商这一族的 `secretRef` 还在（见 `docs/bugs/BUG-028`），
    *   但界面**不许**依赖核验结果里的名字 —— 它只说"引用了某把钥匙"。
    */
-  credential?: { state?: string; hasRef?: boolean; detail?: string | null }
+  /**
+   * ★★ hub **核验过**的凭证状态：`none | ready | missing | unavailable`。
+   *
+   *   ★ 这里没有引用名（2026-10-12）：档案那一族已经改成只发 `hasRef`，
+   *     供应商这一族也不再整行原样返回 —— 名字是可枚举的攻击面（BUG-028）。
+   *
+   *   ★★ `runtime` 是**另一件不同的事**（同日）：`state` 问的是 **Legion 自己的库**，
+   *     而真正让 agent 跑起来的钥匙来自 **DSH 自己的**凭证文件
+   *     （派工只传 `agentOptions: { provider, model }`，一个凭证字段都没有；
+   *       Legion → DSH 的写路径"物化"门也是关的）。
+   *      只有前一格时，用户会以为"配在这里就够了"。
+   *      它同样**不含引用名**，只给结论、来源与一句说明。
+   */
+  credential?: {
+    state?: string
+    hasRef?: boolean
+    detail?: string | null
+    runtime?: { state?: string; layer?: string | null; detail?: string }
+  }
   /**
    * ★ `runtimeType`：跟这个供应商说话用哪个运行时。
    *   它**已经上移到供应商一份**（原来每条档案各写一遍）—— 所以模型档案那边不用填。
@@ -109,6 +127,54 @@ function credentialView(p: Provider): { cls: string; label: string; title: strin
   }
 }
 
+/**
+ * ★★ **运行侧**（DSH）有没有这把钥匙 → 界面读法（2026-10-12）。
+ *
+ * 它与 `credentialView` **并列而不是替代**，因为两者回答的是不同的问题：
+ *
+ *   · `credentialView`：**Legion 自己的库**里有吗（"测试连接"读的就是它）；
+ *   · `runtimeKeyView`：**跑起来的那个进程**取得到吗（真正决定任务成不成）。
+ *
+ * 为什么这一格必须有（将军问"凭证库又是干嘛的"追问出来的）：一次实测里，
+ * Legion 的库有 3 条、其中一条没有任何供应商指向它、而且 **DSH 那边根本没有**。
+ * 在那之前界面只有前者的读数 —— 于是往 Legion 里录一把 DSH 没有的钥匙，
+ * 面板会说"已核验"、连测试连接都可能过，**而任务跑不起来**。
+ *
+ *   > 一个"我这边的库里有"的读数，
+ *   > 与一个"跑起来真的能用"的读数，在界面上说的是同一句话 ——
+ *   > 而它们的修法是完全不同的两件事。
+ *
+ * 三种状态**照实说**，尤其 `absent` 不许越权说成"DSH 没有"：
+ * 服务端只查了宿主环境与 DSH 凭证文件两层，**没查** DSH 启动目录的 `.env`
+ * （详见 `team-hub/runtime-credential.mjs` 的文件头）。
+ */
+function runtimeKeyView(p: Provider): { cls: string; label: string; title: string; bad: boolean } {
+  const rt = p.credential?.runtime
+  const state = rt?.state
+  const detail = rt?.detail ?? ''
+  if (state === 'present') {
+    return {
+      cls: ' ready', label: '运行侧可用', bad: false,
+      title: `运行时会用上它${rt?.layer ? `（来源：${rt.layer}）` : ''}。${detail}`,
+    }
+  }
+  if (state === 'absent') {
+    return {
+      cls: ' missing', label: '运行侧没有', bad: true,
+      title: detail || '运行侧的宿主环境与 DSH 凭证文件里都没有找到这把钥匙。',
+    }
+  }
+  if (state === 'unknown') {
+    return { cls: ' unknown', label: '运行侧未核验', bad: false, title: detail || '没读到运行侧的凭证来源，因此无法判断。' }
+  }
+  // `not-needed`：这条本来就不要凭证（本地模型合法）。
+  if (state === 'not-needed') {
+    return { cls: ' ready', label: '运行侧无需密钥', bad: false, title: '这个供应商没有配置凭证引用。' }
+  }
+  // 没有这一格（老 hub）：**不猜**，也不装作核验过。
+  return { cls: ' unknown', label: '运行侧未核验', bad: false, title: '这次没有核验运行侧有没有这把钥匙。' }
+}
+
 interface Form { provider: string; name: string; endpoint: string; protocol: string; models: string; key: string; runtimeType: string }
 const empty: Form = { provider: '', name: '', endpoint: '', protocol: 'openai-completions', models: '', key: '', runtimeType: 'dsh' }
 
@@ -129,6 +195,8 @@ export function DshProvidersPanel(): React.JSX.Element {
   const [editing, setEditing] = useState<Provider | null>(null)
   const [open, setOpen] = useState(false)
   const [removing, setRemoving] = useState<Provider | null>(null)
+  /** ★ 2026-10-12：删供应商时**要不要连钥匙一起删**（默认不勾：那是不可逆的）。 */
+  const [deleteKeyWithProvider, setDeleteKeyWithProvider] = useState(false)
   const [form, setForm] = useState<Form>(empty)
   /** 密钥库的可用性（`GET /api/secrets/status`）。`null` = 还没问出来。 */
   const [keyStore, setKeyStore] = useState<{ ok: boolean; message: string } | null>(null)
@@ -229,8 +297,24 @@ export function DshProvidersPanel(): React.JSX.Element {
     if (!removing) return
     setBusy(true); setError('')
     try {
-      await hubRequest('DELETE', `/api/model-providers/${encodeURIComponent(removing.id)}`, { actor: 'general', version: removing.version })
-      setRemoving(null); setNotice('供应商已删除。'); await load()
+      // ★★ 2026-10-12：`deleteCredential` 只在用户**明确勾选**时发。
+      //   默认不删：删钥匙不可逆，而"我删了这个供应商"不等于"我要毁掉那把钥匙"
+      //   （同一个引用可能正被别的东西指着）。服务端还会再拦一道（共享引用），
+      //   见 `routes/model-providers.mjs` 的 DELETE 那一段。
+      const r = await hubRequest('DELETE', `/api/model-providers/${encodeURIComponent(removing.id)}`, {
+        actor: 'general', version: removing.version,
+        ...(deleteKeyWithProvider ? { deleteCredential: true } : {}),
+      }) as { credential?: { deleted?: boolean; code?: string; message?: string } }
+      const c = r?.credential
+      // 照实说结果：这里会出现"供应商删掉了、钥匙没删掉"这种**成功了一半**的情况
+      // （比如别的供应商还指着同一把钥匙）。把它说成"已删除"会让人以为钥匙也没了。
+      const suffix = c === undefined
+        ? ''
+        : c.deleted === true
+          ? '那把钥匙也一起删掉了。'
+          : `⚠ 那把钥匙**没有**删掉：${c.message ?? c.code ?? '未知原因'}`
+      setRemoving(null); setDeleteKeyWithProvider(false)
+      setNotice(`供应商已删除。${suffix}`); await load()
     } catch (e) { setError(e instanceof Error ? e.message : String(e)); setRemoving(null) }
     finally { setBusy(false) }
   }
@@ -331,6 +415,10 @@ export function DshProvidersPanel(): React.JSX.Element {
   }).length
   const missingCount = providers.filter(p => p.credential?.state === 'missing').length
   const unknownCount = providers.filter(p => p.credential?.state === 'unavailable').length
+  // ★★ 运行侧那一格的两个计数（2026-10-12）。它们才是"任务能不能跑"的读数：
+  //   上面那两个数说的是 Legion 自己的库。
+  const runtimeAbsent = providers.filter(p => p.credential?.runtime?.state === 'absent')
+  const runtimeUnknownCount = providers.filter(p => p.credential?.runtime?.state === 'unknown').length
 
   return <div className="set-panel dsh-providers-panel">
     <div className="model-config-intro"><div><h2>模型</h2><p>填入模型供应商的 API 密钥即可使用其模型。配置适用于所有空间。</p></div><button className="btn" disabled={loading || busy} onClick={() => void load()}>刷新配置</button></div>
@@ -346,7 +434,19 @@ export function DshProvidersPanel(): React.JSX.Element {
       已配置 {providers.length} 个供应商 · {modelCount} 个模型 · 密钥已核验 {readyCount} 个
       {missingCount > 0 && <span className="provider-cred-warn"> · {missingCount} 个引用的钥匙不在库里</span>}
       {unknownCount > 0 && <span className="provider-cred-unknown"> · {unknownCount} 个无法核验（读不到密钥库）</span>}
+      {runtimeAbsent.length > 0 && <span className="provider-cred-warn"> · {runtimeAbsent.length} 个**运行侧**取不到钥匙</span>}
+      {runtimeUnknownCount > 0 && <span className="provider-cred-unknown"> · {runtimeUnknownCount} 个运行侧未核验</span>}
     </p>}
+    {/* ★★ 把规则讲清楚（2026-10-12）。不写这段时，上面那些"已核验"会被读成
+        "任务一定跑得起来" —— 而运行时取钥匙的地方是 DSH 自己，不是这里。 */}
+    {!loading && !error && runtimeAbsent.length > 0 && <div className="set-notice warn" role="status">
+      <p><strong>有 {runtimeAbsent.length} 个供应商在**运行侧**取不到钥匙。</strong>
+        {runtimeAbsent.length === 1 ? `「${runtimeAbsent[0].displayName}」` : '它们在'}的凭证只在 Legion 这边有这个引用，
+        而真正跑任务的进程（DSH）在自己的凭证库里找不到它。</p>
+      <p>钥匙的两处不是同一件事：这里存的那份给"测试连接"用；**任务要跑，靠的是 DSH 自己的凭证库**。
+        两边现在各存一份、且没有自动同步（把 Legion 的配置写进 DSH 的开关默认是关的）。</p>
+      <p>要做的是**在 DSH 那边也配上这把钥匙**（DSH 的模型设置页），而不是在这里再填一遍。</p>
+    </div>}
     <div className="provider-settings-list">
       {!loading && providers.map(p => {
         const cred = credentialView(p)
@@ -355,6 +455,15 @@ export function DshProvidersPanel(): React.JSX.Element {
         {p.source === 'dsh-import' && <span className="provider-custom-badge">自运行环境导入</span>}
         <span className={`provider-state-dot${cred.cls}`} role="img" aria-label={cred.label} title={cred.title} />
         <span className="provider-cred-label" title={cred.title}>{cred.label}</span>
+        {/* ★★ 运行侧那一格（2026-10-12）。它与上面那一格**都显示**：一个说"这个库里有"，
+            一个说"跑起来取得到"。缺了后者，用户以为"配在这里就够了"。 */}
+        {p.credential?.runtime !== undefined && (() => {
+          const rt = runtimeKeyView(p)
+          return <>
+            <span className={`provider-state-dot${rt.cls}`} role="img" aria-label={rt.label} title={rt.title} />
+            <span className={`provider-cred-label${rt.bad ? ' provider-cred-warn' : ''}`} title={rt.title}>{rt.label}</span>
+          </>
+        })()}
         {/* ★ 档案是**保存时自动生成**的（将军："添加完自动生成供应商档案"）。
             所以这里不再有"生成"按钮：`missing > 0` 只意味着**那次没跑成**
             （历史数据 / 某条 id 冲突），于是说的是"补齐"而不是"生成"。 */}
@@ -393,7 +502,16 @@ export function DshProvidersPanel(): React.JSX.Element {
         <button className="btn" disabled={repairBusy} onClick={() => { setRepairing(null); setRepairResult(null) }}>取消</button>
       </div>
     </div></div>}
-    {removing && <div className="provider-editor-mask"><div className="provider-editor-dialog" role="alertdialog" aria-label="删除供应商"><h3>删除 {removing.displayName}？</h3><p>删除后，使用该供应商的岗位需要重新选择模型。已存储的密钥不会被删除。</p><button className="btn provider-delete" disabled={busy} onClick={() => void remove()}>确认删除</button><button className="btn" disabled={busy} onClick={() => setRemoving(null)}>取消</button></div></div>}
+    {removing && <div className="provider-editor-mask"><div className="provider-editor-dialog" role="alertdialog" aria-label="删除供应商"><h3>删除 {removing.displayName}？</h3><p>删除后，使用该供应商的岗位需要重新选择模型。</p>
+      {/* ★★ 2026-10-12：孤儿钥匙的出口。删供应商从前**完全不碰密钥**，于是库里会攒下
+          "没有任何供应商指向它"的条目（实测这台机器上就有一条）。这里给一个**明确**的出口，
+          但**默认不勾** —— 删钥匙不可逆，而且它可能正被别的东西用着。 */}
+      {removing.credentialRequired === true && <label className="field" style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+        <input type="checkbox" checked={deleteKeyWithProvider} disabled={busy} onChange={e => setDeleteKeyWithProvider(e.target.checked)} />
+        <span>同时删掉它的钥匙（不可撤销）</span>
+      </label>}
+      {removing.credentialRequired === true && <p className="set-notice muted">不勾选时，钥匙会留在「凭证库」里 —— 如果这个供应商是最后一个用它的，它就成了一个**没有任何供应商指向它**的孤儿。那边可以随时删。</p>}
+      <button className="btn provider-delete" disabled={busy} onClick={() => void remove()}>确认删除</button><button className="btn" disabled={busy} onClick={() => { setRemoving(null); setDeleteKeyWithProvider(false) }}>取消</button></div></div>}
     {open && <div className="provider-editor-mask"><form role="dialog" aria-modal="true" aria-label={editing ? `编辑 ${editing.displayName}` : '添加模型供应商'} className="set-form model-provider-form" onSubmit={e => { e.preventDefault(); void save() }}><h3>{editing ? `编辑 ${editing.displayName}` : '添加自定义供应商'}</h3>{error && <div className="set-notice bad" role="alert">{error}</div>}{notice && <div className="set-notice ok" role="status">{notice}</div>}<div className="set-grid">
       <label className="field"><span>供应商 ID</span><input className="set-input" value={form.provider} disabled={!!editing || busy} onChange={e => set('provider', e.target.value)} required placeholder="例如 company-gateway" /></label>
       <label className="field"><span>显示名称</span><input className="set-input" value={form.name} disabled={busy} onChange={e => set('name', e.target.value)} /></label>

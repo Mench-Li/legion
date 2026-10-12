@@ -81,11 +81,16 @@
  * 造密钥库（secrets）：状态只读 + 列表 + 写入 + 轮换 + 删除（引用名走 URL）族路由。
  *
  * @param {object} deps 全部由 `server.mjs` 注入
+ * @param {Function} [deps.claimedRefs] ★ 2026-10-12：`() => Set<string>`，**谁在用这些引用名**
+ *   （实现里读的是供应商目录）。省略时列表不带 `claimed` 那一格（行为与从前逐字相同）。
+ *   它存在的理由是一次实测：库里有一条 `SVEA_DS_1_API_KEY`，**没有任何供应商指向它**
+ *   —— 删供应商时从前完全不碰密钥，于是孤儿会一直攒着，而界面上看不出来。
  */
 export function createSecretsRoutes({
   json,
   secretAdmin, handleRun, audit,
   readScope,
+  claimedRefs = null,
 }) {
   const deps = { json,
     secretAdmin, handleRun, audit,
@@ -117,7 +122,26 @@ export function createSecretsRoutes({
       async run(req, res) {
         await handleRun(req, res, async () => {
           const r = await secretAdmin().list()
-          return { secrets: r.entries, aclVerified: r.aclVerified }
+          // ★★ 2026-10-12：标出"没有任何供应商指向它"的那些条目（孤儿）。
+          //
+          //   为什么值得单独一格：删一个供应商**不会**动它的钥匙（那个动作是不可逆的，
+          //   而"我删了这个供应商"不等于"我要毁掉那把钥匙"）。代价是孤儿会一直攒着 ——
+          //   实测这台机器上就有一条：库里有、DSH 那边没有、没有任何供应商指向它。
+          //   不标出来时，它与"正在被用的那把"在列表上长得一模一样。
+          //
+          //   ⚠ 它只回答"有没有供应商指向它"，**不等于**"可以删"：那把钥匙也可能
+          //   正被别的东西（手工写的脚本、DSH 自己的配置）用着。所以文案要写"没有供应商指向它"，
+          //   而不是"没人在用"。
+          let claimed = null
+          if (typeof claimedRefs === 'function') {
+            try { claimed = new Set(Array.from(await claimedRefs() ?? [])) } catch { claimed = null }
+          }
+          const entries = claimed === null
+            ? r.entries
+            : (r.entries ?? []).map((e) => (typeof e?.ref === 'string'
+              ? { ...e, claimedByProvider: claimed.has(e.ref) }
+              : e))
+          return { secrets: entries, aclVerified: r.aclVerified }
         })
       },
     },

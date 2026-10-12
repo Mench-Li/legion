@@ -1354,6 +1354,12 @@ test('★★ product 的 16 处动态下标逐条对账：14 处真读进 dynami
   //   所以重数时逐条对过**表达式**（不是只看条数）：条数从 16 变 16 时，
   //   光看数字会以为"没变"。
   assert.deepEqual(got, [
+    // ★ 2026-10-12：这一处从 `product/launcher/cli.mjs` **搬到了** `product/dsh-location.mjs`
+    //   （同一个 process、同一个表达式、仍然是 ×1）—— 因为读它的多了一个调用方：
+    //   `team-hub/runtime-credential.mjs` 要用同一个路径回答"运行侧到底有没有这把钥匙"，
+    //   而中枢不该 import 一个**进程入口**只为拿一个 join。
+    //   ⚠ 列表是**排序后**比对的，所以它必须待在 `launcher/` 各条之前（`dsh-location` < `launcher`）。
+    'product/dsh-location.mjs → env[DSH_HOME_ENV]',
     'product/launcher/allowlist.mjs → env[key]',
     'product/launcher/allowlist.mjs → env[key]',
     // 2026-10-04：`bundled-runtime.mjs` 是 desktop 线的内嵌运行时解包器
@@ -1367,7 +1373,6 @@ test('★★ product 的 16 处动态下标逐条对账：14 处真读进 dynami
     'product/launcher/bundled-runtime.mjs → env[key]',
     'product/launcher/bundled-runtime.mjs → key',
     'product/launcher/bundled-runtime.mjs → key',
-    'product/launcher/cli.mjs → env[DSH_HOME_ENV]',
     // PRT-708：托盘图标宿主要在 Windows 上照 DSH 那条解析顺序找 shell，
     // 于是多了 PATH / ProgramFiles / SystemRoot 三处读（PATH 读两处，见注册表 occ=2）。
     'product/launcher/tray-icon.mjs → env[SHELL_ENV.PATH]',

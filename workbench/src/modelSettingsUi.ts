@@ -240,6 +240,13 @@ export interface SecretRowView {
   /** 轮换状态：`null` 表示从未轮换。 */
   rotatedText: string | null
   timesText: string
+  /**
+   * ★ 2026-10-12：这一条有没有**供应商**指着它。
+   * `null` = 服务端没给这一格（老 hub）——**不猜**，界面就不显示那一栏。
+   */
+  orphanText: string | null
+  /** 是不是孤儿（没有任何供应商指向它）。用来上警示色。 */
+  isOrphan: boolean
 }
 
 /** 只取 `YYYY-MM-DD HH:mm` 这一段；格式不认识就原样返回（不编造时间）。 */
@@ -263,6 +270,21 @@ export function secretRowView(entry: unknown): SecretRowView {
   if (created !== null) times.push(`录入于 ${created}`)
   if (updated !== null && updated !== created) times.push(`更新于 ${updated}`)
 
+  // ★★ 2026-10-12：「**没有任何供应商指向它**」是单独一栏，而不是让人自己去比对。
+  //
+  //   它来自一次实测：库里有一条钥匙，供应商目录里没有任何一条指着它
+  //   （那是删供应商时留下的 —— 那个动作**默认不碰密钥**）。不标出来时，
+  //   它与"正在被用的那把"在列表上长得一模一样，而它是可以被清掉的那个。
+  //
+  //   ⚠ 措辞是"没有供应商指向它"，**不是**"没人在用"：那把钥匙也可能正被别的东西
+  //   （手工脚本、DSH 自己的配置）用着，而 Legion 看不到那些地方。
+  const claimed = e.claimedByProvider
+  const orphanText = claimed === false
+    ? '没有任何供应商指向它（删供应商留下的；但可能有别的东西在用，删之前先确认）'
+    : claimed === true
+      ? '有供应商指向它'
+      : null
+
   return {
     ref,
     refText: ref === '' ? '（响应里没有引用名）' : ref,
@@ -270,6 +292,8 @@ export function secretRowView(entry: unknown): SecretRowView {
     schemeText: scheme ?? '（没有保护方案信息）',
     rotatedText: rotated === null ? null : `最近轮换：${rotated}`,
     timesText: times.length === 0 ? '（没有时间戳）' : times.join('　'),
+    orphanText,
+    isOrphan: claimed === false,
   }
 }
 

@@ -2049,6 +2049,11 @@ async function stageTest() {
     //      最重要的一条：**读不出来 ⇒ unavailable，绝不是 missing**。
     { label: 'model-resolution（BUG-023：留空继承供应商 / 写了就不被覆盖 / 纯复制识别）', files: ['team-hub/model-resolution.test.mjs'], cwd: ROOT, nodeArgs: ['--experimental-strip-types'] },
     { label: 'credential-status（BUG-023：核验钥匙在不在库里；读不出来 ≠ 没有）', files: ['team-hub/credential-status.test.mjs'], cwd: ROOT, nodeArgs: ['--experimental-strip-types'] },
+    // ★★ 2026-10-12（将军问"凭证库又是干嘛的"追问出来的）：上面那一套问的是 **Legion 自己的库**，
+    //   而真正让 agent 跑起来的钥匙来自 **DSH 自己的**凭证文件（派工只传 `agentOptions: {provider, model}`，
+    //   一个凭证字段都没有；Legion → DSH 的写路径"物化"门默认关着）。
+    //   这一套是那个**并列**的读数：运行侧到底有没有这把钥匙（三值，读不出来 ≠ 没有）。
+    { label: 'runtime-credential（运行侧有没有这把钥匙：宿主环境 / DSH 凭证文件；读失败 ≠ 没有）', files: ['team-hub/runtime-credential.test.mjs'], cwd: ROOT, nodeArgs: ['--experimental-strip-types'] },
     // ★ 从供应商派生档案（将军："那我还有必要新建档案嘛，直接来源于模型与供应商才对啊"）：
     //   身份是 **(供应商, 模型)** 而不是 `id` —— 库里既有档案的 id 与派生规则**不一致**
     //   （连字符 vs 点号），按 id 认身份会一次多建三条重复档案，而它们看起来完全正常。

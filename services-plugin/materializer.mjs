@@ -38,6 +38,46 @@ import { planToOps, expectedResidual, verifyResidual } from './materialize-ops.m
 import { readDshProviderSnapshot } from './dsh-snapshot.mjs'
 
 /**
+ * ★★ 2026-10-12（BUG-035）：**先探自己是不是在 HMR 事务里**，在的话这一轮**不写**。
+ *
+ * ## 为什么要探
+ *
+ * `settings.mutate` 会经 `packages/boot/config-editor/src/index.ts:153` 走进
+ * `hmr.runExclusive(...)`，而它在"已经在事务里"时是**第一句就拒绝**：
+ *
+ *     // packages/boot/hmr/src/index.ts:262-263
+ *     if (this.executing.getStore()) return Promise.reject(new Error('HMR transactions cannot be nested'))
+ *
+ * 而 DSH 每次启动**紧跟一次自动重载**，插件那个周期调度器就是在重载事务里被建出来的 ——
+ * 它的定时器回调会**继承**该事务的 `AsyncLocalStorage` 上下文（ALS 的定义行为，递归
+ * `setTimeout` 也逃不掉）⇒ 这个进程此后**每一次写都被拒**。
+ *
+ * ## 探法为什么可靠
+ *
+ * 用一个**空的**操作去调 `runExclusive`：
+ *   · 它成功 ⇒ 我们不在事务里（而且顺手排在队列里，之后写是安全的）；
+ *   · 它抛 `cannot be nested` ⇒ 我们**在**事务里 —— 那个字符串只由上面那一支产生；
+ *   · 别的失败（例如 `HMR is disposed`）⇒ **无从判断**，返回 `null` 不据此拦截
+ *     （写入自己的 catch 会处理）。
+ *
+ * ★ 探到之后我们**只报告、不写**：这是"写入永远不该从一次重载里冒出来"那条直觉的
+ *   直接实现 —— 一次"配置刚变"的重载，与一次"用户要求接管"的启动，在插件看来是同一个
+ *   回调，而只有后者该允许写。
+ *
+ * @returns `true` 在事务里 ｜ `false` 不在 ｜ `null` 无从判断（没有 hmr 服务 / 别的失败）
+ */
+async function insideHmrTransaction(ctx) {
+  const hmr = ctx?.get?.('hmr') ?? null
+  if (!hmr || typeof hmr.runExclusive !== 'function') return null
+  try {
+    await hmr.runExclusive(async () => {})
+    return false
+  } catch (e) {
+    return /cannot be nested/i.test(e instanceof Error ? e.message : String(e)) ? true : null
+  }
+}
+
+/**
  * @param ctx        宿主上下文（只用 `ctx.get(...)` **软取** settings / credentials / llm）
  * @param hubUpstream 中枢地址（用来读 Legion 的目录）
  * @param fetchImpl   注入点（用例用假件）
@@ -113,6 +153,20 @@ export async function runMaterialization({
   }
 
   // ── 写 ──
+  //
+  // ★★ BUG-035：**先探自己是不是在 HMR 事务里**。在的话这一轮不写（只报告）——
+  //   否则每一次写入都会被 DSH 在执行前拒绝，而日志会把"没写"说成"写坏了一半"。
+  const inTxn = await insideHmrTransaction(ctx)
+  if (inTxn === true) {
+    log('模型配置物化：★ 检测到自己在 **HMR 事务**里（每次启动紧跟一次自动重载 ⇒ 本进程的写入通道失效）'
+      + `→ 本轮**不写**，只报告。本轮的差异：${t.ops.length} 组 ops / ${t.credentialsToSet.length} 条凭证。`
+      + '**配置保持原样（一个字节都没写）**；这是通道问题，不是数据问题 —— 见 docs/bugs/BUG-035')
+    return {
+      applied: false, reason: 'hmr-transaction', wrote: false,
+      before, credentialsToSet: t.credentialsToSet.length, ops: t.ops.length,
+    }
+  }
+
   let revision = undefined
   try {
     // 乐观锁：先取当前 revision，写入时带上 —— 两个写入者同时改时，后来的那次会被拒绝，
@@ -144,9 +198,28 @@ export async function runMaterialization({
       wroteOps.push(`credential(${ref})`)
     }
   } catch (e) {
-    log(`模型配置物化：写入失败（${e instanceof Error ? e.message : String(e)}）→ 尝试回滚`)
+    const msg = e instanceof Error ? e.message : String(e)
+    // ★★ BUG-035：**"被拒之前什么都没做"与"写了一半"必须分开说。**
+    //
+    //   `runExclusive` 在"已在事务里"那一支上是 `return Promise.reject(...)` ——
+    //   **在任何工作开始之前**就拒绝了（`packages/boot/hmr/src/index.ts:262-263`）。
+    //   所以只要**我们自己还没有任何写入记录**，就可以确证"一个字节都没写"。
+    //
+    //   而原来的实现两种情况同一句话（"回滚也失败了 …… 需要人工看一次"），
+    //   结果是：一个**假的**"需要人工看一次"每 5 分钟报一次，
+    //   而**真的**需要人工看的那一刻会被淹在里面。
+    if (/cannot be nested/i.test(msg) && wroteOps.length === 0 && credentialsWritten.length === 0) {
+      log('模型配置物化：写入被 DSH **在执行前拒绝**（HMR 事务里不许嵌套）⇒ '
+        + '**一个字节都没写**，DSH 配置保持原样。'
+        + '⚠ 不尝试回滚：那条拒绝发生在任何工作之前，没有半成品可言 —— 见 docs/bugs/BUG-035')
+      return {
+        applied: false, reason: 'hmr-transaction', wrote: false, wroteOps,
+        error: msg, provablyNothingWritten: true,
+      }
+    }
+    log(`模型配置物化：写入失败（${msg}）→ 尝试回滚`)
     const rolled = await rollback({ settings, reversed: t.reversed, log })
-    return { applied: false, reason: 'write-failed', wrote: true, wroteOps, rolled, error: e instanceof Error ? e.message : String(e) }
+    return { applied: false, reason: 'write-failed', wrote: true, wroteOps, rolled, error: msg }
   }
 
   // ── ③ 写后回读：用**真读者**重新出计划 ──

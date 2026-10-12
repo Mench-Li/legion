@@ -59,6 +59,9 @@ function fakeHost({ initial = {}, mutateBehavior = 'normal', initialCredentials 
           mutate: async (_ns, ops) => {
             calls.mutate.push(ops)
             if (mutateBehavior === 'throw') throw new Error('磁盘只读')
+            // 'nested' = DSH 在**执行前**就拒绝（HMR 事务里不许嵌套）——
+            // ★ 这是 BUG-035 的形状：什么都没做，而报的错看起来像"写坏了"。
+            if (mutateBehavior === 'nested') throw new Error('HMR transactions cannot be nested')
             // 'ignore' = 假装成功、其实什么都没改（用来逼出"回读不通过 ⇒ 回滚"那条路）
             if (mutateBehavior === 'ignore') return
             applyOps(ops)
@@ -235,6 +238,104 @@ test('⑦b ★ **默认就是关**：不传 `enabled` 时也不许写（"没写�
   assert.equal(r.wrote, false)
   assert.deepEqual(ctx.calls.mutate, [])
   assert.deepEqual(ctx.state.providers, {}, '默认关时 DSH 必须一个字节都没变')
+})
+
+// ══════════════════════════════════════════════════════════════════════════
+// ⑦c ★★★ BUG-035：**在 HMR 事务里就不写，而且要把"没写"说成"没写"**
+//
+// 实测（2026-10-12，冷启动之后）：DSH 每次启动**紧跟一次自动重载**，插件那个
+// 每 5 分钟一轮的调度器就是在重载事务里被建出来的 —— 它的定时器回调会继承
+// 该事务的 `AsyncLocalStorage` 上下文（ALS 的定义行为，递归 `setTimeout` 逃不掉）
+// ⇒ 这个进程此后**每一次写都被 DSH 在执行前拒绝**。
+//
+// 而原来的文案把这种情况说成"回滚也失败了 …… DSH 的配置现在既不等于 Legion 的、
+// 也不等于改动前的，需要人工看一次" —— **那是误报**，而且方向有害：
+// 它让操作者去做一件没有必要的事，于是**真的**需要人工看的那一刻会被淹在里面。
+//
+// 这组判据盯两件事：
+//   · 探到在事务里 ⇒ **连 mutate 都不调**（不是"调了被拒"）；
+//   · 写入阶段被拒且我们**没有任何写入记录** ⇒ 不回滚、如实说"一个字节都没写"。
+// ══════════════════════════════════════════════════════════════════════════
+
+/** 给假宿主接上一个"我们正在事务里"的 hmr 服务（`runExclusive` 第一句就拒绝）。 */
+function withNestedHmr(ctx, { throws = 'cannot be nested' } = {}) {
+  const calls = []
+  const get = ctx.get
+  ctx.get = (k) => {
+    if (k === 'hmr') {
+      return {
+        runExclusive: async () => {
+          calls.push('runExclusive')
+          throw new Error(`HMR transactions ${throws}`)
+        },
+      }
+    }
+    return get(k)
+  }
+  ctx.hmrCalls = calls
+  return ctx
+}
+
+test('⑦c ★★★ 检测到自己在 HMR 事务里 ⇒ **连 mutate 都不调**，只报告', async () => {
+  const ctx = withNestedHmr(fakeHost({ initial: {} }))
+  const logs = []
+  const r = await runMaterialization({ ctx, hubUpstream: 'http://hub.test', fetchImpl: hub([LEGION_FJD]), enabled: true, log: (m) => logs.push(m) })
+  assert.equal(r.reason, 'hmr-transaction')
+  assert.equal(r.wrote, false)
+  assert.deepEqual(ctx.calls.mutate, [], '★ 探到在事务里就不该去调 mutate（调了也是被拒，而日志会因此说谎）')
+  assert.deepEqual(ctx.calls.set, [])
+  assert.deepEqual(ctx.state.providers, {}, 'DSH 必须一个字节都没变')
+  assert.deepEqual(ctx.hmrCalls, ['runExclusive'], '探测只调一次')
+  const line = logs.join('\n')
+  assert.match(line, /HMR 事务/)
+  assert.match(line, /一个字节都没写/)
+  assert.doesNotMatch(line, /需要人工看一次/, '★ 这句是误报：什么都没写，不需要人工看')
+})
+
+test('⑦c ★★ 不在事务里（`runExclusive` 成功）⇒ 照常写，探测不拦路', async () => {
+  const ctx = fakeHost({ initial: {} })
+  const get = ctx.get
+  const calls = []
+  ctx.get = (k) => (k === 'hmr' ? { runExclusive: async (op) => { calls.push('runExclusive'); return op() } } : get(k))
+  const r = await runMaterialization({ ctx, hubUpstream: 'http://hub.test', fetchImpl: hub([LEGION_FJD]), enabled: true, log: () => {} })
+  assert.equal(r.wrote, true, '不在事务里就该真的写')
+  assert.deepEqual(calls, ['runExclusive'], '探一次，然后照常走')
+  assert.equal(ctx.state.providers['fjd-ds']?.api, 'openai-responses', 'DSH 的状态真的被改了')
+})
+
+test('⑦c ★★★ 写入阶段被拒（嵌套）且**没有任何写入记录** ⇒ 不尝试回滚，并如实说"执行前拒绝"', async () => {
+  // 宿主没有 hmr 服务（探不到）⇒ 不拦路；但 mutate 自己抛嵌套错误 ⇒ 走 catch 那一支。
+  const ctx = fakeHost({
+    initial: { 'fjd-ds': { displayName: 'OLD', api: 'openai-responses', baseURL: 'https://a.example/v1', apiKeyEnv: 'FJD_DS_API_KEY', models: [{ id: 'm1', name: 'M1' }] } },
+    mutateBehavior: 'nested',
+  })
+  const logs = []
+  const r = await runMaterialization({ ctx, hubUpstream: 'http://hub.test', fetchImpl: hub([LEGION_FJD]), enabled: true, log: (m) => logs.push(m) })
+  assert.equal(r.reason, 'hmr-transaction')
+  assert.equal(r.wrote, false)
+  assert.equal(r.provablyNothingWritten, true, '★ 这一格是"可证没写"：拒绝发生在任何工作之前')
+  assert.equal(r.rolled, undefined, '不许尝试回滚 —— 没有半成品可言')
+  // 回滚会再调一次 mutate（逆 ops）；这里必须**只**有失败的那一次
+  assert.equal(ctx.calls.mutate.length, 1, '不许为了回滚再写一次')
+  const line = logs.join('\n')
+  assert.match(line, /执行前拒绝/)
+  assert.match(line, /一个字节都没写/)
+  // ⚠ 这里只能查**动作形式**（`→ 尝试回滚`）：新文案里有一句解释
+  // "⚠ 不尝试回滚：……"，查裸的 /尝试回滚/ 会把它自己判红。
+  assert.doesNotMatch(line, /→\s*尝试回滚/, '不许走回滚那条动作')
+  assert.doesNotMatch(line, /需要人工看一次/)
+})
+
+test('⑦c ★ 别的写入错误 ⇒ **照旧回滚**（新分支不许把真的失败也吞成"没写")', async () => {
+  const ctx = fakeHost({
+    initial: { 'fjd-ds': { displayName: 'OLD', api: 'openai-responses', baseURL: 'https://a.example/v1', apiKeyEnv: 'FJD_DS_API_KEY', models: [{ id: 'm1', name: 'M1' }] } },
+    mutateBehavior: 'throw',   // 磁盘只读 —— 与 HMR 无关
+  })
+  const logs = []
+  const r = await runMaterialization({ ctx, hubUpstream: 'http://hub.test', fetchImpl: hub([LEGION_FJD]), enabled: true, log: (m) => logs.push(m) })
+  assert.equal(r.reason, 'write-failed', '别的错误仍走原来那条路')
+  assert.match(logs.join('\n'), /尝试回滚/)
+  assert.equal(r.provablyNothingWritten, undefined, '不许把"别的错误"也说成可证没写')
 })
 
 test('⑱ ★ 尾部那段也要如实报"没写"：ops 为空、只有凭证要补而 Legion 里没值', async () => {

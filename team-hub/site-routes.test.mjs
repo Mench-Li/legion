@@ -121,64 +121,67 @@ describe('官网：入口页', () => {
   })
 })
 
-describe('官网：下载区诚实地缺席', () => {
-  test('★ 没有安装包时如实说「尚未发布」，且**不含**任何发布链接', async (t) => {
-    const routes = createSiteRoutes({ root: makeSite(t), readRelease: () => ({ url: '' }) })
-    const zh = await call(routes, { path: '/' })
-    assert.match(zh.body, /尚未发布/)
-    assert.doesNotMatch(zh.body, /\/legion\/releases\//, '没有链接可给时，一个字符的链接都不能有')
-    assert.doesNotMatch(zh.body, /<a[^>]+download/, '不该出现下载锚点')
+describe('官网：**没有任何**桌面端下载入口', () => {
+  // ★★★ 2026-10-12：这一族原本叫「下载区诚实地缺席」，测的是"没发布时如实说
+  //   尚未发布、不放假链接"。现在整块下载区**从官网上撤掉了**，所以判据换了
+  //   一个方向：不再是"怎么把下载说诚实"，而是"**确认官网上没有下载**"。
+  //
+  //   为什么判据要留着（而不是随功能一起删）：一个被删掉的功能不会自己长回来，
+  //   但**入口会**。下一个人想"顺手加个下载按钮"时，红掉的用例是唯一会说话的
+  //   东西 —— 而"我们曾经决定不加"这件事，只有用例能记住。
+
+  test('★★★ 官网首页不含任何安装包链接、`.exe` 或不存在的版本清单', async (t) => {
+    // 连"配了发布"这条路也一起测：即使这台 Hub 确实有一份最新安装包，
+    // 官网也**不许**把它放到页面上。
+    for (const [label, readRelease] of [['没配发布', undefined], ['有发布', FIXED]]) {
+      const routes = createSiteRoutes({ root: makeSite(t), ...(readRelease ? { readRelease } : {}) })
+      for (const path of ['/', '/en']) {
+        const r = await call(routes, { path })
+        assert.equal(r.status, 200)
+        assert.doesNotMatch(r.body, /\.exe/, `${label} ${path}：官网不该出现任何可执行文件链接`)
+        assert.doesNotMatch(r.body, /Legion-Setup/, `${label} ${path}：不该出现安装包名`)
+        assert.doesNotMatch(r.body, /下载电脑版|Download for Windows/, `${label} ${path}：不该有下载按钮文案`)
+        assert.doesNotMatch(r.body, /legion\/releases/, `${label} ${path}：不该链接发布目录`)
+        assert.doesNotMatch(r.body, /Windows x64/, `${label} ${path}：不该出现 Windows 平台标签`)
+        assert.doesNotMatch(r.body, /尚未发布|not yet published/, `${label} ${path}：不是"还没发布"，是**不再提供**`)
+      }
+    }
   })
 
-  test('★ 有安装包时给出链接、版本、体积与日期', async (t) => {
+  test('★★★ `dl-actions` / `dl-meta` / `dl-lines` 一个都不该再被产出', async (t) => {
+    // 这三个 class 是下载卡片专有的。它们还在 CSS 里（纯样式、不产生行为），
+    // 但**渲染层不该再产出**。
     const routes = createSiteRoutes({ root: makeSite(t), readRelease: FIXED })
     const r = await call(routes, { path: '/' })
-    assert.match(r.body, /href="\/legion\/releases\/r-1\/Legion-Setup-win-x64\.exe"/)
-    assert.match(r.body, /v0\.1\.0/)
-    assert.match(r.body, /100\.0 MB/)
-    assert.match(r.body, /2026-10-06/)
+    for (const cls of ['dl-actions', 'dl-meta', 'dl-lines']) {
+      assert.doesNotMatch(r.body, new RegExp(`class="${cls}"`), `不该再产出 .${cls}`)
+    }
   })
 
-  test('★ 建路由之后再发一份新的：**当次请求**就改口（无需重启）', async (t) => {
-    let rel = FIXED()
-    const routes = createSiteRoutes({ root: makeSite(t), readRelease: () => rel })
-    assert.match((await call(routes, { path: '/' })).body, /r-1\//)
-    rel = { ...rel, url: '/legion/releases/r-2/Legion-Setup-win-x64.exe' }
-    const after = await call(routes, { path: '/' })
-    assert.match(after.body, /r-2\//, '换了之后必须立刻改口')
-    assert.doesNotMatch(after.body, /r-1\//, '旧链接不该还留在页面上')
-  })
-
-  test('★ 发布没了：旧链接必须跟着消失', async (t) => {
-    let rel = FIXED()
-    const routes = createSiteRoutes({ root: makeSite(t), readRelease: () => rel })
-    assert.match((await call(routes, { path: '/' })).body, /r-1/)
-    rel = { url: '' }
+  test('★★ 模板里若有下载标记，它被替换成**空**（不留标记、不留占位）', async (t) => {
+    // 官网上那个标记已经被删了，但**别的部署**可能还留着一份旧模板
+    // （模板是运营者机器上的文件）。一个没人替换的标记会原样出现在 HTML 里。
+    const routes = createSiteRoutes({ root: makeSite(t) })
     const r = await call(routes, { path: '/' })
-    assert.match(r.body, /尚未发布/)
-    assert.doesNotMatch(r.body, /r-1/)
+    assert.doesNotMatch(r.body, /legion:download/, '标记必须被替换掉，不许原样出现')
+    assert.doesNotMatch(r.body, /legion:cta|legion:hub-line/, '另两个标记同样要替换掉')
+    // 而替换的结果是**空**：合成模板里那个 `<section id="download">` 现在是空的。
+    assert.match(r.body, /<section id="download"><\/section>/, '标记处应当是空内容')
   })
 
-  test('★ 不给 `/legion/` 这类**目录**链接（那一族只发文件，目录一律 404）', async (t) => {
-    // 这条是上线后实测补的：曾经有过一行「全部历史版本 → /legion/」，
-    // 而 `/legion/` 是 404 —— 发布目录那族从不列目录。守卫当时测的是
-    // "安装包来自发布目录"（为真），而不是"那个路径下有可读的东西"（为假）。
-    // 所以现在无论发布是否配置，站上都不出现任何目录链接。
-    const fromReleases = await call(createSiteRoutes({ root: makeSite(t), readRelease: FIXED }), { path: '/' })
-    assert.doesNotMatch(fromReleases.body, /href="\/legion\/"/, '不能指向发布目录本身')
-    assert.doesNotMatch(fromReleases.body, /全部历史版本/, '不该承诺一个不存在的历史版本页')
-
-    const explicit = await call(
-      createSiteRoutes({ root: makeSite(t), readRelease: () => ({ url: 'https://cdn.test/a.exe' }) }), { path: '/' },
-    )
-    assert.doesNotMatch(explicit.body, /href="\/legion\/"/)
-    assert.match(explicit.body, /https:\/\/cdn\.test\/a\.exe/, '显式配置那条路照旧')
+  test('★ 官网不链接 `/legion/` 目录，也不承诺历史版本页', async (t) => {
+    // 这条是上线后实测补的：曾经有过一行「全部历史版本 → /legion/」，而
+    // `/legion/` 是 404 —— 发布目录那族从不列目录。现在整个下载区没了，
+    // 但"不许指向一个目录"这条仍然钉着：目录链接会随任何一次"加个入口"回来。
+    const routes = createSiteRoutes({ root: makeSite(t), readRelease: FIXED })
+    const r = await call(routes, { path: '/' })
+    assert.doesNotMatch(r.body, /href="\/legion\/"/, '不能指向发布目录本身')
+    assert.doesNotMatch(r.body, /全部历史版本/, '不该承诺一个不存在的历史版本页')
   })
 
-  test('★ 下载卡片里**没有**「本次更新」那一块（业主看过之后要求撤掉）', async (t) => {
-    // 那张卡片已经承载了下载、版本/体积/日期、未签名说明与摘要校验。
-    // 再挂四段更新条目就不是"一张卡片"而是一页文档了 —— 超过上限之后
-    // **每一段都变便宜了**。
+  test('★ 官网任何地方都不出现「本次更新」那一块', async (t) => {
+    // 旧实现对 `readRelease` 返回的 `changes` 做过渲染。撤掉下载区之后
+    // 这条路也不该再存在 —— 传进去也不许出现在页面上。
     const routes = createSiteRoutes({
       root: makeSite(t),
       readRelease: () => ({ url: '/legion/releases/r-1/x.exe', changes: ['把**正文**送到电脑端'], changesEn: [] }),
@@ -192,20 +195,24 @@ describe('官网：下载区诚实地缺席', () => {
     }
   })
 
-  test('★ 下载卡片里只有一个按钮，且不是「查看协作界面」', async (t) => {
-    // 2026-10-08 业主报"下载按钮没有文字"。真因是 `.deploy-item a`（0,1,1）比
-    // `.primary`（0,1,0）更具体，把按钮文字染成了 `--accent` —— 而按钮底色也是
-    // `--accent`，青绿字压青绿底。CSS 权重那种事只有真看渲染才算数，
-    // 这里钉住"只有一个按钮"，权重那条由下面 `真实模板不漂移` 里的源码断言守着。
-    const routes = createSiteRoutes({ root: makeSite(t), readRelease: () => ({ url: '/legion/releases/r-1/x.exe' }) })
-    const r = await call(routes, { path: '/' })
-    const from = r.body.indexOf('class="dl-actions"')
-    const actions = r.body.slice(from, r.body.indexOf('</div>', from))
-    assert.equal((actions.match(/<a /g) || []).length, 1, '下载卡片里只该有一个链接按钮')
-    assert.match(actions, /下载电脑版/)
-    assert.doesNotMatch(actions, /查看协作界面/)
+  test('★★ 传了 `readRelease` 也不会被调用（官网不再读发布目录）', async (t) => {
+    // 这条钉的是**接线**：`createSiteRoutes` 已经不再接受这个参数，传了也应该
+    // 被忽略。判据用"调用次数"而不是"页面内容" —— 内容可能因为别的原因不含
+    // 安装包（比如模板里就没写），而调用次数证明的是"这条路真的断了"。
+    let calls = 0
+    const routes = createSiteRoutes({
+      root: makeSite(t),
+      readRelease: () => { calls += 1; return FIXED() },
+    })
+    await call(routes, { path: '/' })
+    await call(routes, { path: '/en' })
+    assert.equal(calls, 0, '官网每请求都会读一次发布目录 —— 那是一次没人用的扫描')
   })
+})
 
+describe('官网：动态块、样式表版本与注册措辞', () => {
+  // （这一族原先挂在「下载区诚实地缺席」那个 describe 下 —— 名字与内容早就
+  //   对不上了。撤掉下载区时顺手分开：一个 describe 里该是同一类断言。）
   test('★ 入口页引用的样式表**带版本串**（否则边缘缓存会把新 HTML 配上旧 CSS）', async (t) => {
     // 2026-10-08 线上实测：`site.css` 无内容哈希、无 ETag，却发 `max-age=86400`。
     // 隧道经 Cloudflare，边缘缓存 24 小时；入口页是 `no-store`。于是重新部署后
@@ -252,36 +259,56 @@ describe('官网：下载区诚实地缺席', () => {
     assert.match(closed, /未开放自助注册/)
   })
 
-  test('★ 所有插值都转义：恶意下载地址进不来可执行标记', async (t) => {
+  test('★ 所有插值都转义：恶意 `mobilePath` 进不来可执行标记', async (t) => {
+    // 下载地址那条插值随下载卡片一起没了，现在**唯一**进 HTML 的可配值是
+    // `mobilePath`（首屏主按钮 + 部署卡 Web 入口，两处）。判据的**用意**没变：
+    // 钉住"可配值不能变成可执行标记"。
     const evil = '"><script>alert(1)</script>'
-    const routes = createSiteRoutes({ root: makeSite(t), readRelease: () => ({ url: evil, version: '<img onerror=x>' }) })
+    const routes = createSiteRoutes({ root: makeSite(t), mobilePath: evil })
     const r = await call(routes, { path: '/' })
-    // 关键不是"字符串里没有 onerror"，而是**没有能成形的标签**：
-    // 尖括号已被转义成 &lt;/&gt;，所以 `&lt;img …&gt;` 只是文本，不是标签。
+    // 关键不是"字符串里没有 script"，而是**没有能成形的标签**。
     assert.doesNotMatch(r.body, /<script>/)
-    assert.doesNotMatch(r.body, /<img/)
-    assert.match(r.body, /&lt;img/, '应当是被转义（而非被丢弃）')
-    // 引号也被转义 ⇒ 逃不出 href 这个属性。
     assert.doesNotMatch(r.body, /href=""><script/)
   })
 
-  test('纯函数：没发布的语言各自诚实', () => {
-    const zh = renderLiveBlocks({ lang: 'zh', downloadUrl: '' })
-    const en = renderLiveBlocks({ lang: 'en', downloadUrl: '' })
-    // 诚实的话在**部署卡片**里（hero 退回设计稿原本的那一对动作，不给死按钮）。
-    assert.match(zh.download, /还没上传到这台 Hub/)
-    assert.match(en.download, /No desktop installer has been uploaded/)
-    assert.doesNotMatch(zh.download, /href="\/legion\/releases\//, '没发布就没有任何发布链接')
-    assert.doesNotMatch(zh.download, /<a class="btn primary"/, '没发布就不该有可点的下载按钮')
-    // hero 的两个动作退回稿子原本的那一对，且都指向站内锚点。
+  test('纯函数：两种语言各自的文案都在，且都**不含**下载入口', () => {
+    const zh = renderLiveBlocks({ lang: 'zh' })
+    const en = renderLiveBlocks({ lang: 'en' })
+    // 返回的块只有两个 —— 没有 download。
+    assert.deepEqual(Object.keys(zh).sort(), ['cta', 'hub'])
+    assert.equal(zh.download, undefined, 'download 块不该再存在（它是下载卡片的内容）')
+    // 两种语言的主入口文案都在，且都指向站内（这里没传 mobilePath，用默认值）。
     assert.match(zh.cta, /查看协作界面/)
     assert.match(en.cta, /See the interface/)
-    assert.doesNotMatch(zh.cta, /href="\/legion\//)
+    for (const [label, b] of [['zh', zh], ['en', en]]) {
+      assert.doesNotMatch(b.cta, /\.exe|Legion-Setup|legion\/releases/, `${label}：首屏不该有任何安装包链接`)
+      assert.doesNotMatch(b.hub, /\.exe|Legion-Setup|legion\/releases/, `${label}：Web 入口块也不该有`)
+    }
+  })
+
+  test('★ 反例守卫：上面那条"没有 download 块"不是恒真', () => {
+    // 一个"断言某个不存在的键是 undefined"的用例，在**任何**实现下都可能为真
+    // （打错键名也算）。所以这里证明这两行确实在测东西：
+    const withKey = { cta: 'x', hub: 'y', download: '有东西' }
+    assert.notEqual(withKey.download, undefined, '反例：有 download 键时那条断言必须红')
+    assert.notDeepEqual(Object.keys(withKey).sort(), ['cta', 'hub'], '反例：键集合不同时必须红')
   })
 
   test('纯函数：注入用 split/join，替换串里的 `$&` 不会被当成替换模式吃掉', () => {
-    const out = injectLiveBlocks(`A${MARKER_CTA}B`, { cta: 'x$&y', download: '', hub: '' })
+    const out = injectLiveBlocks(`A${MARKER_CTA}B`, { cta: 'x$&y', hub: '' })
     assert.equal(out, 'Ax$&yB')
+  })
+
+  test('★★★ 注入把下载标记换成**空串**（不是原样留着，也不是 undefined）', () => {
+    // 这条判据的由来：`injectLiveBlocks` 仍然处理 MARKER_DOWNLOAD，但不再从
+    // `blocks` 取 —— 因为渲染层已经产不出那个块了。写成 `blocks.download`
+    // 会得到 `undefined`，而 `split().join(undefined)` 会把字面量 "undefined"
+    // 写进页面。
+    const tpl = `A${MARKER_CTA}B${MARKER_DOWNLOAD}C${MARKER_HUB}D`
+    const out = injectLiveBlocks(tpl, { cta: 'cta', hub: 'hub' })
+    assert.equal(out, 'ActaBChubD')
+    assert.doesNotMatch(out, /undefined/, '替换成 undefined 会把字面量写进页面')
+    assert.doesNotMatch(out, /legion:download/)
   })
 })
 
@@ -383,13 +410,34 @@ describe('官网：真实模板不漂移', () => {
   const siteRoot = fileURLToPath(new URL('../site/', import.meta.url))
   const read = (p) => readFileSync(join(siteRoot, p), 'utf8')
 
-  test('★ 两种语言的真实模板都恰好各带一个标记，且一个都不少', () => {
+  test('★★★ 真实模板里**没有**下载标记了，另两个标记各恰好一次', () => {
+    // ★ 2026-10-12：这条判据原来是"三个标记各恰好一次"。下载那块撤掉之后，
+    //   它必须改成"下载标记**一次都没有**" —— 而不是把数组里的那一项删掉。
+    //
+    //   两者的差别很实际：只删数组项的话，某天有人把 `<!-- legion:download -->`
+    //   加回模板，**没有任何用例会红**（注入层仍然会把它换成空串，页面看起来
+    //   也正常），于是"我们决定官网不提供下载"这件事就悄悄失效了。
     for (const p of ['index.html', join('en', 'index.html')]) {
       const html = read(p)
-      for (const m of [MARKER_CTA, MARKER_DOWNLOAD, MARKER_HUB]) {
+      for (const m of [MARKER_CTA, MARKER_HUB]) {
         const n = html.split(m).length - 1
         assert.equal(n, 1, `${p} 里 ${m} 应恰好出现 1 次，实际 ${n} 次`)
       }
+      const stray = html.split(MARKER_DOWNLOAD).length - 1
+      assert.equal(stray, 0, `${p} 里不该再有下载标记 —— 官网不提供桌面端下载（实际 ${stray} 次）`)
+    }
+  })
+
+  test('★★★ 真实模板里没有 Windows 卡片、没有下载按钮文案', () => {
+    // 判据盯**模板**（运营者真正看到的那个文件），与上面那条盯**渲染结果**的
+    // 合起来才完整：只盯渲染结果的话，模板里留着卡片、靠注入层清空，也算绿。
+    for (const p of ['index.html', join('en', 'index.html')]) {
+      const html = read(p)
+      for (const bad of [/Windows 桌面端/, /Windows desktop app/, /内部验证 · 未签名/, /Internal build · unsigned/, /下载电脑版/, /Download for Windows/]) {
+        assert.doesNotMatch(html, bad, `${p} 不该再出现 ${bad}`)
+      }
+      // 而"同一份数据"那张卡必须在（撤掉一张卡不能把这一节掏空）。
+      assert.match(html, /deploy-item/, `${p} 的开始那一节不该只剩一个格子`)
     }
   })
 
@@ -398,7 +446,7 @@ describe('官网：真实模板不漂移', () => {
     const zh = ids(read('index.html'))
     const en = ids(read(join('en', 'index.html')))
     assert.equal(zh, en, '中英两页的 id 集合必须一致')
-    assert.ok(zh.includes('"deploy"'), '部署/下载锚点必须在')
+    assert.ok(zh.includes('"deploy"'), '开始使用那一节的锚点必须在')
   })
 
   test('★ 品牌标记用**产品图标**，不是自绘的近似图形', () => {
@@ -545,37 +593,31 @@ describe('官网：真实模板不漂移', () => {
     assert.match(html, /PRODUCT DEMO/)
   })
 
-  test('★ 部署卡：Web 一路指向仓库，Windows 一路只有徽标 + 一个按钮', async (t) => {
-    // 业主 2026-10-09 定的形态：
-    //   · Web：**本地启动**（不是托管在 hub 上），并从这里**直达仓库**；
-    //   · Windows：打一个「内部验证 · 未签名」徽标就够了，不再展开三条处理说明、
-    //     不再显示 sha256 —— 那些字比它们解决的问题更长。
+  test('★★★ 开始那一节：只指向仓库，**一个安装包链接都没有**', async (t) => {
+    // 这条原来是"Web 一路指向仓库，Windows 一路只有徽标 + 一个按钮"，
+    // 并钉住"安装包链接只出现一处"。现在那一处也没了。
+    //
+    // ★ 判据从"恰好一处"变成"零处"是**收紧**而不是放松：数字变了，但防的
+    //   还是同一件事 —— 有人又加了一个下载入口。
     const routes = createSiteRoutes({ root: makeSite(t), readRelease: FIXED })
     const r = await call(routes, { path: '/' })
 
-    // Web 那一路：指向真实仓库，且开在新窗口时不留 opener 隐患。
-    assert.match(r.body, /href="https:\/\/github\.com\/Mench-Li\/legion"/, 'Web 卡必须直达仓库')
+    // 仓库链接还在（它是"这是什么、源码在哪"的唯一出口）。
+    assert.match(r.body, /href="https:\/\/github\.com\/Mench-Li\/legion"/, '必须直达仓库')
     assert.match(r.body, /rel="noopener"/, '外链要带 rel=noopener')
 
-    // Windows 那一路：卡片里不再有 ①② 说明、sha256 与更新条目。
-    // （徽标是**模板**里的静态内容，由 `真实模板不漂移` 那条守。）
+    // 那些"说明"与"摘要"从来不该回来。
     assert.doesNotMatch(r.body, /Smart App Control/, '三条处理说明已撤')
     assert.doesNotMatch(r.body, /sha256/, '摘要已撤')
     assert.doesNotMatch(r.body, /本次更新/, '更新条目已撤')
-    // 下载链接只出现**一处**（部署卡里那一个按钮）。
-    //
-    // ★ 2026-10-12：原来是**两处**（首屏主动作 + 部署卡）。首屏的主动作换成了
-    //   "打开就能用"（→ Web 端），所以它不再指向安装包。
-    //
-    //   这条断言的**用意**没变、而且更该留着：它防的是"有人又加了一个入口"。
-    //   2 变 1 是**行为变化的结果**，不是把判据放松 —— 所以下面同时钉住
-    //   "首屏出现的是 Web 入口、不是安装包"，两者合起来才等于原来的不变式。
-    assert.equal((r.body.match(/Legion-Setup-win-x64\.exe/g) || []).length, 1,
-      '安装包链接只该有一处（部署卡）；首屏的主动作已经是 Web 入口')
 
-    const en = await call(routes, { path: '/en' })
-    assert.match(en.body, /href="https:\/\/github\.com\/Mench-Li\/legion"/)
-    assert.doesNotMatch(en.body, /sha256/)
+    // ★ 安装包链接：**零处**。中英两页都要。
+    for (const [label, body] of [['zh', r.body], ['en', (await call(routes, { path: '/en' })).body]]) {
+      assert.equal((body.match(/Legion-Setup-win-x64\.exe/g) || []).length, 0,
+        `${label}：官网上不该再有任何安装包链接`)
+      assert.equal((body.match(/\.exe/g) || []).length, 0, `${label}：一个 .exe 都不该出现`)
+      assert.doesNotMatch(body, /sha256/)
+    }
   })
 
   // ══════════════════════════════════════════════════════════════════════════
@@ -650,22 +692,141 @@ describe('官网：真实模板不漂移', () => {
     assert.match(evil.cta, /&quot;|&#x27;/, '引号必须被转义成实体')
   })
 
-  test('★ 反例守卫：上面那些"首屏不许出现安装包"的断言不是恒真', () => {
-    // 证明判据真的能发现回归：把旧的 hero 形态喂给它，必须被判红。
-    const oldHero = '<div class="actions">\n  <a href="/legion/releases/r-1/Legion-Setup-win-x64.exe" class="btn primary">下载电脑版</a>\n</div>'
-    assert.match(oldHero, /Legion-Setup/, '反例本身应当被"不许出现安装包"抓住')
-    assert.doesNotMatch(oldHero, /href="\/mobile\/"/, '反例本身应当被"必须指向 Web 入口"抓住')
+  test('★★★ 反例守卫：上面那些"官网不许出现安装包"的断言不是恒真', () => {
+    // 证明判据真的能发现回归：把**曾经真实存在过的**那两张卡片喂给它们，
+    // 必须被抓住。反例取自 2026-10-12 之前线上真正渲染出来的 HTML。
+    const oldWindowsCard = '<h3>Windows 桌面端 <span class="label human">内部验证 · 未签名</span></h3>\n'
+      + '<div class="dl-actions"><a class="btn primary" href="/legion/releases/r-1/Legion-Setup-win-x64.exe">下载电脑版</a></div>\n'
+      + '<p class="dl-meta"><span>Windows x64</span></p>'
+    assert.match(oldWindowsCard, /Legion-Setup/, '反例应当被"不许出现安装包"抓住')
+    assert.match(oldWindowsCard, /\.exe/, '反例应当被"一个 .exe 都不许"抓住')
+    assert.match(oldWindowsCard, /下载电脑版/, '反例应当被"不许有下载按钮文案"抓住')
+    assert.match(oldWindowsCard, /Windows x64/, '反例应当被"不许有平台标签"抓住')
+    assert.match(oldWindowsCard, /class="dl-actions"/, '反例应当被"不许产出 dl-actions"抓住')
+    assert.match(oldWindowsCard, /内部验证 · 未签名/, '反例应当被模板断言抓住')
+
+    // 而**现在的**首屏形态不该被那些断言误伤。
+    const newHero = '<div class="actions">\n  <a href="/mobile/" class="btn primary">打开就能用</a>\n</div>'
+    assert.doesNotMatch(newHero, /Legion-Setup|\.exe|dl-actions|Windows x64/)
   })
 
-  test('★ 部署卡：Windows 一路只有徽标——签名状态由它承担，不再展开三条处理说明', () => {
-    // 业主 2026-10-09：那些字比它们解决的问题更长。徽标是**模板**里的静态内容。
-    for (const [p, badge] of [['index.html', /内部验证 · 未签名/], [join('en', 'index.html'), /Internal build · unsigned/]]) {
-      const html = read(p)
-      assert.match(html, /class="label human"/, `${p} 的徽标要保留`)
-      assert.match(html, badge, `${p} 的徽标文案`)
-      // 卡片里不该再有那三条处理说明或摘要。
-      assert.doesNotMatch(html, /Smart App Control/, `${p} 不该再有 Smart App Control 说明`)
-      assert.doesNotMatch(html, /未知发布者/, `${p} 不该再有"未知发布者"说明`)
+  test('★★★ 开始那一节讲的是「一个入口、两种设备、同一份数据」', () => {
+    // ★ 这一节是这次改动的**内容**本身，不只是"把下载卡删掉"。
+    //   业主要的是"web+移动端**具体怎么体现**"，具体到
+    //   「电脑上开的任务，手机上能看到」。
+    //
+    // ★★ 判据必须**按位置**断言，不能"整页找关键词" —— 这是被一次
+    //   破坏性验证逼出来的：第一版在整页里找 `/手机/`、`/同一份数据/`，
+    //   于是**把标题改回旧文案**、**把引言改回"自托管"**、**把"手机"从那张卡里
+    //   删掉**，三处破坏全都还是绿的 —— 因为同一个词在页面别处还有。
+    //
+    //   > 一个"整页里出现过这个词"的判据，
+    //   > 与一个"这一句说的是这件事"的判据，在页面正常时是同一个东西。
+    //
+    //   所以下面按 **标题 / 引言 / 两张卡** 分别取出来再断言。
+    //
+    // ⚠️ 钉的是**文案本身**，措辞改了就红 —— 这是有意的：这一节的文字是交付物。
+    const sectionOf = (html) => {
+      const at = html.indexOf('id="deploy"')
+      return html.slice(at, html.indexOf('</section>', at))
+    }
+    const cardsOf = (section) => [...section.matchAll(/<article class="deploy-item">([\s\S]*?)<\/article>/g)].map((m) => m[1])
+    const grab = (section, cls) => new RegExp(`<[^>]+class="${cls}"[^>]*>([^<]*)<`).exec(section)?.[1] ?? ''
+    const h2 = (section) => /<h2>([^<]*)<\/h2>/.exec(section)?.[1] ?? ''
+
+    const zh = sectionOf(read('index.html'))
+    const en = sectionOf(read(join('en', 'index.html')))
+
+    for (const [label, sec] of [['zh', zh], ['en', en]]) {
+      const cards = cardsOf(sec)
+      assert.equal(cards.length, 2, `${label}：开始那一节该有两张卡，实际 ${cards.length}`)
+      assert.equal((sec.match(/class="deploy-item"/g) || []).length, 2, `${label}：不该多出第三张卡`)
+    }
+
+    // ① 标题就点出"同一份数据"（不是"选择怎么开始"那种先装再用的框）。
+    assert.match(h2(zh), /同一份数据/, `zh 标题：${h2(zh)}`)
+    assert.match(h2(en), /one set of data/i, `en 标题：${h2(en)}`)
+
+    // ② 引言讲"不用装"。
+    assert.match(grab(zh, 'deploy-intro'), /不用安装|不用装/, `zh 引言：${grab(zh, 'deploy-intro')}`)
+    assert.match(grab(en, 'deploy-intro'), /nothing to install|no app to install/i, `en 引言：${grab(en, 'deploy-intro')}`)
+
+    // ③ 第一张卡：**两种设备**都点到名。
+    const zhCards = cardsOf(zh)
+    const enCards = cardsOf(en)
+    assert.match(zhCards[0], /电脑/, 'zh 第一张卡该提到电脑')
+    assert.match(zhCards[0], /手机/, 'zh 第一张卡该提到手机')
+    assert.match(enCards[0], /computer/i, 'en card 1 should mention computer')
+    assert.match(enCards[0], /phone/i, 'en card 1 should mention phone')
+
+    // ④ 第二张卡：**同一份数据**，而且是"不是同步的副本"。
+    assert.match(zhCards[1], /同一个库|同一份/, `zh 第二张卡：${zhCards[1].slice(0, 80)}`)
+    assert.match(zhCards[1], /不是同步|本来就/, 'zh 第二张卡该说清"不是同步出来的"')
+    assert.match(enCards[1], /same database|same data|one set of data/i, 'en card 2 should say the data is the same')
+
+    // ⑤ ★★★ 第二张卡的**正文**（不是标题）要说清跨设备这件事。
+    //
+    //   这条是被破坏性验证逼出来的：上面 ④ 那两条只盯**整张卡**，而卡的
+    //   **标题**里本来就有"同一份数据 / 不是同步的副本" —— 于是把正文那句话
+    //   换成一句没有信息量的（"换台机器打开就看得到"），④ 仍然是绿的。
+    //
+    //   > 一个"这张卡提到了同一份数据"的判据，
+    //   > 与一个"这句话解释了为什么要用两台设备"的判据，
+    //   > 在标题写得好的时候是同一个东西。
+    //
+    //   而业主点名要的正是正文那句：「电脑上开的任务，手机上能看到」。
+    const bodyOf = (card) => /<p>([\s\S]*?)<\/p>/.exec(card)?.[1] ?? ''
+    const zhBody = bodyOf(zhCards[1])
+    const enBody = bodyOf(enCards[1])
+    assert.match(zhBody, /电脑/, `zh 第二张卡正文要提到电脑：${zhBody.slice(0, 70)}`)
+    assert.match(zhBody, /手机/, `zh 第二张卡正文要提到手机：${zhBody.slice(0, 70)}`)
+    assert.match(zhBody, /同一个库/, `zh 第二张卡正文要说是同一个库：${zhBody.slice(0, 70)}`)
+    assert.match(enBody, /computer/i, `en card 2 body should mention the computer: ${enBody.slice(0, 70)}`)
+    assert.match(enBody, /phone/i, `en card 2 body should mention the phone: ${enBody.slice(0, 70)}`)
+    assert.match(enBody, /same database|same data/i, `en card 2 body should mention the same database: ${enBody.slice(0, 70)}`)
+
+    // ⑤ 旧叙事（"先把它跑起来"）不许回来 —— 同样的位置断言。
+    for (const [label, sec] of [['zh', zh], ['en', en]]) {
+      for (const b of [/自托管入口/, /从仓库在本地启动/, /Self-hosted entry/, /Started locally from the repository/, /局域网自托管/]) {
+        assert.doesNotMatch(sec, b, `${label}：开始那一节不该再有"先自托管"那套框架：${b}`)
+      }
+    }
+  })
+
+  test('★★★ 反例守卫：上面那条"两种设备/同一份数据"不是恒真', () => {
+    // 把**旧的**那一节按同样的方式取出来喂给那些断言，必须被判红 ——
+    // 否则上面那条可能对任何输入都为真（尤其是"整页找关键词"那种写法）。
+    const sectionOf = (html) => {
+      const at = html.indexOf('id="deploy"')
+      return html.slice(at, html.indexOf('</section>', at))
+    }
+    const cardsOf = (section) => [...section.matchAll(/<article class="deploy-item">([\s\S]*?)<\/article>/g)].map((m) => m[1])
+    const h2Of = (section) => /<h2>([^<]*)<\/h2>/.exec(section)?.[1] ?? ''
+
+    // 一整页：旧的开始那一节 + 页脚里"手机"这个词（真实页面里到处都有近义词）。
+    const oldPage = `<main>
+      <section id="deploy"><h2>选择适合你的开始方式。</h2>
+      <p class="deploy-intro">当前以本机或局域网自托管为基础。</p>
+      <article class="deploy-item"><h3>本地 Web 工作台 <span class="label">自托管入口</span></h3><p>从仓库在本地启动</p></article>
+      <article class="deploy-item"><h3>Windows 桌面端</h3></article></section>
+      <footer>手机也可以访问 · 电脑 · 同一个库 · 不用安装</footer></main>`
+
+    // ① "整页找关键词"的写法**会通过** —— 这正是第一版的漏洞。
+    assert.match(oldPage, /手机/, '整页里是有"手机"的')
+    assert.match(oldPage, /同一个库/, '整页里是有"同一个库"的')
+    assert.match(oldPage, /不用安装/, '整页里是有"不用安装"的')
+    // ② 而**按位置取出来**之后，那些词都不在正确的位置上：
+    const sec = sectionOf(oldPage)
+    const cards = cardsOf(sec)
+    assert.equal(cards.length, 2, '反例里也是两张卡（所以"卡数"那条抓不住它）')
+    assert.doesNotMatch(h2Of(sec), /同一份数据/, '反例标题不含"同一份数据" → 标题那条会红')
+    assert.doesNotMatch(grabCls(sec, 'deploy-intro'), /不用安装|不用装/, '反例引言不含"不用装" → 引言那条会红')
+    assert.doesNotMatch(cards[0], /手机/, '反例第一张卡不提手机 → 第一张卡那条会红')
+    assert.doesNotMatch(cards[1], /同一个库|同一份/, '反例第二张卡不提同一份数据 → 第二张卡那条会红')
+    assert.match(sec, /自托管入口/, '反例含被禁的旧叙事 → 禁令那条会红')
+
+    function grabCls(section, cls) {
+      return new RegExp(`<[^>]+class="${cls}"[^>]*>([^<]*)<`).exec(section)?.[1] ?? ''
     }
   })
 

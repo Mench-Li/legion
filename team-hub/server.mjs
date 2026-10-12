@@ -8368,7 +8368,20 @@ if (REMOTE_AGENT_ENABLED) {
     }
   }
   router.families.unshift(createPortalRoutes({
-    downloadUrl: () => describeDownload().url,
+    // ★★ 2026-10-12：**必须把 visitor 转给 `describeDownload`**。
+    //
+    //   这一行原来是 `() => describeDownload().url` —— 它把地区参数**吃掉**了。
+    //   在官网还有下载按钮时这不成问题（那条路走 site 的 `readRelease`，它自己
+    //   传了 country）；官网的卡片撤掉之后，按地区选线只剩门口页这一条路，
+    //   而这一行不转发就等于**永远选默认线路**。
+    //
+    //   而它不会报错、不会变慢、页面也完全正常：按钮在、能点、能下。
+    //   唯一的差别是那条"给国内用户准备的线"从此不再被选中 ——
+    //   这正是这次改动里最容易漏掉的一处。
+    //
+    //   > 一个"把参数默默丢掉"的适配器，
+    //   > 与一个"下游根本不需要参数"的适配器，在只看这一行的时候是同一个东西。
+    downloadUrl: (visitor) => describeDownload(visitor).url,
     version: desktopVersion,
     registration: CFG.values.registration ?? 'closed',
   }))
@@ -8387,7 +8400,14 @@ if (REMOTE_AGENT_ENABLED) {
   // `join(ROOT,'workbench','mobile')` 同一先例——因此不新增任何配置项。
   router.families.unshift(createSiteRoutes({
     root: join(ROOT, 'site'),
-    readRelease: describeDownload,
+    // ★ 2026-10-12：`readRelease: describeDownload` 撤掉了。
+    //
+    //   官网上的下载卡片（版本/体积/日期/线路）已经移除，所以官网不再需要
+    //   任何发布信息。留着这行会让"官网还在读发布目录"看起来仍然成立 ——
+    //   而它每请求会去 `readdir`/`stat` 一次发布目录，为的是没人看的数据。
+    //
+    //   `describeDownload` **本身没有删**：门口页仍然用它（那是唯一还有
+    //   下载按钮的地方），并且现在会把访客地区传进去。
     registration: CFG.values.registration ?? 'closed',
     // ★ 官网"打开就能用"指向哪台 Hub。留空 = 走 `site.mjs` 的相对默认 `/mobile/`。
     //

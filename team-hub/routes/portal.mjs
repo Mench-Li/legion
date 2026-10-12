@@ -34,6 +34,42 @@ function esc(value) {
 }
 
 /**
+ * 这个地址能不能写进 `href`。**站内相对路径**与 **http(s) 绝对地址**都行，
+ * 其余一律拒（`javascript:` / `data:` / `vbscript:` …）。
+ *
+ * ★ 为什么在**转义之外**还需要它：`esc()` 处理的是"这段文本会不会破坏 HTML"，
+ *   而 `javascript:alert(1)` 是一个**完全合法的 HTML 属性值**——转义之后它照样
+ *   会在点击时执行。两者防的不是同一件事。
+ *
+ *   > 一个"所有插值都转义了"的页面，
+ *   > 与一个"转义了、但 href 里能塞 javascript: 协议"的页面，是同一个东西——
+ *   > 只不过前者在代码审查时看起来已经处理过注入了。
+ *
+ * ★ 2026-10-12：这道判断**从 `site.mjs` 搬过来**（官网的下载卡片撤掉之后，
+ *   门口页是唯一还会写出下载链接的地方，而它原先只做了 `esc()`）。
+ *
+ *   ⚠️ 搬过来时它**必须放宽**，原因是一次真实回归：`site.mjs` 里它只服务于
+ *   线路表（那里的地址一律是绝对 URL），而门口页的地址常常是**站内相对路径**
+ *   （发布目录那条路给的就是 `/legion/releases/<id>/Legion-Setup-win-x64.exe`）。
+ *   照搬那份"只认 http(s) 绝对地址"的判断，会让一个**本来能下的**按钮
+ *   变成一个"地址配得不对"的牌子 —— 两处用例当场就红了。
+ *
+ *   > 一个"只认绝对地址"的校验，放在"值一定来自配置"的地方是对的，
+ *   > 放在"值还可能来自站内"的地方，就是在把能用的东西判成坏的。
+ *
+ *   `//host/x` 也算**站外**（协议相对），所以只认"单个斜杠开头"。
+ */
+function isSafeHref(value) {
+  const s = typeof value === 'string' ? value.trim() : ''
+  if (s === '') return false
+  if (s.startsWith('/') && !s.startsWith('//')) return true
+  try {
+    const p = new URL(s)
+    return p.protocol === 'https:' || p.protocol === 'http:'
+  } catch { return false }
+}
+
+/**
  * 造门口那一页的 HTML。**纯函数**，因此用例可以直接断言它写了什么。
  *
  * @param {object} input
@@ -49,7 +85,17 @@ export function renderPortal({ downloadUrl = '', version = '', registration = 'c
     ? `<p class="hint">这台 Hub 开放注册${registration === 'invite' ? '（需要邀请码）' : ''}。打开手机端即可注册。</p>`
     : '<p class="hint">这台 Hub 未开放自助注册；请向管理员索取邀请码。</p>'
 
-  // 下载卡片：有地址给链接，没有就给一句实话 + 该找谁要。
+  // 下载卡片：**三种**情形，各自说实话。
+  //
+  // ★ 2026-10-12：加了第三种（"地址配得不像一个可点的链接"）。
+  //   在它之前只有"有地址"与"没地址"两种，而一个**配了但配坏**的地址会走
+  //   "没地址"那条分支，页面于是写"尚未发布" —— 那是**反的**：
+  //   运营者明明配了东西，却被告知"还没发布"，他会去查上传流程，
+  //   而问题在那一行配置里。
+  //
+  //   > 一个"把配错的地址当成没配"的页面，
+  //   > 对运营者是"我传了但没生效"，对用户是"这东西还没出" ——
+  //   > 两边都被指向了错误的地方，而页面一个字都没说错（它确实没发布可点）。
   //
   // ★ 那段"Windows 会拦一下"是**未签名构建**专有的，不是永远为真 ——
   //   手上这份发布（`r-2026-10-06_0.1.0`）的 PE 证书表是空的（实测），
@@ -60,7 +106,9 @@ export function renderPortal({ downloadUrl = '', version = '', registration = 'c
   //   在用户那里同形 —— 都是"照它说的做，然后发现对不上"，而后者更坏一点，
   //   因为它教会人忽略这一块。这也是把它放在**拿到链接之前**的原因：
   //   用户该在点之前知道要发生什么，而不是拦下来之后去猜是不是自己下坏了。
-  const downloadCard = hasDownload
+  const hasUrl = String(downloadUrl).trim().length > 0
+  const usable = hasUrl && isSafeHref(downloadUrl)
+  const downloadCard = usable
     ? `<a class="card primary" href="${esc(downloadUrl)}">
       <strong>下载电脑版</strong>
       <span>Windows x64${version ? `　v${esc(version)}` : ''}</span>
@@ -69,7 +117,12 @@ export function renderPortal({ downloadUrl = '', version = '', registration = 'c
       ① 浏览器下载时若提示"不常见"，点<b>保留</b>；<br />
       ② 双击运行时出现"未知发布者"，点<b>更多信息 → 仍要运行</b>。<br />
       ⚠️ 例外：若系统开着 <b>Smart App Control</b>（Windows 11 全新安装默认开），它会<b>直接阻止且不给"仍要运行"</b>。关掉它可以装，但关掉之后要重装系统才能再打开 —— 这台机器请改用别的机器下载。</p>`
-    : `<div class="card disabled">
+    : hasUrl
+      ? `<div class="card disabled">
+      <strong>下载地址配得不对</strong>
+      <span>这台 Hub 配了下载地址，但它不是一个可点的 http(s) 链接，所以这里不放按钮。请管理员检查配置。</span>
+    </div>`
+      : `<div class="card disabled">
       <strong>电脑版尚未发布</strong>
       <span>安装包还没上传到这台 Hub；先向管理员索取。</span>
     </div>`
@@ -147,6 +200,22 @@ a.card.primary { border-color:var(--accent); }
  * 所以：`downloadUrl` 传字符串就照旧（显式配置那条路不变），
  * 传函数就**每次请求现算**。现算的代价是每个首页请求几次 `readdir`/`stat`，
  * 而这一页本来就是最冷的页面。
+ *
+ * ★ 2026-10-12：传给 `downloadUrl` 的那个函数现在会收到
+ *   `{ country }`（来自 Cloudflare 的 `CF-IPCountry`）。**按地区选线路这件事
+ *   从官网搬到了这里** —— 官网上的下载卡片撤掉之后，门口页是唯一还有下载
+ *   按钮的地方，而"自动选线对 VPN / 企业出口 / `XX`·`T1` 会选错"这个事实
+ *   没有变。
+ *
+ *   不搬会怎样：`server.mjs` 的 `describeDownload({ country })` 永远拿到
+ *   `undefined`，于是**所有人**都拿到默认线路 —— 而页面看起来完全正常
+ *   （按钮在、能点、能下），只是那条"给国内用户准备的线"从此不再被选中。
+ *
+ *   > 一个"按地区选线"的功能，与一个"永远选默认线"的功能，
+ *   > 在不看请求头的时候是同一个东西。
+ *
+ *   地区**不做前端探测**：读 Cloudflare 注入的请求头是免费的，
+ *   而那段探测 JS 本身要经同一条慢路送到用户机器上。
  */
 export function createPortalRoutes({ downloadUrl = '', version = '', registration = 'closed', mobilePath = '/mobile/' } = {}) {
   const resolveUrl = typeof downloadUrl === 'function' ? downloadUrl : () => downloadUrl
@@ -160,7 +229,12 @@ export function createPortalRoutes({ downloadUrl = '', version = '', registratio
     async dispatch(req, res, ctx) {
       if (req.method !== 'GET' && req.method !== 'HEAD') return false
       if (ctx.path !== '/') return false
-      const html = renderPortal({ downloadUrl: resolveUrl(), version, registration, mobilePath })
+      // 读不到该头时（本地开发、直连、非 Cloudflare 前置）为 null，
+      // 由选线逻辑回退到默认线路。
+      const country = typeof req.headers?.['cf-ipcountry'] === 'string'
+        ? req.headers['cf-ipcountry']
+        : null
+      const html = renderPortal({ downloadUrl: resolveUrl({ country }), version, registration, mobilePath })
       const body = Buffer.from(html, 'utf8')
       res.writeHead(200, {
         'content-type': 'text/html; charset=utf-8',

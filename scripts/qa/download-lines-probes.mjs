@@ -37,19 +37,23 @@ const PROBES = [
   },
   {
     id: 'D3',
-    desc: '路由不再读 CF-IPCountry（按地区选线整条失效）',
-    file: 'team-hub/routes/site.mjs',
-    find: `    const country = typeof req.headers?.['cf-ipcountry'] === 'string'
-      ? req.headers['cf-ipcountry']
-      : null`,
-    replace: `    const country = null`,
+    // ★ 2026-10-12：这条探针**从官网换到了门口页**。官网不再有下载按钮，
+    //   于是它读 `CF-IPCountry` 的那一行成了"读了没人用"；按地区选线现在
+    //   服务于门口页那一个按钮。探针跟着被测行为走，不跟着文件走。
+    desc: '门口页不再读 CF-IPCountry（按地区选线整条失效 → 所有人拿默认线）',
+    file: 'team-hub/routes/portal.mjs',
+    find: `      const country = typeof req.headers?.['cf-ipcountry'] === 'string'
+        ? req.headers['cf-ipcountry']
+        : null`,
+    replace: `      const country = null`,
   },
   {
     id: 'D4',
-    desc: '渲染层不再筛协议（href 里能塞 javascript:）',
-    file: 'team-hub/routes/site.mjs',
-    find: `    .filter((l) => l !== null && typeof l === 'object' && isHttpUrl(l.url))`,
-    replace: `    .filter((l) => l !== null && typeof l === 'object')`,
+    // ★ 2026-10-12：协议白名单从 `site.mjs` 的线路渲染搬到了门口页的 `isSafeHref`。
+    desc: '门口页不再筛协议（href 里能塞 javascript: 且仍然可点）',
+    file: 'team-hub/routes/portal.mjs',
+    find: `  if (s.startsWith('/') && !s.startsWith('//')) return true`,
+    replace: `  return true`,
   },
   {
     id: 'D5',
@@ -60,10 +64,16 @@ const PROBES = [
   },
   {
     id: 'D6',
-    desc: '备选线路不再渲染（选了线路却看不到别的线路）',
-    file: 'team-hub/routes/site.mjs',
-    find: `  const othersRow = has && otherLines.length > 0`,
-    replace: `  const othersRow = false && has && otherLines.length > 0`,
+    // ★ 2026-10-12：原 D6 是"备选线路不再渲染"（打 site.mjs 的 othersRow）。
+    //   官网的下载卡片撤掉之后，**没有任何页面再展示备选线路** —— 那条探针
+    //   没有被测对象了，所以删掉它，而不是留一条永远报"锚点未命中"的探针。
+    //
+    //   替代它的是**相对路径不许被误伤**：白名单放宽之后，最容易犯的错是
+    //   "收紧回去"，而那会把一个本来能下的按钮变成一块牌子。
+    desc: '协议白名单收紧成只认绝对地址（发布目录那条站内相对路径被判成坏的）',
+    file: 'team-hub/routes/portal.mjs',
+    find: `  if (s.startsWith('/') && !s.startsWith('//')) return true`,
+    replace: `  if (false && s.startsWith('/') && !s.startsWith('//')) return true`,
   },
   // ── 上传器（SigV4）────────────────────────────────────────────────────────
   {

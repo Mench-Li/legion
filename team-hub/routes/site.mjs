@@ -85,42 +85,22 @@ function esc(value) {
     .replaceAll('"', '&quot;').replaceAll("'", '&#39;')
 }
 
-/**
- * 这个地址能不能写进 `href`（只有 http/https）。
- *
- * ★ 为什么在**转义之外**还需要它：`esc()` 处理的是"这段文本会不会破坏 HTML"，
- *   而 `javascript:alert(1)` 是一个**完全合法的 HTML 属性值**——转义之后它照样
- *   会在点击时执行。两者防的不是同一件事。
- *
- *   > 一个"所有插值都转义了"的页面，
- *   > 与一个"转义了、但 href 里能塞 javascript: 协议"的页面，是同一个东西——
- *   > 只不过前者在代码审查时看起来已经处理过注入了。
- *
- * 备选线路来自配置文件（`parseDownloadLines` 已经拒过非 http(s)），但
- * `renderLiveBlocks` 是导出函数，调用方可以给任意数据——所以在这里再筛一次。
- */
-function isHttpUrl(value) {
-  if (typeof value !== 'string' || value.trim() === '') return false
-  try {
-    const p = new URL(value)
-    return p.protocol === 'https:' || p.protocol === 'http:'
-  } catch { return false }
-}
-
-/** 字节 → `183.4 MB`。给不出精确值时返回空串（宁可少一行，也不编一个数）。 */
-function formatSize(bytes) {
-  if (!Number.isFinite(bytes) || bytes <= 0) return ''
-  return `${(bytes / 1048576).toFixed(1)} MB`
-}
-
-
-/** mtime → `2026-10-06`。 */
-function formatDate(ms) {
-  if (!Number.isFinite(ms) || ms <= 0) return ''
-  const d = new Date(ms)
-  if (Number.isNaN(d.getTime())) return ''
-  return d.toISOString().slice(0, 10)
-}
+// ★ 2026-10-12：这里原本还有三个只服务于下载卡片的辅助函数 ——
+//   `isHttpUrl`（协议白名单，防 `javascript:` 进 href）、`formatSize`（体积）、
+//   `formatDate`（日期）。卡片撤掉之后它们在本文件里**没有任何调用方**。
+//
+//   处理方式各不相同，因为"没用到的代码"与"没用到的**判断**"不是一回事：
+//     · `formatSize` / `formatDate` —— 直接删。它们是纯格式化，没有别处要用。
+//     · `isHttpUrl` —— **搬到 `portal.mjs`**（并改名 `isSafeHref`、放宽成
+//       也接受站内相对路径）。门口页仍然会写出一个下载链接
+//       （`esc(downloadUrl)`），而 `esc()` 挡不住 `javascript:`：那是一个完全
+//       合法的属性值，转义之后照样会在点击时执行。
+//
+//       > 一个"所有插值都转义了"的页面，
+//       > 与一个"转义了、但 href 里能塞 javascript: 协议"的页面，是同一个东西。
+//
+//       把它删掉会让门口页失去这道判断；把它留在这里则是一段永远不执行的代码。
+//       所以它跟着**那个还存在的 href** 走。
 
 /**
  * 两种语言的动态块文案。静态正文在 `site/*.html` 里，这里只放**要现算**的那几句。
@@ -139,19 +119,20 @@ const COPY = Object.freeze({
     //   > 与一个"能用的入口"，在页面截图上长得一模一样——
     //   > 只不过前者让访客以为是自己机器坏了。
     //
-    //   所以：Web 端是**主入口**（它不需要安装、不需要签名、也不受 SAC 影响），
-    //   桌面端降级为"另有 Windows 版（内部验证）"。
+    // ★ 2026-10-12（当天稍后）：桌面端下载**整块撤掉**了，不再有"次要入口"。
+    //   上一版把桌面端降级成部署卡里的第二张卡，仍然在页面上教人"先把包装上"——
+    //   而这条产品线现在的主打是 Web + 移动端。留着那张卡等于用一个次要位置
+    //   继续宣告"桌面端是主要用法"，只是声音小一点。
+    //
+    //   > 一个"被降到次要位置"的入口，
+    //   > 与一个"被删掉"的入口，对**只看标题和徽标**的访客是同一个东西。
+    //
+    //   所以这里不再有 `cta`（下载电脑版）/`notYet`（尚未发布）/`otherLines`
+    //   （备选线路）/`deployWinEmpty` 这些串：**没有地方会用到它们了**。
+    //   发布目录（`/legion/*`）与桌面端自动更新**不受影响**，只是官网上不再提。
     ctaWeb: '打开就能用',
-    // `cta` 仍然只用在**下载卡片**上（那个卡片本身就是"把包装到你机器上"）。
-    cta: '下载电脑版',
     ctaSecond: '查看协作界面',
     explore: '探索 Legion',
-    // 设计稿的首屏节奏是「两个动作 + 一行小字」，塞进一整段会把节奏压垮。
-    ctaWarnShort: '当前为内部验证版：安装包未做代码签名。',
-    deployWinEmpty: '桌面端安装包还没上传到这台 Hub；先向管理员索取。',
-    notYet: '电脑版尚未发布',
-    // T-196：备选线路那一段的前缀。措辞与 `.dl-meta` 同一路（短、无句号）。
-    otherLines: '其他线路：',
     mobile: '打开就能用',
     regOpen: '这台 Hub 开放注册，打开即可注册。',
     regInvite: '这台 Hub 开放注册（需要邀请码），打开即可注册。',
@@ -159,20 +140,12 @@ const COPY = Object.freeze({
     webRepo: '在 GitHub 上查看源码',
     trial: '产品演示（静态样本）',
     trialNote: '一个目标拆出的八个阶段任务，可点开看描述、验收标准与证据。示例数据，不连实例。',
-    // ★ 未签名构建专有的说明。换签名构建时**这段必须跟着改**，否则它会变成
-    //   "照它说的做、然后发现对不上"，而那种文案教会人忽略这一块。
   },
   en: {
     lang: 'en',
     ctaWeb: 'Open in your browser',
-    cta: 'Download for Windows',
     ctaSecond: 'See the interface',
     explore: 'Explore Legion',
-    ctaWarnShort: 'Internal build: the installer is not code-signed.',
-    deployWin: 'Desktop and web share one backend and one set of data. It is at internal-validation stage: the installer is not code-signed, so Windows will push back — that is expected, not a broken download.',
-    deployWinEmpty: 'No desktop installer has been uploaded to this Hub yet; ask the administrator.',
-    notYet: 'Desktop build not yet published',
-    otherLines: 'Other mirrors: ',
     mobile: 'Open in your browser',
     regOpen: 'This Hub is open for sign-up — open it to register.',
     regInvite: 'This Hub is open for sign-up (invite code required) — open the mobile app to register.',
@@ -184,29 +157,27 @@ const COPY = Object.freeze({
 })
 
 /**
- * 造三个动态块的 HTML。**纯函数**，因此用例可以直接断言它写了什么。
+ * 造两个动态块的 HTML。**纯函数**，因此用例可以直接断言它写了什么。
  *
  * @param {object} input
  * @param {'zh'|'en'} input.lang
- * @param {string} input.downloadUrl  桌面版安装包的下载地址；留空 = 尚未发布。
- *        T-196 起，**服务端已经把它换成了按地区选中的那条线路**（见
- *        `server.mjs` 的 `describeDownload`），所以渲染层只认这一个主地址——
- *        多一个 `featuredUrl` 参数会让"主按钮到底用哪个"有两个来源。
- * @param {ReadonlyArray<object>} [input.lines] 备选线路（T-196）；空数组 = 不渲染那一段。
- * @param {'zh'|'en'} input.lang
- * @param {string} [input.version]    版本号（可空 —— 空就不显示这一行，不猜）
- * @param {string} [input.size]       已格式化的体积（可空）
- * @param {string} [input.date]       发布日期（可空）
  * @param {string} [input.registration] 'closed' | 'invite' | 'open'
  * @param {string} [input.mobilePath]
+ *
+ * ★ 2026-10-12：**下载块没了**，所以这里只剩两块（首屏动作 + Web 入口）。
+ *   它原本叫"造三个动态块"，第三块渲染的是 Windows 安装包卡片。
+ *
+ *   随之撤掉的还有那五个只服务于它的参数（`downloadUrl` / `lines` / `version` /
+ *   `size` / `date`）。留着不用的参数会变成**看起来还能配、其实什么也不发生**
+ *   的旋钮——而那种东西比没有更坏：有人会照着它写配置，然后以为是自己写错了。
+ *
+ *   发布目录（`GET /legion/*`）与桌面端自动更新**都不受影响**：它们从来不经过
+ *   这个函数。这里撤掉的只是"官网上那个下载按钮"。
  */
 export function renderLiveBlocks({
-  lang = 'zh', downloadUrl = '', lines = [], version = '', size = '', date = '',
-  registration = 'closed', mobilePath = MOBILE_PATH_DEFAULT,
+  lang = 'zh', registration = 'closed', mobilePath = MOBILE_PATH_DEFAULT,
 } = {}) {
   const c = COPY[lang] ?? COPY.zh
-  const has = String(downloadUrl).trim().length > 0
-  const href = has ? esc(downloadUrl) : ''
 
   // ① Hero 的两个动作。
   //
@@ -228,81 +199,23 @@ export function renderLiveBlocks({
         <a href="#workflow" class="btn">${c.ctaSecond}</a>
       </div>`
 
-  // ② 下载块（部署区里那张 Windows 卡片的内容）。
-  //
-  // ★ 这里**曾经**有一行「全部历史版本 → /legion/」。实测（2026-10-08 上线后）
-  //   `/legion/` 是 **404**：发布目录那一族只发**文件**，从不列目录
-  //   （`releases.mjs` 头部：目录不存在就如实 404，不假装）。也就是说我加了一个
-  //   **点开 404 的假链接** —— 正是 `portal.mjs` 立下那条纪律要防的形状，
-  //   而当时的守卫（"releaseId 非空"）测的是错的方向：它证明了"安装包来自发布目录"，
-  //   却证明不了"那个路径下有可读的东西"。
-  //
-  //   > 一个"链接指向确实存在的安装包"的守卫，与一个"链接指向确实存在的**页面**"
-  //   > 的守卫，在没人点过那个链接的时候，是同一个东西。
-  //
-  // 所以：站上不承诺任何版本历史/清单浏览。要加，得先有一个真的列表端点。
-
-  // 元信息：有哪几项就写哪几项，一项都没有就不出现这一行。等宽，与稿子的标签同一路。
-  const metaBits = ['Windows x64', version ? `v${esc(version)}` : '', esc(size), esc(date)].filter((s) => s.length > 0)
-  const meta = metaBits.length > 0
-    ? `<p class="dl-meta">${metaBits.map((bit) => `<span>${bit}</span>`).join('<span class="sep">·</span>')}</p>`
-    : ''
-
-  // ③ 备选线路（T-196 多线路）。
-  //
-  // 为什么备选线路要**显示**而不是只留主按钮：按地区选线路用的是
-  // Cloudflare 的 `CF-IPCountry`，而它对**部分**访客不准（VPN、企业出口、
-  // 以及 `XX`/`T1` 这两个"不知道"的取值）。一个只给一条线路的页面，
-  // 会让选错的那部分用户**没有任何办法**换一条。
-  //
-  //   > 一个"按地区自动选、选错了也没得换"的页面，
-  //   > 与一个"只有一条线路"的页面，对那部分用户是同一个东西——
-  //   > 只不过前者看起来更聪明。
-  //
-  // ★ 这里**再**筛一次协议：`parseDownloadLines` 已经拒了非 http(s)，
-  //   但本函数是导出的纯函数，调用方可以传任意数据。`esc()` 只处理引号与
-  //   尖括号，**不会**让 `javascript:` 变成无害的——而它会被直接写进 `href`。
-  const otherLines = (Array.isArray(lines) ? lines : [])
-    .filter((l) => l !== null && typeof l === 'object' && isHttpUrl(l.url))
-  const othersRow = has && otherLines.length > 0
-    ? `<p class="dl-lines">${c.otherLines}${otherLines
-      .map((l) => `<a href="${esc(l.url)}">${esc(lang === 'en' ? (l.labelEn || l.label) : l.label)}</a>`)
-      .join('<span class="sep">·</span>')}</p>`
-    : ''
-
-  // 下载卡片：一句话 + **一个**动作 + 元信息 + 未签名说明 + 摘要。
-  // 按钮只留下载那一个 —— "查看协作界面"在首屏已经是第二个动作，这张卡片里再放一次
-  // 是重复；而这张卡片的主题就是"把这个包装到你机器上"。
-  //
-  // ⚠️ 2026-10-12：**不要**在这里加"若被 Smart App Control 拦住…"之类的处理说明。
-  //   业主 2026-10-09 定过：那些字比它们解决的问题更长，三条说明已撤
-  //   （`site-routes.test.mjs` 有一条 `doesNotMatch(/Smart App Control/)` 守着它）。
-  //   桌面端降级为次要入口这件事，由**首屏主按钮换成"打开就能用"**表达，
-  //   不需要在卡片里再解释一遍。
-  const download = has
-    ? `<div class="dl-actions">
-         <a class="btn primary" href="${href}">${c.cta}</a>
-       </div>
-       ${othersRow}
-       ${meta}`
-    : `<p>${c.deployWinEmpty}</p>
-       <div class="dl-actions"><span class="btn" aria-disabled="true">${c.notYet}</span></div>`
-
-  // ③ 这台 Hub 自己的入口与注册状态。门口页原来承担的"这是什么、该去哪儿"，
+  // ② 这台 Hub 自己的入口与注册状态。门口页原来承担的"这是什么、该去哪儿"，
   //    现在由官网承担——所以这一段不能丢。
   //
   // ★ 2026-10-12：这一格的主动作也是"打开就能用"，而且**与首屏同一个地址**
-  //   （`mobilePath`）。部署区第一张卡片标题是"本地 Web 工作台"，它就是 Web 入口；
-  //   原先它只给了一个纯文本链接，而首屏给的却是下载按钮 —— 两处对"主入口是谁"
-  //   给出了相反的答案。
+  //   （`mobilePath`）。原先它只给了一个纯文本链接，而首屏给的却是下载按钮 ——
+  //   两处对"主入口是谁"给出了相反的答案。
   //
   //   > 一个"首屏说打开就能用、部署区说下载电脑版"的官网，
   //   > 与一个只有其中一种说法的官网，在有人**两处都看**之前是同一个东西。
   //
-  // ★ 用**独立的 class**（`hub-actions` 而不是复用 `dl-actions`）：两块在语义上
-  //   是不同的东西（Web 入口 / Windows 下载），而用例与 CSS 都要能指名道姓地
-  //   说"我说的是哪一块"。复用同一个 class 时，"第一块是哪一块"只能靠**文档顺序**
-  //   推断 —— 而顺序是模板里一个标记的位置，是随时会动的东西。
+  // ★ 用**独立的 class**（`hub-actions`）：用例与 CSS 都要能指名道姓地说
+  //   "我说的是哪一块"，而不是靠**文档顺序**推断 —— 顺序是模板里一个标记的位置，
+  //   是随时会动的东西。
+  //
+  //   （`dl-actions` 现在**没有任何地方**再产出它了。CSS 里那几条规则暂时留着：
+  //     它们是纯样式、不产生行为，而删掉它们的收益只是少几行。等下一次真的重构
+  //     部署区时一起清。）
   const reg = registration === 'open' ? c.regOpen
     : registration === 'invite' ? c.regInvite
       : c.regClosed
@@ -317,19 +230,30 @@ export function renderLiveBlocks({
   //   `<p><a href="/demo">${c.trial}</a></p>
   //    <p class="small">${c.trialNote}</p>`
 
-  return { cta, download, hub }
+  return { cta, hub }
 }
 
 /**
- * 把三个标记替换进模板。**纯函数**：同一个模板 + 同一份数据 → 同一份输出。
+ * 把标记替换进模板。**纯函数**：同一个模板 + 同一份数据 → 同一份输出。
  *
  * 用 `split/join` 而不是 `replace`：后者在替换串里出现 `$&` 一类序列时会被
- * 当成替换模式解释掉，而这里的替换串包含**运营者可配的下载地址**。
+ * 当成替换模式解释掉，而这些替换串来自**运营者可配的值**（`mobilePath`）。
+ *
+ * ★ 2026-10-12：`MARKER_DOWNLOAD` **仍然被替换，但替换成空串**。
+ *   两个理由，都不是洁癖：
+ *
+ *   ① 真实模板里的那个标记已经被删了（两张卡里第二张换成了"同一份数据"）。
+ *      但**别的部署**可能还留着一份旧模板，而模板是运营者机器上的文件。
+ *      一个没人替换的标记会**原样出现在页面上**（`<!-- legion:download -->`
+ *      是 HTML 注释，访客看不见，但它证明"这里本该有东西"）。
+ *   ② 更实际的是：这个函数是导出的纯函数，用例会拿**自造模板**来调它。
+ *      保留这一行让"标记 → 空"成为一条**可断言的行为**，而不是靠调用方记得
+ *      自己先删掉标记。
  */
 export function injectLiveBlocks(template, blocks) {
   return String(template)
     .split(MARKER_CTA).join(blocks.cta)
-    .split(MARKER_DOWNLOAD).join(blocks.download)
+    .split(MARKER_DOWNLOAD).join('')
     .split(MARKER_HUB).join(blocks.hub)
 }
 
@@ -339,20 +263,20 @@ export function injectLiveBlocks(template, blocks) {
  * @param {object} deps
  * @param {string} deps.root        站点目录（绝对路径），里面是 `index.html` / `en/index.html` / `assets/`
  * @param {string} [deps.mount]     静态资源挂载前缀，默认 `/site`
- * @param {Function} [deps.readRelease] 返回**当次**发布信息的函数：
- *        `{ url, version, sizeBytes, at }`。传函数而不是值，是为了"最新那份每次现算"。
- *        也接受字符串（显式配置那条路不变）。
  * @param {string} [deps.registration] 'closed' | 'invite' | 'open'
  * @param {string} [deps.mobilePath]
+ *
+ * ★ 2026-10-12：`readRelease` 参数**撤掉了**。它存在的唯一理由是给下载卡片
+ *   填版本/体积/日期，而那张卡片已经从官网上移除。留着一个"传进来但没人用"
+ *   的依赖，会让调用方以为官网上还有下载区。
  */
 export function createSiteRoutes({
-  root, mount = '/site', readRelease = () => ({ url: '' }),
+  root, mount = '/site',
   registration = 'closed', mobilePath = MOBILE_PATH_DEFAULT,
 } = {}) {
   if (typeof root !== 'string' || root.length === 0) throw new TypeError('createSiteRoutes 需要 root')
   const absRoot = resolve(root)
   const prefix = mount.endsWith('/') ? mount.slice(0, -1) : mount
-  const resolveRelease = typeof readRelease === 'function' ? readRelease : () => ({ url: String(readRelease ?? '') })
 
   /** 两个入口页。`/` 是中文，`/en` 是英文（路径式双语，见方案）。 */
   /**
@@ -467,39 +391,25 @@ export function createSiteRoutes({
   }
 
   /**
-   * 发入口页：读模板 → 注入动态块 → 送出。**入口页永不缓存**（它带着当次算出的下载地址）。
+   * 发入口页：读模板 → 注入动态块 → 送出。**入口页永不缓存**。
    *
-   * `live: false` 的那一页（演示页）没有动态块，所以不调 `resolveRelease()` ——
-   * 那是一次发布目录扫描，为一个静态页面每请求跑一遍是白花。
+   * ★ 2026-10-12：这里原先还读 `CF-IPCountry` 并按地区选**下载线路**。
+   *   那个功能唯一的用途是下载卡片上那一个按钮指向哪条线；卡片撤掉之后，
+   *   读地区就成了一次**读了没人用**的动作 —— 而它看起来还像在工作
+   *   （请求头照读、`readRelease` 照调）。所以一并撤掉：
+   *   没有下载按钮，就没有"这个按钮该指向哪"。
+   *
+   *   按地区选线本身**没有消失**，它搬到门口页继续用（`describeDownload`
+   *   仍然被 `createPortalRoutes` 用着）—— 那里还有一个下载按钮。
+   *
+   * `live: false` 的那一页（演示页）没有动态块，所以不注入。
    */
   function servePage(req, res, lang, { live = true } = {}) {
     const abs = PAGES[lang]
     const template = readTemplate(abs)
     // 模板不存在 = 这个部署没有官网。返回 `false` 让请求落到门口页。
     if (template === null) return false
-    // ★ 访客地区来自 **Cloudflare 注入的 `CF-IPCountry`**（本站经 Tunnel 对外，
-    //   源站能直接读到）。读不到时传 null，由选线逻辑回退到默认线路——
-    //   本地开发、直连部署、以及非 Cloudflare 前置的部署都走这一条。
-    //
-    //   刻意**不做**前端探测：那段 JS 本身要经同一条慢路送达，
-    //   而"探测超时就选默认"在探测必然慢的那一侧总是选错。
-    const country = typeof req.headers?.['cf-ipcountry'] === 'string'
-      ? req.headers['cf-ipcountry']
-      : null
-    const r = live ? (resolveRelease({ country }) ?? {}) : {}
-    const blocks = live
-      ? renderLiveBlocks({
-        lang,
-        downloadUrl: r.url ?? '',
-        // 备选线路：**不含**被选中的那条（服务端已经排除）。
-        lines: Array.isArray(r.others) ? r.others : [],
-        version: r.version ?? '',
-        size: formatSize(r.sizeBytes),
-        date: formatDate(r.at),
-        registration,
-        mobilePath,
-      })
-      : { cta: '', download: '', hub: '' }
+    const blocks = live ? renderLiveBlocks({ lang, registration, mobilePath }) : { cta: '', hub: '' }
     // 样式表 URL 挂上版本串（理由见 `assetVersion()`）。
     // 用 split/join 而不是 replace：替换串里没有 `$` 序列，但保持与注入同一套写法，
     // 免得将来有人在这里塞进一个带 `$&` 的值。

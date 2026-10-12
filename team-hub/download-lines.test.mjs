@@ -31,7 +31,9 @@ import {
   formatDownloadLineProblems, loadDownloadLines, parseDownloadLines,
   sampleLinesConfig, selectDownloadLine, selfCheckDownloadLines,
 } from './download-lines.mjs'
-import { createSiteRoutes, renderLiveBlocks } from './routes/site.mjs'
+// ★ 2026-10-12：这两条 import 从 `routes/site.mjs` 换成了 `routes/portal.mjs`。
+//   官网不再有下载按钮，按地区选线现在服务于门口页那一个按钮。
+import { createPortalRoutes, renderPortal } from './routes/portal.mjs'
 
 const CN_URL = 'https://legion-releases.s3.cn-north-1.jdcloud-oss.com/legion/releases/r-1/Legion-Setup-win-x64.exe'
 const GLOBAL_URL = 'https://legion-si.online/legion/releases/r-1/Legion-Setup-win-x64.exe'
@@ -40,26 +42,6 @@ const LINES = Object.freeze([
   Object.freeze({ id: 'cn', label: '国内线路', labelEn: 'China mirror', url: CN_URL, countries: Object.freeze(['CN']) }),
   Object.freeze({ id: 'global', label: '国际线路', labelEn: 'Global', url: GLOBAL_URL, countries: Object.freeze([]) }),
 ])
-
-const MARKER_CTA = '<!-- legion:cta -->'
-const MARKER_DOWNLOAD = '<!-- legion:download -->'
-const MARKER_HUB = '<!-- legion:hub-line -->'
-
-function template(lang) {
-  return `<!doctype html><html lang="${lang}"><head><link rel="stylesheet" href="/site/assets/site.css"></head>
-<body>${MARKER_CTA}${MARKER_HUB}<section id="download">${MARKER_DOWNLOAD}</section></body></html>
-`
-}
-
-function makeSite() {
-  const root = mkdtempSync(join(tmpdir(), 'legion-lines-site-'))
-  mkdirSync(join(root, 'en'), { recursive: true })
-  mkdirSync(join(root, 'assets'), { recursive: true })
-  writeFileSync(join(root, 'index.html'), template('zh'))
-  writeFileSync(join(root, 'en', 'index.html'), template('en'))
-  writeFileSync(join(root, 'assets', 'site.css'), 'body{}')
-  return root
-}
 
 async function call(routes, { method = 'GET', path = '/', headers = {} } = {}) {
   const chunks = []
@@ -257,125 +239,151 @@ describe('线路表：从磁盘读', () => {
   })
 })
 
-// ── ⑤ 渲染：备选线路真的进了页面 ────────────────────────────────────────────
+// ── ⑤ 渲染：**备选线路那一段已经没有了** ────────────────────────────────────
+//
+// ★ 2026-10-12：这一族（原 ⑱–㉒）测的是"备选线路真的进了官网页面"。
+//   官网的下载卡片撤掉之后，**没有任何页面再展示备选线路** ——
+//   门口页只给一个按钮（被选中的那条线）。所以那五条判据没有了被测对象。
+//
+//   处理方式：**删掉画线那部分，保留"选线"那部分**（下面的 ⑦ 与上面的
+//   ① – ④ 全都在测 `parseDownloadLines` / `selectDownloadLine`，它们照旧有用：
+//   `describeDownload()` 仍然用它来挑门口页那个按钮指向哪条线）。
+//
+//   > 一个"页面不再展示它"的功能，与一个"没有这个功能"的功能，
+//   > 在只看页面的人眼里是同一个东西 —— 区别在于选线那半边还在被用着。
 
-describe('页面渲染：备选线路', () => {
-  test('⑱ 不给 lines 时输出**逐字不变**（不渲染那一段）', () => {
-    const html = renderLiveBlocks({ lang: 'zh', downloadUrl: GLOBAL_URL }).download
-    assert.doesNotMatch(html, /dl-lines/, '没配多线路时不该出现备选线路那一段')
-    assert.match(html, new RegExp(GLOBAL_URL.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')))
-  })
-
-  test('⑲ 给了 lines 时：主按钮是被选中的线路，备选线路各有可点的链接', () => {
-    const html = renderLiveBlocks({
-      lang: 'zh', downloadUrl: CN_URL,
-      lines: [LINES[1]],
-    }).download
-    assert.match(html, /dl-lines/)
-    assert.ok(html.includes(`href="${CN_URL}"`), '主按钮应指向被选中的线路')
-    assert.ok(html.includes(`href="${GLOBAL_URL}"`), '备选线路应可点')
-    assert.match(html, /其他线路/)
-    assert.match(html, /国际线路/)
-  })
-
-  test('⑳ 英文页用 labelEn', () => {
-    const html = renderLiveBlocks({ lang: 'en', downloadUrl: CN_URL, lines: [LINES[1]] }).download
-    assert.match(html, /Other mirrors/)
-    assert.match(html, /Global/)
-  })
-
-  test('㉑ 非 http(s) 的备选线路被丢弃（esc 不会让 javascript: 变无害）', () => {
-    const html = renderLiveBlocks({
-      lang: 'zh', downloadUrl: CN_URL,
-      lines: [
-        { id: 'evil', label: '坏线路', url: 'javascript:alert(1)' },
-        { id: 'ok', label: '好线路', url: GLOBAL_URL },
-      ],
-    }).download
-    assert.doesNotMatch(html, /javascript:/, 'href 里不允许出现 javascript: 协议')
-    assert.ok(html.includes(`href="${GLOBAL_URL}"`), '同批里的合法线路仍应保留')
-  })
-
-  test('㉒ 标签与地址都转义（配置里带引号/尖括号也不会破坏 HTML）', () => {
-    const html = renderLiveBlocks({
-      lang: 'zh', downloadUrl: CN_URL,
-      lines: [{ id: 'x', label: '<b>粗</b>"', url: 'https://h.example/a.exe?x=1&y=2' }],
-    }).download
-    assert.doesNotMatch(html, /<b>粗<\/b>/, '标签里的 HTML 必须被转义')
-    assert.match(html, /&lt;b&gt;/)
-    assert.match(html, /&amp;y=2/, '查询串里的 & 必须被转义')
-  })
-})
-
-// ── ⑥ 路由级：CF-IPCountry 真的改变了页面上的地址 ──────────────────────────
+// ── ⑥ 路由级：CF-IPCountry 真的改变了**门口页那个按钮**的地址 ──────────────
 //
 // ★ 这一组才是"接缝"的断言：上面的纯函数全绿而页面还是老地址，是完全可能的。
+//
+// ★★ 2026-10-12：这一组**从官网搬到了门口页**。原因是官网不再有下载按钮，
+//   于是它原先读 `CF-IPCountry` 的那一行成了"读了没人用"。
+//
+//   不搬会怎样：`describeDownload({ country })` 永远拿到 `undefined`，
+//   于是**所有人**都拿到默认线路 —— 而页面看起来完全正常（按钮在、能点、能下），
+//   只是那条"给国内用户准备的线"从此不再被选中。
+//
+//   > 一个"按地区选线"的功能，与一个"永远选默认线"的功能，
+//   > 在不看请求头的时候是同一个东西。
 
-describe('官网路由：按 CF-IPCountry 换主按钮地址', () => {
+describe('门口页路由：按 CF-IPCountry 换按钮地址', () => {
   function routesWithSpy() {
     const seen = []
-    const root = makeSite()
-    const routes = createSiteRoutes({
-      root,
-      readRelease: (visitor = {}) => {
+    const routes = createPortalRoutes({
+      downloadUrl: (visitor = {}) => {
         seen.push(visitor)
         const sel = selectDownloadLine(LINES, { country: visitor.country ?? null })
-        return { url: sel.featured.url, version: '1.0.0', sizeBytes: 104857600, at: Date.UTC(2026, 9, 6), others: sel.others }
+        return sel.featured.url
       },
+      version: '1.0.0',
+      registration:
+        'open',
     })
-    return { routes, seen, root }
+    return { routes, seen }
   }
 
-  test('㉓ CN 访客：主按钮是国内线路，页面同时给出国际线路', async () => {
-    const { routes, seen, root } = routesWithSpy()
-    try {
-      const r = await call(routes, { path: '/', headers: { 'cf-ipcountry': 'CN' } })
-      assert.equal(r.status, 200)
-      assert.deepEqual(seen[0], { country: 'CN' }, '路由必须把 CF-IPCountry 传进 readRelease')
-      assert.ok(r.body.includes(`href="${CN_URL}"`), '主按钮应指向国内线路')
-      assert.ok(r.body.includes(`href="${GLOBAL_URL}"`), '国际线路应作为备选出现')
-    } finally { rmSync(root, { recursive: true, force: true }) }
+  test('㉓ CN 访客：按钮指向国内线路', async () => {
+    const { routes, seen } = routesWithSpy()
+    const r = await call(routes, { path: '/', headers: { 'cf-ipcountry': 'CN' } })
+    assert.equal(r.status, 200)
+    assert.deepEqual(seen[0], { country: 'CN' }, '路由必须把 CF-IPCountry 传进 downloadUrl')
+    assert.ok(r.body.includes(`href="${CN_URL}"`), `按钮应指向国内线路，实际：${r.body.slice(0, 200)}`)
   })
 
-  test('㉔ 非 CN 访客：主按钮是国际线路，备选是国内线路', async () => {
-    const { routes, seen, root } = routesWithSpy()
-    try {
-      const r = await call(routes, { path: '/', headers: { 'cf-ipcountry': 'US' } })
-      assert.deepEqual(seen[0], { country: 'US' })
-      assert.ok(r.body.includes(`href="${GLOBAL_URL}"`))
-      assert.ok(r.body.includes(`href="${CN_URL}"`), '国内线路仍应作为备选可点')
-    } finally { rmSync(root, { recursive: true, force: true }) }
+  test('㉔ 非 CN 访客：按钮指向国际线路', async () => {
+    const { routes, seen } = routesWithSpy()
+    const r = await call(routes, { path: '/', headers: { 'cf-ipcountry': 'US' } })
+    assert.deepEqual(seen[0], { country: 'US' })
+    assert.ok(r.body.includes(`href="${GLOBAL_URL}"`))
   })
 
-  test('㉕ 读不到该头（本地开发/直连）：country 传 null，页面回退到默认线路', async () => {
-    const { routes, seen, root } = routesWithSpy()
-    try {
-      const r = await call(routes, { path: '/', headers: {} })
-      assert.deepEqual(seen[0], { country: null }, '没有该头时必须传 null，而不是空串或 undefined')
-      assert.ok(r.body.includes(`href="${GLOBAL_URL}"`), '应回退到默认线路')
-    } finally { rmSync(root, { recursive: true, force: true }) }
+  test('㉕ 读不到该头（本地开发/直连）：country 传 null，回退到默认线路', async () => {
+    const { routes, seen } = routesWithSpy()
+    const r = await call(routes, { path: '/', headers: {} })
+    assert.deepEqual(seen[0], { country: null }, '没有该头时必须传 null，而不是空串或 undefined')
+    assert.ok(r.body.includes(`href="${GLOBAL_URL}"`), '应回退到默认线路')
   })
 
-  test('㉖ 英文页同样按地区选线', async () => {
-    const { routes, root } = routesWithSpy()
-    try {
-      const r = await call(routes, { path: '/en', headers: { 'cf-ipcountry': 'CN' } })
-      assert.ok(r.body.includes(`href="${CN_URL}"`))
-      assert.match(r.body, /Other mirrors/)
-      assert.match(r.body, /Global/)
-    } finally { rmSync(root, { recursive: true, force: true }) }
+  test('㉖ 大小写/空串的头也照原样传下去（不在这里归一，由选线那一侧负责）', async () => {
+    // readme：归一只有一处（`normalizeCountry`），路由层不做第二次判断 ——
+    // 两处各归一一次，正是当初 `"cn"` 配置生效、`"cn"` 访客不生效的那个 bug。
+    const { routes, seen } = routesWithSpy()
+    for (const raw of ['cn', '', 'XX']) {
+      await call(routes, { path: '/', headers: { 'cf-ipcountry': raw } })
+    }
+    assert.deepEqual(seen.map((v) => v.country), ['cn', '', 'XX'], '路由层只做透传，不做归一')
   })
 
-  test('㉗ 没配线路表时页面与从前一样（这次部署的既有行为不变）', async () => {
-    const root = makeSite()
-    try {
-      const routes = createSiteRoutes({
-        root,
-        readRelease: () => ({ url: GLOBAL_URL, version: '1.0.0', sizeBytes: null, at: null }),
-      })
-      const r = await call(routes, { path: '/', headers: { 'cf-ipcountry': 'CN' } })
-      assert.ok(r.body.includes(`href="${GLOBAL_URL}"`))
-      assert.doesNotMatch(r.body, /dl-lines/, '没有线路表时不该出现备选线路那一段')
-    } finally { rmSync(root, { recursive: true, force: true }) }
+  test('㉗ 没配多线路时按钮就是那一个地址（既有行为不变）', async () => {
+    const seen = []
+    const routes = createPortalRoutes({
+      downloadUrl: (v = {}) => { seen.push(v); return GLOBAL_URL },
+    })
+    const r = await call(routes, { path: '/', headers: { 'cf-ipcountry': 'CN' } })
+    assert.equal(r.status, 200)
+    assert.ok(r.body.includes(`href="${GLOBAL_URL}"`))
+    // 单线路时也不能把地址弄丢或重复渲染。
+    assert.equal((r.body.match(/Legion-Setup-win-x64.exe/g) || []).length, 1, '只该有一个下载链接')
+  })
+
+  test('★★★ HEAD 也要走同一条选线（不缓存、且不能与 GET 给出不同地址）', async () => {
+    // 门口页是 `no-store`，HEAD 与 GET 必须一致 —— 否则链接预览/健康检查
+    // 看到的地址与用户点开的不是同一个。
+    const { routes, seen } = routesWithSpy()
+    await call(routes, { method: 'HEAD', path: '/', headers: { 'cf-ipcountry': 'CN' } })
+    assert.deepEqual(seen[0], { country: 'CN' }, 'HEAD 也必须把地区传下去')
   })
 })
+
+// ── ⑦ ★★★ 协议白名单：门口页那个 href ──────────────────────────────────────
+//
+// ★ 这一族是**从官网搬过来的**（原 ㉑/㉒）。官网的下载卡片撤掉之后，门口页是
+//   唯一还会把"配置里的地址"写进 `href` 的地方 —— 所以那两条判据跟着 href 走。
+//
+//   搬过来时它**放宽了**：只认 http(s) 绝对地址会把发布目录那条**站内相对路径**
+//   （`/legion/releases/<id>/…`）判成坏的，而那是这台 Hub 最常见的情形。
+//   放宽的代价必须被钉住，否则下次有人"顺手收紧"就会再断一次。
+describe('门口页：下载地址的协议白名单', () => {
+  test('★★★ 非 http(s) 的地址**不变成可点的链接**，且说清是配错了', () => {
+    for (const evil of ['javascript:alert(1)', 'JavaScript:alert(1)', 'data:text/html,<script>x</script>', 'vbscript:msgbox', '//evil.com/x']) {
+      const html = renderPortal({ downloadUrl: evil, version: '1.0.0' })
+      assert.doesNotMatch(html, /<a class="card primary" href="(javascript|data|vbscript)/i,
+        `${evil} 不该变成可点的 href`)
+      // ★ 关键：不能说"尚未发布" —— 运营者明明配了东西，那会把他引去查上传流程。
+      assert.match(html, /配得不对/, `${evil}：必须说清是**地址配错**，而不是"还没发布"`)
+      assert.doesNotMatch(html, /尚未发布/, `${evil}：不是没发布，是配错了`)
+    }
+  })
+
+  test('★★★ 站点相对路径**照旧可点**（发布目录那条路给的就是它）', () => {
+    // 这条是搬过来时那次真实回归的守卫：`/legion/releases/...` 是相对路径，
+    // 如果白名单只认 http(s) 绝对地址，一个**本来能下的**按钮会变成一块牌子。
+    const rel = '/legion/releases/r-1/Legion-Setup-win-x64.exe'
+    const html = renderPortal({ downloadUrl: rel })
+    assert.match(html, /下载电脑版/, '站内相对路径必须仍然给出按钮')
+    assert.ok(html.includes(`href="${rel}"`), '而且 href 就是它')
+    assert.doesNotMatch(html, /配得不对/)
+  })
+
+  test('★ http 与 https 的绝对地址都可点', () => {
+    for (const ok of ['https://cdn.test/a.exe', 'http://117.72.146.36/legion/releases/x.exe']) {
+      const html = renderPortal({ downloadUrl: ok })
+      assert.ok(html.includes(`href="${ok}"`), `${ok} 应当可点`)
+    }
+  })
+
+  test('★ 地址里的引号与尖括号被转义（配置是人写的，可以写错）', () => {
+    const html = renderPortal({ downloadUrl: '/a.exe?x=1&y=2' })
+    assert.match(html, /&amp;y=2/, '查询串里的 & 必须被转义')
+    const evil = renderPortal({ downloadUrl: '/a" onmouseover="alert(1)' })
+    assert.doesNotMatch(evil, /onmouseover="alert\(1\)"[^>]*>\s*下载/, '引号不许闭合 href 属性')
+  })
+
+  test('★★ 反例守卫：上面那条"非 http(s) 不可点"不是恒真', () => {
+    // 证明判据真的能发现回归：把**没有白名单**的形态喂给它，必须被判红。
+    const noGuard = '<a class="card primary" href="javascript:alert(1)"><strong>下载电脑版</strong></a>'
+    assert.match(noGuard, /<a class="card primary" href="javascript/i, '反例应当被"非 http(s) 不可点"抓住')
+    assert.doesNotMatch(noGuard, /配得不对/, '反例说明：没有守卫时不会出现那句"配得不对"')
+  })
+})
+

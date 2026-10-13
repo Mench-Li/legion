@@ -7329,6 +7329,11 @@ const router = createRouter([
   //   所以"注错厂"不会报错，只会安静地不生效。
   createModelProvidersRoutes({
     json, handleRun, providerStore, credentialStatus, runtimeCredentialStatus, modelStore, secretAdmin, authorized,
+    // ★★ 2026-10-12：「获取可用模型」在用户没填钥匙时**自己去库里取**
+    //   （`probeService().readCredentialValue()` —— 与「测试连接」同一个开库路径）。
+    //   实测根因：编辑已有供应商时表单留空 ⇒ 不带钥匙去问 `/models` ⇒ 网关 401
+    //   ⇒ 界面把它显示成"钥匙不对"。注入的是**惰性 getter**（与档案那一族同一手法）。
+    probeService,
   }),
   createUsageRoutes({
     json,

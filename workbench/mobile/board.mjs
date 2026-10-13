@@ -116,6 +116,55 @@ export const BOARD_COLUMNS = Object.freeze([
 ])
 
 /**
+ * 任务卡的**展示顺序**：按时间，最新的在最上面。
+ *
+ * ★ **镜像** `workbench/src/taskOrder.ts`（手机端是独立静态根、import 不到 TS）。
+ *   两端的顺序由 `scripts/task-order.test.mjs` 用同一个 fixture 逐项比对 ——
+ *   沿用本仓 slots/avatar 的"镜像 + parity"惯例：只改一端 = 手机与桌面看到两个不同的队列。
+ *
+ * 为什么不是按任务号排（原来就是）：任务号**不等于**时间。T-199 是 10-12 才重做完成的，
+ * 号却比更早完成的 T-200/T-201/T-202 小 —— 按号排它被压在它们上面，
+ * 而真正最新的那条沉在下面。见 `taskOrder.ts` 文件头。
+ */
+export const TASK_TIME_FIELDS = Object.freeze(['updatedAt', 'createdAt', 'claimedAt'])
+
+/** 取排序时间（毫秒）；没有任何可用时间时返回 null（**不是 0**，0 会被当成 1970 年）。 */
+export function taskTimeMs(t) {
+  if (t === null || t === undefined) return null
+  for (const k of TASK_TIME_FIELDS) {
+    const v = t[k]
+    if (typeof v !== 'string' || v === '') continue
+    const ms = Date.parse(v)
+    if (Number.isFinite(ms)) return ms
+  }
+  return null
+}
+
+/** 新的在前；平局用**任务号降序**兜底（顺序总是确定的，不依赖 sort 稳定性）。 */
+export function compareByMostRecent(a, b) {
+  const ta = taskTimeMs(a)
+  const tb = taskTimeMs(b)
+  if (ta !== null && tb !== null) {
+    if (ta !== tb) return tb - ta
+  } else if (ta !== null) {
+    return -1
+  } else if (tb !== null) {
+    return 1
+  }
+  return compareTaskId(String(b?.id ?? ''), String(a?.id ?? ''))
+}
+
+/** 任务号比较：数字感知（`T-9` < `T-10`）。 */
+export function compareTaskId(a, b) {
+  return String(a).localeCompare(String(b), undefined, { numeric: true })
+}
+
+/** 不改原数组：返回按"最新在前"排好的**新**数组。 */
+export function sortByMostRecent(tasks) {
+  return [...(tasks ?? [])].sort(compareByMostRecent)
+}
+
+/**
  * 任务列表 → 看板列。
  *
  * 不认识的 `status` **不丢弃**：丢进最后一列并标注原文。丢掉的后果是
@@ -132,7 +181,8 @@ export function boardColumns(tasks = []) {
   }
   const columns = BOARD_COLUMNS.map((c) => Object.freeze({
     id: c.id, title: c.title, tone: c.tone,
-    tasks: Object.freeze(buckets.get(c.id)),
+    // 每列**按时间倒序**（最新在最上）。buckets 里是新建的数组，排序不会碰到入参。
+    tasks: Object.freeze(sortByMostRecent(buckets.get(c.id))),
     count: buckets.get(c.id).length,
   }))
   return Object.freeze({ columns: Object.freeze(columns), unknown: Object.freeze(unknown), total: (tasks ?? []).length })

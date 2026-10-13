@@ -73,13 +73,17 @@ test('任务按状态入列，`done` 与 `canceled` 同列（都是"结束了"�
   const r = boardColumns([
     { id: 'T-1', status: 'todo' },
     { id: 'T-2', status: 'in_progress' },
-    { id: 'T-3', status: 'done' },
-    { id: 'T-4', status: 'canceled' },
+    // ★ 2026-10-13：这一列的**入参顺序故意与期望顺序相反**。
+    //   从前这里断言的是"保持入参顺序"，但那条性质只是"没排序"的副作用，不是设计意图；
+    //   现在各列内部按时间倒序（最新在最上），于是这条用例顺带证明了排序真的发生
+    //   （若排序被摘掉，它会拿到 T-4, T-3 而变红）。
+    { id: 'T-4', status: 'canceled', updatedAt: '2026-01-01T00:00:00Z' },
+    { id: 'T-3', status: 'done', updatedAt: '2026-06-01T00:00:00Z' },
   ])
   const col = (id) => r.columns.find((c) => c.id === id)
   assert.deepEqual(col('todo').tasks.map((t) => t.id), ['T-1'])
   assert.deepEqual(col('in_progress').tasks.map((t) => t.id), ['T-2'])
-  assert.deepEqual(col('done').tasks.map((t) => t.id), ['T-3', 'T-4'])
+  assert.deepEqual(col('done').tasks.map((t) => t.id), ['T-3', 'T-4'], 'done 列内：新完成的在前')
   assert.equal(r.total, 4)
 })
 

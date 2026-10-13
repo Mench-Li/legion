@@ -8,6 +8,7 @@ import type { CardComment, CardStatus, HubTask, SpaceInfo } from '../types'
 import { toast } from './Toast'
 import { deliveryBadgeOf, schedulingBadgeOf } from '../deliveryBadge.ts'
 import { planDrop } from '../reworkPlan.ts'
+import { sortByMostRecent } from '../taskOrder.ts'
 import { ReworkModal } from './ReworkModal'
 import { TaskDetailModal } from './TaskDetailModal'
 
@@ -119,6 +120,8 @@ interface TcRow {
   blockedBy: string[]
   claimedAt?: string | null
   updatedAt?: string
+  /** 排序兜底用（`updatedAt` 缺失时退到它）；界面不展示。 */
+  createdAt?: string
   comments: CardComment[]
   evidenceCount: number
   patchesCount: number
@@ -145,6 +148,7 @@ function rowFromHub(t: HubTask): TcRow {
     blockedBy: t.blockedBy ?? [],
     claimedAt: t.claimedAt ?? null,
     updatedAt: t.updatedAt,
+    createdAt: t.createdAt,
     comments: t.comments ?? [],
     evidenceCount: (t.evidence ?? []).length,
     patchesCount: (t.patches ?? []).length,
@@ -181,10 +185,8 @@ function askOpen(r: TcRow): boolean {
   return (cs[cs.length - 1].text ?? '').startsWith('❓')
 }
 
-function normId(a: string, b: string): number {
-  return a.localeCompare(b, undefined, { numeric: true })
-}
-
+// ★ 原来这里有个 `normId(a,b)`，只服务于「按任务号升序」那一行（已换成 sortByMostRecent）。
+//   删掉而不是留着，是因为留着它会让下一个人以为"号序"仍然是某种被判定的东西。
 export function TaskCenterView({ scope, hubMode, spaces = [], onSelectScope, onDataChanged, selectedView, onViewChange, onContactAgent }: TaskCenterViewProps): React.JSX.Element {
   /** 将军视角过滤（原「指挥总览」分组语义并入看板；默认「全部」= 经典泳道全貌）。 */
   const [view, setView] = useState<TcView>(() => {
@@ -399,7 +401,7 @@ export function TaskCenterView({ scope, hubMode, spaces = [], onSelectScope, onD
   const lanes = useMemo(
     () =>
       KANBAN_COLUMNS.map(col => {
-        const inCol = filtered.filter(r => r.status === col.status).sort((a, b) => normId(a.id, b.id))
+        const inCol = sortByMostRecent(filtered.filter(r => r.status === col.status))
         const items = view === 'all' ? inCol : inCol.filter(r => viewStatuses.includes(r.status))
         return { ...col, items, hidden: inCol.length - items.length }
       }),

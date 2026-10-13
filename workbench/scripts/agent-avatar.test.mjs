@@ -55,7 +55,36 @@ after(() => {
 })
 
 const render = (token, extra) => renderToString(react.createElement(AgentAvatar, Object.assign({ token }, extra || {})))
+
+/**
+ * 去掉**整行注释**之后再断言（与 `no-classic-board.test.mjs` 的 `codeOnly` 同一手法）。
+ *
+ * ★ 2026-10-13：这一层是**补上**的，起因是一次真实的假红。
+ *   `AgentAvatar.tsx` 的文件头要解释"为什么不能用 SVG 渐变"，于是正文里写出了判据
+ *   禁掉的那个词（`url` 加左括号）—— 而本函数读的是**原始文本**，注释也算，
+ *   于是**一条解释判据为什么存在的注释，把那条判据本身弄红了**。
+ *
+ *   本仓的 `no-classic-board.test.mjs` 早记过同一个坑并给了同一条解法：
+ *
+ *     > 注释里引用旧代码会让"源码里还有这个字符串"的判据**永远为假**。
+ *
+ *   只剥整行注释（`// …`、块注释续行 `* …`、`/* …`）：行尾注释里可能还有真代码，
+ *   宁可少剥，不要剥错。扫描**代码**的两个用例（TC-S1-04/09）改用 `avatarCode()`；
+ *   其余用例照旧读原始源码。
+ */
+function codeOnly(src) {
+  return src
+    .split('\n')
+    .filter((line) => {
+      const t = line.trim()
+      return !(t.startsWith('//') || t.startsWith('*') || t.startsWith('/*'))
+    })
+    .join('\n')
+}
+
 const avatarSources = () => ['slots.ts', 'AgentAvatar.tsx', 'index.ts', 'assets'].map(f => { try { return readFileSync(join(SRC, f), 'utf8') } catch { return '' } }).join('\n')
+/** 剥掉注释后的源码 —— 「源码里不许出现某字符串」这类判据必须用它（见 `codeOnly`）。 */
+const avatarCode = () => codeOnly(avatarSources())
 
 describe('S1 头像基座', () => {
   test('TC-S1-01 渲染为 <svg 且没有单个字符文本节点（AC-R3-1）', () => {
@@ -89,7 +118,7 @@ describe('S1 头像基座', () => {
 
   test('TC-S1-04 同 token 幂等，且源码无随机/时钟/网络（AC-R3-4、AC-R8-1）', () => {
     assert.equal(render('human:coder'), render('human:coder'))
-    const src = avatarSources()
+    const src = avatarCode()
     for (const banned of ['Math.random', 'Date.now', 'performance.now', 'new Date', 'fetch(', 'XMLHttpRequest', 'http://', 'https://']) {
       assert.ok(!src.includes(banned), '禁止出现 ' + banned)
     }
@@ -117,10 +146,22 @@ describe('S1 头像基座', () => {
   })
 
   test('TC-S1-09 离线自足：无 <img、无 url( 外链、无网络调用（AC-R8-1）', () => {
-    const src = avatarSources()
+    const src = avatarCode()
     for (const banned of ['<img', 'url(', 'src=', 'onerror']) {
       assert.ok(!src.includes(banned), '头像不得依赖 ' + banned)
     }
+  })
+
+  test('★ TC-S1-09b 变红验证：剥注释**没有**把这道门禁架空（代码里出现 url( 必须红）', () => {
+    // 上一版把"剥注释"补上来时，最容易出的事就是把门禁一起剥没了——
+    // 于是一条真违规会**静默通过**。这里用两条对照把边界钉住：
+    const violation = codeOnly("const a = 'x'\nconst bg = 'url(#grad)' // 真违规\n")
+    assert.ok(violation.includes('url('), '★ 代码行里的 url( 必须仍然可见 ⇒ 门禁没被剥空')
+    const commented = codeOnly("// 解释为什么不能用 url( 加左括号\nconst a = 'x'\n")
+    assert.ok(!commented.includes('url('), '整行注释里的同名字符串不该再误伤')
+    // 反向锚：源码确实读到了东西（否则"0 命中"可能只是因为读空了）
+    assert.ok(avatarCode().includes('AgentAvatar') || avatarCode().includes('SLOT_KEYS'),
+      'avatarCode() 必须真的读到源码')
   })
 
   test('TC-S1-10 依赖零新增（AC-R8-2）', () => {

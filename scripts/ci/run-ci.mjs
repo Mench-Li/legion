@@ -1991,6 +1991,10 @@ async function stageTest() {
     // ── T-199：Agent 人性化名称 + 人性化头像（S1~S7 收口）──────────────────────
     { label: 'agent-avatar（S1 头像基座：内联人形 SVG / 位面构造性唯一 / 确定性 / 回退 / 离线零依赖）', files: ['workbench/scripts/agent-avatar.test.mjs'], cwd: ROOT },
     { label: 'seed-roster（S2 数据面：两段式展示名 / 头像令牌 / 迁移保护 / 幂等）', files: ['team-hub/scripts/seed-roster.test.mjs'], cwd: ROOT },
+    // 2026-10-13：**头像迁移**（旧 emoji → human:<key> 令牌）。这次真实故障的收口：
+    //   功能全做完、界面全接好，而库里 24 行全是 emoji ⇒ 全部渲染成同一张灰剪影 ⇒
+    //   用户看到的结论是"这个功能没做"。它覆盖 seed 名单之外的自建 role（ozon/gf001）。
+    { label: 'migrate-avatars（头像迁移：旧 emoji → 令牌 / 覆盖自建 role / 幂等 / --dry 不写库）', files: ['team-hub/scripts/migrate-avatars.test.mjs'], cwd: ROOT },
     { label: 'agent-identity-tokens（S3 接口面：新建自动分配人形令牌 / 读出口兜底收敛）', files: ['team-hub/agent-identity-tokens.test.mjs'], cwd: ROOT },
     { label: 'agent-avatar-surfaces（S4 桌面展示面一：单一来源 / 无首字回退 / 无破图）', files: ['workbench/scripts/agent-avatar-surfaces.test.mjs'], cwd: ROOT },
     { label: 'agent-avatar-settings（S5 桌面展示面二：新建不配置头像 / 三处成员头像接入）', files: ['workbench/scripts/agent-avatar-settings.test.mjs'], cwd: ROOT },

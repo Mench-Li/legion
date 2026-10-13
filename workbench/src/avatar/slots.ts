@@ -21,12 +21,16 @@ export const BUILTIN_ROLE_KEYS = [
 /** 备用位面 key：自建/空间专属 role 由接口层按该空间最小未占用者分配。 */
 export const SPARE_KEYS = Array.from({ length: 15 }, (_, i) => 's' + String(i + 1).padStart(2, '0'))
 
-const SKINS = ['#f2d3b3', '#e9bd93', '#d6a06f', '#b57f52']
-const HAIRS = ['#28364b', '#5b3a29', '#8a5a2b', '#3d3d42', '#7a4a6b']
+// 调色板（2026-10-13 改版）：低饱和粉彩 —— 「圆润吉祥物」画风的一半靠它。
+// ★★ 改这里必须**同步改 `workbench/mobile/avatar.mjs` 的同名常量**：
+//    `avatar-parity.test.mjs` 的 TC-S6-01b 会逐 key 比对两端位面字段，一漂就红
+//    （那条规矩存在，正是因为"只改一端的长相"曾经差点上线）。
+const SKINS = ['#f7d9bd', '#efc49c', '#dca876', '#bd8557']
+const HAIRS = ['#33405a', '#5f4030', '#8a5a2b', '#3a3a44', '#7d4d6e']
 const STYLES: ReadonlyArray<AvatarSlot['hairStyle']> = ['short', 'bob', 'bun', 'curly']
-const TOPS = ['#4e84be', '#9472bd', '#44a99c', '#cf8764', '#7d9b60', '#b47197']
+const TOPS = ['#84b6e8', '#b6a0e2', '#63c8bc', '#f0aa86', '#a3c47e', '#e6a0bd']
 const ACCESSORIES: ReadonlyArray<AvatarSlot['accessory']> = ['none', 'glasses', 'beard', 'earring', 'cap']
-const BACKGROUNDS = ['#e3e9f0', '#eee6f5', '#dfeeed', '#f3ead9', '#e9eef9', '#f0e6ee']
+const BACKGROUNDS = ['#e8eff8', '#f1eaf8', '#e3f2f0', '#faf0e3', '#eaeffb', '#f8e9f1']
 
 /** 全量位面 key（25 岗位 + s01..s15），顺序即索引顺序。 */
 export const SLOT_KEYS: readonly string[] = [...BUILTIN_ROLE_KEYS, ...SPARE_KEYS]

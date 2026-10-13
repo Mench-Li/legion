@@ -462,6 +462,17 @@ export interface ProviderReadiness {
   version?: string
   checkedAtMs?: number
   /**
+   * 凭据模式（2026-10-13）：`subscription`（订阅态登录文件）/
+   * `api-settings`（CLI 配置里的 API 模式）/ `env`（环境变量）/ `none` / `not-required`。
+   *
+   * ★ 区分它的理由：**同样是"有凭据"，修法完全不同**。第一版没区分，于是把
+   * "在 settings.json 里配了 API key"的用户判成"没登录"，还建议他去 `/login` ——
+   * 那条建议会把他刻意配好的 API 模式顶掉。
+   */
+  authMode?: 'subscription' | 'api-settings' | 'env' | 'none' | 'not-required'
+  /** 探过的端点 host（只到 host：路径与查询串只有泄露风险、没有诊断价值）。 */
+  endpointHost?: string
+  /**
    * provider **自报的能力位**（2026-10-13）：它是"能干什么"的真值，
    * 与 `state`（"能不能跑"）合成完整读数。
    *

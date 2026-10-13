@@ -34,7 +34,7 @@
 //      "哪台机器的哪个路径缺什么"本身就是一张地图。
 // ============================================================================
 import { join } from 'node:path'
-import { accessSync, constants, existsSync } from 'node:fs'
+import { accessSync, constants, existsSync, readFileSync } from 'node:fs'
 import { execFile } from 'node:child_process'
 import { delimiter } from 'node:path'
 
@@ -58,7 +58,23 @@ export const STEP_TIMEOUT_MS = 4_000
 export const PROVIDER_DEADLINE_MS = 12_000
 
 const CLAUDE_LOGIN_HINT = '在这台机器上运行 `claude` 并执行 /login（会生成 ~/.claude/.credentials.json）'
+const CLAUDE_API_HINT = '在 ~/.claude/settings.json 的 env 块里配 ANTHROPIC_BASE_URL + ANTHROPIC_AUTH_TOKEN'
+  + '（或 ANTHROPIC_API_KEY），也可以改用顶层 apiKeyHelper'
 const CODEX_LOGIN_HINT = '在这台机器上运行 `codex login`（会生成 ~/.codex/auth.json）'
+
+/** 凭据从哪来。**修法随它而变**，所以必须分开说。 */
+export const AUTH_MODE = Object.freeze({
+  /** 订阅态登录文件（`claude` 的 OAuth）/ 各家的 auth.json。 */
+  SUBSCRIPTION: 'subscription',
+  /** 从 CLI 自己的配置文件里读到的 API 凭据（Claude Code 的 `settings.json` env 块 / apiKeyHelper）。 */
+  API_SETTINGS: 'api-settings',
+  /** 从进程环境变量读到的 key。 */
+  ENV: 'env',
+  /** 什么都没找到。 */
+  NONE: 'none',
+  /** 该 runtime 不需要凭据。 */
+  NOT_REQUIRED: 'not-required',
+})
 
 /**
  * provider 名 → 探测规格。**唯一来源**：新增一个外部运行时只改这里。
@@ -102,9 +118,29 @@ export const PROVIDER_SPECS = Object.freeze({
     cli: 'claude',
     authFiles: ['.claude/.credentials.json'],
     authEnvKeys: ['ANTHROPIC_API_KEY', 'ANTHROPIC_AUTH_TOKEN'],
+    /**
+     * ★★ 2026-10-13 实机修正：Claude Code **还有第二种凭据来源** —— 它自己的
+     *   `settings.json`，很多人（包括本机用户）就是靠它走 **API 模式**的：
+     *
+     *     { "env": { "ANTHROPIC_BASE_URL": "…", "ANTHROPIC_AUTH_TOKEN": "…" } }
+     *
+     *   只查 `.credentials.json`（订阅 OAuth）与进程环境变量，会把这套完全合法的配置
+     *   判成 `not_logged_in`，并**建议人家去跑 `/login`** —— 那条建议是有害的：
+     *   照做会把人家刻意配好的 API 模式顶掉。
+     *
+     *     > 一个"我没找到你的凭据"的结论，
+     *     > 与一个"你没有凭据"的结论，在界面上是同一句话 ——
+     *     > 而前者的正确下一步是**改我的检查**，不是改用户的机器。
+     *
+     *   我们只读**键名与是否非空**，绝不读取、绝不外传任何值。
+     */
+    settingsFiles: ['.claude/settings.json', '.claude/settings.local.json'],
+    /** 自定义端点：配了它就该探**它**，而不是厂商默认地址（否则又是一次假阴性）。 */
+    baseUrlEnvKeys: ['ANTHROPIC_BASE_URL'],
     endpoint: 'https://api.anthropic.com',
     installHint: 'npm i -g @anthropic-ai/claude-code，并确保它在这个守护能看到的 PATH 上',
     loginHint: CLAUDE_LOGIN_HINT,
+    apiHint: CLAUDE_API_HINT,
   }),
   codex: Object.freeze({
     kind: 'external',
@@ -196,6 +232,21 @@ export function createLocalReadinessDeps({ env = process.env, home = null, platf
     fileExists: (abs) => {
       try { accessSync(abs, constants.F_OK); return true } catch { return false }
     },
+    /**
+     * 读一个 JSON 配置（CLI 自己的 settings.json）。
+     *
+     * ★ 读进来的对象**只用于取键名与非空判断**（见 `readCliAuthConfig`），
+     *   值不会进结论、不会被记录、不会外传。
+     * ★ 读不到 / 不是合法 JSON ⇒ `null`，与"没有这个文件"同一处理：探测不该因为
+     *   一份正在被编辑器写一半的文件而报错。
+     */
+    readJsonFile: (abs) => {
+      try {
+        if (!existsSync(abs)) return null
+        const parsed = JSON.parse(readFileSync(abs, 'utf8'))
+        return parsed !== null && typeof parsed === 'object' ? parsed : null
+      } catch { return null }
+    },
     envHas: (key) => typeof env[key] === 'string' && env[key] !== '',
     pathValue: env.PATH ?? env.Path ?? '',
     resolveOnPath: (bin) => resolveOnPath(bin, env.PATH ?? env.Path ?? '', { platform }),
@@ -216,6 +267,54 @@ export function createLocalReadinessDeps({ env = process.env, home = null, platf
     },
     now: () => Date.now(),
   }
+}
+
+/**
+ * 从一个 CLI 自己的配置文件里读出「凭据是否配好了」与「它指向哪个端点」。
+ *
+ * ★ 只取**键名与是否非空**，不取、不存、不外传任何值。
+ *   （这与 `fileExists` 是同一档强度：我们知道"填了"，但不知道"填的是什么"。）
+ *
+ * 认两种写法（都是 Claude Code 支持的）：
+ *   · `env: { ANTHROPIC_AUTH_TOKEN | ANTHROPIC_API_KEY: <非空> }`
+ *   · 顶层 `apiKeyHelper: <非空字符串>`（一个能吐出 key 的命令；**只认它存在，不执行它** ——
+ *     一个就绪度探测没有理由去跑用户机器上的任意命令）
+ */
+export function readCliAuthConfig(config, { authEnvKeys = [], baseUrlEnvKeys = [] } = {}) {
+  if (config === null || typeof config !== 'object' || Array.isArray(config)) {
+    return { hasAuth: false, baseUrl: null }
+  }
+  const env = config.env !== null && typeof config.env === 'object' && !Array.isArray(config.env)
+    ? config.env
+    : {}
+  const nonEmptyString = (v) => typeof v === 'string' && v.trim() !== ''
+  const hasAuth = authEnvKeys.some((k) => nonEmptyString(env[k])) || nonEmptyString(config.apiKeyHelper)
+  const baseUrlKey = baseUrlEnvKeys.find((k) => nonEmptyString(env[k]))
+  return {
+    hasAuth,
+    // ★ 只回一个**字符串原值**给调用方去探；调用方负责只显示 host（见 describeEndpoint）。
+    baseUrl: baseUrlKey === undefined ? null : String(env[baseUrlKey]).trim(),
+  }
+}
+
+/**
+ * 把 URL 收敛成**只含 host** 的形式，用于显示与判据。
+ *
+ * 为什么不显示完整 URL：端点地址可能带路径、甚至带查询串（有些代理把 token 放在 query 里）。
+ * 显示 host 已经足够让人认出"在探哪个服务"，而**多显示的部分只有泄露的风险、没有诊断价值**。
+ * （与"reason 里不出现机器路径"是同一条纪律的不同面。）
+ */
+export function endpointHost(url) {
+  try {
+    const u = new URL(String(url))
+    return u.host === '' ? null : u.host
+  } catch { return null }
+}
+
+/** 该 provider 用哪个端点：**用户配的优先**，没配才用厂商默认。 */
+export function endpointFor(spec, authConfig) {
+  const configured = typeof authConfig?.baseUrl === 'string' && authConfig.baseUrl !== '' ? authConfig.baseUrl : null
+  return { url: configured ?? spec.endpoint, configured: configured !== null }
 }
 
 /**
@@ -272,41 +371,70 @@ export async function probeProvider(name, deps = createLocalReadinessDeps()) {
 
   const ver = await settle(() => deps.execVersion(cliPath), { ok: false, stdout: '' })
   const version = ver && ver.ok ? extractVersion(ver.stdout) : undefined
+  const withVersion = version === undefined ? {} : { version }
 
-  const authOk = (spec.authEnvKeys ?? []).some((k) => deps.envHas(k))
-    || (spec.authFiles ?? []).some((rel) => deps.fileExists(join(deps.home, rel)))
-  if (!authOk) {
-    const what = [...(spec.authFiles ?? []), ...(spec.authEnvKeys ?? [])].join(' 或 ')
+  // ── 凭据：三处来源，**每一处都对应一种不同的用法**，所以模式要分开报 ──
+  const readConfig = (rel) => {
+    if (typeof deps.readJsonFile !== 'function') return null
+    try { return deps.readJsonFile(join(deps.home, rel)) } catch { return null }
+  }
+  const settingsConfigs = (spec.settingsFiles ?? []).map(readConfig)
+  const fromSettings = settingsConfigs.map((cfg) => readCliAuthConfig(cfg, spec)).find((r) => r.hasAuth)
+  const envHasAuth = (spec.authEnvKeys ?? []).some((k) => deps.envHas(k))
+  const hasAuthFile = (spec.authFiles ?? []).some((rel) => deps.fileExists(join(deps.home, rel)))
+
+  const authMode = envHasAuth ? AUTH_MODE.ENV
+    : hasAuthFile ? AUTH_MODE.SUBSCRIPTION
+      : fromSettings !== undefined ? AUTH_MODE.API_SETTINGS
+        : AUTH_MODE.NONE
+
+  if (authMode === AUTH_MODE.NONE) {
+    // ★ 修法要说清**两种模式各自的配法**，不能只喊 /login ——
+    //   对 API 模式的用户来说，"去 /login"是把人家配好的东西顶掉的建议。
+    const checked = [...(spec.authFiles ?? []), ...(spec.settingsFiles ?? []), ...(spec.authEnvKeys ?? [])].join('、')
     return {
       state: READINESS_STATE.NOT_LOGGED_IN,
-      reason: `找到了 \`${spec.cli}\`，但这台机器上找不到登录态（${what}）。${spec.loginHint}`,
+      reason: `找到了 \`${spec.cli}\`，但这台机器上找不到凭据（查过：${checked}）。`
+        + `两种配法任选其一 —— 订阅：${spec.loginHint}；API 模式：${spec.apiHint ?? '在 CLI 配置里填 API key'}。`,
       cli: 'found',
       auth: 'absent',
-      ...(version === undefined ? {} : { version }),
+      authMode,
+      ...withVersion,
       checkedAtMs,
     }
   }
 
-  const net = await settle(() => deps.httpHead(spec.endpoint), 'unreachable')
+  // ── 网络：探**用户实际在用的**端点（配了 baseURL 就探它，否则探厂商默认） ──
+  const endpoint = endpointFor(spec, fromSettings)
+  const host = endpointHost(endpoint.url)
+  const net = await settle(() => deps.httpHead(endpoint.url), 'unreachable')
+  const authLabel = authMode === AUTH_MODE.API_SETTINGS ? '凭据（CLI 配置里的 API 模式）'
+    : authMode === AUTH_MODE.SUBSCRIPTION ? '登录态（订阅）' : '凭据（环境变量）'
   if (net !== 'reachable') {
     return {
       state: READINESS_STATE.NO_NETWORK,
-      reason: `CLI 与登录态都在，但连不上 ${spec.endpoint}（可能是离线/代理/防火墙）。`,
+      reason: `CLI 与${authLabel}都在，但连不上 ${host ?? endpoint.url}`
+        + `${endpoint.configured ? '（这是你配置的自定义端点）' : ''}（可能是离线/代理/防火墙）。`,
       cli: 'found',
       auth: 'present',
+      authMode,
       network: 'unreachable',
-      ...(version === undefined ? {} : { version }),
+      ...(host === null ? {} : { endpointHost: host }),
+      ...withVersion,
       checkedAtMs,
     }
   }
 
   return {
     state: READINESS_STATE.READY,
-    reason: `\`${spec.cli}\` 可用、登录态在、端点可达。`,
+    reason: `\`${spec.cli}\` 可用、${authLabel}在、端点 ${host ?? endpoint.url} 可达`
+      + `${endpoint.configured ? '（自定义端点）' : ''}。`,
     cli: 'found',
     auth: 'present',
+    authMode,
     network: 'reachable',
-    ...(version === undefined ? {} : { version }),
+    ...(host === null ? {} : { endpointHost: host }),
+    ...withVersion,
     checkedAtMs,
   }
 }

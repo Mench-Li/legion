@@ -21,6 +21,12 @@ export type ReadinessState =
   | 'unprobed'
   | 'unknown'
 
+/** 凭据从哪来。**修法随它而变**，所以结论里必须带上它。 */
+export type AuthMode = 'subscription' | 'api-settings' | 'env' | 'none' | 'not-required'
+
+/** 凭据模式的取值表（运行期同名导出的类型面）。 */
+export declare const AUTH_MODE: Readonly<Record<string, AuthMode>>
+
 /** 单个 provider 的探测结论（**不含机器路径、不含凭据**）。 */
 export interface ProviderReadiness {
   readonly state: ReadinessState
@@ -28,6 +34,16 @@ export interface ProviderReadiness {
   readonly reason: string
   readonly cli?: string
   readonly auth?: string
+  /**
+   * 凭据模式（2026-10-13 加）。
+   *
+   * ★ 它区分的是**同样是"有凭据"的两种完全不同用法**：订阅态 OAuth、与 CLI 配置里的
+   *   API 模式。第一版没区分，于是把 API 模式的用户判成"没登录"并叫他去 `/login` ——
+   *   那条建议对他是**有害的**（会把他刻意配好的东西顶掉）。
+   */
+  readonly authMode?: AuthMode
+  /** 探过的端点 host（只到 host：不含路径与查询串）。 */
+  readonly endpointHost?: string
   readonly network?: string
   readonly version?: string
   readonly checkedAtMs: number

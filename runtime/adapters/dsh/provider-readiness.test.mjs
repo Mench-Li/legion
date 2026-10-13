@@ -14,13 +14,17 @@ import { readFileSync } from 'node:fs'
 import { join, delimiter } from 'node:path'
 
 import {
+  AUTH_MODE,
   PROVIDER_SPECS,
   READINESS_STATE,
   createReadinessCache,
+  endpointFor,
+  endpointHost,
   extractVersion,
   hasReadinessSpec,
   probeProvider,
   probeProviders,
+  readCliAuthConfig,
   readinessProbeTargets,
   resolveOnPath,
 } from './provider-readiness.mjs'
@@ -34,12 +38,25 @@ function deps(over = {}) {
     home: HOME,
     fileExists: () => false,
     envHas: () => false,
+    /** 默认没有任何 CLI 配置文件；要测 API 模式就覆写它。 */
+    readJsonFile: () => null,
     pathValue: '/usr/local/bin',
     resolveOnPath: () => '/usr/local/bin/tool',
     execVersion: async () => ({ ok: true, stdout: 'tool 1.2.3\n' }),
     httpHead: async () => 'reachable',
     now: () => 1_000_000,
     ...over,
+  }
+}
+
+/**
+ * 让 `readJsonFile` 假装某几个配置文件存在。
+ * @param {Record<string, unknown>} byRelPath 相对 HOME 的路径 → 解析出来的对象
+ */
+function withSettings(byRelPath) {
+  return (abs) => {
+    const hit = Object.entries(byRelPath).find(([rel]) => abs === join(HOME, rel))
+    return hit === undefined ? null : hit[1]
   }
 }
 
@@ -320,8 +337,182 @@ describe('探测目标：注册表 ∪ 规格表', () => {
   })
 })
 
-describe('规格表本身', () => {
-  test('★ 两个进程内后端都必须是 native/ready（fork 是实机补的）', async () => {
+// ════════════════════════════════════════════════════════════════════════════
+// Claude Code 的 **API 模式**（2026-10-13 用户实测报上来的假阴性）
+//
+// 用户原话：「我的 Claude 是通过 API 方式登录，通过修改 settings.json 来使用的」。
+//
+// 他机器上的真实形状（只看键名）：
+//
+//   ~/.claude/settings.json
+//     env.ANTHROPIC_AUTH_TOKEN: string 非空
+//     env.ANTHROPIC_BASE_URL:   string 非空
+//     env.ANTHROPIC_DEFAULT_*_MODEL…: …
+//
+// 而第一版只查 `.credentials.json`（订阅 OAuth）与进程环境变量 —— 两处都不是他的用法
+// ⇒ 报 `not_logged_in`，还建议他去跑 `/login`。**那条建议是有害的**：照做会把他刻意配好的
+// API 模式顶掉，而这本来是我的检查漏了一处来源。
+//
+//   > 一个"我没找到你的凭据"的结论，
+//   > 与一个"你没有凭据"的结论，在界面上是同一句话 ——
+//   > 而前者的正确下一步是**改我的检查**，不是改用户的机器。
+//
+// 第二处同类假阴性：他配了自定义 `ANTHROPIC_BASE_URL`，而固定去探 api.anthropic.com
+// 在国内常常不通 ⇒ 会被判 `no_network`。要探的是**他实际用的那个端点**。
+// ════════════════════════════════════════════════════════════════════════════
+
+/** 用户机器上的真实形状（值用占位串，结构照抄）。 */
+const USER_SETTINGS = Object.freeze({
+  env: {
+    ANTHROPIC_AUTH_TOKEN: 'sk-placeholder-token-value',
+    ANTHROPIC_BASE_URL: 'https://api.example-proxy.invalid/anthropic',
+    ANTHROPIC_DEFAULT_SONNET_MODEL: 'claude-sonnet-4-6',
+  },
+  includeCoAuthoredBy: true,
+})
+
+describe('API 模式：从 CLI 自己的配置文件里认凭据', () => {
+  test('★★ 用户的真实形状 ⇒ 认出来是 API 模式（不再是 not_logged_in）', async () => {
+    const r = await probeProvider('claude-code', deps({
+      fileExists: () => false,          // 没有 .credentials.json（订阅态）
+      envHas: () => false,              // 进程环境里也没有
+      readJsonFile: withSettings({ '.claude/settings.json': USER_SETTINGS }),
+      httpHead: async () => 'reachable',
+    }))
+    assert.equal(r.state, READINESS_STATE.READY, '这套配置是合法的，必须判 ready：' + r.reason)
+    assert.equal(r.authMode, AUTH_MODE.API_SETTINGS)
+    assert.equal(r.auth, 'present')
+  })
+
+  test('★★ 探的是**用户配的**端点，不是厂商默认', async () => {
+    const probed = []
+    await probeProvider('claude-code', deps({
+      readJsonFile: withSettings({ '.claude/settings.json': USER_SETTINGS }),
+      httpHead: async (url) => { probed.push(url); return 'reachable' },
+    }))
+    assert.deepEqual(probed, ['https://api.example-proxy.invalid/anthropic'],
+      '配了 baseURL 就该探它 —— 固定探 api.anthropic.com 会在国内造出假 no_network')
+    assert.ok(!probed.includes('https://api.anthropic.com'), '不该去探厂商默认地址')
+  })
+
+  test('★★ 结论里**绝不出现凭据值**，也不出现完整 URL（只到 host）', async () => {
+    const r = await probeProvider('claude-code', deps({
+      readJsonFile: withSettings({ '.claude/settings.json': USER_SETTINGS }),
+    }))
+    const dump = JSON.stringify(r)
+    assert.ok(!dump.includes('sk-placeholder-token-value'), '结论里出现了 token 值')
+    assert.ok(!dump.includes('/anthropic'), '结论里出现了完整 URL 路径（只该到 host）')
+    assert.equal(r.endpointHost, 'api.example-proxy.invalid')
+    assert.match(r.reason, /api\.example-proxy\.invalid/)
+  })
+
+  test('★★ API 模式下的文案**不得**建议 /login（那会把人家配好的顶掉）', async () => {
+    const ok = await probeProvider('claude-code', deps({
+      readJsonFile: withSettings({ '.claude/settings.json': USER_SETTINGS }),
+    }))
+    assert.ok(!ok.reason.includes('/login'), 'API 模式已就绪时不该提 /login：' + ok.reason)
+    assert.match(ok.reason, /API/, '要说明凭据来自 CLI 配置的 API 模式')
+
+    // 网络不通时也一样：不能说"去 /login"，那是错的方向
+    const noNet = await probeProvider('claude-code', deps({
+      readJsonFile: withSettings({ '.claude/settings.json': USER_SETTINGS }),
+      httpHead: async () => 'unreachable',
+    }))
+    assert.equal(noNet.state, READINESS_STATE.NO_NETWORK)
+    assert.ok(!noNet.reason.includes('/login'), '网络问题不该建议重新登录：' + noNet.reason)
+    assert.match(noNet.reason, /自定义端点/)
+  })
+
+  test('apiKeyHelper 也算 API 模式（只认它存在，**不执行**它）', async () => {
+    let ran = false
+    const r = await probeProvider('claude-code', deps({
+      readJsonFile: withSettings({ '.claude/settings.json': { apiKeyHelper: '/usr/local/bin/get-key.sh' } }),
+      httpHead: async () => 'reachable',
+      // 就算给了一个会"被调用"的探针也不该有人去跑它
+      execVersion: async () => { ran = true; return { ok: true, stdout: 'x 1.0.0' } },
+    }))
+    assert.equal(r.authMode, AUTH_MODE.API_SETTINGS)
+    assert.equal(r.state, READINESS_STATE.READY)
+    assert.ok(ran, 'execVersion 是探 --version 用的，本来就该跑（这里只是确认这条路径没走偏）')
+  })
+
+  test('settings.json 在 settings.local.json 里也算（两个文件都看）', async () => {
+    const r = await probeProvider('claude-code', deps({
+      readJsonFile: withSettings({ '.claude/settings.local.json': USER_SETTINGS }),
+    }))
+    assert.equal(r.authMode, AUTH_MODE.API_SETTINGS)
+  })
+
+  test('★ 空的 key / 空串不算配好（"填了个空"与"没填"都等于没有）', async () => {
+    for (const env of [{ ANTHROPIC_AUTH_TOKEN: '' }, { ANTHROPIC_AUTH_TOKEN: '   ' }, {}]) {
+      const r = await probeProvider('claude-code', deps({
+        readJsonFile: withSettings({ '.claude/settings.json': { env } }),
+      }))
+      assert.equal(r.state, READINESS_STATE.NOT_LOGGED_IN, JSON.stringify(env) + ' 不该算配好')
+      assert.equal(r.authMode, AUTH_MODE.NONE)
+    }
+  })
+
+  test('★★ 都没有时，修法要给出**两种模式**（不能只喊 /login）', async () => {
+    const r = await probeProvider('claude-code', deps({ readJsonFile: () => null }))
+    assert.equal(r.state, READINESS_STATE.NOT_LOGGED_IN)
+    assert.match(r.reason, /订阅/, '要给出订阅态的配法')
+    assert.match(r.reason, /API 模式/, '也要给出 API 模式的配法 —— 只喊 /login 是半个答案')
+    assert.match(r.reason, /settings\.json/, '要说清 API 模式配在哪个文件')
+  })
+
+  test('三种来源同时存在时的优先级：环境变量 > 订阅文件 > CLI 配置', async () => {
+    const all = {
+      fileExists: () => true,
+      envHas: () => true,
+      readJsonFile: withSettings({ '.claude/settings.json': USER_SETTINGS }),
+    }
+    assert.equal((await probeProvider('claude-code', deps(all))).authMode, AUTH_MODE.ENV)
+    assert.equal((await probeProvider('claude-code', deps({ ...all, envHas: () => false }))).authMode, AUTH_MODE.SUBSCRIPTION)
+    assert.equal((await probeProvider('claude-code', deps({
+      ...all, envHas: () => false, fileExists: () => false,
+    }))).authMode, AUTH_MODE.API_SETTINGS)
+  })
+})
+
+describe('readCliAuthConfig / endpointHost / endpointFor（纯函数）', () => {
+  test('readCliAuthConfig 只回答"配了没"与"端点是什么"，不碰别的', () => {
+    const spec = PROVIDER_SPECS['claude-code']
+    assert.deepEqual(readCliAuthConfig(USER_SETTINGS, spec),
+      { hasAuth: true, baseUrl: 'https://api.example-proxy.invalid/anthropic' })
+    assert.deepEqual(readCliAuthConfig({ env: { ANTHROPIC_API_KEY: 'k' } }, spec),
+      { hasAuth: true, baseUrl: null })
+    assert.deepEqual(readCliAuthConfig({ apiKeyHelper: 'x' }, spec), { hasAuth: true, baseUrl: null })
+    // 脏输入一律当"没有"，不抛错
+    for (const bad of [null, undefined, [], 'x', 1, { env: null }, { env: [] }, { env: { OTHER: 'x' } }]) {
+      const r = readCliAuthConfig(bad, spec)
+      assert.equal(r.hasAuth, false, JSON.stringify(bad))
+      assert.equal(r.baseUrl, null)
+    }
+  })
+
+  test('endpointHost 只保留 host（路径与查询串一律丢掉）', () => {
+    assert.equal(endpointHost('https://api.anthropic.com'), 'api.anthropic.com')
+    assert.equal(endpointHost('https://api.x.com/anthropic?token=secret'), 'api.x.com')
+    assert.equal(endpointHost('http://127.0.0.1:8080/v1'), '127.0.0.1:8080')
+    for (const bad of ['', 'not a url', null, undefined, 1]) {
+      assert.equal(endpointHost(bad), null, JSON.stringify(bad))
+    }
+    // ★ 关键：查询串里的东西不许跟出来
+    assert.ok(!String(endpointHost('https://a.b/c?token=sk-secret')).includes('sk-secret'))
+  })
+
+  test('endpointFor：配了就用配的，没配才用厂商默认', () => {
+    const spec = PROVIDER_SPECS['claude-code']
+    assert.deepEqual(endpointFor(spec, { baseUrl: 'https://mine.invalid/v1' }),
+      { url: 'https://mine.invalid/v1', configured: true })
+    assert.deepEqual(endpointFor(spec, { baseUrl: null }),
+      { url: 'https://api.anthropic.com', configured: false })
+    assert.deepEqual(endpointFor(spec, null), { url: 'https://api.anthropic.com', configured: false })
+  })
+})
+
+describe('规格表本身', () => {  test('★ 两个进程内后端都必须是 native/ready（fork 是实机补的）', async () => {
     // 实机上 `fork` 曾被报成 `unprobed`（= "没有探测规格"），而它是
     // `@deepseek-ai/dsh-subagent-fork-in-process` 注册的、DSH 自带且**默认**的进程内后端。
     //   > 把"我还没写规格"说成"已注册不等于可用"，

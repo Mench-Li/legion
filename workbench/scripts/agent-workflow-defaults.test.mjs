@@ -159,6 +159,23 @@ describe('provider 就绪度 → 候选', () => {
     assert.equal(scopeReadiness([{ member: 'old@A', scope: 'A', kind: 'worker', providers: null }], 'A'), null)
   })
 
+  test('★ 凭据模式与端点 host 要透传到候选（界面靠它区分 API 模式与订阅登录）', () => {
+    // 背景：「我的 Claude 是通过 API 方式登录，通过修改 settings.json 来使用的」——
+    // 这两种配置此前在界面上是同一行字，而它们的修法完全不同。
+    const choices = providerChoices({ providers: {
+      'claude-code': { state: 'ready', authMode: 'api-settings', endpointHost: 'api.example.invalid' },
+      codex: { state: 'ready', authMode: 'subscription' },
+    } })
+    const by = Object.fromEntries(choices.map(c => [c.name, c]))
+    assert.equal(by['claude-code'].authMode, 'api-settings')
+    assert.equal(by['claude-code'].endpointHost, 'api.example.invalid')
+    assert.equal(by.codex.authMode, 'subscription')
+    assert.equal(by.codex.endpointHost, null, '没上报就是 null，不编造')
+    // 没读数的候选也必须是 null 而不是 undefined（界面按 null 判断）
+    assert.equal(by[DEFAULT_NATIVE_PROVIDER].authMode, null)
+    assert.equal(by[DEFAULT_NATIVE_PROVIDER].endpointHost, null)
+  })
+
   test('★ 候选包含读数外的**已知默认值**（刚装好、还没轮到自检时也能选）', () => {
     const choices = providerChoices(scopeReadiness(members, 'A'))
     const names = choices.map(c => c.name)

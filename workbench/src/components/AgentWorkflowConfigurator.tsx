@@ -615,12 +615,23 @@ export function AgentWorkflowConfigurator({ scope }: Props): React.JSX.Element {
               <div style={{ marginTop: 6, display: 'grid', gap: 4 }}>
                 {providerCandidates.map(choice => {
                   const mark = choice.ready ? '✅' : choice.state === null ? '·' : '⚠'
+                  // ★ 2026-10-13：把**凭据模式**画出来。
+                  //   "就绪（订阅登录）"与"就绪（API 模式）"是两种完全不同的配置，
+                  //   而它们此前在界面上是同一行字 —— 对 API 模式的用户来说，
+                  //   分不出来就意味着他可能会被"去 /login"这类建议带偏。
+                  const authText = choice.authMode === null ? ''
+                    : choice.authMode === 'api-settings' ? '（凭据：settings.json 的 API 模式）'
+                      : choice.authMode === 'subscription' ? '（凭据：订阅态登录）'
+                        : choice.authMode === 'env' ? '（凭据：环境变量）'
+                          : choice.authMode === 'not-required' ? '（不需要凭据）'
+                            : ''
                   const stateText = choice.state === null
                     ? '还没有读数（不代表不可用；本机自检约 10 分钟一轮）'
-                    : choice.ready ? '就绪' : choice.state
+                    : choice.ready ? `就绪${authText}` : choice.state
                   return <div key={choice.name} style={{ color: choice.ready || choice.state === null ? 'var(--muted-2)' : 'var(--yellow)' }}>
                     {mark} <code>{choice.name}</code>
                     {choice.version === null ? '' : ` v${choice.version}`} —— {stateText}
+                    {choice.endpointHost === null ? '' : ` · 端点 ${choice.endpointHost}`}
                     {choice.state !== null && !choice.ready && choice.reason !== null && <div style={{ marginLeft: 18 }}>修法：{choice.reason}</div>}
                   </div>
                 })}

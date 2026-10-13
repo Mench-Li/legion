@@ -183,7 +183,14 @@ export interface Config {
   hubToken: string
   /** 守护负责的项目 scope（默认 default；goal 发布目标时默认用 roles.json 的 name）。 */
   scope: string
-  /** 可选执行节点身份；登记后会上报实际 provider 与能力。 */
+  /**
+   * 可选执行节点身份；登记后会上报实际 provider 与能力。
+   *
+   * ★ 支持 `{scope}` 占位符（2026-10-13）：节点表主键是 `id`，**一个 id 只能属于一个空间**，
+   *   而 `scopes: 'auto'` 的守护同时服务多个空间 ⇒ 想"一条配置覆盖多空间"必须写
+   *   `desktop-{scope}`（各空间解析成 `desktop-software` / `desktop-ozon`）。
+   *   不含占位符时行为与以前完全一致。
+   */
   agentNodeId: string
   /** 切片流水线类型化槽位：并发 coder 上限（fix 任务占 coder 槽）。 */
   sliceCoderSlots: number
@@ -927,6 +934,36 @@ function spaceWorker(ctx: AppContext, config: Config): void {
   //   手机在 `default` 里派的单**永远到不了电脑**，而两端日志都"正常"。
   const scope = config.scope !== '' ? config.scope : (filePipeline?.name ?? 'default')
 
+  /** 配置里为本空间解析出的节点 id（**不做可用性门控**）—— 心跳用它去登记 / 续期。 */
+  const configuredAgentNodeId = (): string => resolveAgentNodeId(config.agentNodeId, scope)
+
+  /**
+   * 本空间的执行节点**心跳是否成功过**（2026-10-13）。
+   *
+   * ## 为什么认领要门控在这一位上
+   *
+   * hub 的认领路径有这一段：只要请求带了 `agentNodeId`，就要求这个节点**存在且 ready**，
+   * 否则抛 409 AGENT_NODE_NOT_READY。也就是说"携带节点身份"本身是一个**有前置条件的动作**：
+   *
+   *   节点还没登记 / 还没心跳 / 心跳过期  ⇒ 带上它就等于**每个任务都领不走**。
+   *
+   * 而 `scopes: 'auto'` 的守护会不断遇到**新空间**（新空间里当然还没有节点）。
+   * 若"配了就总是携带"，新空间从出现到节点就绪之间的**每一个任务都会静默停住** ——
+   * 而这正是本次要在别处消灭的那种失败。
+   *
+   *   > 一个"配了就总是携带"的节点身份，
+   *   > 与一个"确认自己对得上之后才携带"的节点身份，
+   *   > 在**节点已登记且就绪**的时候是同一个东西 ——
+   *   > 区别只在它还没就绪的那段时间，而那时前者会让每个任务都领不走。
+   *
+   * 门控之后语义是干净的：**没携带 = 没绑定要求**（未绑定的任务照常领走），
+   * 而绑定了节点的任务本来就必须等这台机器就绪才该被领走。
+   */
+  let nodeReportedReady = false
+
+  /** 认领 / 回执里携带的节点 id：只有本空间节点心跳成功过之后才携带。 */
+  const agentNodeIdForScope = (): string => (nodeReportedReady ? configuredAgentNodeId() : '')
+
   const activeWriteGuards = new Map<string, GrantedWrite>()
   const childTaskIds = new Map<string, string>()
   async function fetchWriteGrant(taskId: string, worktree: string): Promise<GrantedWrite | null> {
@@ -1401,7 +1438,7 @@ function spaceWorker(ctx: AppContext, config: Config): void {
       claimed = await hubPost('/api/claim', {
         id, soldier, by: config.role, scope: scope, requestId,
         ...(config.taskTtlMinutes > 0 ? { ttlMinutes: config.taskTtlMinutes } : {}),
-        ...((config.agentNodeId ?? '').trim() !== '' ? { agentNodeId: (config.agentNodeId ?? '').trim() } : {}),
+        ...(agentNodeIdForScope() !== '' ? { agentNodeId: agentNodeIdForScope() } : {}),
       }) as Task
     } else {
       const argv = ['claim', id, '--soldier', soldier, '--request-id', requestId]
@@ -2733,7 +2770,7 @@ function spaceWorker(ctx: AppContext, config: Config): void {
           sourceCommit,
           stageAttemptId: workflowStageAttemptId,
           providerRunId,
-          runnerNodeId: (config.agentNodeId ?? '').trim() || null,
+          runnerNodeId: agentNodeIdForScope() || null,
         }
         if (changedDuringTests) {
           const completedReceipt = receipt
@@ -3808,15 +3845,19 @@ function spaceWorker(ctx: AppContext, config: Config): void {
         //   取不到就整个字段不发：面板那边"未知"会走"不给命令"的分支。
         ...(runningProfileName === null ? {} : { profile: runningProfileName }),
       })
-      if ((config.agentNodeId ?? '').trim() !== '') {
-        const worktreeProbe = config.isolate
-          ? await runGit(workspace.repoRootFor(), ['rev-parse', '--is-inside-work-tree'])
-          : { code: 1 }
-        const providers = Object.fromEntries(providerNames.map((name) => [name, subagentProviderCapabilities(ctx, name)]))
-        await hubPost('/api/agent-nodes/heartbeat', {
-          id: (config.agentNodeId ?? '').trim(),
-          scope,
-          by: `${config.role}@${scope}`,
+      const nodeIdForHeartbeat = configuredAgentNodeId()
+      if (nodeIdForHeartbeat !== '') {
+        // ★ 单独 try/catch：节点心跳失败**不该**被报成"chat 心跳上报失败"，
+        //   而且它必须能把 nodeReportedReady 翻回 false（否则一次成功后永久放行）。
+        try {
+          const worktreeProbe = config.isolate
+            ? await runGit(workspace.repoRootFor(), ['rev-parse', '--is-inside-work-tree'])
+            : { code: 1 }
+          const providers = Object.fromEntries(providerNames.map((name) => [name, subagentProviderCapabilities(ctx, name)]))
+          await hubPost('/api/agent-nodes/heartbeat', {
+            id: nodeIdForHeartbeat,
+            scope,
+            by: `${config.role}@${scope}`,
           providerNames,
           capabilities: {
             isolatedWorktree: config.isolate && worktreeProbe.code === 0,
@@ -3826,7 +3867,17 @@ function spaceWorker(ctx: AppContext, config: Config): void {
             cancellation: Object.values(providers).some((caps) => caps.cancellation),
             providers,
           },
-        })
+          })
+          // ★ 到这里才算"本空间的节点身份可用" ⇒ 之后认领才开始携带它。
+          if (!nodeReportedReady) {
+            nodeReportedReady = true
+            log(`执行节点 ${nodeIdForHeartbeat} 已就绪上报，后续认领将携带该节点身份`)
+          }
+        } catch (e) {
+          // 退回"不携带节点身份"：未绑定的任务照常能领；绑定了的任务本来就要等这台机器就绪。
+          if (nodeReportedReady) log(`执行节点 ${nodeIdForHeartbeat} 心跳失败，认领暂不携带节点身份：${String(e)}`)
+          nodeReportedReady = false
+        }
       }
     } catch (e) {
       log(`chat 心跳上报失败：${String(e)}`)
@@ -4127,6 +4178,43 @@ export interface SpaceRuntimeView {
  * 「主 scope」归属：优先给父配置自己声明的 scope；父 scope 不在接管集合里时**交给第一个空间**——
  * 否则当父 scope 未开通时没人再维护 `daemon.json`，看板/健康页的守护卡片会永久停留在旧数据。
  */
+/**
+ * 解析**本空间**的执行节点 id —— 支持 `{scope}` 占位符（2026-10-13）。
+ *
+ * ## 为什么需要占位符
+ *
+ * `agent_node_configs` 的主键是 **`id`**（不是 `(id, scope)`），注册走
+ * `ON CONFLICT(id) DO UPDATE SET scope=excluded.scope` ⇒ **一个节点 id 只能属于一个空间**。
+ * 而认领路径要求 `getAgentNodeConfig({ id, scope: 任务所在空间 })` 命中 ⇒
+ * `node.scope` 必须**逐字等于**任务所在空间。
+ *
+ * 可一个守护是 `scopes: 'auto'`：它同时服务多个空间（实测本机 software + ozon 两个 fiber）。
+ * 配置里只有一个 `agentNodeId` 字符串，会被**所有** fiber 共用 ⇒ 若填一个字面 id，
+ * 则**只有一个空间认领得走**，另一个空间的每个任务都会 409 AGENT_NODE_NOT_READY，
+ * 而且表现为"任务不动"。
+ *
+ *   > 一个"一个守护一个节点"的模型，
+ *   > 与一个"一个守护服务多个空间"的部署，
+ *   > 在**只服务一个空间**的时候是同一个东西 ——
+ *   > 区别只在切到第二个空间那天，而那时一半的任务会静默停住。
+ *
+ * 所以写 `desktop-{scope}` ⇒ 各 fiber 解析成 `desktop-software` / `desktop-ozon`。
+ *
+ * ★ **不含占位符时逐字返回（trim 后）** —— 单空间部署的行为与以前完全一致，向后兼容。
+ * ★ 空/空白 ⇒ 空串（= 不上报节点，与以前一致）。
+ */
+export function resolveAgentNodeId(configured: string | undefined | null, scope: string): string {
+  const raw = typeof configured === 'string' ? configured.trim() : ''
+  if (raw === '') return ''
+  if (!raw.includes('{scope}')) return raw
+  const s = typeof scope === 'string' ? scope.trim() : ''
+  // ★ 空间名未知时**不**把占位符原样送出去：`desktop-{scope}` 不是一个合法节点 id，
+  //   送上去只会换来一条来自 hub 的格式错误（而真正的问题是"这个 fiber 不知道自己服务谁"）。
+  //   返回空串 = 不上报节点 ⇒ 退化成"任一在线节点认领"，与今天一致。
+  if (s === '') return ''
+  return raw.split('{scope}').join(s)
+}
+
 export function planSpaceRunners(parent: Config, spaces: SpaceRuntimeView[]): Config[] {
   const want = parent.scopes
   if (want === undefined || want === 'off') return []

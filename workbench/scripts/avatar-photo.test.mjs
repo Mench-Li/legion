@@ -146,3 +146,20 @@ test('⑨ 图片基址：两端都是相对 `./avatars/`（否则 /mobile/ 下�
   assert.ok(html.includes('src="./avatars/'), '手机端渲染结果必须用相对基址：' + html.slice(0, 90))
   assert.ok(!html.includes('src="/avatars/'), '手机端不许用站点根绝对路径（在 /mobile/ 下会 404）')
 })
+
+test('★ ⑩ 两个静态服务都认得 `.webp`（否则：桌面正常、手机端全 404）', () => {
+  // ★ 这一条是**实测踩出来的**：图放好了、桌面 200，而 `/mobile/avatars/x.webp` 回 **404** ——
+  //   因为两个静态服务的 MIME 都是**白名单**，"不在表里的一律 404"，而 .webp 当时不在表里。
+  //   这个故障的形状很坏：桌面端看起来完全正常，只有手机端整片头像裂掉。
+  //
+  //   > 一条"白名单里漏了一项"的规则，
+  //   > 在**只有一类客户端**的时候，与一条正确的规则没有区别。
+  const cases = [
+    ['team-hub/routes/mobile.mjs', /MIME\s*=\s*Object\.freeze\(\{[\s\S]*?'\.webp'\s*:\s*'image\/webp'/],
+    ['workbench/scripts/serve.mjs', /MIME\s*=\s*\{[\s\S]*?'\.webp'\s*:\s*'image\/webp'/],
+  ]
+  for (const [file, re] of cases) {
+    const src = readFileSync(resolve(ROOT, file), 'utf8')
+    assert.match(src, re, `${file} 的 MIME 白名单必须包含 .webp → image/webp（漏了就是 404）`)
+  }
+})

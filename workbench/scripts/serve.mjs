@@ -31,7 +31,7 @@ import { createServer, request } from 'node:http'
 import { appendFileSync, createReadStream, createWriteStream, existsSync, openSync, readSync, writeSync, closeSync, unlinkSync, rmdirSync, mkdirSync, readdirSync, renameSync, realpathSync, statSync, lstatSync, writeFileSync, rmSync } from 'node:fs'
 import { randomBytes, createHash } from 'node:crypto'
 import { execFileSync, spawn } from 'node:child_process'
-import { basename, extname, join, normalize, dirname, sep, resolve } from 'node:path'
+import { basename, extname, join, normalize, dirname, sep, resolve, relative } from 'node:path'
 import { homedir } from 'node:os'
 import { fileURLToPath } from 'node:url'
 import { buildGithubTarballUrl, scanSkillDirs, sanitizeSkillId } from './skillImporter.mjs'
@@ -2747,7 +2747,29 @@ function routeRequest(req, res) {
     return
   }
   const type = MIME[extname(file)] ?? 'application/octet-stream'
-  res.writeHead(200, { 'content-type': type })
+  // ★★★ 2026-10-13：**静态文件必须带缓存策略**（从前后端产物只有 `content-type`）。
+  //
+  // 实测事故：vite 每次构建都会**换产物名并删掉旧文件**（`index-DxpVJAXj.js` → `index-o7z2j4Q6.js`）。
+  // 而这里发的 `index.html` **一个缓存头都没有** ⇒ 浏览器有资格长期留着旧壳
+  // ⇒ 旧壳去要那个已被删掉的 JS ⇒ **404** ⇒ 单页应用整页死（界面框架在、里面什么都没有），
+  // 用户看到的是"模型和任务**都**加载不出来"，而每一层的报错都指不到这一处。
+  //
+  //   > 一份"永远不过期"的旧壳，与一份"其实是最新的"旧壳，
+  //   > 在用户眼里是同一块白屏 —— 而重建产物的人以为自己只是改了个按钮。
+  //
+  // 三档与**中枢那一侧同一条口径**（`team-hub/routes/static-tree.mjs` 的 `cacheControlFor`）：
+  //   · `.html`            → `no-store`（入口必须每次回源，否则发新版拿不到）
+  //   · `/assets/` 前缀下  → 永久 + `immutable`（文件名带内容哈希，改内容就换名字）
+  //   · 其余               → 一天
+  // ⚠ 这里比的是**静态根的相对路径**（与中枢那条同一个坑：写成完整 URL 路径就永远不匹配）。
+  const relPath = '/' + relative(ROOT, file).split(sep).join('/')
+  const ext = extname(file)
+  const cacheControl = ext === '.html'
+    ? 'no-store'
+    : relPath.startsWith('/assets/')
+      ? 'public, max-age=31536000, immutable'
+      : 'public, max-age=86400'
+  res.writeHead(200, { 'content-type': type, 'cache-control': cacheControl })
   const rs = createReadStream(file)
   rs.on('error', (e) => { // 文件消失/权限等读失败：不击穿进程
     try {

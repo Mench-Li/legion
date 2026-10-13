@@ -913,6 +913,10 @@ async function stageTest() {
         'runtime/dsh-composition/plugins/runtime-contract-registrar-row.test.mjs',
         'team-hub/routes/agent-workflow.test.mjs',
         'workbench/scripts/agent-workflow-view.test.mjs',
+        // 2026-10-13：面板的**默认值**（「相当茫然，完全不知道怎么配置」那次）。
+        // 原来默认预设 Claude Code + Codex 两个没装的外部产品，一打开就是缺失告警
+        // + 一个查不到的必填项。这条守"默认状态必须可发布、不得预设没装的东西"。
+        'workbench/scripts/agent-workflow-defaults.test.mjs',
       ],
       cwd: ROOT,
     },

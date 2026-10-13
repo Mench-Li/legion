@@ -2,12 +2,18 @@ import { useRef, useState } from 'react'
 import { fetchAgentNodes, fetchAgentToolConfigs, fetchAgentWorkflowDefinitions, fetchAgentWorkflowHistory, fetchAgentWorkflowInstances, fetchModelProfiles, fetchSpacePipeline, registerAgentNode, registerAgentToolConfig, registerAgentWorkflowDefinition, saveSpacePipeline, setGoalStatus } from '../api'
 import type { AgentNodeRecord, AgentToolConfigRecord, AgentWorkflowDefinition, AgentWorkflowHistory, AgentWorkflowInstanceSummary, HubModelProfile, SpacePipelineConfig } from '../api'
 import { formatCodexSystemProxyMode } from '../agentWorkflowView'
+import {
+  DEFAULT_NATIVE_PROVIDER,
+  NATIVE_TOOL_DEFAULTS,
+  defaultRoleFor,
+  externalToolsChosen,
+  nativeProviderCandidates,
+} from '../agentWorkflowDefaults'
+import type { ToolChoice, WorkflowRoleKey as RoleKey } from '../agentWorkflowDefaults'
 import { toast } from './Toast'
 import type { GoalStatus } from '../types'
 
 interface Props { scope: string }
-type ToolChoice = 'claude-code' | 'dsh-native' | 'codex'
-type RoleKey = 'designRole' | 'implementationRole' | 'reviewRole'
 interface GraphStageDraft {
   id: string
   role: string
@@ -54,11 +60,7 @@ function observedCodexSystemProxyMode(node: AgentNodeRecord): string | null {
   return typeof provider?.systemProxyMode === 'string' ? provider.systemProxyMode : null
 }
 
-function defaultRole(stages: SpacePipelineConfig['stages'], key: RoleKey): string {
-  const preferred = key === 'designRole' ? ['designer', 'researcher', 'requirement']
-    : key === 'implementationRole' ? ['coder', 'implementer', 'developer'] : ['reviewer', 'review']
-  return stages.find(stage => preferred.includes(stage.role))?.role ?? stages.find(stage => stage.enabled)?.role ?? ''
-}
+// `defaultRole` 搬进了 agentWorkflowDefaults.ts（`defaultRoleFor`）——它现在有单测。
 
 export function AgentWorkflowConfigurator({ scope }: Props): React.JSX.Element {
   const [open, setOpen] = useState(false)
@@ -84,8 +86,13 @@ export function AgentWorkflowConfigurator({ scope }: Props): React.JSX.Element {
   const [newNodeId, setNewNodeId] = useState('')
   const [newNodeLabel, setNewNodeLabel] = useState('')
   const [roles, setRoles] = useState<Record<RoleKey, string>>({ designRole: '', implementationRole: '', reviewRole: '' })
-  const [tools, setTools] = useState<Record<RoleKey, ToolChoice>>({ designRole: 'claude-code', implementationRole: 'dsh-native', reviewRole: 'codex' })
-  const [dshProvider, setDshProvider] = useState('')
+  // ★ 默认值 = **本地执行服务**（不是 Claude Code / Codex）。理由见 agentWorkflowDefaults.ts：
+  //   原来的硬编码默认值预设了"这台机器装了三个外部产品"，而实测本环境一个都没有 ——
+  //   于是面板一打开就是两条缺失告警 + 一个查不到的必填项，用户无从下手。
+  const [tools, setTools] = useState<Record<RoleKey, ToolChoice>>({ ...NATIVE_TOOL_DEFAULTS })
+  // ★ 默认填 DSH 注册的那个 provider 名（`plugins/src/index.ts` 的 config.provider 默认 'spawn'），
+  //   不留空 —— 留空 + 发布时必填 = 用户必须先去读 DSH 源码才发得出去。
+  const [dshProvider, setDshProvider] = useState<string>(DEFAULT_NATIVE_PROVIDER)
   const [maxReworkRounds, setMaxReworkRounds] = useState(2)
   const [definitionName, setDefinitionName] = useState('Claude Code → DeepSeek Harness → Codex')
   const [graphStages, setGraphStages] = useState<GraphStageDraft[]>([])
@@ -143,20 +150,25 @@ export function AgentWorkflowConfigurator({ scope }: Props): React.JSX.Element {
       }
       const workflow = nextPipeline.workflow
       setRoles({
-        designRole: workflow?.designRole ?? defaultRole(nextPipeline.stages, 'designRole'),
-        implementationRole: workflow?.implementationRole ?? defaultRole(nextPipeline.stages, 'implementationRole'),
-        reviewRole: workflow?.reviewRole ?? defaultRole(nextPipeline.stages, 'reviewRole'),
+        designRole: workflow?.designRole ?? defaultRoleFor(nextPipeline.stages, 'designRole'),
+        implementationRole: workflow?.implementationRole ?? defaultRoleFor(nextPipeline.stages, 'implementationRole'),
+        reviewRole: workflow?.reviewRole ?? defaultRoleFor(nextPipeline.stages, 'reviewRole'),
       })
       setMaxReworkRounds(workflow?.maxReworkRounds ?? 2)
       const nextNodeIds = { designRole: '', implementationRole: '', reviewRole: '' } as Record<RoleKey, string>
       for (const key of Object.keys(ROLE_LABEL) as RoleKey[]) {
-        const role = workflow?.[key] ?? defaultRole(nextPipeline.stages, key)
+        const role = workflow?.[key] ?? defaultRoleFor(nextPipeline.stages, key)
         nextNodeIds[key] = workflow?.stageTools?.[role]?.nodeId ?? ''
       }
       setNodeIds(nextNodeIds)
-      const nextTools = { designRole: 'claude-code', implementationRole: 'dsh-native', reviewRole: 'codex' } as Record<RoleKey, ToolChoice>
+      // ★★ 这里的初值决定"用户一点开看到什么"。原来是硬编码的
+      //    `claude-code / dsh-native / codex` —— 即"这台机器装了三个外部产品"，
+      //    而实测本环境：0 工具配置、0 执行节点、8 个流水线阶段的 agentToolConfig 全空。
+      //    那份默认值**没有任何环境证据**，它只是把一个特定部署形态当成了默认。
+      //    现在的规则：**先看环境** —— 流水线阶段已指定工具就用它，否则用本地执行服务。
+      const nextTools = { ...NATIVE_TOOL_DEFAULTS } as Record<RoleKey, ToolChoice>
       for (const key of Object.keys(ROLE_LABEL) as RoleKey[]) {
-        const role = workflow?.[key] ?? defaultRole(nextPipeline.stages, key)
+        const role = workflow?.[key] ?? defaultRoleFor(nextPipeline.stages, key)
         const current = workflow?.stageTools?.[role]?.agentToolConfig
           ?? nextPipeline.stages.find(stage => stage.role === role)?.agentToolConfig
         const config = current ? nextConfigs.find(item => item.id === current.id && item.version === current.version) : undefined
@@ -173,9 +185,9 @@ export function AgentWorkflowConfigurator({ scope }: Props): React.JSX.Element {
       }
       setTools(nextTools)
       setGraphStages([
-        { id: 'design', role: workflow?.designRole ?? defaultRole(nextPipeline.stages, 'designRole'), label: '方案设计', tool: nextTools.designRole, toolConfigRef: workflow?.stageTools?.[workflow.designRole]?.agentToolConfig ?? null, modelConfigRef: null, nodeId: nextNodeIds.designRole, inputArtifacts: '', outputArtifacts: 'design-bundle', testExecutable: '', testArgs: '[]', testTimeoutMs: 900000 },
-        { id: 'implement', role: workflow?.implementationRole ?? defaultRole(nextPipeline.stages, 'implementationRole'), label: '编码与测试', tool: nextTools.implementationRole, toolConfigRef: workflow?.stageTools?.[workflow.implementationRole]?.agentToolConfig ?? null, modelConfigRef: null, nodeId: nextNodeIds.implementationRole, inputArtifacts: 'design-bundle', outputArtifacts: 'implementation-commit, test-evidence', testExecutable: 'node', testArgs: '["--test"]', testTimeoutMs: 900000 },
-        { id: 'review', role: workflow?.reviewRole ?? defaultRole(nextPipeline.stages, 'reviewRole'), label: '代码审查', tool: nextTools.reviewRole, toolConfigRef: workflow?.stageTools?.[workflow.reviewRole]?.agentToolConfig ?? null, modelConfigRef: null, nodeId: nextNodeIds.reviewRole, inputArtifacts: 'design-bundle, implementation-commit, test-evidence', outputArtifacts: '', testExecutable: '', testArgs: '[]', testTimeoutMs: 900000 },
+        { id: 'design', role: workflow?.designRole ?? defaultRoleFor(nextPipeline.stages, 'designRole'), label: '方案设计', tool: nextTools.designRole, toolConfigRef: workflow?.stageTools?.[workflow.designRole]?.agentToolConfig ?? null, modelConfigRef: null, nodeId: nextNodeIds.designRole, inputArtifacts: '', outputArtifacts: 'design-bundle', testExecutable: '', testArgs: '[]', testTimeoutMs: 900000 },
+        { id: 'implement', role: workflow?.implementationRole ?? defaultRoleFor(nextPipeline.stages, 'implementationRole'), label: '编码与测试', tool: nextTools.implementationRole, toolConfigRef: workflow?.stageTools?.[workflow.implementationRole]?.agentToolConfig ?? null, modelConfigRef: null, nodeId: nextNodeIds.implementationRole, inputArtifacts: 'design-bundle', outputArtifacts: 'implementation-commit, test-evidence', testExecutable: 'node', testArgs: '["--test"]', testTimeoutMs: 900000 },
+        { id: 'review', role: workflow?.reviewRole ?? defaultRoleFor(nextPipeline.stages, 'reviewRole'), label: '代码审查', tool: nextTools.reviewRole, toolConfigRef: workflow?.stageTools?.[workflow.reviewRole]?.agentToolConfig ?? null, modelConfigRef: null, nodeId: nextNodeIds.reviewRole, inputArtifacts: 'design-bundle, implementation-commit, test-evidence', outputArtifacts: '', testExecutable: '', testArgs: '[]', testTimeoutMs: 900000 },
       ])
       setGraphEdges([{ from: 'design', to: 'implement' }, { from: 'implement', to: 'review' }])
       setReviewStageId('review')
@@ -230,7 +242,9 @@ export function AgentWorkflowConfigurator({ scope }: Props): React.JSX.Element {
 
   const createOrReuseConfig = async (choice: ToolChoice): Promise<{ id: string; version: number }> => {
     const providerName = choice === 'dsh-native' ? dshProvider.trim() : choice
-    if (!providerName) throw new Error('请填写 已注册的子 Agent provider 名称')
+    // 报错要说**下一步做什么**。原来只有一句"请填写 已注册的子 Agent provider 名称"——
+    // 而用户既不知道去哪查、也不知道默认值是什么（现在默认已填 `spawn`，这句基本不会再出现）。
+    if (!providerName) throw new Error(`请填写「本地执行服务 注册名」。不确定填什么就填 ${DEFAULT_NATIVE_PROVIDER}（Legion 守护自带的本地执行服务，无需额外安装）。`)
     const adapter = choice === 'dsh-native' ? 'dsh-native' : 'dsh-subagent'
     const permissionProfile = choice === 'codex' ? 'codex-workspace-write'
       : choice === 'claude-code' ? 'claude-code-acceptEdits' : `dsh-native:${providerName}`
@@ -478,12 +492,31 @@ export function AgentWorkflowConfigurator({ scope }: Props): React.JSX.Element {
       </button>
       {open && <div style={{ marginTop: 10, fontSize: 12, lineHeight: 1.6 }}>
         {loading ? <div>正在读取阶段链与工具配置…</div> : error && !pipeline ? <div style={{ color: 'var(--red)' }}>{error}</div> : pipeline && <>
-            <div style={{ color: 'var(--muted-2)' }}>
-            独立定义跨 Agent 的设计 → 实现/测试 → 审查链，不要求岗位在空间常规流水线中相邻。发布目标时冻结工作流和工具版本；后续配置变化不改写已有目标。
-            Claude Code 与 Codex 使用各自的 外部执行服务；本地执行服务 必须与运行环境注册名及能力一致。
-              此处只配置交接链，不会自动开启空间执行守护；启用执行仍由侧栏的「持续执行编排」控制。
+            {/* ★★ 2026-10-13：先回答"我需要配吗"。原文只说"这是什么"（"独立定义跨 Agent 的
+                设计 → 实现/测试 → 审查链…"），而用户的第一问题其实是**要不要动它** ——
+                于是他在一个可选的高级面板前茫然，怕不填会坏事。实测：本环境 0 定义 /
+                0 工具配置 / 0 节点，`pipeline.workflow` 为 null ⇒ 什么都没配，
+                而流水线照常跑。把这句话写出来，是这一段存在的全部理由。 */}
+            <div style={{ padding: 10, border: '1px solid var(--line)', borderRadius: 6, background: 'var(--surface-2)' }}>
+              <b>先看这里：本页**可选**，不配也能正常跑。</b>
+              <div style={{ marginTop: 4 }}>
+                · 不配 = 空间按**已播种的流水线**（需求→方案→拆解→用例→编码→审查→测试→部署）逐环派工 ——
+                这就是你现在在跑的方式，已有目标与任务都不受影响。
+              </div>
+              <div style={{ marginTop: 4 }}>· 只有想要下面三件事之一时才需要它：① 把某个阶段**换成别的 Agent 工具**跑（Claude Code / Codex）；
+                ② 固定一条**自定义交接链**（阶段可并行或汇合，不按流水线顺序）；
+                ③ 把一条链**冻结成版本**，以后发布目标时点名复用。</div>
+              <div style={{ marginTop: 4 }}>· 最短路径：三行各选一个岗位（已按你的流水线预填）→ 工具保持「本地 Agent」→ 点「发布为可复用工作流版本」。</div>
+              <div style={{ marginTop: 4 }}>· 想让任务**自动开跑**：设置 → <b>持续执行</b>。想让**写码阶段**动起来：任务详情 → <b>🤖 派 AI 执行</b>。这两件事都**不**在本页。</div>
             </div>
-            {Object.values(tools).some(tool => tool !== 'dsh-native') && <div style={{ color: 'var(--yellow)', marginTop: 8 }}>
+            <div style={{ color: 'var(--muted-2)', marginTop: 8 }}>
+            本页只定义**交接链**，不会自动开启空间执行守护。发布目标时冻结工作流与工具版本；后续改动不改写已有目标。
+            Claude Code 与 Codex 需要各自的 外部执行服务；本地执行服务 的注册名与能力必须与运行环境一致。
+            </div>
+            {/* 外部依赖告警的**唯一**门槛：只有用户真的选了外部工具才提示。
+                原来这里是 `Object.values(tools).some(t => t !== 'dsh-native')`，
+                配合硬编码的外部默认值 ⇒ 首次打开就满屏告警，而用户什么都还没选。 */}
+            {externalToolsChosen([...Object.values(tools), ...graphStages.map(stage => stage.tool)]) && <div style={{ color: 'var(--yellow)', marginTop: 8 }}>
               外部 provider 心跳会报告 执行服务实例解析的原生权限模式；该值可核对配置是否匹配，但不证明文件访问边界已生效。真实验收请在可丢弃的系统账户或容器内检查读写边界、取消和清理。
             </div>}
             {permissionModeMismatches.length > 0 && <div style={{ color: 'var(--yellow)', marginTop: 8 }}>
@@ -537,7 +570,21 @@ export function AgentWorkflowConfigurator({ scope }: Props): React.JSX.Element {
               <pre style={{ whiteSpace: 'pre-wrap', margin: '6px 0', padding: 8, background: 'var(--surface-2)' }}>{'- id: subagent-codex\n  config:\n    systemProxyMode: system  # 或 inherit'}</pre>
             </div>}
             {Object.values(tools).includes('dsh-native') && <div style={{ marginTop: 10 }}>
-              <label>本地执行服务 注册名 <input value={dshProvider} onChange={e => setDshProvider(e.target.value)} placeholder="填写 ctx.subagents 中的 provider 名称" /></label>
+              {/* ★ 这里原本只有一个纯文本输入框，提示语是"填写 ctx.subagents 中的 provider 名称"
+                  —— 要求用户知道 DSH 的内部服务名，而**界面上没有任何地方能查到它**，
+                  且发布时它是必填（留空直接抛"请填写 已注册的子 Agent provider 名称"）。
+                  现在给出候选（DSH 的默认值 + 节点心跳实际上报的），仍可自由输入。 */}
+              <label>本地执行服务 注册名
+                <input list="agent-provider-candidates" value={dshProvider} onChange={e => setDshProvider(e.target.value)}
+                  placeholder={`默认 ${DEFAULT_NATIVE_PROVIDER}（DSH 内置）；也可从下拉选心跳上报的其他 provider`} />
+              </label>
+              <datalist id="agent-provider-candidates">
+                {nativeProviderCandidates(nodes).map(name => <option key={name} value={name} />)}
+              </datalist>
+              <div style={{ color: 'var(--muted-2)' }}>
+                默认 <code>{DEFAULT_NATIVE_PROVIDER}</code> 是 Legion 守护自带的本地执行服务，不需要额外安装；
+                候选里的其他名字来自节点心跳上报。填错时任务会派不出去，届时会在这里报出来。
+              </div>
               <div style={{ color: 'var(--muted-2)' }}>能力声明必须与该 provider 一致；执行时会再次核验结构化输出和工具过滤能力。</div>
               <div style={{ color: 'var(--muted-2)' }}>执行节点 要求结构化报告；所选 provider 必须支持输出 schema。</div>
               <label style={{ display: 'block' }}><input type="checkbox" checked={nativeToolFilter} onChange={e => setNativeToolFilter(e.target.checked)} /> 支持工具过滤</label>

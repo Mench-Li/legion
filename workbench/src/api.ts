@@ -445,6 +445,46 @@ export async function fetchAgentNodes(scope: string): Promise<AgentNodeRecord[]>
   return result.nodes
 }
 
+/**
+ * 本机某个 Agent 运行时的**就绪度读数**（守护自检：装了没 / 登录了没 / 端点通不通）。
+ *
+ * ★ 与 `AgentNodeRecord.status` 是两件事：那个是"节点登记了没、心跳新不新"，
+ *   这个是"这台机器上 provider 真能不能跑"。心跳上报的能力位是**声明**，这个是**读数**。
+ */
+export interface ProviderReadiness {
+  /** 与 `runtime/adapters/dsh/provider-readiness.mjs` 的 READINESS_STATE 一一对应。 */
+  state: 'ready' | 'missing_cli' | 'not_logged_in' | 'no_network' | 'unprobed' | 'unknown'
+  /** 面向用户的一句话，**含修法**；不含机器路径、不含凭据。 */
+  reason: string
+  cli?: string
+  auth?: string
+  network?: string
+  version?: string
+  checkedAtMs?: number
+}
+
+/** 一个成员（守护）上报的就绪度表；`providers` 为 null = 这台守护还没上报过。 */
+export interface MemberReadiness {
+  member: string
+  scope: string
+  kind: string
+  lastSeenAt: string | null
+  online: boolean
+  providers: Record<string, ProviderReadiness> | null
+}
+
+/**
+ * 读成员名册（含各自上报的 provider 就绪度）。
+ *
+ * 只读。面板据此**只读展示**"本机哪些 Agent 运行时真能用"，
+ * 取代让用户手填一个界面上查不到的 provider 名。
+ */
+export async function fetchMemberReadiness(): Promise<MemberReadiness[]> {
+  const rows = await readJson<MemberReadiness[]>(await hubGet('/api/members'))
+  return Array.isArray(rows) ? rows : []
+}
+
+
 /** 登记一个不含凭据的执行节点配置；对应 daemon 需配置相同 agentNodeId 后上报心跳。 */
 export function registerAgentNode(input: { id: string; label: string; scope: string; enabled?: boolean }): Promise<unknown> {
   return hubPost('/api/agent-nodes/configs', input as unknown as Record<string, unknown>)

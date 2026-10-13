@@ -17,8 +17,7 @@
 //   ×  0  `path.startsWith('…')`
 //   ×  0  `path.startsWith('…') && path.endsWith('…')`
 //
-// 生成器在切片 5 修正过一次**静默漏取**：切片 4 的版本只认等值那一种，
-// 会静默跳过另外 48 条（旧自检只为"一条都没取到"准备，所以不会响）。
+// 生成器在切片 5 修正过一次**静默漏取**：切片 4 的版本只认等值那一种，// 会静默跳过另外 48 条（旧自检只为"一条都没取到"准备，所以不会响）。
 //
 //   > 一个"按前缀取族、却只认一种写法"的生成器，
 //   > 与一个"把这一族搬走一半"的提交，在 `node --check` 通过时是同一个东西。
@@ -33,7 +32,12 @@
 //
 // 1 条路由的函数体与 `server.mjs` 原文逐字节相同（仅缩进 +2）。
 // 依赖全部由调用方注入，本模块不 import 任何 hub 内部件。
+//
+// ⚠ 2026-10-13 一处**有意**的偏离：读出口现在 import 了纯解析器
+//   `../provider-readiness.mjs`（无 db、无路由），用于把心跳带上来的 provider
+//   就绪度还给界面。先例：`agent-intake.mjs` import `../agent-avatars.mjs`。
 // ============================================================================
+import { deserializeProviderReadiness } from '../provider-readiness.mjs'
 
 /**
  * 造成员名册（GET：按最近出现倒序列出，带 60 秒在线判定）族路由。
@@ -61,6 +65,11 @@ export function createMembersRoutes({
         json(res, 200, rows.map((r) => ({
           member: r.id, scope: r.scope, kind: r.kind, lastSeenAt: r.lastSeenAt,
           online: Date.now() - new Date(r.lastSeenAt ?? 0).getTime() < 60000,
+          // ★ 2026-10-13：本机 provider 就绪度（心跳带上来的自检读数）。
+          //   `null` = 这台守护还没上报过（旧守护，或本轮探测还没出结果）——
+          //   与"上报了但不就绪"是两件不同的事，界面必须分得开。
+          //   读侧不抛错：一行坏 JSON 不该让整个名册 500（见 provider-readiness.mjs）。
+          providers: deserializeProviderReadiness(r.providers_json),
         })))
       },
     },

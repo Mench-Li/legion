@@ -1,5 +1,5 @@
 import { useRef, useState } from 'react'
-import { fetchAgentNodes, fetchAgentToolConfigs, fetchAgentWorkflowDefinitions, fetchAgentWorkflowHistory, fetchAgentWorkflowInstances, fetchModelProfiles, fetchSpacePipeline, registerAgentNode, registerAgentToolConfig, registerAgentWorkflowDefinition, saveSpacePipeline, setGoalStatus } from '../api'
+import { fetchAgentNodes, fetchAgentToolConfigs, fetchAgentWorkflowDefinitions, fetchAgentWorkflowHistory, fetchAgentWorkflowInstances, fetchMemberReadiness, fetchModelProfiles, fetchSpacePipeline, registerAgentNode, registerAgentToolConfig, registerAgentWorkflowDefinition, saveSpacePipeline, setGoalStatus } from '../api'
 import type { AgentNodeRecord, AgentToolConfigRecord, AgentWorkflowDefinition, AgentWorkflowHistory, AgentWorkflowInstanceSummary, HubModelProfile, SpacePipelineConfig } from '../api'
 import { formatCodexSystemProxyMode } from '../agentWorkflowView'
 import {
@@ -8,8 +8,12 @@ import {
   defaultRoleFor,
   externalToolsChosen,
   nativeProviderCandidates,
+  providerChoiceValidation,
+  providerChoices,
+  readinessSummary,
+  scopeReadiness,
 } from '../agentWorkflowDefaults'
-import type { ToolChoice, WorkflowRoleKey as RoleKey } from '../agentWorkflowDefaults'
+import type { MemberReadinessLike, ProviderChoice, ProviderReadinessLike, ToolChoice, WorkflowRoleKey as RoleKey } from '../agentWorkflowDefaults'
 import { toast } from './Toast'
 import type { GoalStatus } from '../types'
 
@@ -71,6 +75,14 @@ export function AgentWorkflowConfigurator({ scope }: Props): React.JSX.Element {
   const [pipeline, setPipeline] = useState<SpacePipelineConfig | null>(null)
   const [configs, setConfigs] = useState<AgentToolConfigRecord[]>([])
   const [modelProfiles, setModelProfiles] = useState<HubModelProfile[]>([])
+  /**
+   * ★ 2026-10-13：本 scope 守护上报的 **provider 就绪度读数**。
+   *
+   * `null` = 还没读到（守护没上报过，或本地探测还没出结果）。
+   * 这个状态与"读到了但不就绪"是**两件事**，界面必须分开说 ——
+   * 把两者都说成"不可用"，会让用户去修一个其实没坏的东西。
+   */
+  const [readiness, setReadiness] = useState<{ member: string; providers: Record<string, ProviderReadinessLike> } | null>(null)
   const [definitions, setDefinitions] = useState<AgentWorkflowDefinition[]>([])
   const [instances, setInstances] = useState<AgentWorkflowInstanceSummary[]>([])
   const [instanceTotal, setInstanceTotal] = useState(0)
@@ -132,15 +144,23 @@ export function AgentWorkflowConfigurator({ scope }: Props): React.JSX.Element {
     setInstancesLoading(true)
     setError('')
     try {
-      const [nextPipeline, nextConfigs, nextNodes, nextDefinitions, nextModelProfiles, instancePage] = await Promise.all([
+      // ★ 成员名册与就绪度**单独拉、单独失败**：它是诊断信息，读不到不该让整个面板打不开。
+      //   （Promise.all 里任何一条挂了都会让下面全部 setState 不执行 —— 那正是"一个诊断字段
+      //   拖垮主流程"的形状，与心跳那条纪律同一个道理。）
+      const membersPromise: Promise<MemberReadinessLike[]> = fetchMemberReadiness()
+        .then((rows) => rows as MemberReadinessLike[])
+        .catch(() => [])
+      const [nextPipeline, nextConfigs, nextNodes, nextDefinitions, nextModelProfiles, instancePage, members] = await Promise.all([
         fetchSpacePipeline(scope), fetchAgentToolConfigs(), fetchAgentNodes(scope), fetchAgentWorkflowDefinitions(scope), fetchModelProfiles(),
         fetchAgentWorkflowInstances(scope, { limit: 20, offset: 0, status: instanceStatus, search: instanceSearch }),
+        membersPromise,
       ])
       setPipeline(nextPipeline)
       setConfigs(nextConfigs)
       setNodes(nextNodes)
       setDefinitions(nextDefinitions)
       setModelProfiles(nextModelProfiles)
+      setReadiness(scopeReadiness(members, scope))
       if (instanceRequest === instanceRequestId.current) {
         setInstances(instancePage.instances)
         setInstanceTotal(instancePage.total)
@@ -446,6 +466,19 @@ export function AgentWorkflowConfigurator({ scope }: Props): React.JSX.Element {
   }
 
   const rolesForSelect = pipeline?.stages.filter(stage => stage.enabled) ?? []
+  /**
+   * ★ 可选 provider 候选 = **本机读数** ∪ **节点心跳上报的** ∪ **已知默认值**。
+   *
+   * 三处合并而不是只取一处，是因为它们各自会**独立地迟到**：
+   *   · 读数要等守护自检（TTL 10 分钟）；
+   *   · 节点心跳要等 `agentNodeId` 配好（本环境 0 个节点 ⇒ 这一路是空的）；
+   *   · 默认值永远在（它不需要安装）。
+   * 只取任一条，都会出现"明明能用却选不到"。
+   */
+  const providerCandidates: ProviderChoice[] = providerChoices(readiness, nativeProviderCandidates(nodes))
+  const providerNameValidation = providerChoiceValidation(dshProvider, providerCandidates)
+  /** 读数里**不可用**的那些：用来给"为什么选不了/为什么没绿"一个解释。 */
+  const notReadyChoices = providerCandidates.filter(c => c.state !== null && !c.ready)
   const providerRequirements = [
     ...Object.entries(tools).map(([role, tool]) => ({
       providerName: tool === 'dsh-native' ? dshProvider.trim() : tool,
@@ -513,6 +546,34 @@ export function AgentWorkflowConfigurator({ scope }: Props): React.JSX.Element {
             本页只定义**交接链**，不会自动开启空间执行守护。发布目标时冻结工作流与工具版本；后续改动不改写已有目标。
             Claude Code 与 Codex 需要各自的 外部执行服务；本地执行服务 的注册名与能力必须与运行环境一致。
             </div>
+            {/* ★★ 2026-10-13：本机 provider **就绪度**（只读）。
+                这是"相当茫然"那个问题的正面回答：不再要求用户知道并提供 provider 名，
+                而是把守护自检出来的读数摆出来 —— 装了没 / 登录了没 / 端点通不通，以及怎么修。
+                它要说清三件**不同**的事（把三者挤成一句"不可用"会让人修错方向）：
+                  ① 就绪           —— 现在就能选它；
+                  ② 有读数但不就绪 —— 附修法；
+                  ③ 还没有读数     —— **不代表不可用**，可能只是本轮自检还没跑到。 */}
+            <div style={{ marginTop: 10, padding: 10, border: '1px solid var(--line)', borderRadius: 6 }}>
+              <b>本机 Agent 运行时（provider）就绪度</b>
+              <div style={{ color: 'var(--muted-2)', marginTop: 4 }}>{readinessSummary(readiness)}</div>
+              <div style={{ marginTop: 6, display: 'grid', gap: 4 }}>
+                {providerCandidates.map(choice => {
+                  const mark = choice.ready ? '✅' : choice.state === null ? '·' : '⚠'
+                  const stateText = choice.state === null
+                    ? '还没有读数（不代表不可用；本机自检约 10 分钟一轮）'
+                    : choice.ready ? '就绪' : choice.state
+                  return <div key={choice.name} style={{ color: choice.ready || choice.state === null ? 'var(--muted-2)' : 'var(--yellow)' }}>
+                    {mark} <code>{choice.name}</code>
+                    {choice.version === null ? '' : ` v${choice.version}`} —— {stateText}
+                    {choice.state !== null && !choice.ready && choice.reason !== null && <div style={{ marginLeft: 18 }}>修法：{choice.reason}</div>}
+                  </div>
+                })}
+              </div>
+              {notReadyChoices.length > 0 && <div style={{ color: 'var(--muted-2)', marginTop: 6 }}>
+                判据来自守护的**本机探测**（只看存在性：CLI 在不在 PATH 上、登录态文件/变量在不在、端点通不通）。
+                它**不读任何凭据内容**，也不含机器路径。
+              </div>}
+            </div>
             {/* 外部依赖告警的**唯一**门槛：只有用户真的选了外部工具才提示。
                 原来这里是 `Object.values(tools).some(t => t !== 'dsh-native')`，
                 配合硬编码的外部默认值 ⇒ 首次打开就满屏告警，而用户什么都还没选。 */}
@@ -573,18 +634,24 @@ export function AgentWorkflowConfigurator({ scope }: Props): React.JSX.Element {
               {/* ★ 这里原本只有一个纯文本输入框，提示语是"填写 ctx.subagents 中的 provider 名称"
                   —— 要求用户知道 DSH 的内部服务名，而**界面上没有任何地方能查到它**，
                   且发布时它是必填（留空直接抛"请填写 已注册的子 Agent provider 名称"）。
-                  现在给出候选（DSH 的默认值 + 节点心跳实际上报的），仍可自由输入。 */}
+                  现在候选来自三处合并（本机读数 ∪ 节点心跳 ∪ 已知默认值），**仍然可以自由输入**
+                  —— 用 datalist 而不是 select，是为了不让"读数还没到"变成"选不了"。 */}
               <label>本地执行服务 注册名
                 <input list="agent-provider-candidates" value={dshProvider} onChange={e => setDshProvider(e.target.value)}
-                  placeholder={`默认 ${DEFAULT_NATIVE_PROVIDER}（DSH 内置）；也可从下拉选心跳上报的其他 provider`} />
+                  placeholder={`默认 ${DEFAULT_NATIVE_PROVIDER}（随 Legion 一起跑，不需要额外安装）`} />
               </label>
               <datalist id="agent-provider-candidates">
-                {nativeProviderCandidates(nodes).map(name => <option key={name} value={name} />)}
+                {providerCandidates.map(choice => <option key={choice.name} value={choice.name}>
+                  {choice.ready ? '就绪' : choice.state === null ? '还没有读数' : choice.state}
+                </option>)}
               </datalist>
               <div style={{ color: 'var(--muted-2)' }}>
                 默认 <code>{DEFAULT_NATIVE_PROVIDER}</code> 是 Legion 守护自带的本地执行服务，不需要额外安装；
-                候选里的其他名字来自节点心跳上报。填错时任务会派不出去，届时会在这里报出来。
+                候选里的其他名字来自**本机自检读数**与节点心跳。填错时任务会派不出去，届时会在这里报出来。
               </div>
+              {providerNameValidation.message !== null && <div style={{ color: providerNameValidation.ok ? 'var(--yellow)' : 'var(--red)' }}>
+                {providerNameValidation.message}
+              </div>}
               <div style={{ color: 'var(--muted-2)' }}>能力声明必须与该 provider 一致；执行时会再次核验结构化输出和工具过滤能力。</div>
               <div style={{ color: 'var(--muted-2)' }}>执行节点 要求结构化报告；所选 provider 必须支持输出 schema。</div>
               <label style={{ display: 'block' }}><input type="checkbox" checked={nativeToolFilter} onChange={e => setNativeToolFilter(e.target.checked)} /> 支持工具过滤</label>

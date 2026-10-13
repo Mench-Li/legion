@@ -101,6 +101,15 @@ import {
   subagentProviderPermissionMode,
 } from '../../runtime/adapters/dsh/subagent-client.mjs'
 import { waitForWorkflowAgentRun } from '../../runtime/adapters/dsh/workflow-run.mjs'
+// ★ 2026-10-13：本机 provider **就绪度**自检（装了没 / 登录了没 / 端点通不通）。
+// 为什么需要：心跳上报的 `providerNames` 与能力位是**声明**，不是**读数** ——
+// 一台没装 codex 的机器，工作流面板照样显示"就绪"，而用户面对的是一个
+// 查不到、又必填的 provider 名输入框（原话：「相当茫然，完全不知道怎么配置」）。
+import {
+  createLocalReadinessDeps,
+  createReadinessCache,
+  probeProviders,
+} from '../../runtime/adapters/dsh/provider-readiness.mjs'
 import { materializeWorkflowCheckpoints, WORKFLOW_CHECKPOINT_EVIDENCE_PREFIX } from '../../runtime/contracts/agent-workflow-checkpoints.mjs'
 import { validateAgentWorkflowTestReport } from '../../runtime/contracts/agent-workflow.mjs'
 import { expectedExternalPermissionMode } from '../../runtime/contracts/agent-provider-policy.mjs'
@@ -3676,22 +3685,42 @@ function spaceWorker(ctx: AppContext, config: Config): void {
   }
   /** S2/R-1（决策 B1）：守护心跳：POST /api/heartbeat kind=worker（成员在线 60s 窗由 hub 判定），
    *  附带当前选用模型（daemon-heartbeat，供 GET /api/chat/health 模型解析链兜底展示）。失败仅日志，不阻断扫单。 */
+  /**
+   * provider 就绪度缓存。
+   *
+   * ★ 心跳**只读缓存**，探测在后台跑 —— 起子进程探 `--version` 最慢能到几秒，
+   *   让它串在心跳里等于给心跳装了个随时会卡死的闸。
+   * ★ TTL 10 分钟：装完 CLI / 登录完，最多等一轮刷新就能在面板上看到它变绿。
+   * ★ 探测失败只记日志，**不让心跳挂**（`onError`）。
+   */
+  const readinessCache = createReadinessCache({
+    probe: (names: string[]) => probeProviders(names, createLocalReadinessDeps()),
+    onError: (e) => log(`provider 就绪度探测失败（不影响心跳）：${String(e)}`),
+  })
+
   async function hubHeartbeat(): Promise<void> {
     if (!useHub || config.mode !== 'worker') return
     try {
       let sel: { provider?: string; model?: string } = {}
       try { sel = ctx.agentDefaultModel.currentSelection() ?? {} } catch { /* 读不到默认模型不影响心跳 */ }
+      // 读一次 provider 名单：主心跳与节点心跳都用它。
+      // 拿不到就按空目录处理 —— 这 **不能** 让心跳失败（读目录只是"顺带上报"）。
+      let providerNames: string[] = []
+      try { providerNames = listSubagentProviders(ctx) } catch { /* 执行面读不到就不上报 */ }
+      // ★ 只有**已经有读数**时才带上；第一轮通常还没有（探测在后台）。
+      //   刻意不发一个空的 `providers`：那会让服务端把"还没探过"存成"探过且为空"。
+      const readiness = readinessCache.snapshot(providerNames)
       await hubPost('/api/heartbeat', {
         by: `${config.role}@${scope}`,
         scope,
         kind: 'worker',
         model: { provider: sel.provider || config.provider, model: sel.model || '' },
+        ...(readiness === null ? {} : { providers: readiness }),
       })
       if ((config.agentNodeId ?? '').trim() !== '') {
         const worktreeProbe = config.isolate
           ? await runGit(workspace.repoRootFor(), ['rev-parse', '--is-inside-work-tree'])
           : { code: 1 }
-        const providerNames = listSubagentProviders(ctx)
         const providers = Object.fromEntries(providerNames.map((name) => [name, subagentProviderCapabilities(ctx, name)]))
         await hubPost('/api/agent-nodes/heartbeat', {
           id: (config.agentNodeId ?? '').trim(),

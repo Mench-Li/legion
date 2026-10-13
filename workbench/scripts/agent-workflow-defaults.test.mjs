@@ -31,6 +31,10 @@ import {
   defaultRoleFor,
   externalToolsChosen,
   nativeProviderCandidates,
+  providerChoiceValidation,
+  providerChoices,
+  readinessSummary,
+  scopeReadiness,
 } from '../src/agentWorkflowDefaults.ts'
 
 describe('工作流面板的默认值', () => {
@@ -115,5 +119,104 @@ describe('工作流面板的默认值', () => {
     assert.equal(defaultRoleFor([], 'designRole'), '')
     assert.equal(defaultRoleFor([{ role: 'x', enabled: false }], 'designRole'), '', '未启用的阶段不算候选')
     assert.equal(defaultRoleFor(null, 'designRole'), '')
+  })
+})
+
+// ════════════════════════════════════════════════════════════════════════════
+// provider 就绪度 → 候选（2026-10-13）
+//
+// 这一组守的是"相当茫然"那个问题的正面回答：不再要求用户**知道并填写** provider 名，
+// 而是从守护的本机自检读数里派生候选。
+//
+// 核心分歧点只有两个，且都不是"列表长什么样"：
+//   ① **"还没有读数" 不是 "不可用"** —— 两者会让用户做完全不同的事（等 vs 去修）；
+//   ② **读数只用来说，不用来否决** —— 自检有 10 分钟 TTL，拿它拦发布等于"我刚修好却不让发"。
+// ════════════════════════════════════════════════════════════════════════════
+
+describe('provider 就绪度 → 候选', () => {
+  const members = [
+    { member: 'worker@A', scope: 'A', kind: 'worker', online: true, lastSeenAt: '2026-10-13T10:00:00Z',
+      providers: { spawn: { state: 'ready' }, codex: { state: 'missing_cli', reason: 'PATH 上找不到 codex' } } },
+    { member: 'exec@A', scope: 'A', kind: 'executor', online: true, lastSeenAt: '2026-10-13T11:00:00Z',
+      providers: { spawn: { state: 'ready' }, 'other-thing': { state: 'ready' } } },
+    { member: 'worker@B', scope: 'B', kind: 'worker', online: true, lastSeenAt: '2026-10-13T12:00:00Z',
+      providers: { claude: { state: 'ready' } } },
+    { member: 'old@A', scope: 'A', kind: 'worker', online: true, lastSeenAt: '2026-10-13T13:00:00Z', providers: null },
+  ]
+
+  test('★ 取**本空间**的读数，且优先 kind=worker（答"本机能不能跑"的是守护）', () => {
+    const r = scopeReadiness(members, 'A')
+    assert.equal(r.member, 'worker@A', '哪怕 executor 的 lastSeenAt 更新，也该取守护那条')
+    assert.equal(r.providers.codex.state, 'missing_cli')
+    assert.equal(scopeReadiness(members, 'B').member, 'worker@B')
+  })
+
+  test('★ 没有读数 ⇒ null（"还没上报"，**不是**"不可用"）', () => {
+    assert.equal(scopeReadiness(members, 'C'), null, '没有该空间的成员')
+    assert.equal(scopeReadiness([], 'A'), null)
+    assert.equal(scopeReadiness(null, 'A'), null)
+    // 只有 providers=null 的成员 ⇒ 仍是 null（那是"旧守护还没上报"）
+    assert.equal(scopeReadiness([{ member: 'old@A', scope: 'A', kind: 'worker', providers: null }], 'A'), null)
+  })
+
+  test('★ 候选包含读数外的**已知默认值**（刚装好、还没轮到自检时也能选）', () => {
+    const choices = providerChoices(scopeReadiness(members, 'A'))
+    const names = choices.map(c => c.name)
+    assert.ok(names.includes('codex'), '读数里的要在')
+    assert.ok(names.includes(DEFAULT_NATIVE_PROVIDER), '默认值永远要在 —— 它不需要安装')
+    assert.ok(!names.includes('other-thing'), '别的空间的读数不该混进来')
+  })
+
+  test('★ 没有读数时，候选至少给出默认值（不是空列表）', () => {
+    const choices = providerChoices(null)
+    assert.deepEqual(choices.map(c => c.name), [DEFAULT_NATIVE_PROVIDER])
+    assert.equal(choices[0].state, null, 'state=null 表示还没读数')
+    assert.equal(choices[0].ready, false, '没读数不等于就绪')
+  })
+
+  test('★ 排序稳定且"就绪"在前：就绪 → 有读数但不就绪 → 没读数', () => {
+    const choices = providerChoices(scopeReadiness(members, 'A'))
+    const groups = choices.map(c => (c.ready ? 0 : c.state === null ? 2 : 1))
+    assert.deepEqual(groups, [...groups].sort((a, b) => a - b), '组序必须是就绪在前')
+    // 同组内按名字，且重复调用结果一致（否则每次打开排列都变，等于没有顺序）
+    assert.deepEqual(choices.map(c => c.name), providerChoices(scopeReadiness(members, 'A')).map(c => c.name))
+  })
+
+  test('★ 脏读数被规整：不认识的状态当成"没有读数"，不猜成 ready', () => {
+    const choices = providerChoices({ providers: {
+      a: { state: 'READY' },        // 大小写不对
+      b: { state: 'ok' },           // 自造状态
+      c: {},                        // 没有 state
+      d: { state: 'ready' },
+    } })
+    const by = Object.fromEntries(choices.map(c => [c.name, c]))
+    assert.equal(by.a.state, null); assert.equal(by.a.ready, false)
+    assert.equal(by.b.state, null); assert.equal(by.b.ready, false)
+    assert.equal(by.c.state, null); assert.equal(by.c.ready, false)
+    assert.equal(by.d.state, 'ready'); assert.equal(by.d.ready, true)
+  })
+
+  test('★ 读数只用来说、不用来否决：不 ready 也**允许发布**，但给出提示', () => {
+    const choices = providerChoices(scopeReadiness(members, 'A'))
+    const v = providerChoiceValidation('codex', choices)
+    assert.equal(v.ok, true, '读数不 ready 不该拦发布 —— 自检有 10 分钟 TTL，用户可能刚装好')
+    assert.match(v.message, /missing_cli/, '但必须提示当前状态')
+    assert.match(v.message, /PATH 上找不到 codex/, '提示里要带上修法（reason）')
+  })
+
+  test('空名字才拦发布，且提示里给出"不知道填什么就填什么"', () => {
+    const v = providerChoiceValidation('   ', providerChoices(null))
+    assert.equal(v.ok, false)
+    assert.match(v.message, new RegExp(DEFAULT_NATIVE_PROVIDER), '必须点名默认值')
+    // 认得的、就绪的、读不到的，都不提示
+    assert.equal(providerChoiceValidation(DEFAULT_NATIVE_PROVIDER, providerChoices(null)).message, null)
+    assert.equal(providerChoiceValidation('自由输入的名字', providerChoices(null)).message, null,
+      '斜杠自造的名字也允许（datalist 不是 select），不提示')
+  })
+
+  test('摘要把"几个就绪"说清楚；没有读数时如实说没有', () => {
+    assert.match(readinessSummary(scopeReadiness(members, 'A')), /worker@A/)
+    assert.match(readinessSummary(scopeReadiness(members, 'A')), /1 个就绪/)
+    assert.match(readinessSummary(null), /还没有上报/)
   })
 })

@@ -915,8 +915,14 @@ async function stageTest() {
         'workbench/scripts/agent-workflow-view.test.mjs',
         // 2026-10-13：面板的**默认值**（「相当茫然，完全不知道怎么配置」那次）。
         // 原来默认预设 Claude Code + Codex 两个没装的外部产品，一打开就是缺失告警
-        // + 一个查不到的必填项。这条守"默认状态必须可发布、不得预设没装的东西"。
+        // + 一个查不到的必填项。这条守"默认状态必须可发布、不得预设没装的东西"，
+        // 以及"provider 候选从本机读数派生、读数只用来说不用来否决"。
         'workbench/scripts/agent-workflow-defaults.test.mjs',
+        // 2026-10-13：provider **就绪度**自检（装了没 / 登录了没 / 端点通不通）。
+        // 守"已注册 ≠ 可用"：不同的不可用必须分得开，结论里不含机器路径与凭据，
+        // 且坏掉的诊断字段**不许**把心跳带崩（否则整台守护会被标成离线）。
+        'runtime/adapters/dsh/provider-readiness.test.mjs',
+        'team-hub/provider-readiness.test.mjs',
       ],
       cwd: ROOT,
     },

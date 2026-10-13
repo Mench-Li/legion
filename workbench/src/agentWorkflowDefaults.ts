@@ -18,7 +18,7 @@
 //   · 已经替你选好了 Claude Code 与 Codex（两个**根本没装**的外部产品）；
 //   · 两条黄色告警说这两个 provider 没有就绪心跳；
 //   · 一条 `dsh plugin --profile <profile> add @deepseek-ai/dsh-subagent-codex …` 命令；
-//   · 一个"填写 ctx.subagents 中的 provider 名称"的**空必填项**（发布时抛错）。
+//   · 一个"填写 ctx 上的 subagents 服务里的 provider 名称"的**空必填项**（发布时抛错）。
 //
 // 用户的原话是**「相当茫然，完全不知道怎么配置」**。
 //
@@ -96,7 +96,7 @@ export interface ProviderObservation {
 /**
  * 「本地执行服务 注册名」的候选值：**已知默认值** + **节点心跳实际上报的 provider**。
  *
- * 这个字段原本是一个纯文本输入框，提示语是"填写 ctx.subagents 中的 provider 名称" ——
+ * 这个字段原本是一个纯文本输入框，提示语是"填写 ctx 上的 subagents 服务里的 provider 名称" ——
  * 要求用户知道 DSH 的内部服务名，而界面上**没有任何地方能查到它**。
  * 改成下拉候选（仍保留自由输入）之后，"不知道填什么"这个问题从"去读源码"变成"选一个"。
  *
@@ -128,4 +128,141 @@ export function defaultRoleFor(
   const hit = list.find(stage => preferred.includes(stage.role))
   if (hit) return hit.role
   return list.find(stage => stage.enabled)?.role ?? ''
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// provider 就绪度 → 可选清单（2026-10-13）
+//
+// 「本地执行服务 注册名」原来是一个**自由文本输入框**，提示语写着
+// 「填写 ctx 上的 subagents 服务里的 provider 名称」——要求用户知道 DSH 的内部服务名，
+// 而界面上**没有任何地方能查到它**。用户的原话是「相当茫然，完全不知道怎么配置」。
+//
+// 现在把它变成**从读数派生的候选**：守护自己探测本机哪个 provider 真能用
+// （装了没 / 登录了没 / 端点通不通），面板只读展示 + 下拉选择。
+//
+//   > 一个"让人填一个只有源码知道的字符串"的输入框，
+//   > 与一个"从本机读数里选一个"的下拉，
+//   > 在**用户恰好知道那个字符串**的时候是同一个东西。
+// ────────────────────────────────────────────────────────────────────────────
+
+/** 与 `runtime/adapters/dsh/provider-readiness.mjs` 的 READINESS_STATE 对齐。 */
+export type ReadinessState = 'ready' | 'missing_cli' | 'not_logged_in' | 'no_network' | 'unprobed' | 'unknown'
+
+export interface ProviderReadinessLike {
+  readonly state?: string
+  readonly reason?: string
+  readonly version?: string
+  readonly checkedAtMs?: number
+}
+
+export interface MemberReadinessLike {
+  readonly member?: string
+  readonly scope?: string
+  readonly kind?: string
+  readonly online?: boolean
+  readonly lastSeenAt?: string | null
+  readonly providers?: Record<string, ProviderReadinessLike> | null
+}
+
+/** 一条候选：provider 名 + 它的读数（没有读数时 state 为 null）。 */
+export interface ProviderChoice {
+  readonly name: string
+  /** `null` = 本机还没上报过这个 provider 的读数（**不是**"不可用"）。 */
+  readonly state: ReadinessState | null
+  readonly ready: boolean
+  readonly reason: string | null
+  readonly version: string | null
+  readonly checkedAtMs: number | null
+}
+
+const KNOWN_STATES: readonly ReadinessState[] = ['ready', 'missing_cli', 'not_logged_in', 'no_network', 'unprobed', 'unknown']
+
+function normalizeState(raw: unknown): ReadinessState | null {
+  return typeof raw === 'string' && (KNOWN_STATES as readonly string[]).includes(raw) ? (raw as ReadinessState) : null
+}
+
+/**
+ * 取**本空间守护**上报的就绪度。
+ *
+ * 选哪一条有讲究：优先 `kind === 'worker'`（守护），其次在线的，最后按 lastSeenAt 最新。
+ * 不这么排的话，一个先心跳过的别的成员会把守护的读数挡住 ——
+ * 而"本机能不能跑 provider"是**执行机**的属性，答它的是守护。
+ *
+ * @returns 该成员的读数；没有任何成员上报过则返回 null（= 还没上报，不是"不可用"）。
+ */
+export function scopeReadiness(
+  members: readonly MemberReadinessLike[] | null | undefined,
+  scope: string,
+): { member: string; providers: Record<string, ProviderReadinessLike> } | null {
+  const candidates = (members ?? []).filter(
+    m => m?.scope === scope && m.providers !== null && m.providers !== undefined && Object.keys(m.providers).length > 0,
+  )
+  if (candidates.length === 0) return null
+  const rank = (m: MemberReadinessLike): number => (m.kind === 'worker' ? 0 : 1)
+  const sorted = [...candidates].sort((a, b) => {
+    if (rank(a) !== rank(b)) return rank(a) - rank(b)
+    if (Boolean(a.online) !== Boolean(b.online)) return a.online ? -1 : 1
+    return String(b.lastSeenAt ?? '').localeCompare(String(a.lastSeenAt ?? ''))
+  })
+  const top = sorted[0]
+  return { member: String(top.member ?? ''), providers: top.providers ?? {} }
+}
+
+/**
+ * 候选清单：**读数里有的** ∪ **已知内置的**。
+ *
+ * 为什么不只列读数里的：一个刚装好、还没等到守护自检（TTL 10 分钟）的机器，
+ * 读数可能还是空的 —— 那时至少要让用户看到默认值（它不需要安装，永远是候选项）。
+ *
+ * 排序：就绪的在前，其次"有读数但不就绪"，最后"没有读数"。同组内按名字 ——
+ * **顺序必须稳定**，否则用户每次打开看到的排列都不一样，等于没有顺序。
+ */
+export function providerChoices(
+  readiness: { providers: Record<string, ProviderReadinessLike> } | null | undefined,
+  fallbackNames: readonly string[] = [DEFAULT_NATIVE_PROVIDER],
+): ProviderChoice[] {
+  const names = new Set<string>([...fallbackNames, ...Object.keys(readiness?.providers ?? {})])
+  const out: ProviderChoice[] = []
+  for (const name of names) {
+    if (typeof name !== 'string' || name.trim() === '') continue
+    const entry = readiness?.providers?.[name]
+    const state = normalizeState(entry?.state)
+    out.push({
+      name,
+      state,
+      ready: state === 'ready',
+      reason: typeof entry?.reason === 'string' && entry.reason !== '' ? entry.reason : null,
+      version: typeof entry?.version === 'string' && entry.version !== '' ? entry.version : null,
+      checkedAtMs: typeof entry?.checkedAtMs === 'number' && Number.isFinite(entry.checkedAtMs) ? entry.checkedAtMs : null,
+    })
+  }
+  const group = (c: ProviderChoice): number => (c.ready ? 0 : c.state === null ? 2 : 1)
+  return out.sort((a, b) => (group(a) - group(b)) || a.name.localeCompare(b.name))
+}
+
+/**
+ * 当前选中的 provider 名要不要拦下发布。
+ *
+ * 判据只有一条：**能不能解析出一个非空的名字**。
+ * 刻意**不**因为"读数不 ready"就拦 —— 守护自检有 10 分钟 TTL，而用户可能刚装好；
+ * 那时拦下发布等于"我刚修好却不让发"。读数只用来**提示**，不用来**否决**。
+ */
+export function providerChoiceValidation(name: string, choices: readonly ProviderChoice[]): { ok: boolean; message: string | null } {
+  const trimmed = String(name ?? '').trim()
+  if (trimmed === '') {
+    return { ok: false, message: `请选择「本地执行服务 注册名」。不确定就选 ${DEFAULT_NATIVE_PROVIDER}（随 Legion 一起跑，不需要额外安装）。` }
+  }
+  const hit = choices.find(c => c.name === trimmed)
+  if (hit !== undefined && hit.state !== null && !hit.ready) {
+    return { ok: true, message: `本机自检报告 ${trimmed} 当前 ${hit.state}${hit.reason === null ? '' : '：' + hit.reason}` }
+  }
+  return { ok: true, message: null }
+}
+
+/** 读数的一句话摘要（给面板显示用）。 */
+export function readinessSummary(readiness: { member: string; providers: Record<string, ProviderReadinessLike> } | null): string {
+  if (readiness === null) return '本机守护还没有上报过 provider 就绪度（心跳带上后会自动出现）。'
+  const names = Object.keys(readiness.providers)
+  const ready = names.filter(n => normalizeState(readiness.providers[n]?.state) === 'ready').length
+  return `读数来自守护 ${readiness.member}：${names.length} 个 provider，其中 ${ready} 个就绪。`
 }

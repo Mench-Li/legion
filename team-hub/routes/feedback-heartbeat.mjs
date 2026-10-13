@@ -33,7 +33,13 @@
 //
 // 2 条路由的函数体与 `server.mjs` 原文逐字节相同（仅缩进 +2）。
 // 依赖全部由调用方注入，本模块不 import 任何 hub 内部件。
+//
+// ⚠ 2026-10-13 一处**有意**的偏离：`/api/heartbeat` 现在 import 了纯校验器
+//   `../provider-readiness.mjs`（无 db、无路由、无 hub 内部件），用于校验心跳里
+//   新增的 provider 就绪度字段。这与 `agent-intake.mjs` import `../agent-avatars.mjs`
+//   是同一个先例。改这一行的理由见下面 `/api/heartbeat` 的注释。
 // ============================================================================
+import { serializeProviderReadiness } from '../provider-readiness.mjs'
 
 /**
  * 造用户反馈的独立读端点（PRT-404，含跨空间越权防线）与 worker 心跳族路由。
@@ -116,7 +122,23 @@ export function createFeedbackHeartbeatRoutes({
           const modelText = m && (typeof m.model === 'string' || typeof m.provider === 'string')
             ? JSON.stringify({ provider: typeof m.provider === 'string' ? m.provider : '', model: typeof m.model === 'string' ? m.model : '' })
             : undefined
-          touchMember(by, scope, typeof body.kind === 'string' ? body.kind : 'unknown', modelText)
+          // ★★ 2026-10-13：心跳可附带**本机 provider 就绪度**（装了没 / 登录了没 / 端点通不通），
+          //    供工作流面板只读展示、取代让人手填 provider 名。
+          //
+          //    🔴 校验失败**只丢字段、不丢心跳**。心跳失败的代价是这台守护被标成离线
+          //       （60 秒在线窗）——对话健康降级、任务不再派给它；而就绪度只是诊断信息，
+          //       没有它一切照常。这两件事的代价差一个量级，不允许共命运：
+          //
+          //         一个坏掉的诊断字段，与一个坏掉的健康上报，
+          //         在**字段总是合法**的时候是同一条路径 ——
+          //         区别只在字段坏掉的那一刻：前者该少一行信息，后者会让整台机器"下线"。
+          //
+          //    缺失（旧守护不上报）是**合法**的，不是坏掉。
+          let providersJson = null
+          if (body?.providers !== undefined && body.providers !== null) {
+            providersJson = serializeProviderReadiness(body.providers)
+          }
+          touchMember(by, scope, typeof body.kind === 'string' ? body.kind : 'unknown', modelText, providersJson)
           return { member: by, scope, online: true }
         })
       },

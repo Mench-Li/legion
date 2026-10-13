@@ -1513,6 +1513,10 @@ ensureColumn('space_runtime', 'review_workflow', 'review_workflow TEXT DEFAULT N
 // 列可空，既有成员行/插入语句零影响）。走 ensureColumn：双进程并发启动时非原子写法会崩在这里
 // （实测 `duplicate column name: model`，见 scripts/ci/dual-write-smoke.test.mjs 的并发启动用例）。
 ensureColumn('members', 'model', 'model TEXT DEFAULT NULL')
+// 迁移：members 补充 providers_json 列（2026-10-13：守护心跳携带**本机 provider 就绪度**
+// 自检结果 —— 装了没 / 登录了没 / 端点通不通）。列可空：旧守护不上报 ⇒ NULL ⇒ 界面显示
+// "本机还没上报"，这是**一个诚实的状态**，不是错误。同样走 ensureColumn（并发启动安全）。
+ensureColumn('members', 'providers_json', 'providers_json TEXT DEFAULT NULL')
 // 空间目标（goal）：一个工作空间可**并存多个目标**（多目标并发，互不取消），任务集围绕各自目标推进。
 // 每行 = 一个目标记录：
 //   id        目标唯一标识（G-xxx）
@@ -3289,11 +3293,25 @@ export function heartbeatAwaitingApproval({ requestId, nowMs = Date.now(), reque
   })
 }
 
-function touchMember(member, scope, kind, modelText) {
+/**
+ * 记一次成员心跳。
+ *
+ * `providersJson` 是**可空的诊断字段**（本机 provider 就绪度，已由调用方校验过）。
+ * ★ 它为空时**不清掉已有的值**：心跳每 30 秒一次，而就绪度探测有 10 分钟 TTL ——
+ *   如果"这次没带"就写成 NULL，界面上的绿色会在两次带值的心跳之间闪回"没上报"。
+ *   所以语义是：**带了就覆盖，没带就保留**。
+ */
+function touchMember(member, scope, kind, modelText, providersJson = null) {
   db.prepare(`
-    INSERT INTO members (id, scope, kind, lastSeenAt, online, model) VALUES (?, ?, ?, ?, 1, ?)
-    ON CONFLICT(id) DO UPDATE SET scope=excluded.scope, kind=excluded.kind, lastSeenAt=excluded.lastSeenAt, online=1, model=excluded.model
-  `).run(member, scope, kind, now(), typeof modelText === 'string' && modelText.length > 0 ? modelText : null)
+    INSERT INTO members (id, scope, kind, lastSeenAt, online, model, providers_json) VALUES (?, ?, ?, ?, 1, ?, ?)
+    ON CONFLICT(id) DO UPDATE SET
+      scope=excluded.scope, kind=excluded.kind, lastSeenAt=excluded.lastSeenAt, online=1, model=excluded.model,
+      providers_json=COALESCE(excluded.providers_json, members.providers_json)
+  `).run(
+    member, scope, kind, now(),
+    typeof modelText === 'string' && modelText.length > 0 ? modelText : null,
+    typeof providersJson === 'string' && providersJson.length > 0 ? providersJson : null,
+  )
 }
 
 // ── 技能（scope-owned + grant + 版本/review，借鉴 QM shared skills + RFC-032）──

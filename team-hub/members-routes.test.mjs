@@ -7,7 +7,8 @@
 //
 // 形状全部是量出来的（`probe23-members.mjs`）：
 //   · 回执是**裸数组**（不是 `{ok, members}`）
-//   · 每行恰好 5 个键：`member / scope / kind / lastSeenAt / online`
+//   · 每行恰好 6 个键：`member / scope / kind / lastSeenAt / online / providers`
+//     （第 6 个 `providers` 是 2026-10-13 加的：本机 provider 就绪度，可空）
 //   · `member` 取的是库里的 `id`（不是 scope）
 //   · 顺序 `lastSeenAt DESC`，`lastSeenAt` 为 `null` 的排最后
 //   · `online` = `Date.now() - new Date(lastSeenAt ?? 0).getTime() < 60000`
@@ -56,13 +57,20 @@ test('① 一个成员都没有时返回**裸空数组**（不是 `{ok, members:
   assert.deepEqual(r.body, [])
 })
 
-test('② 每行恰好 5 个键，`member` 取的是库里的 id', async () => {
+test('② 每行恰好 6 个键，`member` 取的是库里的 id', async () => {
   seed('m-shape', 'sp-shape', 'agent', 1000)
   const rows = (await get()).body
   assert.equal(rows.length, 1)
+  // ★ 键集变了就是**接口变了** —— 前端按这些键画名册。
+  //   这个判据在 2026-10-13 如期响了：`providers`（本机 provider 就绪度，心跳带上来的
+  //   自检读数）是**有意**新增的第 6 个键。它没有把这条放宽成"至少包含这些键" ——
+  //   放宽之后，"多出一个前端不认识的键"就再也没人拦了，而那正是这条要防的事。
+  //   新键**可空**：`null` = 这台守护还没上报过（旧守护，或本轮自检还没出结果），
+  //   与"上报了但不就绪"是两件不同的事。
   assert.deepEqual(Object.keys(rows[0]).sort(),
-    ['kind', 'lastSeenAt', 'member', 'online', 'scope'],
-    '★ 键集变了就是**接口变了** —— 前端按这 5 个键画名册')
+    ['kind', 'lastSeenAt', 'member', 'online', 'providers', 'scope'],
+    '★ 键集变了就是**接口变了** —— 前端按这些键画名册')
+  assert.equal(rows[0].providers, null, '★ 没上报过就是 null，不是空对象（两者含义不同）')
   assert.equal(rows[0].member, 'm-shape', '★ 拿 scope 当成员名的话，前端会画出两个同名的"人"')
   assert.equal(rows[0].scope, 'sp-shape')
   assert.equal(rows[0].kind, 'agent')

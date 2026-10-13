@@ -16,6 +16,7 @@ const react = require('react')
 const here = dirname(fileURLToPath(import.meta.url))
 const SRC = join(here, '..', 'src', 'avatar')
 const tmpSlots = join(here, '.agent-avatar.slots.mjs')
+const tmpPhotos = join(here, '.agent-avatar.photos.mjs')
 const tmpComponent = join(here, '.agent-avatar.render.mjs')
 
 const ROLES = [
@@ -30,6 +31,7 @@ const EMOJI_RE = /[\u{1F000}-\u{1FAFF}\u{2600}-\u{27BF}\u{FE0F}]/u
 
 let AgentAvatar
 let mod
+let photos
 
 function transpile(from, to, rewrite) {
   const out = ts.transpileModule(readFileSync(from, 'utf8'), {
@@ -37,20 +39,30 @@ function transpile(from, to, rewrite) {
   })
   if (out.diagnostics && out.diagnostics.length) throw new Error('transpile 诊断：' + JSON.stringify(out.diagnostics))
   let code = out.outputText
-  if (rewrite) code = code.replace(/['"]\.\/slots['"]/g, "'./.agent-avatar.slots.mjs'")
+  // AgentAvatar 现在有两个相对 import（slots 与 photo-assets），两个都要指到临时产物上；
+  // 少改一个的表现是 ERR_MODULE_NOT_FOUND —— 而 node:test 会把 10 条用例全报红，
+  // 看起来像"头像全坏了"，其实是**测试脚手架**没跟上。
+  if (rewrite) {
+    code = code
+      .replace(/['"]\.\/slots['"]/g, "'./.agent-avatar.slots.mjs'")
+      .replace(/['"]\.\/photo-assets['"]/g, "'./.agent-avatar.photos.mjs'")
+  }
   writeFileSync(to, code, 'utf8')
 }
 
 before(() => {
   transpile(join(SRC, 'slots.ts'), tmpSlots, false)
+  transpile(join(SRC, 'photo-assets.ts'), tmpPhotos, false)
   transpile(join(SRC, 'AgentAvatar.tsx'), tmpComponent, true)
 })
 before(async () => {
   mod = await import(pathToFileURL(tmpSlots).href)
+  photos = await import(pathToFileURL(tmpPhotos).href)
   AgentAvatar = (await import(pathToFileURL(tmpComponent).href)).default
 })
 after(() => {
   try { rmSync(tmpSlots, { force: true }) } catch { /* 清理 */ }
+  try { rmSync(tmpPhotos, { force: true }) } catch { /* 清理 */ }
   try { rmSync(tmpComponent, { force: true }) } catch { /* 清理 */ }
 })
 
@@ -82,21 +94,49 @@ function codeOnly(src) {
     .join('\n')
 }
 
-const avatarSources = () => ['slots.ts', 'AgentAvatar.tsx', 'index.ts', 'assets'].map(f => { try { return readFileSync(join(SRC, f), 'utf8') } catch { return '' } }).join('\n')
+const avatarSources = () => ['slots.ts', 'AgentAvatar.tsx', 'photo-assets.ts', 'index.ts', 'assets'].map(f => { try { return readFileSync(join(SRC, f), 'utf8') } catch { return '' } }).join('\n')
 /** 剥掉注释后的源码 —— 「源码里不许出现某字符串」这类判据必须用它（见 `codeOnly`）。 */
 const avatarCode = () => codeOnly(avatarSources())
 
 describe('S1 头像基座', () => {
-  test('TC-S1-01 渲染为 <svg 且没有单个字符文本节点（AC-R3-1）', () => {
-    const html = render('human:requirement')
-    assert.ok(html.includes('<svg'), '必须含 <svg 根节点')
-    assert.equal(html.replace(/<[^>]*>/g, '').trim(), '', '不得有文本节点（emoji/首字）')
+  // 头像有**两条来源**（配图 → `<img>`，没配图 → 内联 `<svg>`），所以"必须渲染什么"
+  // 的断言要先分路。写死 `<svg` 会在配图那天全红 —— 而那并不是故障。
+  const isGraphic = (html) => html.includes('<svg') || html.includes('<img')
+  /** 本仓资产表里配了图的 key —— 直接读**转译后的真模块**，不拿正则去啃 TS 源。 */
+  const photoKeys = () => Object.keys(photos.AVATAR_PHOTOS)
+
+  test('TC-S1-01 两条来源都渲染成"图形"且都没有文本节点（AC-R3-1）', () => {
+    // ① 配了图的 key → `<img>`（用户提供的写实头像）
+    const withPhoto = render('human:coder')
+    assert.ok(withPhoto.includes('<img'), '配了图的位面必须走 <img>')
+    assert.equal(withPhoto.replace(/<[^>]*>/g, '').trim(), '', '不得有文本节点（emoji/首字）')
+    // ② 没配图的 key → 内联 `<svg>`（矢量人形；`s10` 就是这种）
+    const withoutPhoto = render('human:s10')
+    assert.ok(withoutPhoto.includes('<svg'), '没配图的位面必须回落内联 SVG')
+    assert.ok(!withoutPhoto.includes('<img'), '没配图时不许出现 <img（那会是一张破图）')
+    assert.equal(withoutPhoto.replace(/<[^>]*>/g, '').trim(), '', '不得有文本节点（emoji/首字）')
+    // ③ 非法/缺失令牌 → 占位矢量（不是图片）
+    const placeholder = render('human:UNKNOWN')
+    assert.ok(placeholder.includes('<svg'), '未知令牌必须回落占位矢量人形')
   })
 
   test('TC-S1-02 25 个岗位头像两两不同（AC-R3-3）', () => {
     const marks = ROLES.map(r => render('human:' + r))
-    for (const m of marks) assert.ok(m.includes('<svg'))
+    for (const [i, m] of marks.entries()) assert.ok(isGraphic(m), ROLES[i] + ' 必须渲染成图形')
     assert.equal(new Set(marks).size, ROLES.length, '25 个岗位头像必须两两不同')
+  })
+
+  test('★ TC-S1-02b 配了图的 key 一定渲染 <img> 且 src 是同源相对路径（不是外链）', () => {
+    const keys = photoKeys()
+    assert.ok(keys.length > 0, '资产表不该是空的')
+    for (const k of keys) {
+      const html = render('human:' + k)
+      assert.ok(html.includes('<img'), k + ' 配了图却没走 <img>')
+      const src = (/src="([^"]+)"/.exec(html) || [])[1] ?? ''
+      assert.ok(src.startsWith('./avatars/'), k + ' 的 src 必须是同源相对路径：' + src)
+      assert.ok(!/^https?:|^\/\//.test(src), k + ' 的 src 不许是外链：' + src)
+      assert.ok(src.endsWith('.webp'), k + ' 的资产必须是 webp：' + src)
+    }
   })
 
   test('TC-S1-03 位面表 = 25 岗位 ∪ s01..s15，>=40 且单射、确定性（AC-R3-3）', () => {
@@ -125,15 +165,27 @@ describe('S1 头像基座', () => {
   })
 
   test('TC-S1-05/06/07/17 缺失/emoji/非法令牌 → 确定性占位人形，不显示名称首字（AC-R9-1/9-2、AC-R4-1）', () => {
-    const values = [undefined, null, '', '   ', '\u{1F916}', '\u{1F9ED}', '\u{2699}\u{FE0F}', 'human:', 'human:UNKNOWN', 'HUMAN:requirement', 'human:requirement ', 'human:a/../b', 'not-a-token', '<img src=x>']
+    // ★ 2026-10-13：`'human:requirement '`（**带尾空格**）从这个名单里移走了。
+    //   它不是非法令牌 —— `resolveSlot()` 会 trim，于是它**正常解析**成 requirement。
+    //   从前它混在这里也能过，是因为**所有**头像都渲染 `<svg`，断言分不出真假；
+    //   配图之后 requirement 走 `<img>`，它就被"揭发"成了一个假阳性用例。
+    //   现在拆成两条：真非法的走占位，可解析的单独断言（见下面 TC-S1-05b）。
+    const values = [undefined, null, '', '   ', '\u{1F916}', '\u{1F9ED}', '\u{2699}\u{FE0F}', 'human:', 'human:UNKNOWN', 'HUMAN:requirement', 'human:a/../b', 'not-a-token', '<img src=x>']
     const marks = values.map(v => render(v, { name: '析言' }))
     for (let i = 0; i < values.length; i += 1) {
       const html = marks[i]
       assert.ok(html.includes('<svg'), '必须渲染占位人形：' + String(values[i]))
+      assert.ok(!html.includes('<img'), '非法令牌不许落到图片：' + String(values[i]))
       assert.ok(!EMOJI_RE.test(html.replace(/<[^>]*>/g, '')), '不得渲染 emoji 文本：' + String(values[i]))
       assert.ok(!html.includes('析'), '回退不得用 name 首字：' + String(values[i]))
     }
     assert.equal(new Set(marks.slice(0, 4).map(h => h)).size, 1, '空/缺失令牌必须落到同一占位人形')
+  })
+
+  test('TC-S1-05b 可解析但形态特殊：尾空格被 trim 后照常解析（不是回退）', () => {
+    // `human:<key>` 前后空白由 `resolveSlot()` trim 掉 ⇒ 这是**合法**输入。
+    assert.equal(render('human:coder '), render('human:coder'), '尾空格必须被 trim 后正常解析')
+    assert.equal(render('  human:coder'), render('human:coder'), '前空格同理')
   })
 
   test('TC-S1-08 组件契约：默认导出 + props + size/className 生效', () => {
@@ -142,7 +194,7 @@ describe('S1 头像基座', () => {
     assert.ok(html.includes('48'), 'size 必须反映到渲染尺寸')
     assert.ok(html.includes('x-y'), 'className 必须透传到根节点')
     const boundary = [0, -1, 1024, NaN].map(s => render('human:requirement', { size: s }))
-    for (const h of boundary) assert.ok(h.includes('<svg'), '非法 size 仍必须渲染人形')
+    for (const h of boundary) assert.ok(isGraphic(h), '非法 size 仍必须渲染图形')
   })
 
   /**
@@ -162,8 +214,20 @@ describe('S1 头像基座', () => {
    *
    *   现在按**本意**收口：外链形式全部继续禁（下面的 `EXTERNAL`），
    *   `url(#…)` 放行。`TC-S1-09b` 用两侧对照把这条边界钉住。
+   *
+   * ★★ 2026-10-13 再改一次（同一本意，第三次收口）：头像现在**允许 `<img>`** ——
+   *    因为用户提供了真实头像资产，走 `<img src="./avatars/x.webp">`。于是原来
+   *    禁 `'<img'` 与 `'src='` 的两条又变成了误伤：它们拦的是**"用图片"**本身，
+   *    而不是"用**外部**图片"。规矩收成一句话：
+   *
+   *      > 头像可以引用**随包发布的本机资源**（相对路径），
+   *      > 引用任何要"走出去拿"的东西一律不许。
+   *
+   *    所以现在禁的是**带协议/协议相对的写法**（`http:` / `https:` / `//` / `data:`），
+   *    放行相对路径与内部片段；并且禁止 `onerror` 之类的内联事件（那能让外部地址
+   *    绕过静态检查）。`TC-S1-09b` 用两侧对照把这三条边界一起钉住。
    */
-  const EXTERNAL = ['<img', 'url(http', 'url(https', 'url(//', 'url(data:', 'src=', 'onerror', 'xlink:href']
+  const EXTERNAL = ['url(http', 'url(https', 'url(//', 'url(data:', 'src="http', "src='http", 'src="//', "src='//", 'src="data:', 'xlink:href="http', ' onerror=', 'onerror=']
   test('TC-S1-09 离线自足：无外链资源、无网络调用（AC-R8-1）', () => {
     const src = avatarCode()
     for (const banned of EXTERNAL) {
@@ -171,16 +235,32 @@ describe('S1 头像基座', () => {
     }
     // 内部渐变引用是**允许**的（它不出文档）——这一条是防"改判据时顺手把渐变也删了"
     assert.ok(src.includes('url(#'), '本版头像用内部渐变做明暗；没有它说明画法被回退了')
+    // ★ 反向锚：允许的写法必须真的在用（否则"零命中"可能只是因为头像根本没有图）
+    assert.ok(src.includes("AVATAR_PHOTO_BASE + file") || src.includes('AVATAR_PHOTO_BASE'),
+      '配了图的位面必须真的走图片路径')
   })
 
-  test('★ TC-S1-09b 边界对照：内部渐变放行、外链写法必红、剥注释没架空门禁', () => {
+  test('★ TC-S1-09b 边界对照：内部渐变与同源图片放行、外链写法必红、剥注释没架空门禁', () => {
     const isExternal = (code) => EXTERNAL.some((b) => code.includes(b))
     // ① 内部渐变引用：不许判红（否则画不了明暗）
     assert.equal(isExternal(codeOnly("const f = 'url(#face-grad)'\n")), false,
       '★ url(#…) 是同文档引用，不是外链')
+    // ①b 同源相对图片：不许判红（这正是这一版要用的写法）
+    for (const ok of ["const u = './avatars/agent-avatar-01.webp'", "const u = '/avatars/x.webp'", '<img src="./avatars/a.webp" />']) {
+      assert.equal(isExternal(codeOnly(ok + '\n')), false, '★ 同源相对路径是允许的：' + ok)
+    }
     // ② 外链形式：一条都不许漏
-    for (const bad of ["url(http://x/a.svg)", "url(https://x/a.png)", "url(//cdn/a.svg)", "url(data:image/svg+xml;base64,AA)", '<img src="a.png">']) {
-      assert.equal(isExternal(codeOnly('const f = ' + JSON.stringify(bad) + '\n')), true,
+    //
+    // ★ 夹具用**模板串**直插，不用 `JSON.stringify`：后者会把 `"` 转义成 `\"`，
+    //   于是 `src="http` 这种**字面判据**在夹具里永远匹配不到 —— 一条本该红的用例
+    //   会静静地绿着。实测就是这么发现的：`<img src="https://x/a.png">` 报了 false。
+    //   真实源码里的引号是**不转义**的，夹具必须长得跟它一样。
+    for (const bad of [
+      "url(http://x/a.svg)", "url(https://x/a.png)", "url(//cdn/a.svg)", "url(data:image/svg+xml;base64,AA)",
+      '<img src="https://x/a.png">', "<img src='http://x/a.png'>", '<img src="//cdn/a.png">',
+      '<img src="data:image/png;base64,AA">', '<img src="a.png" onerror="alert(1)">',
+    ]) {
+      assert.equal(isExternal(codeOnly(`const f = ${bad}\n`)), true,
         '★ 外链写法必须被判红：' + bad)
     }
     // ③ 剥注释没有把门禁剥空（代码行里的违规仍可见）

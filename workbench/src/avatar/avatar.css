@@ -1,10 +1,32 @@
-/* workbench/src/avatar/avatar.css —— 人形头像的图形化适配。
-   旧的文本徽章（.agent-avatar 等）原本按 emoji 文本排版；这里让内联 SVG 填满徽章并裁圆。 */
+/* workbench/src/avatar/avatar.css —— 成员头像的图形化适配。
+   头像有**两条来源**：`<img>`（照片/插画资产）与内联 SVG（矢量人形）。
+   两者都必须填满外层徽章并按徽章的圆角裁切 —— 否则同一个位置上，
+   有图的成员是方的、没图的成员是圆的，一眼就能看出"这两个不是一套"。 */
 .agent-avatar-svg { display: block; width: 100%; height: 100%; border-radius: inherit; }
+
+/* `<img>` 这一路：`object-fit: cover` 是必须的 —— 资产是正方形，而徽章可能不是
+   （`.agent-opt-avatar` 是 18px 圆、侧栏是 28px 圆角块）。不 cover 就会拉变形。 */
+.agent-avatar-img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  object-position: center 32%; /* 人像的"脸"通常在上三分之一；居中裁会把下巴切掉 */
+  border-radius: inherit;
+  background: #eef1f4; /* 图片解码前的占位底色，避免闪一下白块 */
+  user-select: none;
+  -webkit-user-drag: none;
+}
+
 .directory-avatar, .agent-avatar, .ao-avatar, .scene-agent-avatar, .agent-tag-avatar, .agent-opt-avatar { overflow: hidden; }
 .directory-avatar > .agent-avatar-svg,
 .agent-avatar > .agent-avatar-svg,
 .ao-avatar > .agent-avatar-svg,
 .scene-agent-avatar > .agent-avatar-svg,
 .agent-tag-avatar > .agent-avatar-svg { width: 100%; height: 100%; }
+.directory-avatar > .agent-avatar-img,
+.agent-avatar > .agent-avatar-img,
+.ao-avatar > .agent-avatar-img,
+.scene-agent-avatar > .agent-avatar-img,
+.agent-tag-avatar > .agent-avatar-img { width: 100%; height: 100%; }
 .agent-opt-avatar { display: inline-flex; align-items: center; justify-content: center; width: 18px; height: 18px; border-radius: 50%; }

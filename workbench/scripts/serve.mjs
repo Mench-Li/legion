@@ -84,6 +84,9 @@ const MIME = {
   '.json': 'application/json; charset=utf-8',
   '.svg': 'image/svg+xml',
   '.png': 'image/png',
+  // ★ 2026-10-13：成员头像改用 256px WebP。缺这一条，静态服务会回
+  //   `application/octet-stream`，浏览器把头像当下载/破图 —— 与 mobile.mjs 同步补。
+  '.webp': 'image/webp',
   '.ico': 'image/x-icon',
   '.map': 'application/json; charset=utf-8',
   '.txt': 'text/plain; charset=utf-8',

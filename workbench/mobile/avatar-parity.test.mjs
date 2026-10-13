@@ -50,10 +50,12 @@ describe('S6 移动端头像', () => {
     }
   })
 
-  test('TC-S6-02/03 渲染为 <svg 人形而非 emoji，25 岗位两两不同（AC-R11-1）', () => {
+  test('TC-S6-02/03 渲染成图形（图片或 SVG 人形）而非 emoji，25 岗位两两不同（AC-R11-1）', () => {
+    // ★ 2026-10-13：头像现在是"有图用图、没图用矢量"，所以断言改成**渲染成图形**
+    //   而不是"必须是 `<svg`" —— 否则配图那天全线报红，而那不是故障。
     const marks = ROLES.map(r => mobile.renderAvatar('human:' + r, 22))
     for (const html of marks) {
-      assert.ok(html.includes('<svg'), '必须渲染内联 SVG')
+      assert.ok(html.includes('<svg') || html.includes('<img'), '必须渲染成图形（svg 或 img）')
       assert.equal(html.replace(/<[^>]*>/g, '').trim(), '', '不得有文本节点（emoji/首字）')
     }
     assert.equal(new Set(marks).size, ROLES.length, '25 个岗位头像两两不同')
@@ -70,11 +72,14 @@ describe('S6 移动端头像', () => {
     assert.equal(typeof mobile.avatarLabel('not-a-token', '衡码'), 'string')
   })
 
-  test('TC-S6-06 移动端不 import 桌面 TS 源，且无网络调用（独立静态根、离线自足）', () => {
+  test('TC-S6-06 移动端不 import 桌面 TS 源，且零网络/零外链（独立静态根、离线自足）', () => {
     const app = readFileSync(resolve(HERE, 'app.mjs'), 'utf8')
     assert.ok(!/from\s+['"][^'"]*workbench\/src/.test(app), '移动端不得 import 桌面 TS 源')
     const av = readFileSync(resolve(HERE, 'avatar.mjs'), 'utf8')
-    for (const banned of ['fetch(', 'XMLHttpRequest', 'http://', 'https://', '<img']) {
+    // ★ 2026-10-13：`'<img'` 从黑名单里**移走**了 —— 头像现在合法地用 `<img>` 引**同源**资产。
+    //   被禁的是"要走出去拿"的写法，不是"用图片"本身。这条边界由本用例剩下的几项 +
+    //   `avatar-photo.test.mjs` 的 ⑧（渲染出的 src 一律 ./avatars/）一起守。
+    for (const banned of ['fetch(', 'XMLHttpRequest', 'http://', 'https://', 'url(http', 'url(//', 'src="http', 'src="//']) {
       assert.ok(!av.includes(banned), '移动端头像不得依赖 ' + banned)
     }
   })

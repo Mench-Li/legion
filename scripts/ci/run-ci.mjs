@@ -1990,6 +1990,10 @@ async function stageTest() {
     { label: 'doc-render（文档产物契约）', files: ['workbench/scripts/doc-render.test.mjs'], cwd: ROOT },
     // ── T-199：Agent 人性化名称 + 人性化头像（S1~S7 收口）──────────────────────
     { label: 'agent-avatar（S1 头像基座：内联人形 SVG / 位面构造性唯一 / 确定性 / 回退 / 离线零依赖）', files: ['workbench/scripts/agent-avatar.test.mjs'], cwd: ROOT },
+    // 2026-10-13：头像从"纯矢量"扩成"有图用图、没图用矢量"后，多出一整类**只在运行时
+    // 才暴露**的故障面 —— 映射到不存在的图（破图）、只拷了桌面忘了手机（手机全裂）、
+    // 两端内容不一致（同一个人两副面孔）、src 被写成外链。全部做成**提交时**判据。
+    { label: 'avatar-photo（头像图片资产：存在性 / 两端逐字节一致 / 零外链 / 来源可溯 / 体积可控）', files: ['workbench/scripts/avatar-photo.test.mjs'], cwd: ROOT },
     { label: 'seed-roster（S2 数据面：两段式展示名 / 头像令牌 / 迁移保护 / 幂等）', files: ['team-hub/scripts/seed-roster.test.mjs'], cwd: ROOT },
     // 2026-10-13：**头像迁移**（旧 emoji → human:<key> 令牌）。这次真实故障的收口：
     //   功能全做完、界面全接好，而库里 24 行全是 emoji ⇒ 全部渲染成同一张灰剪影 ⇒

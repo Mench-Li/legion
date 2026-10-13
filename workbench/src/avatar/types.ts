@@ -21,3 +21,22 @@ export interface AvatarSlot {
   readonly hairShade: string
   readonly topShade: string
 }
+
+/**
+ * 一张「AI 生成头像」资产（2026-10-13 加）。
+ *
+ * 头像现在有**两条来源**，优先级是图片在前、矢量在后：
+ *   ① 这条记录存在 ⇒ 渲染 `<img>`（用户提供的写实/插画头像）；
+ *   ② 不存在 ⇒ 回落内联 SVG 矢量人形（原路径，未受影响）。
+ * 这样"没配图的岗位"与"配了图的岗位"能在同一个界面里共存，且**不会出现破图**。
+ */
+export interface AvatarPhoto {
+  /** 文件名（相对 `AVATAR_PHOTO_BASE`）。 */
+  readonly file: string
+  /** 来源（原图相对路径）—— 留痕用，便于回溯是谁提供的。 */
+  readonly from: string
+  /** 原图尺寸（形如 `1254x1254`）。 */
+  readonly srcSize: string
+  /** 派生文件 sha256 前 16 位，用于两端一致性判据。 */
+  readonly sha256: string
+}

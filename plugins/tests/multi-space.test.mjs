@@ -2,7 +2,7 @@ import assert from 'node:assert/strict'
 import { join } from 'node:path'
 import test from 'node:test'
 
-import { childLogFile, fetchSpaceViews, isSupervisor, planSpaceRunners, statusFileNames } from '../lib/index.js'
+import { childLogFile, fetchSpaceViews, isSupervisor, planSpaceRunners, resolveAgentNodeId, statusFileNames } from '../lib/index.js'
 
 /**
  * SP-P1 多空间编排：监督者的**决策**是纯函数，这里逐条钉住它的边界。
@@ -209,4 +209,94 @@ test('★ TC-SP-P1-17 空视图必须**说出来**（"没读到空间"与"没有
   assert.match(src, /数据面没有读到任何空间/, '空视图要打一句能定位的话（含 hub 地址）')
   // 而且只喊一次：每 30s 重复喊会把日志淹掉，而"喊过一次"就够定位了
   assert.match(src, /loggedEmptyViews/, '要有"只喊一次"的闸门')
+})
+
+// ════════════════════════════════════════════════════════════════════════════
+// 执行节点 id 的**逐空间**解析（2026-10-13）
+//
+// 起因：给目标绑执行节点时发现，一个 `scopes: 'auto'` 的守护同时服务多个空间，
+// 而 `agent_node_configs` 的主键是 **`id`**（一个 id 只能属于一个空间），
+// 认领路径又要求 `node.scope === 任务所在空间`。若配置里只写**一个字面 id**，
+// 则只有一个空间认领得走，另一个空间的**每个任务**都会 409、表现为"任务不动"。
+//
+//   > 一个"一个守护一个节点"的模型，
+//   > 与一个"一个守护服务多个空间"的部署，
+//   > 在**只服务一个空间**的时候是同一个东西 ——
+//   > 区别只在切到第二个空间那天，而那时一半的任务会静默停住。
+// ════════════════════════════════════════════════════════════════════════════
+
+test('TC-SP-P1-18 ★★ `{scope}` 占位符按空间解析（一条配置覆盖多空间）', () => {
+  assert.equal(resolveAgentNodeId('desktop-{scope}', 'software'), 'desktop-software')
+  assert.equal(resolveAgentNodeId('desktop-{scope}', 'ozon'), 'desktop-ozon')
+  // 同一个配置、两个 fiber ⇒ 两个不同的节点 id（这正是要点）
+  assert.notEqual(resolveAgentNodeId('desktop-{scope}', 'software'), resolveAgentNodeId('desktop-{scope}', 'ozon'))
+  // 出现在中间/多处也要换干净
+  assert.equal(resolveAgentNodeId('n-{scope}-x', 'a'), 'n-a-x')
+  assert.equal(resolveAgentNodeId('{scope}{scope}', 'a'), 'aa')
+})
+
+test('TC-SP-P1-19 ★★ 不含占位符 ⇒ **逐字返回**（单空间部署行为不变）', () => {
+  assert.equal(resolveAgentNodeId('desktop-software', 'ozon'), 'desktop-software',
+    '字面 id 不许被空间名改写 —— 否则单空间部署的既有配置会悄悄指向别的节点')
+  assert.equal(resolveAgentNodeId('my-node', 'anything'), 'my-node')
+})
+
+test('TC-SP-P1-20 ★ 空 / 空白 / 缺失 ⇒ 空串（= 不上报节点，与以前一致）', () => {
+  for (const v of ['', '   ', undefined, null]) {
+    assert.equal(resolveAgentNodeId(v, 'software'), '', JSON.stringify(v) + ' 应当是不上报节点')
+  }
+  // 前后空白要去掉
+  assert.equal(resolveAgentNodeId('  desktop-{scope}  ', 'software'), 'desktop-software')
+})
+
+test('TC-SP-P1-21 ★★ 空间名未知时**不把占位符原样送出去**', () => {
+  // `desktop-{scope}` 不是合法节点 id，送到 hub 只会换来一条格式错误 ——
+  // 而真正的问题是"这个 fiber 不知道自己服务谁"。退化成"不上报节点"
+  // （= 任一在线节点可认领）比报一个假错更接近事实。
+  assert.equal(resolveAgentNodeId('desktop-{scope}', ''), '')
+  assert.equal(resolveAgentNodeId('desktop-{scope}', '   '), '')
+  assert.equal(resolveAgentNodeId('desktop-{scope}', undefined), '')
+  assert.ok(!resolveAgentNodeId('desktop-{scope}', '').includes('{scope}'))
+})
+
+test('TC-SP-P1-22 ★★★ 认领**只许**用门控版节点 id（源码级，闭包内不变量）', async () => {
+  // 为什么这条必须存在：hub 的认领路径只要收到 `agentNodeId`，就要求该节点**存在且 ready**，
+  // 否则 409 AGENT_NODE_NOT_READY ⇒ "携带节点身份"是个**有前置条件**的动作。
+  // 而 `scopes: 'auto'` 会不断遇到新空间（新空间里还没有节点）——
+  // 若认领直接用**未门控**的解析结果，新空间从出现到节点就绪之间**每个任务都领不走**，
+  // 且只是"任务不动"，没有报错。
+  //
+  //   > 一个"配了就总是携带"的节点身份，
+  //   > 与一个"确认自己对得上之后才携带"的节点身份，
+  //   > 在**节点已登记且就绪**的时候是同一个东西 ——
+  //   > 区别只在它还没就绪的那段时间，而那时前者会让每个任务都领不走。
+  //
+  // 这个不变量活在闭包里，没法从外部调；所以照本文件既有的做法（TC-SP-P1-17）
+  // 直接读源码钉住**接线**：认领点必须调用门控版，未门控版只许出现在心跳那一段。
+  const { readFileSync } = await import('node:fs')
+  const root = new URL('..', import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, '$1')
+  const src = readFileSync(join(root, 'src', 'index.ts'), 'utf8')
+
+  // 门控存在，且默认是"未就绪"
+  assert.match(src, /let nodeReportedReady = false/, '要有"本空间节点是否就已绪"的位，且初值为 false')
+  assert.match(src, /nodeReportedReady \? configuredAgentNodeId\(\) : ''/,
+    '门控版的形状必须是"未就绪 ⇒ 空串"（空串 = 不携带 = 没有节点绑定要求）')
+
+  // 认领与回执两处必须用门控版
+  for (const [needle, why] of [
+    ['...(agentNodeIdForScope() !== \'\' ? { agentNodeId: agentNodeIdForScope() } : {}),', '认领 /api/claim 携带的节点 id'],
+    ['runnerNodeId: agentNodeIdForScope() || null,', '回执里的 runnerNodeId'],
+  ]) {
+    assert.ok(src.includes(needle), `${why} 必须用门控版 agentNodeIdForScope()：找不到 ` + needle)
+  }
+
+  // 未门控版只许在心跳那一段出现（那里正是"去登记/续期"的地方）
+  const rawUses = [...src.matchAll(/configuredAgentNodeId\(\)/g)].length
+  assert.equal(rawUses, 2, '未门控版应只出现两次（定义处 1 + 心跳处 1）；多出来说明有认领路径绕过了门控')
+  assert.match(src, /const nodeIdForHeartbeat = configuredAgentNodeId\(\)/,
+    '心跳必须用未门控版 —— 否则节点永远无法首次就绪（先有鸡还是先有蛋）')
+
+  // 心跳成功才放行、失败要翻回去（否则一次成功后永久放行）
+  assert.match(src, /nodeReportedReady = true/, '心跳成功后要放行')
+  assert.match(src, /nodeReportedReady = false/, '心跳失败要翻回去')
 })

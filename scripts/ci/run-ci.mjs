@@ -2191,6 +2191,12 @@ async function stageTest() {
     { label: 'delivery-routes（S4 交付/集成/裁决 HTTP 契约）', files: ['team-hub/delivery-routes.test.mjs'], cwd: ROOT },
     { label: 'metrics（S4 指标只读聚合与不可读降级）', files: ['team-hub/metrics.test.mjs'], cwd: ROOT },
     { label: 'write-eligibility（S5 守护侧写入资格/RunRequest 冻结/等待视图）', files: ['plugins/tests/write-eligibility.test.mjs'], cwd: ROOT, nodeArgs: ['--experimental-strip-types'] },
+    // ★ 2026-10-13 补登记：这一套（TC-SP-P1-01…22）**此前从未在本套件表里**，
+    //   也就是说它一直在跑、却从来没被 CI 跑过 —— 一套"存在但不运行"的判据，
+    //   与一套不存在的判据，在**红绿看板**上是同一个东西。
+    //   本次给它加了执行节点 id 的逐空间解析（`{scope}` 占位符）与
+    //   "认领只许用门控版节点 id" 的源码级不变量，正好借机接上。
+    { label: 'multi-space（SP-P1 多空间编排决策 + 执行节点 id 逐空间解析）', files: ['plugins/tests/multi-space.test.mjs'], cwd: ROOT, nodeArgs: ['--experimental-strip-types'] },
     // BUG-008：文件域闸门取"这条切片分支自己改了什么"的 refspec 必须是**三点**（`A...B`）。
     // 用两点（`A..B`）会把主分支在切片飞行期间新增的文件算成切片的改动 —— 实测把一次完全合规的
     // 交付（w/T-178，11 个域内文件）判成"越域"拦在 in_review。用例含真实 git 仓库的行为对照，

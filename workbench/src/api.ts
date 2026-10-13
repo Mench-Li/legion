@@ -304,9 +304,20 @@ export function registerAgentWorkflowDefinition(scope: string, definition: Omit<
   return hubPost('/api/agent-workflows/definitions', { scope, definition })
 }
 
-/** team-hub v2：发布目标——每次**新建**一个目标并生成其独立阶段任务链；与既有目标并存，互不取消。 */
-export function publishGoal(scope: string, objective: string, mode?: 'chain' | 'slice', workflowDefinition?: AgentWorkflowDefinitionRef): Promise<unknown> {
-  return hubPost('/api/goal', { scope, objective, ...(mode ? { mode } : {}), ...(workflowDefinition ? { workflowDefinition } : {}) })
+/**
+ * team-hub v2：发布目标——每次**新建**一个目标并生成其独立阶段任务链；与既有目标并存，互不取消。
+ *
+ * `agentNodeId`（2026-10-13）：把这条链**钉在哪台执行节点**上。省略 = **不绑定**（默认）。
+ * ★ 绑定是硬绑定 —— 认领这条链的执行服务必须配同一个 `agentNodeId`，否则链上每个任务都领不走。
+ *   节点必须已登记且就绪，否则 hub 在**发布时**就拒绝（而不是存下来、等认领时才失败）。
+ */
+export function publishGoal(scope: string, objective: string, mode?: 'chain' | 'slice', workflowDefinition?: AgentWorkflowDefinitionRef, agentNodeId?: string): Promise<unknown> {
+  return hubPost('/api/goal', {
+    scope, objective,
+    ...(mode ? { mode } : {}),
+    ...(workflowDefinition ? { workflowDefinition } : {}),
+    ...(agentNodeId ? { agentNodeId } : {}),
+  })
 }
 
 /** 目标状态迁移（POST /api/goal/status）响应：hub 写端点统一信封 `{ ok, task }`，

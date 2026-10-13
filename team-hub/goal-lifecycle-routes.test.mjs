@@ -214,7 +214,7 @@ const drive = async (router, path, body) => {
 test('⑤ ★★★ 发布时**作用域回落**：`body.scope` 有就用（trim），没有就用 hub 给的那个', async () => {
   const { router, calls } = spyRouter()
   await drive(router, '/api/goal', { by: 'general', objective: 'O' })
-  assert.deepEqual(calls.publish[0], ['scope-from-hub', 'O', 'chain', 'general', false, null],
+  assert.deepEqual(calls.publish[0], ['scope-from-hub', 'O', 'chain', 'general', false, null, null],
     '★★★ 没有 body.scope 时必须回落到 handleWrite 递进来的 scope')
   await drive(router, '/api/goal', { by: 'general', objective: 'O', scope: '  other  ' })
   assert.equal(calls.publish[1][0], 'other', '★★ 给了 scope 就用它，且要去空白')
@@ -242,6 +242,22 @@ test('⑤ ★★★ 发布时**作用域回落**：`body.scope` 有就用（trim
   await drive(router, '/api/goal', { by: 'general', objective: 'O', workflowDefinition: { id: 'wf.x', version: 3 } })
   assert.deepEqual(calls.publish.at(-1)[5], { id: 'wf.x', version: 3 },
     '★★ body.workflowDefinition 必须原样搬到第 6 位（胶水不许把它丢掉）')
+
+  // ★★ 2026-10-13：publishGoalRecord 的**第 7 个位置**是 agentNodeId（执行节点绑定）。
+  //    同一个形状第三次发生（第 5 位→第 6 位→第 7 位），所以照上一条的做法**正面钉住**它：
+  //      function publishGoalRecord(targetScope, objective, mode, by, docSync,
+  //                                 workflowDefinitionRef = null, agentNodeId = null)
+  assert.equal(calls.publish[0][6], null,
+    '★ 没给 agentNodeId ⇒ 第 7 位是 null —— 也就是**不绑定**（默认语义必须与今天一致）')
+  await drive(router, '/api/goal', { by: 'general', objective: 'O', agentNodeId: '  node-a  ' })
+  assert.equal(calls.publish.at(-1)[6], 'node-a',
+    '★★ body.agentNodeId 必须原样搬到第 7 位，且去空白')
+  // 空串 / 空白 / 非字符串 = 没给（与"不绑定"同一个语义，不写空串进库）
+  for (const v of ['', '   ', 123, null, {}, []]) {
+    await drive(router, '/api/goal', { by: 'general', objective: 'O', agentNodeId: v })
+    assert.equal(calls.publish.at(-1)[6], null,
+      `★★ agentNodeId=${JSON.stringify(v)} 必须当作"不绑定"（null），不当成绑定空串`)
+  }
 })
 
 test('⑤b ★★★ `docSync` 有**两个来源**：`body.docSync === true` **或** `body.feature === true`', async () => {

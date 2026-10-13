@@ -2020,6 +2020,16 @@ ensureColumn('goal', 'docsDir', 'docsDir TEXT')
 //    （守护 registerContractDocs 消费 t.docSync===true → done 结算追加 docs/FEATURES.md + README.md 契约）。
 //    发布目标时只把声明落到链上 coder 岗位任务（实现+更新文档的执行者），避免全链误伤前段分析岗。
 ensureColumn('goal', 'docSync', 'docSync INTEGER DEFAULT 0')
+// 7) goal.agentNodeId（2026-10-13）——「这条链跑在哪台执行节点上」。
+//
+//    为什么是**目标级**而不是任务级：认领路径明写同一目标的链上出现两个节点 ⇒
+//    409 AGENT_NODE_WORKSPACE_MISMATCH（「跨节点 workspace/Git 交接尚未实现」）。
+//    ⇒ 一条链只能落在一台上，所以这个选择天然是**每个目标一次**，不是每个任务一次。
+//
+//    NULL = **不绑定**（默认）。不绑定时语义与今天完全一致：任一在线执行服务都能认领。
+//    ★ 默认必须是 NULL：绑定是硬绑定（认领方必须带同一个 agentNodeId），
+//      对没配 agentNodeId 的守护来说，绑定等于"这条链一件都领不走"。
+ensureColumn('goal', 'agentNodeId', 'agentNodeId TEXT DEFAULT NULL')
 ensureColumn('tasks', 'docSync', 'docSync INTEGER DEFAULT 0')
 ensureColumn('tasks', 'fileDomain', 'fileDomain TEXT')
 // 6) 并行任务文件冲突治理：写入调度状态（unplanned/waiting-file/reserved/reconciling/released）
@@ -2429,6 +2439,8 @@ function rowToGoal(row) {
     // 幂等转换：goalView(getGoal()) 会把已转换对象二次传入 rowToGoal，
     // 严格 ===1 对二次传入的 boolean true 恒 false（RC-2 现场）；!! 对 1/0/true/false 均正确且幂等。
     docSync: !!row.docSync,
+    // 这条链绑定的执行节点；null = 不绑定（任一在线执行服务可认领）。
+    agentNodeId: typeof row.agentNodeId === 'string' && row.agentNodeId !== '' ? row.agentNodeId : null,
     context: row.context ?? '',
     contextVersion: row.contextVersion ?? 0,
     createdAt: row.createdAt,
@@ -2538,7 +2550,7 @@ function nextGoalId() {
  * 目标级分析文档命名空间：新目标分配 docsDir = `docs/<goalId>`（阶段产物文档进目标独立目录，
  * 跨目标分析前缀可安全并行）；本列上线前已发布的目标 docsDir=NULL，沿用根 docs/ 固定槽位（旧链兼容）。
  */
-function publishGoalRecord(targetScope, objective, mode = 'chain', by = 'general', docSync = false, workflowDefinitionRef = null) {
+function publishGoalRecord(targetScope, objective, mode = 'chain', by = 'general', docSync = false, workflowDefinitionRef = null, agentNodeId = null) {
   return withTx(() => {
     const rawMode = mode === 'slice' ? 'slice' : 'chain'
     let workflowDefinition = null
@@ -2553,10 +2565,76 @@ function publishGoalRecord(targetScope, objective, mode = 'chain', by = 'general
       })
       if (workflowDefinition === null) throw new Error(`工作流定义不存在：${workflowDefinitionRef.id}@${workflowDefinitionRef.version}`)
     }
+
+    // ── 执行节点绑定（2026-10-13）────────────────────────────────────────
+    //
+    // 用户在发布前**显式确认**了要把这条链钉在哪台执行节点上。三条纪律：
+    //
+    //   ① **默认不绑定**（`agentNodeId` 为 null）：不绑定时语义与今天完全一致。
+    //      绑定是**硬绑定** —— 认领路径要求认领方带的 `agentNodeId` 与它逐字相等
+    //      （`server.mjs` 的 AGENT_NODE_MISMATCH）。对一个没配 `agentNodeId` 的守护来说，
+    //      绑定等于"这条链上的每个任务都领不走"。所以默认值不能替用户做这件事。
+    //
+    //   ② **发布时就校验**：节点要存在、要 enabled、要 ready。
+    //      否则就是**明知领不走还存下来** —— 那正是这一整轮在消灭的"发布成功、派工必失败"。
+    //
+    //   ③ **跨节点在这里说清**：同一条链出现两个节点时，认领路径会抛
+    //      409 AGENT_NODE_WORKSPACE_MISMATCH（跨节点 workspace/Git 交接尚未实现），
+    //      用户看到的是"任务不动"。与其等到那时，不如**发布就报错**。
+    //
+    //     > 一个"存下来、等认领时才失败"的绑定，
+    //     > 与一个"发布时就拒绝"的绑定，在**用户还没派工**的时候看上去一模一样 ——
+    //     > 区别只在第一次认领之后，而那时他已经在查任务为什么不动了。
+    const boundNodeId = typeof agentNodeId === 'string' && agentNodeId.trim() !== '' ? agentNodeId.trim() : null
+
+    // ③ **跨节点在这里说清**（无论用户有没有选节点都查）。
+    //
+    // 第一版把这段放在 `if (boundNodeId !== null)` 里面，于是"工作流自己把阶段绑到两台机器上"
+    // 这种配置**照样发布成功** —— 而它和绑定无关：那条链的任务会带着不同的 executionNode
+    // 进认领，必然 409 WORKSPACE_MISMATCH，用户看到的是"任务不动"。
+    //
+    //   > 一个"只在用户选了节点时才检查的一致性"，与一个"只在出问题时才检查的一致性"，
+    //   > 在**配置恰好一致**的时候是同一个东西 —— 区别只在它不一致的那次，
+    //   > 而那次失败要等到认领才显形。
+    //
+    // 两种来源的形状不同，所以要分别取：
+    //   · 具名定义     ⇒ `stages[].nodeId`
+    //   · 空间级工作流 ⇒ `stageTools[role].nodeId`
+    //   （第一版还漏了空间级这一支 —— 而它才是默认形态。见下面 effectiveWorkflow 的注释。）
+    const effectiveWorkflow = workflowDefinition !== null
+      ? workflowDefinition
+      : (rawMode === 'chain' ? (readPipeline(targetScope).workflow ?? null) : null)
+    const rawNodeIds = effectiveWorkflow === null || effectiveWorkflow === undefined
+      ? []
+      : (Array.isArray(effectiveWorkflow.stages)
+        ? effectiveWorkflow.stages.map((stage) => stage?.nodeId)
+        : Object.values(effectiveWorkflow.stageTools ?? {}).map((tool) => tool?.nodeId))
+    const stageNodeIds = [...new Set(rawNodeIds
+      .map((id) => (typeof id === 'string' && id.trim() !== '' ? id.trim() : null))
+      .filter((id) => id !== null))]
+    if (stageNodeIds.length > 1) {
+      throw Object.assign(new Error(`这条工作流把不同阶段绑到了不同节点（${stageNodeIds.join('、')}）；跨节点 workspace/Git 交接尚未实现，请先在「Agent 工作流」里统一成一个节点`), { code: 'AGENT_NODE_WORKSPACE_MISMATCH', statusCode: 409 })
+    }
+
+    if (boundNodeId !== null) {
+      const configured = harnessStoreForDispatch().getAgentNodeConfig({ id: boundNodeId, scope: targetScope })
+      const live = harnessStoreForDispatch().listAgentNodeConfigs({ scope: targetScope }).find((item) => item.id === boundNodeId)
+      if (configured === null || live === undefined) {
+        throw Object.assign(new Error(`执行节点未登记：${boundNodeId}（先在该空间登记节点，再绑定它）`), { code: 'AGENT_NODE_NOT_REGISTERED', statusCode: 409 })
+      }
+      if (live.status !== 'ready') {
+        throw Object.assign(new Error(`执行节点未就绪：${boundNodeId}（${live.status}）—— 节点就绪后才能把整条链钉在它上面`), { code: 'AGENT_NODE_NOT_READY', statusCode: 409 })
+      }
+      // 用户的选择必须与工作流已绑的那个一致（只能有一个，上面已保证）。
+      if (stageNodeIds.length === 1 && stageNodeIds[0] !== boundNodeId) {
+        throw Object.assign(new Error(`你选的节点「${boundNodeId}」与工作流阶段绑定的「${stageNodeIds[0]}」不同；跨节点 workspace/Git 交接尚未实现，两者必须一致`), { code: 'AGENT_NODE_WORKSPACE_MISMATCH', statusCode: 409 })
+      }
+    }
+
     const t = now()
     const goalId = nextGoalId()
-    db.prepare('INSERT INTO goal (id, scope, objective, status, version, mode, createdAt, updatedAt, endedAt, docsDir, docSync) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)')
-      .run(goalId, targetScope, objective.trim(), 'active', 1, rawMode, t, t, null, `docs/${goalId}`, docSync === true ? 1 : 0)
+    db.prepare('INSERT INTO goal (id, scope, objective, status, version, mode, createdAt, updatedAt, endedAt, docsDir, docSync, agentNodeId) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)')
+      .run(goalId, targetScope, objective.trim(), 'active', 1, rawMode, t, t, null, `docs/${goalId}`, docSync === true ? 1 : 0, boundNodeId)
     const chain = createGoalChain(goalId, targetScope, objective.trim(), rawMode, workflowDefinition)
     if (chain.workflowSnapshot !== null && chain.workflowSnapshot !== undefined) {
       const createdAtMs = new Date(t).getTime()
@@ -5432,6 +5510,27 @@ function workflowDefinitionForChain(definition) {
   }
 }
 
+/**
+ * 为一条链上每个任务构造**执行节点冻结快照**（2026-10-13）。
+ *
+ * 形状与认领时写回的 `claimedNodeSnapshot` 一致（`{id, version, label, capabilities, providers}`）——
+ * 这样"发布时绑的"与"认领时认到的"在任务上是同一种东西，读的人不必分辨来源。
+ *
+ * 返回 `null` = 该空间/该 id 找不到可用节点（发布时已校验过，这里是防御）。
+ */
+function executionNodeSnapshotFor(scope, nodeId) {
+  if (typeof nodeId !== 'string' || nodeId.trim() === '') return null
+  const live = harnessStoreForDispatch().listAgentNodeConfigs({ scope }).find((item) => item.id === nodeId.trim())
+  if (live === undefined) return null
+  return {
+    id: live.id,
+    version: live.version,
+    label: live.label,
+    capabilities: live.observedCapabilities ?? null,
+    providers: live.observedProviders ?? [],
+  }
+}
+
 function createGoalChain(goalId, scope, objective, mode = 'chain', workflowDefinition = null) {
   return withTx(() => {
     const goal = getGoal(goalId)
@@ -5518,18 +5617,47 @@ function createGoalChain(goalId, scope, objective, mode = 'chain', workflowDefin
         blockedBy: predecessorIds,
         goalId,
         docSync: chainTaskDocSync,
-        agentSelectionSnapshot: frozenWorkflow === null ? null : {
-          source: 'goal-agent-workflow',
-          pipelineVersion: frozenWorkflow.pipelineVersion,
-          stageRole: r.role,
-          workflowStageId,
-          agentToolConfig: frozenWorkflow.stageToolsById?.[workflowStageId]?.agentToolConfig ?? frozenWorkflow.stageTools[r.role]?.agentToolConfig ?? null,
-          modelConfig: frozenWorkflow.stageToolsById?.[workflowStageId]?.modelConfig ?? frozenWorkflow.stageTools[r.role]?.modelConfig ?? null,
-          resolvedModelConfig: frozenWorkflow.stageToolsById?.[workflowStageId]?.resolvedModelConfig ?? frozenWorkflow.stageTools[r.role]?.resolvedModelConfig ?? null,
-          executionNode: frozenWorkflow.stageToolsById?.[workflowStageId]?.executionNode ?? frozenWorkflow.stageTools[r.role]?.executionNode ?? null,
-          reviewWorkflow: frozenWorkflow,
-          workflowContext: { designArtifacts: [], implementation: null },
-        },
+        // ★★ 2026-10-13：链上每个任务的执行节点快照。
+        //
+        // 三条分支，按"有没有工作流"×"有没有绑节点"展开：
+        //
+        //   ① 有工作流  ⇒ 沿用原样（工作流自己冻结了执行节点）；
+        //   ② 没工作流、但**绑了节点** ⇒ **仍然要写快照**（新分支）。
+        //      原来这里写的是 `frozenWorkflow === null ? null : {...}` ——
+        //      也就是说**没配工作流的空间根本没有快照可写**，于是"把这条链钉在哪台机器上"
+        //      这件事在默认部署里**无处可存**。用户的诉求（发布时选节点）恰好大部分
+        //      发生在没配工作流的时候，所以这一支是必须的。
+        //   ③ 都没有 ⇒ null（与今天完全一致）。
+        //
+        //      > 一个"只有配了工作流才存在的字段"，
+        //      > 与一个"默认部署里根本用不上"的字段，在**只测工作流那条路**的时候是同一个东西 ——
+        //      > 区别只在默认部署里，而那时它悄无声息地什么都没有。
+        //
+        // 用独立的 `source`（`goal-node-binding`）而不是冒充 `goal-agent-workflow`：
+        // 读的人要能一眼看出这条任务**没有**冻结工作流，只是被钉在了一台机器上。
+        agentSelectionSnapshot: (() => {
+          const boundNodeSnapshot = executionNodeSnapshotFor(scope, goal.agentNodeId)
+          if (frozenWorkflow !== null) {
+            return {
+              source: 'goal-agent-workflow',
+              pipelineVersion: frozenWorkflow.pipelineVersion,
+              stageRole: r.role,
+              workflowStageId,
+              agentToolConfig: frozenWorkflow.stageToolsById?.[workflowStageId]?.agentToolConfig ?? frozenWorkflow.stageTools[r.role]?.agentToolConfig ?? null,
+              modelConfig: frozenWorkflow.stageToolsById?.[workflowStageId]?.modelConfig ?? frozenWorkflow.stageTools[r.role]?.modelConfig ?? null,
+              resolvedModelConfig: frozenWorkflow.stageToolsById?.[workflowStageId]?.resolvedModelConfig ?? frozenWorkflow.stageTools[r.role]?.resolvedModelConfig ?? null,
+              executionNode: frozenWorkflow.stageToolsById?.[workflowStageId]?.executionNode ?? frozenWorkflow.stageTools[r.role]?.executionNode ?? null,
+              reviewWorkflow: frozenWorkflow,
+              workflowContext: { designArtifacts: [], implementation: null },
+            }
+          }
+          if (boundNodeSnapshot === null) return null
+          return {
+            source: 'goal-node-binding',
+            stageRole: r.role,
+            executionNode: boundNodeSnapshot,
+          }
+        })(),
       })
       created.push({ id: task.id, role: r.role, label, workflowStageId })
       if (workflowStageId !== null) workflowTaskIdsByStageId.set(workflowStageId, task.id)

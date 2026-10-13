@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
-import { fetchAgentWorkflowDefinitions, type AgentWorkflowDefinition, type AgentWorkflowDefinitionRef } from '../api'
+import { fetchAgentNodes, fetchAgentWorkflowDefinitions, type AgentNodeRecord, type AgentWorkflowDefinition, type AgentWorkflowDefinitionRef } from '../api'
+import { bindingWarning, crossNodeConflict, describeCrossNodeConflict, scanNodes } from '../goalNodeChoice'
 import { toast } from './Toast'
 
 interface GoalModalProps {
@@ -8,7 +9,7 @@ interface GoalModalProps {
   /** 目标数量提示（发布并存语义：每次发布都新建一个目标记录）。 */
   activeCount?: number
   onClose: () => void
-  onPublish: (scope: string, objective: string, workflowDefinition?: AgentWorkflowDefinitionRef) => Promise<void>
+  onPublish: (scope: string, objective: string, workflowDefinition?: AgentWorkflowDefinitionRef, agentNodeId?: string) => Promise<void>
 }
 
 export function GoalModal({ scope, spaceName, activeCount = 0, onClose, onPublish }: GoalModalProps): React.JSX.Element {
@@ -17,6 +18,14 @@ export function GoalModal({ scope, spaceName, activeCount = 0, onClose, onPublis
   const [definitions, setDefinitions] = useState<AgentWorkflowDefinition[]>([])
   const [selectedDefinition, setSelectedDefinition] = useState('')
   const [definitionsLoaded, setDefinitionsLoaded] = useState(false)
+  /**
+   * 执行节点扫描结果（2026-10-13）。`null` = 还没扫到。
+   *
+   * ★ 默认 **不绑定**（`chosenNode` 初始为 `''`）—— 这是刻意的，理由见 goalNodeChoice.ts：
+   *   绑定是硬绑定，认领方必须带同一个 `agentNodeId`；对没配的守护来说绑定等于"一件都领不走"。
+   */
+  const [nodes, setNodes] = useState<AgentNodeRecord[] | null>(null)
+  const [chosenNode, setChosenNode] = useState('')
 
   useEffect(() => {
     let active = true
@@ -24,10 +33,25 @@ export function GoalModal({ scope, spaceName, activeCount = 0, onClose, onPublis
       .then(value => { if (active) setDefinitions(value) })
       .catch(() => { if (active) setDefinitions([]) })
       .finally(() => { if (active) setDefinitionsLoaded(true) })
+    // 扫描执行节点：读失败就当"没登记"（与后端语义一致：不绑定也能跑）。
+    void fetchAgentNodes(scope)
+      .then(value => { if (active) setNodes(value) })
+      .catch(() => { if (active) setNodes([]) })
     return () => { active = false }
   }, [scope])
 
   const runnableDefinitions = useMemo(() => definitions.filter(isRunnableClosedLoop), [definitions])
+  const scan = useMemo(() => scanNodes(nodes), [nodes])
+  /** 选中的具名定义（用于在发布前就查"工作流绑的节点 vs 我选的节点"是否冲突）。 */
+  const selectedDefinitionRecord = useMemo(
+    () => runnableDefinitions.find(item => `${item.id}@${item.version}` === selectedDefinition) ?? null,
+    [runnableDefinitions, selectedDefinition],
+  )
+  const conflictText = useMemo(() => describeCrossNodeConflict(crossNodeConflict(
+    (selectedDefinitionRecord?.stages ?? []).map(stage => stage.nodeId),
+    chosenNode,
+  )), [selectedDefinitionRecord, chosenNode])
+  const nodeWarning = useMemo(() => bindingWarning(chosenNode), [chosenNode])
 
   const submit = async (): Promise<void> => {
     const text = objective.trim()
@@ -36,7 +60,7 @@ export function GoalModal({ scope, spaceName, activeCount = 0, onClose, onPublis
     const reference = selected ? { id: selected.id, version: selected.version } : undefined
     setBusy(true)
     try {
-      await onPublish(scope, text, reference)
+      await onPublish(scope, text, reference, chosenNode.trim() === '' ? undefined : chosenNode.trim())
       onClose()
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e)
@@ -79,6 +103,28 @@ export function GoalModal({ scope, spaceName, activeCount = 0, onClose, onPublis
                   : '当前空间还没有可执行的命名闭环定义；可继续使用空间当前设置。'
                 : '正在读取可用工作流…'}
             </span>
+          </div>
+          <div className="field">
+            <label>执行节点（可选）</label>
+            {/* ★★ 2026-10-13：「创建后自动扫描 → 推用户确认用哪个节点」。
+                扫描结果分四种情形，**每一档说的话不同**（判据在 goalNodeChoice.ts）：
+                  ① 没登记节点 / ② 有节点但都没就绪 ⇒ **不绑定**（并与今天语义一致），不弹选择；
+                  ③ 唯一就绪 ⇒ 作为**建议**列出，但仍需你确认；
+                  ④ 多个就绪 ⇒ 这才是真正的选择。
+                ★ 默认始终是「不绑定」—— 绑定是硬绑定，会让没配 agentNodeId 的守护一件都领不走。 */}
+            <select value={chosenNode} onChange={event => setChosenNode(event.target.value)} disabled={busy || nodes === null}>
+              <option value="">不绑定（任一在线执行服务可认领 —— 默认）</option>
+              {(scan.readyNodes.length > 0 ? scan.readyNodes : (nodes ?? [])).map(node => (
+                <option key={String(node.id)} value={String(node.id)}>
+                  {node.label ?? node.id} · {node.id}{node.status === 'ready' ? '' : `（${node.status ?? 'unknown'}）`}
+                </option>
+              ))}
+            </select>
+            <span style={{ color: 'var(--muted-2)', fontSize: 10 }}>
+              {nodes === null ? '正在扫描本空间的执行节点…' : scan.headline}
+            </span>
+            {nodeWarning !== null && <span style={{ color: 'var(--yellow)', fontSize: 10 }}>{nodeWarning}</span>}
+            {conflictText !== null && <span style={{ color: 'var(--red)', fontSize: 10 }}>⛔ {conflictText}</span>}
           </div>
           <div className="field">
             <label>

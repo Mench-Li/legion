@@ -68,6 +68,10 @@ export function createGoalLifecycleRoutes({
           const targetScope = typeof body.scope === 'string' && body.scope.trim().length > 0 ? body.scope.trim() : scope
           // RC-2：body.docSync / body.feature=true → 目标级 docSync 声明（链上 coder 任务承接，见 createGoalChain）
           const docSync = body.docSync === true || body.feature === true
+          // 2026-10-13：body.agentNodeId —— 把这条链**钉在哪台执行节点**上。
+          // 省略/空串 = **不绑定**（默认，语义与今天一致）；给了就必须是已登记且就绪的节点，
+          // 否则发布即拒（三条纪律见 publishGoalRecord）。
+          const agentNodeId = typeof body.agentNodeId === 'string' && body.agentNodeId.trim() !== '' ? body.agentNodeId.trim() : null
           return publishGoalRecord(
             targetScope,
             objective,
@@ -75,6 +79,7 @@ export function createGoalLifecycleRoutes({
             by,
             docSync,
             body.workflowDefinition ?? null,
+            agentNodeId,
           )
         })
       },

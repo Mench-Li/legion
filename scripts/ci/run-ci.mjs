@@ -2005,6 +2005,10 @@ async function stageTest() {
     { label: 'avatar-parity（S6 移动端与桌面位面表逐项同轴 + 内联人形渲染）', files: ['workbench/mobile/avatar-parity.test.mjs'], cwd: ROOT },
     { label: 'skill-importer（技能导入契约）', files: ['workbench/scripts/skill-importer.test.mjs'], cwd: ROOT },
     { label: 'hub-board（v2 看板投影）', files: ['workbench/scripts/hub-board.test.mjs'], cwd: ROOT, nodeArgs: ['--experimental-strip-types'] },
+    // 2026-10-13：任务卡**展示顺序**（最新在最上）。原来按任务号排，而任务号不等于时间 ——
+    //   重做过的老任务（T-199，10-12 才完成）号小却被压在更早完成的 T-200..T-202 上面，
+    //   于是"最新完成的沉在最底下"。含桌面/手机两端 parity 与 boardColumns 分列顺序。
+    { label: 'task-order（任务中心顺序：最新在前 / 两端一致 / 各列内排序）', files: ['workbench/scripts/task-order.test.mjs'], cwd: ROOT, nodeArgs: ['--experimental-strip-types'] },
     { label: 'artifact-policy（共享路径策略）', files: ['packages/shared/test/artifact-policy.test.mjs'], cwd: ROOT },
     { label: 'config（P3-2 统一配置：引擎语义/跨进程规则/夹具端到端/默认值漂移）', files: ['scripts/config/config.test.mjs'], cwd: ROOT },
     { label: 'scrum（任务生命周期与产物）', files: ['scrum/artifact-detail.test.mjs', 'scrum/taskctl.ttl.test.mjs'], cwd: ROOT },

@@ -126,7 +126,7 @@ export { readDshProviderSnapshot } from './dsh-snapshot.mjs'
  */
 export function buildTeamHubEnv({
   baseEnv = {}, port = '', host = '', token = '', installDir = '', workspaceDir = '',
-  identityKey = '', remoteAuth = '',
+  identityKey = '', remoteAuth = '', registration = '',
 } = {}) {
   return {
     ...baseEnv,
@@ -141,6 +141,12 @@ export function buildTeamHubEnv({
     ...(identityKey ? { LEGION_IDENTITY_KEY: identityKey } : {}),
     // 远程门禁：对外暴露时必须 '1'，否则除白名单外的 /api/* 不要求用户令牌。
     ...(remoteAuth ? { LEGION_REMOTE_AUTH: remoteAuth } : {}),
+    // ★★★ 2026-10-13：注册策略（closed / invite / open）。
+    //   没有它时**面板「邀请新成员」生成的邀请码兑不了**：中枢的默认策略是 closed，
+    //   而策略闸门排在邀请码校验之前（`user-store.mjs`）⇒ 连真码都得到
+    //   「这台 Hub 未开放注册，请向管理员索取邀请码」。
+    //   ⚠ 与上面两个同一条纪律：**只在有值时才注入** —— 注入空串会把宿主环境里的值盖掉。
+    ...(registration ? { LEGION_REGISTRATION: registration } : {}),
   }
 }
 
@@ -261,6 +267,11 @@ export function apply(ctx, rawConfig = {}) {
   const teamHubRemoteAuth = typeof cfg.teamHubRemoteAuth === 'string' && cfg.teamHubRemoteAuth.trim()
     ? cfg.teamHubRemoteAuth.trim()
     : (typeof baseEnv.LEGION_REMOTE_AUTH === 'string' ? baseEnv.LEGION_REMOTE_AUTH.trim() : '')
+  // ★★★ 2026-10-13：注册策略。与上面两个同一条优先级（composition 配置 > 宿主环境 > 空）。
+  //   ⚠ 空 ⇒ **不注入**（`buildTeamHubEnv` 只在有值时才带）⇒ 中枢用自己的默认 `closed`。
+  const registration = typeof cfg.registration === 'string' && cfg.registration.trim()
+    ? cfg.registration.trim()
+    : (typeof baseEnv.LEGION_REGISTRATION === 'string' ? baseEnv.LEGION_REGISTRATION.trim() : '')
   const workbenchPort = num(cfg.workbenchPort, 5173)
   // ★ P3 的两道门，都**默认关**（见下方写入处的说明）。
   //   `applyModelConfig`：接管供应商配置（settings.mutate）。
@@ -304,6 +315,8 @@ export function apply(ctx, rawConfig = {}) {
         // 手机面/身份系统的总开关与远程门禁：只透传，空即"不注入"。
         identityKey: teamHubIdentityKey,
         remoteAuth: teamHubRemoteAuth,
+        // ★ 注册策略：同样"只透传，空即不注入"（空 ⇒ 中枢用自己的默认 closed）。
+        registration,
       }),
     },
     {

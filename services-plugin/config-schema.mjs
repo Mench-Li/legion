@@ -84,6 +84,30 @@ export const SCHEMA = defineSchema({
       doc: "注入给 team-hub 的远程门禁开关：设为 '1' 时除公开白名单外全部 /api/* 要求用户访问令牌。"
         + '**对外暴露（隧道/反代）时必须为 1**；纯本地单机可以留空',
     },
+    // ── ★★★ 2026-10-13：注册策略（「邀请新成员」能不能真的用）──
+    //
+    // ★ 这是**同一条教训的第三次**（上面 identityKey/remoteAuth 那段就是第二次）：
+    //   中枢读 `LEGION_REGISTRATION`，而本插件**只转传 PORT/HOST/TOKEN + 那两个开关**
+    //   ⇒ 这个键"没有入口"：用户只能去改宿主进程的环境变量，而那条路既不在产品里、
+    //     也不在配置门禁的视野里（改错了没有任何东西会响）。
+    //
+    // ★ 为什么它今天就暴露了：面板「连接与令牌」里有**「邀请新成员」**，点了会生成一个
+    //   一次性邀请码。但 `user-store.mjs` 的策略闸门排在**邀请码校验之前**
+    //   （`registration==='closed'` 直接 403）⇒ **closed 下连真邀请码也兑不了**：
+    //
+    //     POST /api/identity/register → 403 IDENTITY_REGISTRATION_CLOSED
+    //     「这台 Hub 未开放注册，请向管理员索取邀请码」（而用户手里正拿着管理员给的码）
+    //
+    //   > 一句"请向管理员索取邀请码"的拒绝，
+    //   > 与一个"管理员造的邀请码根本不能用"的配置，在用户那边是同一件事 ——
+    //   > 只不过前者看起来像他还没拿到码。
+    {
+      key: 'registration', env: 'LEGION_REGISTRATION', type: 'string', default: 'closed',
+      doc: '注入给 team-hub 的**注册策略**：closed（默认）/ invite（凭邀请码自助注册）/ open（任何人可注册，公网勿用）。'
+        + '⚠ **closed 时邀请码也兑不了**（策略闸门在邀请码校验之前）⇒ 面板「邀请新成员」生成的码'
+        + '会得到同一句 403「请向管理员索取邀请码」。想让邀请码真的有用，这里必须是 invite。'
+        + '优先级：composition 的 config.registration > 本环境变量 > closed（默认由 team-hub 兜）',
+    },
   ],
   // 本文件自己会被扫描（dirs 含整个 services-plugin/）：injects 里的 `TEAM_HUB_PORT` /
   // `DSH_WORKBENCH_PORT` / `DSH_MODELS_BASE_URL` / `LEGION_INSTALL_DIR` 是**注入目标的变量名**
@@ -104,6 +128,12 @@ export const SCHEMA = defineSchema({
     {
       target: 'team-hub', env: 'LEGION_REMOTE_AUTH', via: 'env', from: 'teamHubRemoteAuth',
       note: "远程门禁（'1' 才开）。同样只在有值时才注入",
+    },
+    {
+      target: 'team-hub', env: 'LEGION_REGISTRATION', via: 'env', from: 'registration',
+      note: '注册策略（closed / invite / open）。★ 与上面两个同一条：此前**没有入口**，'
+        + '于是面板「邀请新成员」在界面上存在、却永远兑不了（closed 下连真码都 403）。'
+        + '只在有值时才注入（空串会盖掉宿主环境里的值）',
     },
     { target: 'workbench', env: 'DSH_HUB_UPSTREAM', via: 'env', from: 'hubUpstream', note: '回落到同环境变量' },
     { target: 'workbench', env: 'TEAM_HUB_TOKEN', via: 'env', from: 'teamHubToken', note: '回落到同环境变量' },

@@ -486,6 +486,14 @@ export interface MemberReadiness {
   lastSeenAt: string | null
   online: boolean
   providers: Record<string, ProviderReadiness> | null
+  /**
+   * 这台守护所属的 DSH profile 名（2026-10-13）。
+   *
+   * 用途只有两个，但都很硬：把"装上缺的 bundle"那条修法命令填成**真名**
+   * （`dsh plugin` 的 `--profile` 是必填项），以及判断它是不是 Desktop 独占的
+   * profile —— 那样命令行装不了，面板**不给命令**。`null` = 这台守护还没上报过。
+   */
+  profile: string | null
 }
 
 /**

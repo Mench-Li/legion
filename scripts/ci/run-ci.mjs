@@ -928,6 +928,10 @@ async function stageTest() {
         // 而派工与认领都真的按声明逐位拒收。核心分歧是
         // **读数缺席（不拦）** vs **读数说 false（必须拦）**。
         'workbench/scripts/native-capabilities.test.mjs',
+        // 2026-10-13：「装上缺的 bundle」那条修法的**可粘贴性**。
+        // 原来打印的是 `dsh plugin --profile <profile-name> add …` —— 看着能跑、其实跑不了
+        // （占位符 + Desktop 独占 profile 被 DSH 直接拒绝）。守"什么时候必须**不给**命令"。
+        'workbench/scripts/dsh-remedy.test.mjs',
       ],
       cwd: ROOT,
     },

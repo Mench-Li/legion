@@ -3699,6 +3699,28 @@ function spaceWorker(ctx: AppContext, config: Config): void {
   })
 
   /**
+   * 这个守护所属的 DSH profile 名（2026-10-13）。
+   *
+   * ★ 为什么需要一个名字：面板给出的"装上缺的 bundle"修法是一条 shell 命令，而
+   *   `dsh plugin` 的 `--profile` 是 `requiredOption`（`apps/cli/src/args.ts:190`）——
+   *   原来那句话里写的是**字面占位符** `<profile-name>`，粘进终端根本跑不了。
+   *
+   * 取值同 DSH 自己的算法：优先 `DSH_PROFILE`，退回 `DSH_PROFILE_DIR` 的目录名
+   * （DSH 在 `resolveProfileDir` / `basename(profileDir)` 处就是这么算的）。
+   * 两个都没有 ⇒ `null`，面板据此**不给命令**（宁可不给，也不给假的）。
+   *
+   * 只在插件启动时算一次：profile 不会在进程活着的时候变。
+   */
+  const runningProfileName: string | null = (() => {
+    const direct = (process.env.DSH_PROFILE ?? '').trim()
+    if (direct !== '') return direct
+    const dir = (process.env.DSH_PROFILE_DIR ?? '').trim()
+    if (dir === '') return null
+    const base = dir.split(/[\\/]/).filter(Boolean).pop()
+    return base === undefined || base === '' ? null : base
+  })()
+
+  /**
    * 把 provider **自报的能力位**并进就绪度读数（2026-10-13）。
    *
    * ★ 为什么必须并进来：就绪度回答"能不能跑"，能力位回答"能干什么"，而后者此前
@@ -3735,8 +3757,6 @@ function spaceWorker(ctx: AppContext, config: Config): void {
       try { providerNames = listSubagentProviders(ctx) } catch { /* 执行面读不到就不上报 */ }
       // ★ 只有**已经有读数**时才带上；第一轮通常还没有（探测在后台）。
       //   刻意不发一个空的 `providers`：那会让服务端把"还没探过"存成"探过且为空"。
-      // ★ 只有**已经有读数**时才带上；第一轮通常还没有（探测在后台）。
-      //   刻意不发一个空的 `providers`：那会让服务端把"还没探过"存成"探过且为空"。
       const readiness = withDeclaredCapabilities(readinessCache.snapshot(providerNames))
       await hubPost('/api/heartbeat', {
         by: `${config.role}@${scope}`,
@@ -3744,6 +3764,12 @@ function spaceWorker(ctx: AppContext, config: Config): void {
         kind: 'worker',
         model: { provider: sel.provider || config.provider, model: sel.model || '' },
         ...(readiness === null ? {} : { providers: readiness }),
+        // ★ 2026-10-13：把**这个守护所属的 DSH profile** 也报上去。
+        //   面板给出的"装上缺的 bundle"那条修法命令，必须填**真实**的 profile 名
+        //   （`--profile` 是 `requiredOption`），而且得知道它是不是 Desktop 独占 ——
+        //   是的话命令行**根本装不了**，给命令比不给更糟。判定与措辞见 workbench/src/dshRemedy.ts。
+        //   取不到就整个字段不发：面板那边"未知"会走"不给命令"的分支。
+        ...(runningProfileName === null ? {} : { profile: runningProfileName }),
       })
       if ((config.agentNodeId ?? '').trim() !== '') {
         const worktreeProbe = config.isolate

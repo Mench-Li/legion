@@ -21,6 +21,7 @@ import {
   declaredFor,
   deriveNativeCapabilities,
 } from '../nativeCapabilities'
+import { bundleInstallRemedy } from '../dshRemedy'
 import { toast } from './Toast'
 import type { GoalStatus } from '../types'
 
@@ -97,7 +98,7 @@ export function AgentWorkflowConfigurator({ scope }: Props): React.JSX.Element {
    * 这个状态与"读到了但不就绪"是**两件事**，界面必须分开说 ——
    * 把两者都说成"不可用"，会让用户去修一个其实没坏的东西。
    */
-  const [readiness, setReadiness] = useState<{ member: string; providers: Record<string, ProviderReadinessLike> } | null>(null)
+  const [readiness, setReadiness] = useState<{ member: string; providers: Record<string, ProviderReadinessLike>; profile: string | null } | null>(null)
   const [definitions, setDefinitions] = useState<AgentWorkflowDefinition[]>([])
   const [instances, setInstances] = useState<AgentWorkflowInstanceSummary[]>([])
   const [instanceTotal, setInstanceTotal] = useState(0)
@@ -564,6 +565,14 @@ export function AgentWorkflowConfigurator({ scope }: Props): React.JSX.Element {
     .map(requirement => requirement.providerName)
     .filter(providerName => providerName === 'codex' || providerName === 'claude-code'))]
     .map(providerName => `@deepseek-ai/dsh-subagent-${providerName === 'codex' ? 'codex' : 'claude-code'}`)
+  /**
+   * ★ "装上缺的 bundle"这条修法（2026-10-13）。
+   *
+   * 原本这里直接拼了一句 `dsh plugin --profile <profile-name> add …` —— 看着能跑、其实跑不了
+   * （占位符 + Desktop 独占 profile 命令行装不了）。现在交给纯模块判定：
+   * **能粘才给命令**，否则说清该做什么。见 workbench/src/dshRemedy.ts。
+   */
+  const bundleRemedy = bundleInstallRemedy(readiness?.profile ?? null, missingAgentBundles)
   const rowStyle = { display: 'grid', gridTemplateColumns: '105px minmax(130px, 1fr) minmax(150px, 1.2fr) minmax(150px, 1fr)', gap: 8, alignItems: 'center', marginTop: 8 } as const
   return (
     <div className="field" style={{ borderTop: '1px solid var(--line)', paddingTop: 12 }}>
@@ -636,9 +645,27 @@ export function AgentWorkflowConfigurator({ scope }: Props): React.JSX.Element {
               : missingProviderLabels.length > 0
               ? <div style={{ color: 'var(--yellow)', marginTop: 8 }}>
                 尚无符合节点绑定的就绪心跳报告这些 provider：{missingProviderLabels.join('、')}。请在执行节点的 执行服务配置 安装对应的子 Agent provider bundle 并重启；认证状态仍需真实启动任务确认。
-                {missingAgentBundles.length > 0 && <pre style={{ whiteSpace: 'pre-wrap', margin: '6px 0', padding: 8, background: 'var(--surface-2)' }}>
-                  {`dsh plugin --profile <profile-name> add ${missingAgentBundles.join(' ')}`}
-                </pre>}
+                {/* ★★ 2026-10-13：这里原来打印的是一句**看着能跑、其实跑不了**的命令：
+                      `dsh plugin --profile <profile-name> add …`
+                    两处问题（都在 DSH 源码里核对过）：
+                      ① `<profile-name>` 是字面占位符，而 `--profile` 是 requiredOption
+                         （apps/cli/src/args.ts:190）⇒ 粘了直接报错；
+                      ② 就算填对，Desktop 独占的 profile 命令行**装不了**
+                         （args.ts:83-87 rejectElectronProfile → 'managed exclusively by the
+                         Electron application'；DSH 自己的用例 args.spec.ts:226 也钉着 exit 1）。
+                    现在只在**真能粘贴**时给命令，否则说明该做什么 ——
+                    判定与措辞全在 workbench/src/dshRemedy.ts。 */}
+                {bundleRemedy.kind === 'pasteable'
+                  ? <div style={{ marginTop: 6 }}>
+                    <div>{bundleRemedy.explanation}</div>
+                    <pre style={{ whiteSpace: 'pre-wrap', margin: '6px 0', padding: 8, background: 'var(--surface-2)' }}>{bundleRemedy.command}</pre>
+                  </div>
+                  : <div style={{ marginTop: 6 }}>
+                    <div>{bundleRemedy.explanation}</div>
+                    {bundleRemedy.steps.length > 0 && <div style={{ marginTop: 4, color: 'var(--muted-2)' }}>
+                      {bundleRemedy.steps.map((step, index) => <div key={index}>· {step}</div>)}
+                    </div>}
+                  </div>}
               </div>
               : <div style={{ color: 'var(--muted-2)', marginTop: 8 }}>
                 已从就绪节点心跳确认 provider 注册：{readyProviderNames.join('、')}。心跳不代表账号已认证，也不证明原生权限模式生效。

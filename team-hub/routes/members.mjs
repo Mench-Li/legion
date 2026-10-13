@@ -70,6 +70,11 @@ export function createMembersRoutes({
           //   与"上报了但不就绪"是两件不同的事，界面必须分得开。
           //   读侧不抛错：一行坏 JSON 不该让整个名册 500（见 provider-readiness.mjs）。
           providers: deserializeProviderReadiness(r.providers_json),
+          // ★ 这台守护所属的 DSH profile 名。用途只有两个，但都很硬：
+          //   ① 把"装上缺的 bundle"那条修法命令填成**真名**（`--profile` 是必填项）；
+          //   ② 判断它是不是 Desktop 独占的 profile —— 那样命令行装不了，
+          //      面板**不给命令**而是指向界面（见 workbench/src/dshRemedy.ts）。
+          profile: typeof r.profile === 'string' && r.profile !== '' ? r.profile : null,
         })))
       },
     },

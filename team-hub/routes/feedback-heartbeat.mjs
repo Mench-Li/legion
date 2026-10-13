@@ -39,7 +39,7 @@
 //   新增的 provider 就绪度字段。这与 `agent-intake.mjs` import `../agent-avatars.mjs`
 //   是同一个先例。改这一行的理由见下面 `/api/heartbeat` 的注释。
 // ============================================================================
-import { serializeProviderReadiness } from '../provider-readiness.mjs'
+import { parseProfileName, serializeProviderReadiness } from '../provider-readiness.mjs'
 
 /**
  * 造用户反馈的独立读端点（PRT-404，含跨空间越权防线）与 worker 心跳族路由。
@@ -138,7 +138,13 @@ export function createFeedbackHeartbeatRoutes({
           if (body?.providers !== undefined && body.providers !== null) {
             providersJson = serializeProviderReadiness(body.providers)
           }
-          touchMember(by, scope, typeof body.kind === 'string' ? body.kind : 'unknown', modelText, providersJson)
+          // ★ 2026-10-13：守护所属的 DSH profile 名。用它把"装上缺的 bundle"那条修法
+          //   填成**真名**（`--profile` 必填，原来写的是字面占位符 ⇒ 粘了跑不了）；
+          //   若它是 Desktop 独占的 profile，面板会**不给命令**而是指向界面 ——
+          //   因为 DSH 明确拒绝 `dsh plugin --profile desktop …`。
+          //   同一条纪律：不合法就当没上报，**不带崩心跳**。
+          const profileName = parseProfileName(body?.profile)
+          touchMember(by, scope, typeof body.kind === 'string' ? body.kind : 'unknown', modelText, providersJson, profileName)
           return { member: by, scope, online: true }
         })
       },

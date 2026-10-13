@@ -936,6 +936,11 @@ async function stageTest() {
         // 第三路是**实机补的**：前两路在那台机器上都取不到（症状是心跳里 profile 恒为 null，
         // 而同机 pwsh 里 DSH_PROFILE=desktop 明明有值 ⇒ 那是为工具进程注入的，不是继承的）。
         'runtime/adapters/dsh/profile-name.test.mjs',
+        // 2026-10-13：发布目标时的**执行节点选择**（扫描 → 呈现 → 只在显式确认时绑定）。
+        // 守住的核心是一条默认值：**没有可用节点时不替用户绑定**（绑定是硬绑定，
+        // 会让没配 agentNodeId 的守护一件都领不走）；以及跨节点冲突在**发布时**就说清。
+        'workbench/scripts/goal-node-choice.test.mjs',
+        'team-hub/goal-node-binding.test.mjs',
       ],
       cwd: ROOT,
     },

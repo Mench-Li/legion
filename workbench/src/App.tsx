@@ -505,9 +505,9 @@ export default function App(): React.JSX.Element {
   }, [scope, loadMissions])
 
   /** 发布目标：写 team-hub 后刷新目标列表。每次发布 = 新建一个目标（与既有目标并存，不取消旧链）。 */
-  const handlePublishGoal = useCallback(async (scopeValue: string, objective: string, workflowDefinition?: { id: string; version: number }): Promise<void> => {
+  const handlePublishGoal = useCallback(async (scopeValue: string, objective: string, workflowDefinition?: { id: string; version: number }, agentNodeId?: string): Promise<void> => {
     // publishGoal 失败向上抛 → GoalModal 捕获并 toast（弹窗保留，可改后重试）
-    await publishGoal(scopeValue, objective, undefined, workflowDefinition)
+    await publishGoal(scopeValue, objective, undefined, workflowDefinition, agentNodeId)
     try {
       const info = await fetchGoal(scopeValue)
       setGoalInfo(info)

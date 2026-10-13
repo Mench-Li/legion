@@ -3471,12 +3471,62 @@ function spaceWorker(ctx: AppContext, config: Config): void {
     }
   }
   interface ReplySettingsPayload { enabled: boolean; model: string | null; identity: string | null; systemHint: string | null }
+  /**
+   * hub 的**读**请求（带 token），读失败**必须留下痕迹**。
+   *
+   * ★★★ 2026-10-13（将军："Agent 对话，不能够正常回复消息"）：从前的实现是
+   *
+   *     const res = await fetch(url)        // ← 不带任何鉴权头
+   *     if (!res.ok) return null            // ← 401 被静默当成"空队列"
+   *     return await res.json()
+   *     catch { return null }
+   *
+   * 而中枢设了令牌（`teamHubRemoteAuth=1`）⇒ 不带头的读**一律 401**
+   * ⇒ `null` ⇒ 两个调用点各自把 `null` 读成"这轮没东西"：
+   *   · `sweepChatReplies()`：`queue?.messages ?? []` ⇒ **恒空** ⇒ 永远不回复；
+   *   · `answerChatMessage()`：`settings === null` ⇒ 直接 return（"等下一轮"）。
+   * 于是症状是**全静默**：守护日志里一行都没有（守的是空队列，而空队列本就正常），
+   * 用户那条消息 `awaiting` 到 120s 被服务端兜底标成
+   * `failed`「回复超时（120000ms 内未收到回复方应答）」。
+   *
+   *   > 一处"我没被授权读"的失败，与一处"确实没有待回复"的空队列，
+   *   > 在调用方眼里是同一个 `null` —— 而只有前者会每 30 秒安静地重复一次。
+   *
+   * 为什么其它读路径没事：`hubList()` / `/api/goal` / `/api/pipeline` / `/api/rules`
+   * 全都走 `hubHeaders()`（见上面那段注释里记着的历史：**读与写一样需要它**）。
+   * 只有这个帮手漏了 —— 而同一条规则写成两处、只修了一处，正是本仓反复出错的形状。
+   *
+   * ⚠ 失败仍然返回 `null`（调用方现有的"这轮跳过"语义不变），但**一定会**打一行日志
+   *   （按状态码节流，避免每 30 秒刷屏）。"读不到"不许再伪装成"没有"。
+   */
+  const readFailSeen = new Map<string, number>()
   async function fetchJson<T>(url: string): Promise<T | null> {
     try {
-      const res = await fetch(url)
-      if (!res.ok) return null
+      const res = await fetch(url, { headers: hubHeaders() })
+      if (!res.ok) {
+        // 节流：同一个 (起源+状态) 每分钟最多说一次，说清**是哪个接口**与**什么状态**。
+        const key = `${res.status} ${new URL(url).pathname}`
+        const now = Date.now()
+        if (now - (readFailSeen.get(key) ?? 0) > 60_000) {
+          readFailSeen.set(key, now)
+          log(`hub 读失败：HTTP ${res.status} ${new URL(url).pathname}`
+            + (res.status === 401 || res.status === 403
+              ? '（鉴权被拒：hubToken 与中枢的令牌不一致，或该接口要求用户令牌）'
+              : '')
+            + ' ⇒ 本次按"读不到"处理（**不是**"没有"）')
+        }
+        return null
+      }
       return await res.json() as T
-    } catch { return null }
+    } catch (e) {
+      const key = `net ${new URL(url).pathname}`
+      const now = Date.now()
+      if (now - (readFailSeen.get(key) ?? 0) > 60_000) {
+        readFailSeen.set(key, now)
+        log(`hub 读异常：${new URL(url).pathname} —— ${String(e)} ⇒ 本次按"读不到"处理`)
+      }
+      return null
+    }
   }
   /** 把一条 awaiting 消息标 failed（服务器 CAS，非 awaiting 幂等跳过；TC-S10-02）。 */
   async function markChatFailed(msgId: number, scopeFor: string, identity: string, reason: string): Promise<void> {

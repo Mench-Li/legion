@@ -2184,6 +2184,10 @@ async function stageTest() {
     // 行为侧的组合判据在 `claim-reservation.e2e.test.mjs` 的 ⑯③④；这两行是**调用点**，只有源码判据钉得住。
     { label: 'boot-orphan-reclaim-order（BUG-012：孤儿回收必须排在超龄回收之前）', files: ['plugins/tests/boot-orphan-reclaim-order.test.mjs'], cwd: ROOT },
     { label: 'legacy-convergence（S6 唯一集成入口/模式收敛/回滚）', files: ['plugins/tests/legacy-convergence.test.mjs'], cwd: ROOT, nodeArgs: ['--experimental-strip-types'] },
+    // ★★★ 2026-10-13（将军："Agent 对话，不能够正常回复消息"）：hub **读**路径必须带鉴权，
+    //   且读失败不许静默。缺陷原形是 `fetchJson` 的裸 `fetch(url)` + `if (!res.ok) return null`
+    //   ⇒ 守护每次拉回复队列都被 401 拒 ⇒ 调用方读成"空队列" ⇒ 全静默、消息停在 awaiting。
+    { label: 'hub-read-auth（hub 读必须带令牌；读失败不许伪装成"空队列"）', files: ['plugins/tests/hub-read-auth.test.mjs'], cwd: ROOT, nodeArgs: ['--experimental-strip-types'] },
     { label: 'delivery-ui（S7 交付/调度徽标前端纯函数）', files: ['workbench/scripts/delivery-ui.test.mjs'], cwd: ROOT, nodeArgs: ['--experimental-strip-types'] },
     // `dual-write-smoke` 守「两个进程同时启动、迁移同一新库」的**行为**，
     // 并在第 3 个锚点里按**源码**禁掉两种坏写法（自己 exec ALTER / try-catch 吞掉 ALTER）。

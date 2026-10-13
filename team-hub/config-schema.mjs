@@ -672,6 +672,30 @@ export const SCHEMA = defineSchema({
     //     · READING_INVALID        — 上报的形状不合法（**具名拒**：静默存下一份坏读数
     //       的表现是面板显示"没有差异"，而那正好是最危险的那种假绿）
     'READING_REQUIRES_TOKEN', 'READING_INVALID',
+    // ★★★ 2026-10-12（「获取可用模型」那次 401 的收口）：**钥匙读不到时的五种具名结果**。
+    //
+    //   它们全部来自 `probe-service.mjs` 的 `readCredentialValue(ref)` —— 那条能力
+    //   让中枢在用户没填钥匙时**自己去库里取**（编辑已有供应商时表单是空的）。
+    //   为什么必须具名而不是回一个 `null`：
+    //
+    //     · NO_CREDENTIAL_REF  — 这条供应商还没有引用名（先保存一次）
+    //     · SECRETS_UNAVAILABLE— 密钥库打不开（布局/权限）
+    //     · RESOLVER_MISSING   — 库开着但没有解析器
+    //     · RESOLVE_FAILED     — 取的时候出错
+    //     · CREDENTIAL_MISSING — 库里确实没有这个引用
+    //
+    //   而用户看到的那一次是 **401**：那**不是**上面任何一个 —— 它说的是
+    //   "我没送钥匙"，与"钥匙被拒"在供应商那一侧长得一样
+    //   （`discoverProviderModels` 现在会把这句话说清）。
+    'NO_CREDENTIAL_REF', 'SECRETS_UNAVAILABLE', 'RESOLVER_MISSING', 'RESOLVE_FAILED', 'CREDENTIAL_MISSING',
+    // ★ 2026-10-12：同事那批「验收不满意就重做」缺的三条登记（`e70c81bc`）。
+    //   它们是 `team-hub/server.mjs` 里 `POST /api/rework` 的校验码：
+    //     · REWORK_STATE            — 只有 done|in_review 能往回拖
+    //     · REWORK_REASON_REQUIRED  — 改动点必填
+    //     · REWORK_STAGE_MISSING    — 目标阶段不存在
+    //   ⚠ 那笔提交的文件清单里**没有** `config-schema.mjs` ⇒ 门禁从那时起就是红的，
+    //     与我这边的事故无关；这里补上，否则 `scan --check` 一直红着、谁都只能绕开它。
+    'REWORK_STATE', 'REWORK_REASON_REQUIRED', 'REWORK_STAGE_MISSING',
     // PRT-212 审批端口（team-hub/approval-port.mjs）的失败码。
     //
     // 它们是**这个端口**对外可见的名字，而端口要回答的问题恰恰是

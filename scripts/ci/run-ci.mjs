@@ -1971,6 +1971,10 @@ async function stageTest() {
     // 这条路径此前是**静默**的两种坏结局（卡片拖不动 / 拖动了但下游一条都不重跑），
     // 所以它不是"再加一组 UI 用例"，而是把那个动作的判据补上。
     { label: 'rework-plan（看板往回拖：重做/打回的语义判定 + 必填改动点 + 接线判据）', files: ['workbench/scripts/rework-plan.test.mjs'], cwd: ROOT, nodeArgs: ['--experimental-strip-types'] },
+    // 2026-10-12：**打回**那条路的两处坏 —— 理由只显示给自己看（HubSchedulerModal）
+    // 与打完拿一句像"路径拼错了"的 404（rejectTask 打已退役的 /api/reject）。
+    // 这两个弹窗此前**一个套件都没登记**，而"没人跑的用例"与"没有用例"是同一个东西。
+    { label: 'reject-path（打回：理由真的送达 + 已退役的 /api/reject 不再被打 + 接线判据）', files: ['workbench/scripts/reject-path.test.mjs'], cwd: ROOT, nodeArgs: ['--experimental-strip-types'] },
     { label: 'rules（规范数据面）', files: ['team-hub/rules.test.mjs'], cwd: ROOT },
     { label: 'artifact（产物读取）', files: ['team-hub/artifact-content.test.mjs'], cwd: ROOT },
     { label: 'security（监听安全配置）', files: ['team-hub/security.test.mjs'], cwd: ROOT },
@@ -2093,6 +2097,9 @@ async function stageTest() {
     //   存放/校验（"没收到过 ≠ 没有差异" + 新鲜度）与路由面（上报必须过令牌）。
     { label: 'materialization-reading（物化读数：没收到过 ≠ 没有差异；过期要能看出来）', files: ['team-hub/materialization-reading.test.mjs'], cwd: ROOT, nodeArgs: ['--experimental-strip-types'] },
     { label: 'model-materialization-routes（物化读数上报/读取：上报要令牌、坏形状具名 400）', files: ['team-hub/model-materialization.test.mjs'], cwd: ROOT, nodeArgs: ['--experimental-strip-types'] },
+    // ★★ 2026-10-12：「获取可用模型」那次 401 的收口 —— **钥匙从哪来**（表单刚填 / 库里取的 /
+    //   没带）的优先级、取不到时具名说清、以及"没送钥匙"与"钥匙被拒"在 401 上分得开。
+    { label: 'model-providers-discover（获取可用模型：钥匙三个来源的优先级；401 的话要分得开）', files: ['team-hub/model-providers-discover.test.mjs'], cwd: ROOT, nodeArgs: ['--experimental-strip-types'] },
     // ★ 从供应商派生档案（将军："那我还有必要新建档案嘛，直接来源于模型与供应商才对啊"）：
     //   身份是 **(供应商, 模型)** 而不是 `id` —— 库里既有档案的 id 与派生规则**不一致**
     //   （连字符 vs 点号），按 id 认身份会一次多建三条重复档案，而它们看起来完全正常。

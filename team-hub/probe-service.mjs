@@ -220,6 +220,66 @@ export function createProbeService({
     },
 
     /**
+     * ★★ 2026-10-12：**读出一把钥匙的值**，供一次外发请求使用（今天唯一的消费者是
+     * 「获取可用模型」—— `POST /api/model-providers/discover`）。
+     *
+     * ## 为什么需要它（用户原话）
+     *
+     * 「在模型与凭证，编辑具体的模型，弹框中点击获取可用模型时，弹框中报的错」（401）。
+     *
+     * 根因：那条路由只用**请求体里**的 `apiKey`，而编辑**已有**供应商时表单那格是空的
+     * （界面故意不回显值，BUG-028）⇒ **不带钥匙**去问 `GET {baseURL}/models`
+     * ⇒ 网关回 401 ⇒ 界面把"没送钥匙"显示成"钥匙不对"。
+     *
+     *   > 一处"我没送钥匙"的缺口，与一处"钥匙被拒"的故障，
+     *   > 在供应商那一侧看到的都是 401 —— 而修法完全不同。
+     *
+     * ## 纪律（与 `probeModelProfile` 同源）
+     *
+     *   · **值不外泄**：返回值只给调用方（去拼 `Authorization`），不进日志、不进诊断、
+     *     不进任何响应体；
+     *   · 读不到时**具名**说清是哪一种读不到（引用名为空 / 库打不开 / 库里没有这条），
+     *     而不是回一个 `null` 让调用方猜；
+     *   · 复用 `openStore()` —— 与「测试连接」**同一处**开库、同一套布局判定，
+     *     免得同一条链路的两个入口对"库在哪"给出两种答案（BUG-023 的教训）。
+     *
+     * @param {string} ref 引用名（不是值）
+     * @returns `{ ok: true, value }` 或 `{ ok: false, code, message }`
+     */
+    async readCredentialValue(ref) {
+      if (typeof ref !== 'string' || ref.trim() === '') {
+        return Object.freeze({
+          ok: false, code: 'NO_CREDENTIAL_REF',
+          message: '这条供应商还没有引用名（先保存一次，让服务端把钥匙存进库）',
+        })
+      }
+      const store = await openStore()
+      if (store.ok !== true) {
+        return Object.freeze({
+          ok: false, code: 'SECRETS_UNAVAILABLE',
+          message: store.result?.message ?? '密钥库打不开',
+        })
+      }
+      const resolve = store.resolver?.resolveSecret
+      if (typeof resolve !== 'function') {
+        return Object.freeze({ ok: false, code: 'RESOLVER_MISSING', message: '密钥库没有解析器' })
+      }
+      let value = null
+      try {
+        value = await resolve(ref, { secretRef: ref })
+      } catch (e) {
+        return Object.freeze({
+          ok: false, code: 'RESOLVE_FAILED',
+          message: `读这把钥匙时出错：${e instanceof Error ? e.message : String(e)}`,
+        })
+      }
+      if (typeof value !== 'string' || value === '') {
+        return Object.freeze({ ok: false, code: 'CREDENTIAL_MISSING', message: '本机密钥库里没有这个引用' })
+      }
+      return Object.freeze({ ok: true, value })
+    },
+
+    /**
      * 只读状态，供诊断与用例断言。**不含任何凭证，也不含引用名。**
      *
      * 这里只取 `size` 而**不**取 `probe.inspect().entries`：缓存键是

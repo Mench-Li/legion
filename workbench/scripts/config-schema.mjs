@@ -97,6 +97,12 @@ export const SCHEMA = defineSchema({
     //     "连不上 Hub"与"服务器拒绝了这次请求"是**两件事**（前者要等/重试，后者要改东西），
     //     所以 fetch 抛错时给一个具名的码而不是一句自由文本。形如 env 键，但不是配置。
     'HUB_UNREACHABLE',
+    // ── ★ 2026-10-12：同事那批「验收不满意就重做」缺的一条登记（`e70c81bc`）──
+    //   `workbench/src/api.ts` 的**拒绝码**：往回拖（重做）必须填"改动点"，
+    //   没填就由中枢回这个码，workbench 只是把它翻成界面文案（ReworkModal 的必填提示）。
+    //   ⚠ 那笔提交的文件清单里**没有** `config-schema.mjs` ⇒ 门禁从那时起就是红的，
+    //     与我这边的事故无关；这里补上，否则 `scan --check` 一直红着、谁都只能绕开它。
+    'REJECT_REASON_REQUIRED',
   ],
   // 前缀撞名的外部变量：DSH 宿主自己用 DSH_WEB_URL 表示「Web GUI 地址」，
   // 与 workbench 的 DSH_WEB_*（P2-8 浏览器助手配置）同名空间重叠。它不属于 workbench 的配置面，

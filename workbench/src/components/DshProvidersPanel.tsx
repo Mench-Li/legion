@@ -322,13 +322,32 @@ export function DshProvidersPanel(): React.JSX.Element {
   async function discover(): Promise<void> {
     setBusy(true); setError(''); setNotice('')
     try {
+      // ★★★ 2026-10-12（将军实测报的 401）：把**这条供应商的 id** 一起发出去。
+      //
+      //   从前只发 `baseURL` + （表单里刚填的）`apiKey`。编辑**已有**供应商时表单那格
+      //   是空的（界面故意不回显值，BUG-028）⇒ **不带钥匙**去问 `GET {baseURL}/models`
+      //   ⇒ 网关回 401，而界面把 401 原样显示 ⇒ 读起来像"你的钥匙不对"。
+      //
+      //   现在服务端拿到 id 后**自己去库里取那把钥匙**（`probeService().readCredentialValue`），
+      //   于是"编辑一下已有供应商再点获取"这条正常路径不再需要手填钥匙。
+      //
+      //   ⚠ 表单里刚填的 `form.key` 仍然最优先 —— 那是"我要换一把"的意图。
       const result = await hubRequest('POST', '/api/model-providers/discover', {
-        actor: 'general', baseURL: form.endpoint.trim(), ...(form.key ? { apiKey: form.key } : {}),
-      }) as { models?: { id: string }[] }
+        actor: 'general',
+        provider: form.provider.trim(),
+        baseURL: form.endpoint.trim(),
+        ...(form.key ? { apiKey: form.key } : {}),
+      }) as { models?: { id: string }[]; credentialFrom?: string; credentialNote?: string }
       const ids = (result.models ?? []).map(m => m.id)
-      if (!ids.length) { setNotice('供应商未返回模型目录，请手动填写模型 ID。'); return }
+      // ★ 如实说清这次到底带没带钥匙、从哪来的（**不含值**）——
+      //   否则"读了 3 个模型"与"没带钥匙也能读"在界面上是同一句话。
+      const keyNote = result.credentialFrom === 'request' ? '（用你刚填的那把钥匙）'
+        : result.credentialFrom === 'vault' ? '（用了本机密钥库里存的那把）'
+          : result.credentialFrom === 'unavailable' ? `（⚠ 没能取到库里那把钥匙：${result.credentialNote ?? '原因未知'}）`
+            : ''
+      if (!ids.length) { setNotice(`供应商未返回模型目录，请手动填写模型 ID。${keyNote}`); return }
       setForm(previous => ({ ...previous, models: [...new Set([...previous.models.split('\n').map(id => id.trim()).filter(Boolean), ...ids])].join('\n') }))
-      setNotice(`已读取 ${ids.length} 个模型，保存供应商后生效。`)
+      setNotice(`已读取 ${ids.length} 个模型${keyNote}，保存供应商后生效。`)
     } catch (e) { setError(e instanceof Error ? e.message : String(e)) }
     finally { setBusy(false) }
   }

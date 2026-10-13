@@ -108,6 +108,10 @@ export function createModelProvidersRoutes({
   //   省略时行为与从前逐字相同（响应里没有 `credential` 字段）——但那会让面板
   //   重新有资格说"已配置凭证"。
   credentialStatus = null,
+  // ★★★ 2026-10-12：「获取可用模型」要**自己去库里取钥匙**时用的读值入口
+  //   （`probeService().readCredentialValue(ref)`，注入的是**惰性 getter**，
+  //   与 `createModelProfilesRoutes` 同一手法）。省略时那条降级为"只能用手填的钥匙"。
+  probeService = null,
   // ★★ 2026-10-12（"凭证库是干嘛的"追问出来的）：**运行侧**有没有这把钥匙。
   //
   //   上面那个 `credentialStatus` 问的是 Legion **自己的**库；这一条问的是
@@ -407,11 +411,50 @@ export function createModelProvidersRoutes({
       async run(req, res) {
         // 读供应商的模型目录。**与 DSH 无关**：Legion 自己按 OpenAI 兼容约定去问一次，
         // 于是"自动读取模型列表"这个能力不再需要绕道 DSH 的 `llm/discoverModels`。
+        //
+        // ★★★ 2026-10-12（将军实测报的 401）：**钥匙有三个来源，按优先级取。**
+        //
+        //   从前这里只有 `body.apiKey` —— 也就是**只认用户刚在表单里填的那一把**。
+        //   而编辑**已有**供应商时表单那格是空的（界面故意不回显值，见 BUG-028）
+        //   ⇒ **不带钥匙**去问 `GET {baseURL}/models` ⇒ 网关回 401
+        //   ⇒ 界面把那句 401 显示给用户，读起来像"你的钥匙不对"。
+        //
+        //     ① `body.apiKey`：用户**刚填了一把**（"我要换一把"的意图），最优先；
+        //     ② 库里这条供应商的 `secretRef` 的值：**今天这个 401 的正解**；
+        //     ③ 都没有 ⇒ 明确地"不带钥匙"发出去，并让报错**说清这一点**（见下）。
+        //
+        //   ⚠ ②只按**请求里点名的供应商 id**去取，**不按 baseURL 反查** ——
+        //     两次不同的意图共用一个 baseURL 时（fjd-ds 与 svea-ds 就是同一个网关），
+        //     反查会取到另一条的钥匙，而那种错误不报错、只是"用错了钥匙"。
         await handleRun(req, res, async (body) => {
+          const explicit = typeof body.apiKey === 'string' && body.apiKey !== '' ? body.apiKey : null
+          const providerId = typeof body.provider === 'string' && body.provider !== '' ? body.provider : null
+          let apiKey = explicit
+          /** 钥匙从哪来：`request` = 表单刚填 ｜ `vault` = 库里取的 ｜ `none` = 没带。 */
+          let credentialFrom = explicit !== null ? 'request' : 'none'
+          let credentialNote = null
+
+          if (apiKey === null && providerId !== null) {
+            const row = providerStore.get(providerId)
+            const ref = typeof row?.secretRef === 'string' && row.secretRef !== '' ? row.secretRef : null
+            if (ref === null) {
+              credentialNote = '这条供应商还没有引用名（先保存一次，让服务端把钥匙存进库）'
+            } else if (probeService !== null) {
+              const read = await probeService().readCredentialValue(ref)
+              if (read.ok === true) { apiKey = read.value; credentialFrom = 'vault' }
+              else { credentialFrom = 'unavailable'; credentialNote = read.message }
+            }
+          }
+
           const ids = await discoverModels({
-            baseURL: body.baseURL, apiKey: body.apiKey ?? null, fetchImpl: fetch,
+            baseURL: body.baseURL, apiKey, fetchImpl: fetch,
           })
-          return { models: ids.map((id) => ({ id })) }
+          return {
+            models: ids.map((id) => ({ id })),
+            // ★ 把"钥匙从哪来"如实回报（**不含值**）：用户据此知道刚才那次到底带没带钥匙。
+            credentialFrom,
+            ...(credentialNote === null ? {} : { credentialNote }),
+          }
         })
       },
     },
@@ -680,8 +723,18 @@ export async function discoverProviderModels({ baseURL, apiKey = null, fetchImpl
   } finally { clearTimeout(timer) }
 
   if (!res.ok) {
+    // ★★ 2026-10-12：**"没带钥匙"与"钥匙被拒"必须分开说。**
+    //
+    //   两者在供应商那一侧看到的都是 401，而在用户这一侧是两件完全不同的事：
+    //   前者去填一次钥匙就好，后者要去控制台换钥匙。而从前只有一句话：
+    //   「读模型目录失败：<host> 返回 HTTP 401」—— 它把前者说成了后者。
+    const sentKey = typeof apiKey === 'string' && apiKey !== ''
+    const noKeyHint = !sentKey && (res.status === 401 || res.status === 403)
+      ? '，而**这次没有带钥匙**（表单留空、库里也没取到）⇒ 这不是"钥匙不对"，是"没送钥匙"；'
+        + '在表单里填一次 API 密钥再点，或先保存供应商把钥匙存进库'
+      : ''
     throw new ModelError(MODEL_ERRORS.INVALID_PROFILE,
-      `读模型目录失败：${url.host} 返回 HTTP ${res.status}`, { statusCode: 502 })
+      `读模型目录失败：${url.host} 返回 HTTP ${res.status}${noKeyHint}`, { statusCode: 502 })
   }
   let body = null
   try { body = JSON.parse(await res.text()) } catch {

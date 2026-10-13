@@ -932,6 +932,10 @@ async function stageTest() {
         // 原来打印的是 `dsh plugin --profile <profile-name> add …` —— 看着能跑、其实跑不了
         // （占位符 + Desktop 独占 profile 被 DSH 直接拒绝）。守"什么时候必须**不给**命令"。
         'workbench/scripts/dsh-remedy.test.mjs',
+        // 2026-10-13：profile 名的三路解析（DSH_PROFILE → DSH_PROFILE_DIR 目录名 → argv 认 Desktop 宿主）。
+        // 第三路是**实机补的**：前两路在那台机器上都取不到（症状是心跳里 profile 恒为 null，
+        // 而同机 pwsh 里 DSH_PROFILE=desktop 明明有值 ⇒ 那是为工具进程注入的，不是继承的）。
+        'runtime/adapters/dsh/profile-name.test.mjs',
       ],
       cwd: ROOT,
     },

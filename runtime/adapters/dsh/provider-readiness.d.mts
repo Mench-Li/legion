@@ -36,6 +36,15 @@ export interface ProviderReadiness {
 /** 一批 provider 的结论，按 provider 名索引。 */
 export type ProviderReadinessTable = Record<string, ProviderReadiness>
 
+/**
+ * 真正要探测的名字 = **注册表里的** ∪ **规格表里已知的**。
+ *
+ * ★ 必须并上规格表：注册表为空时若只探注册表，就会探出一个空集，
+ *   于是心跳发出一个空的 `providers`、服务端整份丢掉 ⇒ **读数永远不出现而全程零报错**。
+ *   而 `spawn` 随进程内跑，永远可用，用不着注册表告诉我们。
+ */
+export declare function readinessProbeTargets(names?: readonly string[] | null): string[]
+
 /** 本地真实依赖（PATH / HOME / env 都取自运行环境）。 */
 export declare function createLocalReadinessDeps(options?: {
   env?: Record<string, string | undefined>

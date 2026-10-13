@@ -109,7 +109,11 @@ import {
   createLocalReadinessDeps,
   createReadinessCache,
   probeProviders,
+  readinessProbeTargets,
 } from '../../runtime/adapters/dsh/provider-readiness.mjs'
+// profile 名的三路解析（DSH_PROFILE → DSH_PROFILE_DIR 目录名 → argv 认 Desktop 宿主）。
+// 放在适配层且带单测：它决定面板能不能给出一条**真能粘贴**的修法命令。
+import { resolveProfileName } from '../../runtime/adapters/dsh/profile-name.mjs'
 import { materializeWorkflowCheckpoints, WORKFLOW_CHECKPOINT_EVIDENCE_PREFIX } from '../../runtime/contracts/agent-workflow-checkpoints.mjs'
 import { validateAgentWorkflowTestReport } from '../../runtime/contracts/agent-workflow.mjs'
 import { expectedExternalPermissionMode } from '../../runtime/contracts/agent-provider-policy.mjs'
@@ -3697,28 +3701,24 @@ function spaceWorker(ctx: AppContext, config: Config): void {
     probe: (names: string[]) => probeProviders(names, createLocalReadinessDeps()),
     onError: (e) => log(`provider 就绪度探测失败（不影响心跳）：${String(e)}`),
   })
+  /** 诊断日志只写一次（详见 hubHeartbeat 里那段为什么需要它）。 */
+  let heartbeatDiagnosed = false
 
   /**
    * 这个守护所属的 DSH profile 名（2026-10-13）。
    *
-   * ★ 为什么需要一个名字：面板给出的"装上缺的 bundle"修法是一条 shell 命令，而
-   *   `dsh plugin` 的 `--profile` 是 `requiredOption`（`apps/cli/src/args.ts:190`）——
-   *   原来那句话里写的是**字面占位符** `<profile-name>`，粘进终端根本跑不了。
+   * 取值的三路与理由**全在** `runtime/adapters/dsh/profile-name.mjs`（那里有单测）：
+   * `DSH_PROFILE` → `DSH_PROFILE_DIR` 的目录名 → argv 里带 `dsh-desktop-host` 时为 `desktop`。
+   * 第三路是实机补的：前两路在那台机器上**都取不到**（症状是心跳里 `profile` 一直是 null，
+   * 而同一台机器 pwsh 里 `DSH_PROFILE=desktop` 明明有值 ⇒ 那是为工具进程注入的，不是继承的）。
    *
-   * 取值同 DSH 自己的算法：优先 `DSH_PROFILE`，退回 `DSH_PROFILE_DIR` 的目录名
-   * （DSH 在 `resolveProfileDir` / `basename(profileDir)` 处就是这么算的）。
-   * 两个都没有 ⇒ `null`，面板据此**不给命令**（宁可不给，也不给假的）。
-   *
+   * 取不到 ⇒ `null` ⇒ 面板**不给命令**（宁可不给，也不给带占位符的假命令）。
    * 只在插件启动时算一次：profile 不会在进程活着的时候变。
    */
-  const runningProfileName: string | null = (() => {
-    const direct = (process.env.DSH_PROFILE ?? '').trim()
-    if (direct !== '') return direct
-    const dir = (process.env.DSH_PROFILE_DIR ?? '').trim()
-    if (dir === '') return null
-    const base = dir.split(/[\\/]/).filter(Boolean).pop()
-    return base === undefined || base === '' ? null : base
-  })()
+  const runningProfileName: string | null = resolveProfileName({
+    env: process.env,
+    argv: process.argv,
+  })
 
   /**
    * 把 provider **自报的能力位**并进就绪度读数（2026-10-13）。
@@ -3755,15 +3755,35 @@ function spaceWorker(ctx: AppContext, config: Config): void {
       // 拿不到就按空目录处理 —— 这 **不能** 让心跳失败（读目录只是"顺带上报"）。
       let providerNames: string[] = []
       try { providerNames = listSubagentProviders(ctx) } catch { /* 执行面读不到就不上报 */ }
+      // ★★ 2026-10-13：探测目标 = **注册表里的** ∪ **规格表里已知的**。
+      //    第一版只探注册表，于是实机上注册表为空 ⇒ 探了个空集 ⇒ 心跳发出一个 `providers: {}` ⇒
+      //    服务端按"空对象应省略"整份丢掉 ⇒ **读数永远不出现，而全程零报错**。
+      //    而 `spawn`（随进程内跑的 provider）本来**永远可用**，用不着注册表告诉我们。
+      //    详见 runtime/adapters/dsh/provider-readiness.mjs 的 readinessProbeTargets()。
+      const probeTargets = readinessProbeTargets(providerNames)
       // ★ 只有**已经有读数**时才带上；第一轮通常还没有（探测在后台）。
-      //   刻意不发一个空的 `providers`：那会让服务端把"还没探过"存成"探过且为空"。
-      const readiness = withDeclaredCapabilities(readinessCache.snapshot(providerNames))
+      //   刻意不发空的 `providers`：服务端会把"还没探过"存成"探过且为空"。
+      const snapshot = readinessCache.snapshot(probeTargets)
+      const readiness = withDeclaredCapabilities(snapshot)
+      const providersField = readiness !== null && Object.keys(readiness).length > 0 ? readiness : null
+      // ★ 2026-10-13：**一次**诊断日志 —— 这条链上有三个各自独立的"静默省略"分支
+      //   （注册表为空、探测未出结果、profile 取不到），而它们全都只表现为"字段不见了"。
+      //   实机排查时我为了分辨是哪一支，反复在源码与库表之间来回读了好几轮。
+      //   把这三件事**在第一次心跳时各写一行**，下次就不用猜了。
+      if (!heartbeatDiagnosed) {
+        heartbeatDiagnosed = true
+        log(`心跳诊断（仅一次）：profile=${runningProfileName ?? '(未取到)'}`
+          + ` 注册表 provider=[${providerNames.join(',')}]`
+          + ` 探测目标=[${probeTargets.join(',')}]`
+          + ` 本轮读数=${snapshot === null ? '(探测尚未出结果)' : Object.keys(snapshot).join(',')}`
+          + `（此行的分支判定见 plugins/src/index.ts 的 hubHeartbeat）`)
+      }
       await hubPost('/api/heartbeat', {
         by: `${config.role}@${scope}`,
         scope,
         kind: 'worker',
         model: { provider: sel.provider || config.provider, model: sel.model || '' },
-        ...(readiness === null ? {} : { providers: readiness }),
+        ...(providersField === null ? {} : { providers: providersField }),
         // ★ 2026-10-13：把**这个守护所属的 DSH profile** 也报上去。
         //   面板给出的"装上缺的 bundle"那条修法命令，必须填**真实**的 profile 名
         //   （`--profile` 是 `requiredOption`），而且得知道它是不是 Desktop 独占 ——

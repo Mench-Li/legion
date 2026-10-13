@@ -51,6 +51,12 @@ export function profileManagedByDesktop(profile: string | null | undefined): boo
  *
  * 拿它来**前置校验**：一个连 DSH 都不接受的名字，不该被我们拼进命令里
  * （那会造出一条必然报错的命令 —— 正是本模块要消灭的东西）。
+ *
+ * ★ **刻意不加长度上限**（与 `runtime/adapters/dsh/profile-name.mjs` 的那份逐例一致，
+ *   由 `scripts/dsh-remedy.test.mjs` 的对照用例钉住）：DSH 没有这条规则，
+ *   而这里问的是"它是不是 DSH 认的名字"。加一条 DSH 没有的约束只会**我们自己**退化。
+ *
+ * ★ 这条规则**不保证 shell 安全**（DSH 允许名字里有空格）—— 那是下一道闸的事。
  */
 export function isAcceptableProfileName(name: unknown): name is string {
   if (typeof name !== 'string') return false
@@ -123,9 +129,32 @@ export function bundleInstallRemedy(
       explanation: '还不知道这个守护跑在哪个 DSH profile 上（旧版守护不上报，或本轮心跳还没到），'
         + '所以给不出一条能直接粘贴的命令。',
       steps: [
-        `在你启动 Legion 的那个终端里，把下面这行的 \`<profile>\` 换成你的 profile 名后执行：`,
+        `先确认你的 profile 名：它就是启动 DSH 时 \`--profile\` 后面那个（Desktop 用的是保留的 \`desktop\`）。`,
+        `· 若是普通 profile，把下面这行整行粘贴执行（把 \`<profile>\` 换成真名）：`,
         `dsh plugin --profile <profile> add ${wanted.join(' ')}`,
-        '（`--profile` 是必填项；profile 名就是你 `dsh --profile <名>` 启动时用的那个。）',
+        // ★ 2026-10-13：**必须先排除 Desktop**，否则这段说明会把人送进一条必然失败的命令。
+        //   `desktop` 是 DSH 保留给 Electron 应用的 profile，命令行**明确被拒**
+        //   （apps/cli/src/args.ts 的 rejectElectronProfile）。一个 Desktop 用户照着上面那行填
+        //   `desktop` 去跑，只会拿到一句错误 —— 而这段文字的本意是帮他。
+        `· ⚠ **若你的 profile 是 \`desktop\`（Desktop 应用默认就是它），命令行装不了**：`
+        + `DSH 明确拒绝（"managed exclusively by the Electron application"）。`
+        + `这种情况请改用 Desktop 的「设置 → 插件 → 插件配置」来安装。`,
+      ],
+    }
+  }
+
+  // ★ 拼命令前的**最后一道闸**：DSH 认这个名字，不代表它能安全地放进一行 shell 命令。
+  //   DSH 的规则不禁空格，而空格会让 `--profile 有 空格` 在 shell 里被切成两个词。
+  //   与其引号转义（那又是另一套规则、又要在两处保持一致），不如**不给命令**并说清原因 ——
+  //   与包名那道闸同一条思路。
+  if (SHELL_METACHARACTERS.test(profile)) {
+    return {
+      kind: 'no-command',
+      explanation: `这个 profile 名（${JSON.stringify(profile)}）含空格或 shell 特殊字符，`
+        + '**没法安全地放进一行命令**（粘进终端会被切成别的意思），所以不给出命令。',
+      steps: [
+        `请自行执行（把名字用引号括起来）：dsh plugin --profile "${profile}" add ${wanted.join(' ')}`,
+        '或改用 Desktop 的「设置 → 插件 → 插件配置」安装。',
       ],
     }
   }
@@ -138,21 +167,18 @@ export function bundleInstallRemedy(
   }
 }
 
-/**
- * 从心跳上报的字段里取 profile 名。
- *
- * 优先 `DSH_PROFILE`（DSH 启动器导出的名字），退回 `DSH_PROFILE_DIR` 的**目录名**
- * （DSH 自己也是这么算的：`apps/cli/src/app-boot/src/profile.ts:715` 用的是 `basename(profileDir)`）。
- */
-export function resolveProfileName(
-  env: { readonly DSH_PROFILE?: string; readonly DSH_PROFILE_DIR?: string } | null | undefined,
-): string | null {
-  const direct = env?.DSH_PROFILE
-  if (isAcceptableProfileName(direct)) return direct
-  const dir = env?.DSH_PROFILE_DIR
-  if (typeof dir === 'string' && dir !== '') {
-    const base = dir.split(/[\\/]/).filter(Boolean).pop()
-    if (isAcceptableProfileName(base)) return base
-  }
-  return null
-}
+// ⚠ 这里**刻意不再有** `resolveProfileName`（2026-10-13 删）。
+//
+// 它原本在这里，但**没有任何生产调用点** —— 只有它自己的用例在用它。
+// 而"读这个守护的环境/argv"这件事只能发生在**插件进程里**，浏览器里的面板读不到 process.argv。
+// 所以真实逻辑住在 `runtime/adapters/dsh/profile-name.mjs`（带单测），插件从那里取，
+// 结果经心跳上报到 `/api/members` 的 `profile` 字段，面板只消费那个值。
+//
+//   > 一份"有人为它写了用例、却没有任何调用点"的实现，
+//   > 与一份真的在跑的实现，在**它恰好与真实现一致**的时候是同一个东西 ——
+//   > 区别只在它们分叉之后，而分叉是必然会发生的：这里删掉时它就已经**少了 argv 那一路**
+//   > （那条正是实机为 Desktop 补的），而它的用例仍然全绿。
+//
+// 本模块保留的 `profileManagedByDesktop` 是**另一件事**：它是"拿到名字之后怎么决定给不给命令"，
+// 那是面板的职责，本来就该在这里。两边的名字规则一致性由 `workbench/scripts/dsh-remedy.test.mjs`
+// 的对照用例钉住（它直接 import 适配层那个模块比对）。

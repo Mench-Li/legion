@@ -24,7 +24,6 @@ import {
   bundleInstallRemedy,
   isAcceptableProfileName,
   profileManagedByDesktop,
-  resolveProfileName,
 } from '../src/dshRemedy.ts'
 
 const CODEX = '@deepseek-ai/dsh-subagent-codex'
@@ -119,40 +118,41 @@ describe('修法命令：什么时候给、什么时候不给', () => {
   })
 })
 
-describe('profile 名解析', () => {
-  test('★ 优先 DSH_PROFILE', () => {
-    assert.equal(resolveProfileName({ DSH_PROFILE: 'web' }), 'web')
-    assert.equal(resolveProfileName({ DSH_PROFILE: 'web', DSH_PROFILE_DIR: '/x/profiles/other' }), 'web')
-  })
-
-  test('★ 退回 DSH_PROFILE_DIR 的目录名（DSH 自己也是 basename(profileDir)）', () => {
-    assert.equal(resolveProfileName({ DSH_PROFILE_DIR: 'C:\\Users\\a\\.dsh\\profiles\\desktop' }), 'desktop')
-    assert.equal(resolveProfileName({ DSH_PROFILE_DIR: '/home/a/.dsh/profiles/tui' }), 'tui')
-    assert.equal(resolveProfileName({ DSH_PROFILE_DIR: '/home/a/.dsh/profiles/tui/' }), 'tui', '结尾斜杠不影响')
-  })
-
-  test('两个都没有 / 名字非法 ⇒ null（面板据此不给命令）', () => {
-    assert.equal(resolveProfileName({}), null)
-    assert.equal(resolveProfileName(null), null)
-    assert.equal(resolveProfileName(undefined), null)
-    assert.equal(resolveProfileName({ DSH_PROFILE: '' }), null)
-    assert.equal(resolveProfileName({ DSH_PROFILE: 'a/b' }), null, '非法名不该被当成有效值')
-    assert.equal(resolveProfileName({ DSH_PROFILE_DIR: '' }), null)
-  })
-
-  test('本机实际环境形状：desktop', () => {
-    // 本机实测 DSH_PROFILE=desktop、DSH_PROFILE_DIR=...\.dsh\profiles\desktop
-    assert.equal(resolveProfileName({
-      DSH_PROFILE: 'desktop',
-      DSH_PROFILE_DIR: 'C:\\Users\\11150\\.dsh\\profiles\\desktop',
-    }), 'desktop')
-    // 而它正是"命令行不给命令"的那种 profile —— 这条链的终点：
+describe('本机实际形状：desktop ⇒ 不给命令（整条链的终点）', () => {
+  test('★ 拿到 desktop 之后必须走到"不给命令"', () => {
     const r = bundleInstallRemedy('desktop', [CODEX])
     assert.equal(r.kind, 'no-command')
+    assert.ok(!('command' in r))
+  })
+
+  test('★ 端到端：适配层解析出 desktop → 修法不给命令', async () => {
+    // 直接吃**真实**的适配层实现（那才是插件在生产里调用的那个），而不是在测试里复刻一遍。
+    const { resolveProfileName } = await import('../../runtime/adapters/dsh/profile-name.mjs')
+    const DESKTOP_ARGV = [
+      'D:\\software\\dsh\\DeepSeek Harness.exe',
+      'D:\\software\\dsh\\resources\\app.asar\\dsh\\node_modules\\@deepseek-ai\\dsh-desktop-host\\lib\\index.js',
+    ]
+    // 实机形状：宿主进程**没有**那两个环境变量，只有 argv 这条证据
+    const resolved = resolveProfileName({ env: {}, argv: DESKTOP_ARGV })
+    assert.equal(resolved, 'desktop', '适配层应当从 argv 认出 Desktop 宿主')
+    assert.equal(bundleInstallRemedy(resolved, [CODEX]).kind, 'no-command', '认出 Desktop 后必须不给命令')
   })
 })
 
-describe('profile 名规则（照抄 DSH 的 resolveProfileDir）', () => {
+describe('profile 名规则与适配层一致（防两处漂移）', () => {
+  test('★ workbench 的规则与 runtime/adapters 的规则逐例一致', async () => {
+    // 两处各有一份实现（浏览器侧不能 import runtime/），所以用对照用例钉住它们**不漂移**。
+    // 这正是本仓既有的"镜像 + 对照判据"惯例（如 desktop/mobile 的镜像表）。
+    const { isAcceptableProfileName: adapterRule } = await import('../../runtime/adapters/dsh/profile-name.mjs')
+    const cases = ['web', 'tui', 'headless', 'desktop', 'my-profile', 'a_b', 'A1',
+      '', '.', '..', 'node_modules', 'a/b', 'a\\b', '/abs', 'x'.repeat(65),
+      null, undefined, 1, {}, []]
+    for (const c of cases) {
+      assert.equal(isAcceptableProfileName(c), adapterRule(c),
+        `两边对 ${JSON.stringify(c)} 的判定不一致`)
+    }
+  })
+
   test('接受与拒绝的边界', () => {
     for (const ok of ['web', 'tui', 'headless', 'my-profile', 'a_b', 'A1']) {
       assert.equal(isAcceptableProfileName(ok), true, ok + ' 应当接受')

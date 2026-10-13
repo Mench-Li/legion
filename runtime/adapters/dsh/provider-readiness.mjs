@@ -100,6 +100,44 @@ export function hasReadinessSpec(name) {
 }
 
 /**
+ * 真正要探测的名字 = **注册表里的** ∪ **规格表里已知的**。
+ *
+ * ## 为什么必须并上规格表（2026-10-13 实测踩到）
+ *
+ * 第一版只探 `listSubagentProviders(ctx)` 返回的名字。上线到实机后读数**一直是空的**，
+ * 而日志里**一条探测错误都没有** —— 因为注册表为空时，`probeProviders([])` 立刻返回 `{}`，
+ * 于是心跳发出的 `providers` 是个**空对象**，服务端按"空对象应省略"整份丢掉。
+ *
+ * 全过程**没有任何一处报错**：没有抛错、没有日志、没有告警，只有一个永远不出现的读数。
+ *
+ *   > 一个"什么都没探，于是什么都没报"的读数，
+ *   > 与一个"探过了，本机确实什么都不能用"的读数，
+ *   > 在界面上都是**空**的 —— 区别只在后者有一天会变绿。
+ *
+ * 而是不是真的"本机什么都不能用"？**不是。** `spawn` 是随进程内跑的 provider，
+ * 它**永远可用**，根本不需要注册表告诉我们 —— 规格表里就写着它是 `native`。
+ * 用注册表当唯一入口，等于让"注册表读不到"这件事**伪装成**"本机没有可用的运行时"。
+ *
+ * 所以：注册表给的是"**还有哪些**"，规格表给的是"**至少这些**"。
+ * 两者取并集，读数才不会因为上游读不到而整个消失。
+ *
+ * 顺序稳定（注册表顺序在前，再补规格表里缺的），便于比对与判据。
+ */
+export function readinessProbeTargets(names) {
+  const out = []
+  const seen = new Set()
+  const push = (raw) => {
+    const name = typeof raw === 'string' ? raw.trim() : ''
+    if (name === '' || seen.has(name)) return
+    seen.add(name)
+    out.push(name)
+  }
+  for (const name of names ?? []) push(name)
+  for (const name of Object.keys(PROVIDER_SPECS)) push(name)
+  return out
+}
+
+/**
  * 在给定 PATH 里解析可执行文件。
  *
  * ★ 必须用**子进程真正拿到的那个 PATH**，不是守护自己的 PATH ——

@@ -21,6 +21,7 @@ import {
   hasReadinessSpec,
   probeProvider,
   probeProviders,
+  readinessProbeTargets,
   resolveOnPath,
 } from './provider-readiness.mjs'
 
@@ -261,8 +262,65 @@ describe('PATH 解析与版本号', () => {
   })
 })
 
-describe('规格表本身', () => {
-  test('内置 provider 的 spec 必须标成 native，外部 provider 必须给 CLI 与登录提示', () => {
+// ════════════════════════════════════════════════════════════════════════════
+// 探测目标 = 注册表 ∪ 规格表（2026-10-13 实机修正）
+//
+// 这一组守的是**实机上真实发生过的那次静默失效**：第一版只探注册表返回的名字，
+// 而那台机器上注册表是空的 ⇒ 探了个空集 ⇒ 心跳发出 `providers: {}` ⇒
+// 服务端按"空对象应省略"整份丢掉 ⇒ **读数永远不出现，而全程零报错**
+// （没有抛错、没有日志、没有告警）。
+//
+//   > 一个"什么都没探，于是什么都没报"的读数，
+//   > 与一个"探过了，本机确实什么都不能用"的读数，
+//   > 在界面上都是**空**的 —— 区别只在后者有一天会变绿。
+//
+// 而 `spawn` 随进程内跑，**永远可用**，根本不需要注册表告诉我们 —— 规格表里就写着。
+// ════════════════════════════════════════════════════════════════════════════
+
+describe('探测目标：注册表 ∪ 规格表', () => {
+  test('★★ 注册表为空时**仍然要探规格表里的**（这是实机那次失效的直接原因）', () => {
+    const targets = readinessProbeTargets([])
+    assert.ok(targets.length > 0, '空注册表不能导出一个空探测集 —— 那会变成"永远没有读数"')
+    assert.ok(targets.includes('spawn'), '内置 provider 必须总是被探（它随进程内跑，永远可用）')
+    for (const name of Object.keys(PROVIDER_SPECS)) {
+      assert.ok(targets.includes(name), name + ' 应当在探测目标里')
+    }
+  })
+
+  test('★ null / undefined / 脏输入同样不导出空集', () => {
+    for (const input of [null, undefined, [''], ['   '], [null], [1], [{}]]) {
+      const targets = readinessProbeTargets(input)
+      assert.ok(targets.includes('spawn'), JSON.stringify(input) + ' 不该让探测集变空')
+    }
+  })
+
+  test('注册表里的额外 provider 被并进来，且排在规格表之前（顺序稳定）', () => {
+    const targets = readinessProbeTargets(['custom-a', 'spawn', 'custom-b'])
+    assert.deepEqual(targets.slice(0, 3), ['custom-a', 'spawn', 'custom-b'], '注册表顺序在前')
+    assert.ok(targets.includes('codex'), '规格表里缺的补在后面')
+    assert.equal(new Set(targets).size, targets.length, '不得重复')
+    // 同名不重复出现（注册表已经给了 spawn，规格表不该再加一次）
+    assert.equal(targets.filter((t) => t === 'spawn').length, 1)
+  })
+
+  test('两端空白被规整，空名被丢掉', () => {
+    const targets = readinessProbeTargets(['  spaced  ', ''])
+    assert.ok(targets.includes('spaced'))
+    assert.ok(!targets.includes(''))
+    assert.ok(!targets.includes('  spaced  '))
+  })
+
+  test('★ 探测目标接上 probeProviders 真的会产出读数（端到端）', async () => {
+    // 空注册表 → 目标含 spawn → 探出来就该有 spawn 的读数（而不是空对象）。
+    const targets = readinessProbeTargets([])
+    const table = await probeProviders(targets, deps({ resolveOnPath: () => null }))
+    assert.ok(Object.keys(table).length > 0, '空注册表也必须能产出读数')
+    assert.equal(table.spawn.state, READINESS_STATE.READY, '内置 provider 恒 ready')
+    assert.equal(table.codex.state, READINESS_STATE.MISSING_CLI)
+  })
+})
+
+describe('规格表本身', () => {  test('内置 provider 的 spec 必须标成 native，外部 provider 必须给 CLI 与登录提示', () => {
     assert.equal(PROVIDER_SPECS.spawn.kind, 'native')
     for (const name of ['claude-code', 'codex']) {
       const spec = PROVIDER_SPECS[name]

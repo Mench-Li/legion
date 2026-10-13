@@ -191,6 +191,61 @@ test('★ 读侧永不抛错：坏 JSON / 空串 / null 都当"没有"', () => {
   assert.equal(serializeProviderReadiness({ bad: 1 }), null)
 })
 
+// ══════════════════════════════════════════════════════════════════════════
+// ★★ 逐条丢，而不是"一条坏就整份丢"（2026-10-13 实机修正）
+//
+// 第一版是 all-or-nothing：任何一个 provider 的任何一个字段不合法 ⇒ 整份 `providers` 丢掉。
+// 那是**诊断字段**上最坏的失败模式 —— 一个 provider 的怪值会让**其余全部**读数一起消失，
+// 界面上表现为"这台机器什么都没探到"。
+//
+//   > 一个"因为隔壁那条坏了，于是这条也不报"的读数，
+//   > 与一个"本机确实什么都没有"的读数，在界面上是同一个样子。
+//
+// 而这条数据的用途恰恰是让人看见真相 ⇒ 宁可少一条，也不要一条都没有。
+// 容器形状不对（不是对象 / 空对象 / 超量）仍然整份拒 —— 那是**协议**错误。
+// ══════════════════════════════════════════════════════════════════════════
+
+test('★★ 一条坏、其余好 ⇒ **好的那条要留下**（别让坏邻居把读数全带走）', () => {
+  const r = parseProviderReadiness({
+    spawn: { state: 'ready', reason: '内置' },
+    broken: { state: 'made-up-state' },
+    half: { reason: '缺 state' },
+    weird: { state: 'ready', evil: 1 },
+    notObject: 'nope',
+    also: { state: 'missing_cli', cli: 'missing' },
+  })
+  assert.equal(r.ok, true, '还有可用条目就不该整份拒：' + JSON.stringify(r))
+  assert.deepEqual(Object.keys(r.value).sort(), ['also', 'spawn'], '只有两条有效')
+  assert.equal(r.value.spawn.state, 'ready')
+  assert.equal(r.value.also.state, 'missing_cli')
+  assert.equal(r.dropped.length, 4, '丢弃原因要报出来（便于排查"为什么少了一条"）')
+  assert.ok(r.dropped.some((d) => d.startsWith('broken(')))
+})
+
+test('★ 全都坏 ⇒ 仍然 not-ok（不能存成空对象，那会被读成"探过且为空"）', () => {
+  const r = parseProviderReadiness({ a: { state: 'nope' }, b: null })
+  assert.equal(r.ok, false)
+  assert.match(r.reason, /没有一条可用/)
+})
+
+test('★ 容器形状错误仍然整份拒（那是协议错误，不是"某条脏"）', () => {
+  for (const bad of [null, [], 'x', 42, {}]) {
+    assert.equal(parseProviderReadiness(bad).ok, false, JSON.stringify(bad))
+  }
+})
+
+test('★ 逐条丢之后落库的是**好的那部分**（端到端：坏邻居不该让心跳丢读数）', async () => {
+  mod.db.prepare('DELETE FROM members').run()
+  await post('/api/heartbeat', { by: 'partial@A', scope: 'A', kind: 'worker', providers: {
+    spawn: { state: 'ready', reason: '内置' },
+    broken: { state: 'not-a-real-state' },
+  } })
+  const m = (await get('/api/members')).body.find((x) => x.member === 'partial@A')
+  assert.ok(m.providers, '好的那条必须留下（整份丢会让面板看到"什么都没探到"）')
+  assert.deepEqual(Object.keys(m.providers), ['spawn'])
+  assert.equal(m.providers.spawn.state, 'ready')
+})
+
 // ══════════════════════ 心跳往返 ══════════════════════
 
 test('① 心跳带上就绪度 ⇒ 落库、并能在 /api/members 读回来', async () => {

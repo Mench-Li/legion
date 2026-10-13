@@ -28,6 +28,49 @@ export const READINESS_STATES = Object.freeze([
   'ready', 'missing_cli', 'not_logged_in', 'no_network', 'unprobed', 'unknown',
 ])
 
+/**
+ * provider **自报的能力位**（DSH 描述符上的真值）。
+ *
+ * ★ 为什么把它跟就绪度放在一起上报：这两件事回答的是同一个问题 ——
+ *   **"这台机器上这个 provider 到底能干什么"**。而它此前**无处可读**：
+ *
+ *     工作流面板让用户自己勾「支持工具过滤」等复选框，可 `outputSchema` 连复选框都没有，
+ *     是**硬编码 `true`** 的。而 `plugins/src/index.ts` 派工时要求
+ *     `frozenConfig.capabilities.outputSchema === true`，`team-hub` 认领时又要求
+ *     声明与节点心跳上报的**逐位相等**。于是"provider 不支持结构化输出"这件事，
+ *     用户既看不到、也表达不出来 —— 发布**成功**，然后**每一次派工都抛错**。
+ *
+ *   > 一个"发布成功、派工必失败"的配置，
+ *   > 与一个"发布时就报错"的配置，在**用户还没派工**的时候看上去一模一样 ——
+ *   > 区别只在第一次派工之后，而那时他已经在查任务为什么不动了。
+ *
+ * 校验口径**照抄** `harness-store.mjs` 的 `parseNodeCapabilities`（providers 那一支）：
+ * 同一份能力在两条上报路径上必须同一个形状，否则"读得到"与"存得下"会分叉。
+ */
+const DECLARED_BOOLEAN_KEYS = Object.freeze(['outputSchema', 'toolFilter', 'cancellation'])
+
+function checkDeclared(value) {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return '必须是对象'
+  for (const [key, raw] of Object.entries(value)) {
+    if (key === 'permissionMode') {
+      if (typeof raw !== 'string' || raw.trim() === '') return 'permissionMode 必须是非空字符串'
+      continue
+    }
+    if (key === 'systemProxyMode') {
+      if (!['inherit', 'system'].includes(raw)) return "systemProxyMode 只能是 'inherit' 或 'system'"
+      continue
+    }
+    if (!DECLARED_BOOLEAN_KEYS.includes(key)) return `不支持的能力位 ${key}`
+    if (typeof raw !== 'boolean') return `${key} 必须是布尔值`
+  }
+  // 三个布尔能力位**必须齐全**：缺一个就说明两边版本不一致，
+  // 而"缺位"会被上层读成 false（= 能力不可用），把版本问题伪装成能力问题。
+  for (const key of DECLARED_BOOLEAN_KEYS) {
+    if (typeof value[key] !== 'boolean') return `缺 ${key}（能力位必须齐全，缺位会被读成"不支持"）`
+  }
+  return null
+}
+
 /** 单个 provider 读数里允许出现的键。白名单：未知键说明两边版本不一致，宁可拒。 */
 const ENTRY_KEYS = Object.freeze({
   state: (v) => typeof v === 'string' && READINESS_STATES.includes(v),
@@ -37,6 +80,8 @@ const ENTRY_KEYS = Object.freeze({
   network: (v) => typeof v === 'string' && v.length <= 32,
   version: (v) => typeof v === 'string' && v.length <= 64,
   checkedAtMs: (v) => Number.isFinite(v),
+  /** 2026-10-13：provider 自报的能力位（见 `checkDeclared`）。缺失 = 本机没读到，不是"不支持"。 */
+  declared: (v) => checkDeclared(v) === null,
 })
 
 export const MAX_PROVIDERS = 32

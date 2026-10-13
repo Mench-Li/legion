@@ -14,6 +14,13 @@ import {
   scopeReadiness,
 } from '../agentWorkflowDefaults'
 import type { MemberReadinessLike, ProviderChoice, ProviderReadinessLike, ToolChoice, WorkflowRoleKey as RoleKey } from '../agentWorkflowDefaults'
+import {
+  ASSUMED_KEYS,
+  ASSUMED_REASONS,
+  DERIVED_KEYS,
+  declaredFor,
+  deriveNativeCapabilities,
+} from '../nativeCapabilities'
 import { toast } from './Toast'
 import type { GoalStatus } from '../types'
 
@@ -40,6 +47,14 @@ const ROLE_LABEL: Record<RoleKey, string> = {
 const EXTERNAL_CAPABILITIES: AgentToolConfigRecord['capabilities'] = {
   textInput: true, textOutput: true, outputSchema: false, toolFilter: false,
   localAgent: false, sessionResume: false, cancellation: true,
+}
+/** 能力位的中文标签（界面与推导结果共用一套词，避免两处措辞漂移）。 */
+const ABILITY_LABEL: Record<string, string> = {
+  outputSchema: '支持结构化输出（outputSchema）',
+  toolFilter: '支持工具过滤',
+  cancellation: '支持取消执行',
+  localAgent: '提供本地 Agent 拦截能力',
+  sessionResume: '支持会话续接',
 }
 
 function observedPermissionModes(node: AgentNodeRecord): string {
@@ -268,10 +283,16 @@ export function AgentWorkflowConfigurator({ scope }: Props): React.JSX.Element {
     const adapter = choice === 'dsh-native' ? 'dsh-native' : 'dsh-subagent'
     const permissionProfile = choice === 'codex' ? 'codex-workspace-write'
       : choice === 'claude-code' ? 'claude-code-acceptEdits' : `dsh-native:${providerName}`
-    const capabilities = choice === 'dsh-native' ? {
-      textInput: true, textOutput: true, outputSchema: true, toolFilter: nativeToolFilter,
-      localAgent: nativeLocalAgent, sessionResume: nativeSessionResume, cancellation: nativeCancellation,
-    } : EXTERNAL_CAPABILITIES
+    // ★★ 2026-10-13：能力位**从 provider 自报的读数推导**，不再整体由复选框决定。
+    //    原来 `outputSchema` 是**硬编码 true**（连复选框都没有），而派工与认领都真的按它拒收 ——
+    //    provider 不支持结构化输出时：UI 看不到、也改不了，**发布成功、每次派工都抛错**。
+    //    现在能读到的按读数走，读不到的如实标成"声明"。推导规则见 nativeCapabilities.ts。
+    const capabilities = choice === 'dsh-native'
+      ? deriveNativeCapabilities(declaredFor(readiness, providerName), {
+        toolFilter: nativeToolFilter, localAgent: nativeLocalAgent,
+        sessionResume: nativeSessionResume, cancellation: nativeCancellation,
+      }).capabilities
+      : EXTERNAL_CAPABILITIES
     const compatible = configs.filter(item => item.enabled && item.providerName === providerName
       && item.adapter === adapter && item.permissionProfile === permissionProfile
       && JSON.stringify(item.capabilities) === JSON.stringify(capabilities)).sort((a, b) => b.version - a.version)[0]
@@ -322,6 +343,12 @@ export function AgentWorkflowConfigurator({ scope }: Props): React.JSX.Element {
       setError('三个岗位都必须存在于当前已启用阶段链中。')
       return
     }
+    // ★ 用到了本地 Agent（或图阶段里也有）且读数明确说它不行 ⇒ 拦下。
+    //   现在拦，是为了不让用户拿到一份"保存成功、每次派工都抛错"的配置。
+    if (usesNativeTool() && nativeDerivation.blockers.length > 0) {
+      setError(nativeDerivation.blockers.join(' '))
+      return
+    }
     setSaving(true)
     setError('')
     try {
@@ -363,6 +390,11 @@ export function AgentWorkflowConfigurator({ scope }: Props): React.JSX.Element {
       || !graphStages.some(stage => stage.id === reviewDesignRoute)
       || !graphStages.some(stage => stage.id === reviewImplementationRoute)) {
       setError('审查阶段及设计/实现返工目标必须指向现有阶段。'); return
+    }
+    // 同 save：读数明确说 provider 不行时，不让他发布一份"必然派工失败"的版本。
+    if (usesNativeTool() && nativeDerivation.blockers.length > 0) {
+      setError(nativeDerivation.blockers.join(' '))
+      return
     }
     setSaving(true)
     setError('')
@@ -477,6 +509,21 @@ export function AgentWorkflowConfigurator({ scope }: Props): React.JSX.Element {
    */
   const providerCandidates: ProviderChoice[] = providerChoices(readiness, nativeProviderCandidates(nodes))
   const providerNameValidation = providerChoiceValidation(dshProvider, providerCandidates)
+  /**
+   * ★ 当前注册名对应的能力位推导结果（2026-10-13）。
+   *
+   * 用途有两个，**顺序不能反**：
+   *   ① 拦下"必然失败"的发布（读数明确说 provider 不支持结构化输出）；
+   *   ② 把"哪几位是读数、哪几位只是声明"如实画给用户看。
+   * 判据只有一条：**读数缺席不拦，读数说不行才拦**（理由见 nativeCapabilities.ts）。
+   */
+  const nativeDerivation = deriveNativeCapabilities(declaredFor(readiness, dshProvider.trim()), {
+    toolFilter: nativeToolFilter, localAgent: nativeLocalAgent,
+    sessionResume: nativeSessionResume, cancellation: nativeCancellation,
+  })
+  /** 这套配置里有没有用到本地 Agent（决定能力位推导的结果是否真的会被用到）。 */
+  const usesNativeTool = (): boolean =>
+    Object.values(tools).includes('dsh-native') || graphStages.some(stage => stage.tool === 'dsh-native')
   /** 读数里**不可用**的那些：用来给"为什么选不了/为什么没绿"一个解释。 */
   const notReadyChoices = providerCandidates.filter(c => c.state !== null && !c.ready)
   const providerRequirements = [
@@ -652,12 +699,44 @@ export function AgentWorkflowConfigurator({ scope }: Props): React.JSX.Element {
               {providerNameValidation.message !== null && <div style={{ color: providerNameValidation.ok ? 'var(--yellow)' : 'var(--red)' }}>
                 {providerNameValidation.message}
               </div>}
-              <div style={{ color: 'var(--muted-2)' }}>能力声明必须与该 provider 一致；执行时会再次核验结构化输出和工具过滤能力。</div>
-              <div style={{ color: 'var(--muted-2)' }}>执行节点 要求结构化报告；所选 provider 必须支持输出 schema。</div>
-              <label style={{ display: 'block' }}><input type="checkbox" checked={nativeToolFilter} onChange={e => setNativeToolFilter(e.target.checked)} /> 支持工具过滤</label>
-              <label style={{ display: 'block' }}><input type="checkbox" checked={nativeLocalAgent} onChange={e => setNativeLocalAgent(e.target.checked)} /> 提供本地 Agent 拦截能力</label>
-              <label style={{ display: 'block' }}><input type="checkbox" checked={nativeSessionResume} onChange={e => setNativeSessionResume(e.target.checked)} /> 支持会话续接</label>
-              <label style={{ display: 'block' }}><input type="checkbox" checked={nativeCancellation} onChange={e => setNativeCancellation(e.target.checked)} /> 支持取消执行</label>
+              {/* ★★ 2026-10-13：能力位分成**读数**与**声明**两组显示。
+                  原来 4 个复选框平铺，而 `outputSchema` 连复选框都没有（硬编码 true）——
+                  于是"provider 不支持结构化输出"时用户既看不到也改不了，发布成功、每次派工都抛错。
+                  现在：能读到的按读数走并**禁用复选框**，读不到的留着让用户声明并**说明为什么读不出来**。 */}
+              <div style={{ marginTop: 8, padding: 8, background: 'var(--surface-2)', borderRadius: 5 }}>
+                <b>能力声明</b>
+                <div style={{ color: 'var(--muted-2)', marginTop: 4 }}>
+                  {nativeDerivation.derived.length > 0
+                    ? '前三项按本机读到的 provider 能力自动决定（执行时会逐位核对，对不上会拒绝派工）：'
+                    : '本机没有这三个能力位的读数，下面三项**只是你的声明**（执行时会与真实 provider 逐位核对）：'}
+                </div>
+                {DERIVED_KEYS.map(key => <label key={key} style={{ display: 'block', color: nativeDerivation.derived.length > 0 ? 'var(--muted-2)' : undefined }}>
+                  <input type="checkbox" disabled={nativeDerivation.derived.length > 0}
+                    checked={nativeDerivation.capabilities[key]}
+                    onChange={e => {
+                      if (key === 'toolFilter') setNativeToolFilter(e.target.checked)
+                      else if (key === 'cancellation') setNativeCancellation(e.target.checked)
+                    }} />
+                  {' '}{ABILITY_LABEL[key]}
+                  {nativeDerivation.derived.length > 0 ? '（读数）' : '（声明）'}
+                </label>)}
+                <div style={{ color: 'var(--muted-2)', marginTop: 6 }}>
+                  下列两项**本机读不出来**，需要你确认：
+                </div>
+                {ASSUMED_KEYS.map(key => <label key={key} style={{ display: 'block' }}>
+                  <input type="checkbox"
+                    checked={key === 'localAgent' ? nativeLocalAgent : nativeSessionResume}
+                    onChange={e => { if (key === 'localAgent') setNativeLocalAgent(e.target.checked); else setNativeSessionResume(e.target.checked) }} />
+                  {' '}{ABILITY_LABEL[key]}
+                  <div style={{ marginLeft: 18, color: 'var(--muted-2)' }}>{ASSUMED_REASONS[key]}</div>
+                </label>)}
+              </div>
+              {nativeDerivation.blockers.map((blocker, index) => <div key={index} style={{ color: 'var(--red)', marginTop: 6 }}>
+                ⛔ {blocker}
+              </div>)}
+              {nativeDerivation.warnings.map((warning, index) => <div key={index} style={{ color: 'var(--yellow)', marginTop: 6 }}>
+                {warning}
+              </div>)}
             </div>}
             <div style={{ marginTop: 10 }}>
               <label>审查返工上限 <input type="number" min={0} max={20} value={maxReworkRounds} onChange={e => setMaxReworkRounds(Number(e.target.value))} style={{ width: 70 }} /> 轮</label>

@@ -153,6 +153,11 @@ export interface ProviderReadinessLike {
   readonly reason?: string
   readonly version?: string
   readonly checkedAtMs?: number
+  /**
+   * provider 自报的能力位（2026-10-13）。这里刻意只声明"可能有这个字段"而不钉死内部形状 ——
+   * 具体怎么读、怎么判"读到了没有"归 `nativeCapabilities.ts`（它必须能对**不可信的**字段做防御）。
+   */
+  readonly declared?: unknown
 }
 
 export interface MemberReadinessLike {

@@ -76,6 +76,88 @@ test('★ 缺 state 的条目拒掉（没有结论的条目没有意义）', () 
   assert.match(r.reason, /缺 state/)
 })
 
+// ── 2026-10-13：provider 自报的能力位 `declared`（"能干什么"的真值） ──
+// 守的是一处"发布成功、派工必失败"的缺陷：面板此前硬编码 outputSchema=true，
+// 而派工与认领都真的按声明逐位拒收。所以这份读数必须能被**如实**上报。
+
+test('★ declared 收下三个布尔位 + 权限模式（形状与节点能力位同一套）', () => {
+  const r = parseProviderReadiness({ codex: { state: 'ready', declared: {
+    outputSchema: true, toolFilter: false, cancellation: true,
+    permissionMode: 'codex-workspace-write', systemProxyMode: 'system',
+  } } })
+  assert.equal(r.ok, true, JSON.stringify(r))
+  assert.deepEqual(r.value.codex.declared, {
+    outputSchema: true, toolFilter: false, cancellation: true,
+    permissionMode: 'codex-workspace-write', systemProxyMode: 'system',
+  })
+})
+
+test('★ outputSchema=false 必须能**存下来**（正是它此前无处可表达）', () => {
+  const r = parseProviderReadiness({ p: { state: 'ready', declared: { outputSchema: false, toolFilter: false, cancellation: true } } })
+  assert.equal(r.ok, true, '不支持结构化输出是**合法读数**，不是坏数据')
+  assert.equal(r.value.p.declared.outputSchema, false, '不能被"规整"成 true 或丢掉')
+})
+
+test('★★ 能力位**缺一个就拒**（缺位会被上层读成 false，把版本问题伪装成能力问题）', () => {
+  for (const partial of [
+    { outputSchema: true, toolFilter: true },
+    { outputSchema: true },
+    { outputSchema: true, toolFilter: true, cancellation: undefined },
+    { outputSchema: true, toolFilter: true, cancellation: 'yes' },
+    { outputSchema: 1, toolFilter: true, cancellation: true },
+  ]) {
+    const r = parseProviderReadiness({ p: { state: 'ready', declared: partial } })
+    assert.equal(r.ok, false, JSON.stringify(partial) + ' 应当被拒')
+  }
+})
+
+test('declared 的其它形状限制：未知能力位 / 空 permissionMode / 非法 systemProxyMode', () => {
+  const base = { outputSchema: true, toolFilter: true, cancellation: true }
+  for (const bad of [
+    { ...base, evil: true },
+    { ...base, permissionMode: '' },
+    { ...base, permissionMode: 1 },
+    { ...base, systemProxyMode: 'always' },
+    [],
+  ]) {
+    const r = parseProviderReadiness({ p: { state: 'ready', declared: bad } })
+    assert.equal(r.ok, false, JSON.stringify(bad) + ' 应当被拒')
+    assert.ok(typeof r.reason === 'string' && r.reason.length > 0, '拒掉时必须给出理由')
+  }
+})
+
+test('★ 没有 declared 字段是合法的（旧守护 / 本机没读到）', async () => {
+  const r = parseProviderReadiness({ p: { state: 'ready' } })
+  assert.equal(r.ok, true)
+  assert.equal(r.value.p.declared, undefined, '缺失 ≠ 不支持 —— 这个区别是"拦不拦发布"的判据')
+  // 端到端：不带 declared 的心跳照常成功，读回来 declared 缺席
+  mod.db.prepare('DELETE FROM members').run()
+  await post('/api/heartbeat', { by: 'old@A', scope: 'A', kind: 'worker', providers: { p: { state: 'ready', reason: 'x' } } })
+  const m = (await get('/api/members')).body.find((x) => x.member === 'old@A')
+  assert.equal(m.providers.p.declared, undefined)
+})
+
+test('★ declared 往返：心跳带上能力位 ⇒ /api/members 读得到', async () => {
+  mod.db.prepare('DELETE FROM members').run()
+  await post('/api/heartbeat', { by: 'caps@A', scope: 'A', kind: 'worker', providers: {
+    p: { state: 'ready', declared: { outputSchema: false, toolFilter: true, cancellation: true } },
+  } })
+  const m = (await get('/api/members')).body.find((x) => x.member === 'caps@A')
+  assert.equal(m.providers.p.declared.outputSchema, false)
+  assert.equal(m.providers.p.declared.toolFilter, true)
+})
+
+test('★ 坏 declared 只丢字段、**不带崩心跳**（同一条纪律）', async () => {
+  mod.db.prepare('DELETE FROM members').run()
+  const r = await post('/api/heartbeat', { by: 'badcaps@A', scope: 'A', kind: 'worker',
+    providers: { p: { state: 'ready', declared: { outputSchema: true } } } })
+  assert.equal(r.status, 200)
+  assert.equal(r.body.ok, true)
+  const row = memberRow('badcaps@A')
+  assert.equal(row.online, 1, '坏的能力位不该让守护掉线')
+  assert.equal(row.providers_json, null)
+})
+
 test('★ 未知字段拒掉（两边版本不一致时不猜）', () => {
   const r = parseProviderReadiness({ codex: { state: 'ready', secret: 'x' } })
   assert.equal(r.ok, false)

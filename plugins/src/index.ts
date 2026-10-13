@@ -3698,6 +3698,32 @@ function spaceWorker(ctx: AppContext, config: Config): void {
     onError: (e) => log(`provider 就绪度探测失败（不影响心跳）：${String(e)}`),
   })
 
+  /**
+   * 把 provider **自报的能力位**并进就绪度读数（2026-10-13）。
+   *
+   * ★ 为什么必须并进来：就绪度回答"能不能跑"，能力位回答"能干什么"，而后者此前
+   *   **无处可读** —— 工作流面板让用户自己勾复选框，`outputSchema` 更是硬编码 `true`。
+   *   可是派工（`plugins/src/index.ts` 要求 `outputSchema === true`）与认领
+   *   （`team-hub/server.mjs` 要求声明与心跳逐位相等）都**真的按它拒收**。
+   *   ⇒ "provider 不支持结构化输出"这件事，用户既看不到也表达不出来，
+   *     发布成功，然后每一次派工都抛错。
+   *
+   * 取值来自 `subagentProviderCapabilities`（与节点心跳同一个来源、同一个形状）。
+   * 读不到就**整个 `declared` 字段不写**：缺失 = 本机没读到，**不是**"不支持" ——
+   * 那个区别正是面板"要不要拦发布"的判据。
+   */
+  function withDeclaredCapabilities(readiness: Record<string, unknown> | null): Record<string, unknown> | null {
+    if (readiness === null) return null
+    const out: Record<string, unknown> = {}
+    for (const [name, entry] of Object.entries(readiness)) {
+      if (entry === null || typeof entry !== 'object') { out[name] = entry; continue }
+      let declared: unknown
+      try { declared = subagentProviderCapabilities(ctx, name) } catch { declared = undefined }
+      out[name] = declared === undefined ? entry : { ...(entry as Record<string, unknown>), declared }
+    }
+    return out
+  }
+
   async function hubHeartbeat(): Promise<void> {
     if (!useHub || config.mode !== 'worker') return
     try {
@@ -3709,7 +3735,9 @@ function spaceWorker(ctx: AppContext, config: Config): void {
       try { providerNames = listSubagentProviders(ctx) } catch { /* 执行面读不到就不上报 */ }
       // ★ 只有**已经有读数**时才带上；第一轮通常还没有（探测在后台）。
       //   刻意不发一个空的 `providers`：那会让服务端把"还没探过"存成"探过且为空"。
-      const readiness = readinessCache.snapshot(providerNames)
+      // ★ 只有**已经有读数**时才带上；第一轮通常还没有（探测在后台）。
+      //   刻意不发一个空的 `providers`：那会让服务端把"还没探过"存成"探过且为空"。
+      const readiness = withDeclaredCapabilities(readinessCache.snapshot(providerNames))
       await hubPost('/api/heartbeat', {
         by: `${config.role}@${scope}`,
         scope,

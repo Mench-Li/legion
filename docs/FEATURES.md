@@ -287,7 +287,7 @@ Desktop 启动即自动拉起 team-hub v2 / v1 看板 / 指挥台，进程异常
   - **默认值不预设外部产品**：三个阶段默认都是「本地 Agent」，注册名默认 `spawn`（Legion 守护自带的本地执行服务，无需额外安装）。外部 provider（Claude Code / Codex）缺失的告警**只在你真的选了它们之后**才出现。
   - **本机 provider 就绪度（只读读数列）**：面板顶部会列出**本机守护自检出来的**各 provider 状态 —— 外部 CLI 装了没（在守护子进程真正看到的 PATH 上）、登录态在不在、供应商端点通不通，并附**修法**。「本地执行服务 注册名」的候选从这份读数派生（也可自由输入），不再需要用户自己去查一个界面上查不到的 provider 名。三条**必须分清**的状态：`ready`（现在能用）／有读数但不就绪（附修法）／**还没有读数**（只是本轮自检没跑到，**不代表不可用**）。自检约 10 分钟一轮，**绝不阻塞心跳**；读数只用来说、**不用来否决发布**（否则"刚装好"会被拦）。探测只看存在性，**不读任何凭据内容、不含机器路径**。实现：`runtime/adapters/dsh/provider-readiness.mjs` + `team-hub/provider-readiness.mjs`。
   - **本页只定义交接链**，不会自动开启空间执行守护。想让任务**自动开跑**：设置 → **持续执行**；想让**写码阶段**动起来：任务详情 → **🤖 派 AI 执行**。这两件事都不在本页。
-  - **流水线阶段本身不在本页编辑**（本页只读它，用于提供岗位候选）；改阶段集合要动 `seed-pipeline.mjs` / 运维侧配置。
+  - **能力位从读数推导**（`workbench/src/nativeCapabilities.ts`）：本地 Agent 的 `outputSchema` / `toolFilter` / `cancellation` **有真来源**（provider 自报的能力位，随心跳上报），所以由读数自动决定、复选框置灰；`localAgent` / `sessionResume` **本机读不出来**（前者说的是"运行时交回的句柄带不带本地 Agent"，描述符里没有这一位；后者当前**没有任何消费方**），留作用户声明并注明原因。**读数缺席不拦发布，读数说 `outputSchema=false` 才拦** —— 后者若放行，配置会保存成功但每次派工都失败。  - **流水线阶段本身不在本页编辑**（本页只读它，用于提供岗位候选）；改阶段集合要动 `seed-pipeline.mjs` / 运维侧配置。
   - 执行节点是**运行 Legion worker 的执行服务实例**，不是 Claude/Codex 产品；节点由守护心跳上报 provider、能力与生效权限模式，外部阶段只有匹配冻结权限模式时才会派工。节点绑定的 `agentNodeId` 需在守护配置里设置成同一个值。
   - 接口：`/api/pipeline`（含 `workflow` 字段）、`/api/agent-nodes`、`/api/agent-tool-configs`、`/api/agent-workflows/definitions`、`/api/agent-workflows/instances`、`/api/members`（每行的 `providers` = 该守护上报的就绪度，`null` = 还没上报过）。
 

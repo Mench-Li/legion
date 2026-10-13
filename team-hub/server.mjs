@@ -1517,6 +1517,12 @@ ensureColumn('members', 'model', 'model TEXT DEFAULT NULL')
 // 自检结果 —— 装了没 / 登录了没 / 端点通不通）。列可空：旧守护不上报 ⇒ NULL ⇒ 界面显示
 // "本机还没上报"，这是**一个诚实的状态**，不是错误。同样走 ensureColumn（并发启动安全）。
 ensureColumn('members', 'providers_json', 'providers_json TEXT DEFAULT NULL')
+// 迁移：members 补充 profile 列（2026-10-13：守护上报**自己所属的 DSH profile 名**）。
+// 用途只有一个但很硬：面板那条"装上缺的 bundle"的修法命令必须填真名 ——
+// `dsh plugin` 的 `--profile` 是必填项，原来那句写的是字面占位符 `<profile-name>`，
+// 粘进终端跑不了；而且 Desktop 独占的 profile 命令行根本装不了（那时**不该给命令**）。
+// 列可空：旧守护不上报 ⇒ NULL ⇒ 面板走"不给命令"的分支（宁可不给，也不给假的）。
+ensureColumn('members', 'profile', 'profile TEXT DEFAULT NULL')
 // 空间目标（goal）：一个工作空间可**并存多个目标**（多目标并发，互不取消），任务集围绕各自目标推进。
 // 每行 = 一个目标记录：
 //   id        目标唯一标识（G-xxx）
@@ -3300,17 +3306,22 @@ export function heartbeatAwaitingApproval({ requestId, nowMs = Date.now(), reque
  * ★ 它为空时**不清掉已有的值**：心跳每 30 秒一次，而就绪度探测有 10 分钟 TTL ——
  *   如果"这次没带"就写成 NULL，界面上的绿色会在两次带值的心跳之间闪回"没上报"。
  *   所以语义是：**带了就覆盖，没带就保留**。
+ *
+ * `profileName` 同一条语义（2026-10-13）：它决定"装 bundle"那条修法命令能不能给出
+ * ——给出了就要填真名，而 `--profile` 是必填项（见 `workbench/src/dshRemedy.ts`）。
  */
-function touchMember(member, scope, kind, modelText, providersJson = null) {
+function touchMember(member, scope, kind, modelText, providersJson = null, profileName = null) {
   db.prepare(`
-    INSERT INTO members (id, scope, kind, lastSeenAt, online, model, providers_json) VALUES (?, ?, ?, ?, 1, ?, ?)
+    INSERT INTO members (id, scope, kind, lastSeenAt, online, model, providers_json, profile) VALUES (?, ?, ?, ?, 1, ?, ?, ?)
     ON CONFLICT(id) DO UPDATE SET
       scope=excluded.scope, kind=excluded.kind, lastSeenAt=excluded.lastSeenAt, online=1, model=excluded.model,
-      providers_json=COALESCE(excluded.providers_json, members.providers_json)
+      providers_json=COALESCE(excluded.providers_json, members.providers_json),
+      profile=COALESCE(excluded.profile, members.profile)
   `).run(
     member, scope, kind, now(),
     typeof modelText === 'string' && modelText.length > 0 ? modelText : null,
     typeof providersJson === 'string' && providersJson.length > 0 ? providersJson : null,
+    typeof profileName === 'string' && profileName.length > 0 ? profileName : null,
   )
 }
 

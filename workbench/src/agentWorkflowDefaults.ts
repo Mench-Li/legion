@@ -167,6 +167,8 @@ export interface MemberReadinessLike {
   readonly online?: boolean
   readonly lastSeenAt?: string | null
   readonly providers?: Record<string, ProviderReadinessLike> | null
+  /** 这台守护所属的 DSH profile 名；`null`/缺失 = 还没上报过。 */
+  readonly profile?: string | null
 }
 
 /** 一条候选：provider 名 + 它的读数（没有读数时 state 为 null）。 */
@@ -198,7 +200,7 @@ function normalizeState(raw: unknown): ReadinessState | null {
 export function scopeReadiness(
   members: readonly MemberReadinessLike[] | null | undefined,
   scope: string,
-): { member: string; providers: Record<string, ProviderReadinessLike> } | null {
+): { member: string; providers: Record<string, ProviderReadinessLike>; profile: string | null } | null {
   const candidates = (members ?? []).filter(
     m => m?.scope === scope && m.providers !== null && m.providers !== undefined && Object.keys(m.providers).length > 0,
   )
@@ -210,7 +212,14 @@ export function scopeReadiness(
     return String(b.lastSeenAt ?? '').localeCompare(String(a.lastSeenAt ?? ''))
   })
   const top = sorted[0]
-  return { member: String(top.member ?? ''), providers: top.providers ?? {} }
+  return {
+    member: String(top.member ?? ''),
+    providers: top.providers ?? {},
+    // profile 与读数**分别可缺席**：守护可能报了读数却没有 profile（旧版），
+    // 反过来也一样。合成一个字段会让两种"不知道"混成一个，而它们的修法不同
+    // （前者照常选 provider，后者只是给不出可粘贴的装包命令）。
+    profile: typeof top.profile === 'string' && top.profile !== '' ? top.profile : null,
+  }
 }
 
 /**

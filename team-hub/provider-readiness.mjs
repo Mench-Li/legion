@@ -128,6 +128,29 @@ export function serializeProviderReadiness(value) {
 }
 
 /**
+ * profile 名的合法性 —— **照抄** DSH 自己的规则
+ * （`packages/boot/app-boot/src/profile.ts` 的 `resolveProfileDir`）：
+ * 非空、不含 `/` 与 `\`、不是 `.` / `..` / `node_modules`。
+ *
+ * ★ 为什么这里也要校验：这个名字会被面板拼进一条 **shell 命令**
+ *   （`dsh plugin --profile <名> add …`）。一个连 DSH 都不接受的名字，
+ *   拼出来必然是一条报错的命令 —— 而"一条看起来能跑的命令"正是这次要消灭的东西
+ *   （判定与措辞见 `workbench/src/dshRemedy.ts`）。
+ */
+export function isAcceptableProfileName(value) {
+  if (typeof value !== 'string') return false
+  if (value === '' || value === '.' || value === '..' || value === 'node_modules') return false
+  if (value.includes('/') || value.includes('\\')) return false
+  return value.length <= 64
+}
+
+/** 规范化心跳里的 `profile` 字段；不合法当没上报（null），**不抛错**。 */
+export function parseProfileName(value) {
+  if (value === undefined || value === null) return null
+  return isAcceptableProfileName(value) ? value : null
+}
+
+/**
  * 从库里读回来。
  *
  * ★ 读侧**永不抛错**：一行坏的 JSON 不该让 `/api/members` 整个 500 ——

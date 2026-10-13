@@ -267,3 +267,60 @@ test('⑤ 模型与就绪度互不干扰（model 那一格的行为未变）', a
   assert.equal(JSON.parse(row.model).model, 'mm', 'model 列仍按原样写入')
   assert.equal(JSON.parse(row.providers_json).codex.state, 'ready')
 })
+
+// ── 2026-10-13：守护上报的 profile 名（决定修法命令能不能给） ──
+// 守的是一句"看着能跑、其实跑不了"的命令：`dsh plugin --profile <profile-name> add …`。
+// 真名必须被带到面板，否则面板只能给占位符（而 `--profile` 是必填项，粘了必然报错）；
+// 名称非法则**丢掉**，因为它会被拼进 shell 命令。
+
+test('★ profile 往返：心跳带上 ⇒ /api/members 读得到', async () => {
+  reset()
+  const r = await post('/api/heartbeat', { by: 'prof@A', scope: 'A', kind: 'worker', profile: 'desktop' })
+  assert.equal(r.status, 200, JSON.stringify(r.body))
+  const m = (await get('/api/members')).body.find((x) => x.member === 'prof@A')
+  assert.equal(m.profile, 'desktop', '真名必须能带出来，否则面板只能给占位符')
+})
+
+test('★ 不带 profile ⇒ 心跳照常成功，读出来是 null（旧守护）', async () => {
+  reset()
+  const r = await post('/api/heartbeat', { by: 'noprof@A', scope: 'A', kind: 'worker' })
+  assert.equal(r.status, 200)
+  assert.equal(r.body.ok, true)
+  const m = (await get('/api/members')).body.find((x) => x.member === 'noprof@A')
+  assert.equal(m.profile, null, '没上报就是 null —— 面板据此走"不给命令"分支')
+})
+
+test('★★ 非法 profile 名被丢掉，且**不带崩心跳**（它会被拼进 shell 命令）', async () => {
+  reset()
+  for (const bad of ['a/b', 'a\\b', '.', '..', 'node_modules', '', 123, {}, ['x'], 'x'.repeat(200)]) {
+    const r = await post('/api/heartbeat', { by: 'badprof@A', scope: 'A', kind: 'worker', profile: bad })
+    assert.equal(r.status, 200, `坏 profile 导致心跳非 200：${JSON.stringify(bad)}`)
+    assert.equal(r.body.ok, true)
+    const row = memberRow('badprof@A')
+    assert.equal(row.online, 1, '坏的诊断字段不该让守护掉线')
+    assert.equal(row.profile, null, '非法名不该被存下来（它会被拼进命令）')
+  }
+})
+
+test('★ profile 与 providers 各自独立：一个坏了不影响另一个', async () => {
+  reset()
+  await post('/api/heartbeat', { by: 'mix@A', scope: 'A', kind: 'worker',
+    profile: 'web', providers: { p: { state: 'made-up' } } })
+  let m = (await get('/api/members')).body.find((x) => x.member === 'mix@A')
+  assert.equal(m.profile, 'web', 'providers 坏不该连带丢掉 profile')
+  assert.equal(m.providers, null)
+
+  await post('/api/heartbeat', { by: 'mix2@A', scope: 'A', kind: 'worker',
+    profile: 'a/b', providers: { p: { state: 'ready' } } })
+  m = (await get('/api/members')).body.find((x) => x.member === 'mix2@A')
+  assert.equal(m.profile, null)
+  assert.equal(m.providers.p.state, 'ready', 'profile 坏不该连带丢掉 providers')
+})
+
+test('★ profile 也是"带了覆盖、没带保留"（同 providers 的语义）', async () => {
+  reset()
+  await post('/api/heartbeat', { by: 'keep@A', scope: 'A', kind: 'worker', profile: 'web' })
+  await post('/api/heartbeat', { by: 'keep@A', scope: 'A', kind: 'worker' })
+  const m = (await get('/api/members')).body.find((x) => x.member === 'keep@A')
+  assert.equal(m.profile, 'web', '没带 profile 的那次心跳不该把它抹掉')
+})

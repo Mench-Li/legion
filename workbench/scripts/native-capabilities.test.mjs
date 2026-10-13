@@ -2,7 +2,7 @@
 // 运行：node --experimental-strip-types workbench/scripts/native-capabilities.test.mjs
 //
 // ============================================================================
-// 本地 Agent 能力位的**推导**判据。
+// DSH 能力位的**推导**判据。
 //
 // 守的是一处"发布成功、派工必失败"的缺陷：`outputSchema` 此前硬编码 `true`，
 // 而 provider 真的不支持它时用户既看不到也改不了 —— 发布成功，然后每次派工都抛错。

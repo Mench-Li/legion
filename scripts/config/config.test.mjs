@@ -639,9 +639,13 @@ test('P3-4：plugins schema 覆盖插件真实读取的全部 env，且扫描器
     //     · `LEGION_APPLY_MODEL_CONFIG` / `..._DELETES` / `LEGION_RECONCILE_INTERVAL_MS` —— 物化那三个开关；
     //     · `LEGION_WORKSPACE_DIR` —— 工作区落点。
     //   它们都属 services-plugin（它负责把子进程拉起来并注入这些变量），所以留在这个 schema 里是对的。
+    // ★★ 2026-10-13 再加 1 个（第 11 个）：`LEGION_REGISTRATION` —— 注册策略。
+    //   加它的理由与上面那批**同一条**：中枢读它，而此前插件不转传 ⇒ "功能存在、但没有入口"，
+    //   而那个功能的用户面就是面板「连接与令牌 → 邀请新成员」。
     'DSH_HUB_UPSTREAM', 'DSH_WEB_URL',
     'LEGION_APPLY_MODEL_CONFIG', 'LEGION_APPLY_MODEL_CONFIG_DELETES',
-    'LEGION_IDENTITY_KEY', 'LEGION_RECONCILE_INTERVAL_MS', 'LEGION_REMOTE_AUTH', 'LEGION_WORKSPACE_DIR',
+    'LEGION_IDENTITY_KEY', 'LEGION_RECONCILE_INTERVAL_MS', 'LEGION_REGISTRATION', 'LEGION_REMOTE_AUTH',
+    'LEGION_WORKSPACE_DIR',
     'TEAM_HUB_HOST', 'TEAM_HUB_TOKEN',
   ])
 
@@ -738,8 +742,10 @@ test('P3-4：插件族的 schema 不接管宿主 composition 的主配置面（�
   //   （远程 Agent 那批 —— services-plugin 拉起 team-hub 进程时要把身份密钥与远程鉴权开关传下去）。
   //   两个都指向 services-plugin **自己的**字段（`teamHubIdentityKey` / `teamHubRemoteAuth`），
   //   不是"接管宿主的 composition 配置面"，所以加进这份名单是对的。
+  // ★ 2026-10-13 再加 `team-hub:LEGION_REGISTRATION`（注册策略）：同样是"指向自己的字段
+  //   （`registration`）"，同样是"拉起 team-hub 时要传下去" —— 理由与上面两个逐字相同。
   assert.deepEqual(injects.map((i) => `${i.target}:${i.env}`).sort(), [
-    'team-hub:LEGION_IDENTITY_KEY', 'team-hub:LEGION_REMOTE_AUTH',
+    'team-hub:LEGION_IDENTITY_KEY', 'team-hub:LEGION_REGISTRATION', 'team-hub:LEGION_REMOTE_AUTH',
     'team-hub:TEAM_HUB_HOST', 'team-hub:TEAM_HUB_PORT', 'team-hub:TEAM_HUB_TOKEN',
     'workbench:DSH_HUB_UPSTREAM', 'workbench:DSH_MODELS_BASE_URL', 'workbench:DSH_WORKBENCH_PORT', 'workbench:TEAM_HUB_TOKEN',
   ])

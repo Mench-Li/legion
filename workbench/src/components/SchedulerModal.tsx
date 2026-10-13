@@ -41,13 +41,27 @@ export function SchedulerModal({ board, labels, onClose }: SchedulerModalProps):
     setBusyId(null)
   }
 
-  const reject = async (id: string): Promise<void> => {
+  /**
+   * 打回：评论 + 归还待办（`rejectTask` 里一起做）。
+   *
+   * ★ 这个弹窗在**中枢模式下也挂得出来**（`CommandBar` 的判据是
+   *   `hubMode && scope ? HubSchedulerModal : board ? SchedulerModal`，
+   *   所以「全部空间」—— `scope === null` —— 走的正是这一支）。
+   *   而它从前调的 `rejectTask` 打的是 `/api/reject`：**那个端点已经没有任何服务端在实现**
+   *   （v1 看板取消时跟着没了，v2 中枢从来没有），于是将军点「打回」拿到的是一句
+   *   `POST /api/reject 404：{"error":"not found: ..."}` —— 读起来像路径拼错了。
+   *
+   * ★ 顺带修掉一句**假话**：原来的成功文案是「worktree 已回滚并归还待办」。
+   *   v2 没有 `w/<id>` 分支纪律，也就没有"回滚"这件事（board-plugin 的 501 说明里
+   *   逐字写着「v1 worktree 打回已退役」）。照实说，比说得好听重要。
+   */
+  const reject = async (id: string, version: number): Promise<void> => {
     const reason = window.prompt(`打回 ${id} 的原因`)
     if (reason === null) return
     setBusyId(id)
     await act(
-      () => rejectTask({ id, by: 'general', reason: reason.trim() || '打回重做' }),
-      `${id} 已打回，worktree 已回滚并归还待办`,
+      () => rejectTask({ id, by: 'general', reason: reason.trim(), ifVersion: version }),
+      `${id} 已打回待办（原因已写进评论，执行者下一轮带着它重做）`,
     )
     setBusyId(null)
   }
@@ -112,7 +126,7 @@ export function SchedulerModal({ board, labels, onClose }: SchedulerModalProps):
                         <button className="btn mini primary" disabled={busyId === card.id} onClick={() => void review(card.id, card.version)}>
                           验收通过
                         </button>
-                        <button className="btn mini" disabled={busyId === card.id} onClick={() => void reject(card.id)}>
+                        <button className="btn mini" disabled={busyId === card.id} onClick={() => void reject(card.id, card.version)}>
                           打回
                         </button>
                       </>

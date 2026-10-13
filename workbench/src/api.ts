@@ -133,11 +133,14 @@ async function readJson<T>(res: Response): Promise<T> {
 }
 
 /**
- * 走中枢写一条薄封装（`createTask` / `transitionTask` / `commentTask` / `rejectTask` 用）。
+ * 走中枢写一条薄封装（`createTask` / `transitionTask` / `commentTask` 用）。
  *
  * 它从前打的是那条已删除的 v1 数据源地址；v1 接口整条取消后只剩中枢这一条数据源，
  * 只剩中枢这一条数据源，这里也就跟着中枢走 —— `hubPost` 才是带超时与会话重放的
  * 那一层，本函数是留给那几条薄导出的兼容入口，不新增调用方。
+ *
+ * ★ 它**不**再服务 `rejectTask`：打回是"评论 + 迁移"两件事，走 `hubPost` 那一层
+ *   （带超时与会话重放），而 `post` 三条都没有。见 `rejectTask` 的文件注释。
  */
 async function post(path: string, body: unknown): Promise<unknown> {
   const res = await fetch(`${hubBase()}${path}`, {
@@ -860,8 +863,50 @@ export function commentTask(input: { id: string; by: string; text: string }): Pr
   return post('/api/comment', input)
 }
 
-export function rejectTask(input: { id: string; by: string; reason: string }): Promise<unknown> {
-  return post('/api/reject', input)
+/**
+ * 打回重做（`in_review → todo`）—— **写评论 + 归还待办**，两件事一起做。
+ *
+ * ## 它从前打的是 `/api/reject`，而那个端点**已经没有任何服务端在实现**
+ *
+ * v1 看板（`scrum/serve.mjs`）被取消时，`/api/reject` 跟着一起没了；v2 中枢
+ * 从来没有这条路由（实测 `404 { error: "not found: /api/reject" }`）。
+ * 于是调用方拿到的是 `POST /api/reject 404：{"error":"not found: ..."}` ——
+ * 一句读起来像"我拼错了路径"的话，而真相是"这个动作在 v2 是另一条路"。
+ *
+ * ★ board-plugin 早就把这件事**说出来**了（hub 模式下回 501：
+ *   「v2 hub 不支持 reject（v1 worktree 打回已退役）：请用 transition 迁移 + comment 说明原因」）。
+ *   workbench 这一面漏了同一句话，于是同一个动作在两个界面上有两种命运：
+ *   一个给你指路，另一个给你一句 404。
+ *
+ *   > 一个"已经知道该用哪条路"的进程，与一个"把用户送到 404 面前"的进程，
+ *   > 在它们各自的下游都没报错时是同一件事——直到有人真的按了那个按钮。
+ *
+ * ## 为什么不是"照抄 board-plugin 回一句 501"
+ *
+ * 因为**该做的事是能做到的**：v2 的等价动作就是 board-plugin 那句话里写的
+ * 「transition 迁移 + comment 说明原因」。所以这里直接把它做掉——
+ * 一个只有降级提示、按钮永远不好用的界面，与一个把按钮接通的界面，差别就在这里。
+ *
+ * ★ 顺序不能反：**先落评论，再归还待办**。退回待办后守护下一轮就可能认领开工，
+ *   先落评论才保证那一轮**一定**带得上改动点。
+ *
+ * @throws 理由为空时**在发请求之前**抛具名错误（见下）——空理由等于让执行者
+ *   按原样再交一次，而"又交了一遍同样的东西"与"根本没重做"在下次验收时看不出区别。
+ */
+export function rejectTask(input: { id: string; by: string; reason: string; ifVersion?: number }): Promise<unknown> {
+  const reason = typeof input.reason === 'string' ? input.reason.trim() : ''
+  if (reason.length === 0) {
+    const err = new Error('打回缺少理由：它是执行者下一轮唯一的输入（空着等于让它按原样再交一次）')
+    Object.assign(err, { code: 'REJECT_REASON_REQUIRED' })
+    return Promise.reject(err)
+  }
+  return hubComment(input.id, `↩ 打回重做：${reason}`).then(() =>
+    hubTransition({
+      id: input.id,
+      to: 'todo',
+      by: input.by,
+      ...(input.ifVersion === undefined ? {} : { ifVersion: input.ifVersion }),
+    }))
 }
 // ───────────────────────── 对话中心（S2 ← S1 team-hub /api/chat/*）─────────────────────────
 

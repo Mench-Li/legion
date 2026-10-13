@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { hubComment, hubRework, hubTransition } from '../api'
+import { hubRework, rejectTask } from '../api'
 import { isUsableReason, returnToast, reworkToast } from '../reworkPlan.ts'
 import { toast } from './Toast'
 
@@ -18,6 +18,11 @@ import { toast } from './Toast'
  *
  * 与 `NewTaskModal` 同一分工：对话框持有草稿与忙碌态，调用成功后回调 `onDone()` 让看板重载。
  * 把请求留在父组件里会让这个组件退化成"一个受控输入框"，而它对成功/失败的判断也就没了地方放。
+ *
+ * ★ 打回那一半**不再自己拼"评论 + 迁移"**，而是调 `rejectTask()`：那是同一件事的
+ *   唯一实现（`../api.ts`），三个调用点（看板拖拽 / 调度弹窗 / 这里）共用一份。
+ *   两份实现的下场是某一天给出两句不一样的话——而"打回到底有没有把理由送达"
+ *   恰好是最不能有两种说法的事。
  */
 interface ReworkModalProps {
   task: { id: string; title: string; role?: string }
@@ -25,12 +30,14 @@ interface ReworkModalProps {
   intent: 'rework' | 'return'
   scope?: string | null
   ifVersion?: number
+  /** 打回时迁移的操作者（`by`）。缺省由 hubPost 注入 general。 */
+  by?: string
   onClose: () => void
   /** 成功后回调（父组件据此重载看板与任务集）。 */
   onDone: () => void
 }
 
-export function ReworkModal({ task, intent, scope, ifVersion, onClose, onDone }: ReworkModalProps): React.JSX.Element {
+export function ReworkModal({ task, intent, scope, ifVersion, by, onClose, onDone }: ReworkModalProps): React.JSX.Element {
   const [reason, setReason] = useState('')
   const [busy, setBusy] = useState(false)
   const usable = isUsableReason(reason)
@@ -52,10 +59,14 @@ export function ReworkModal({ task, intent, scope, ifVersion, onClose, onDone }:
         })
         toast('ok', reworkToast(receipt))
       } else {
-        // 打回 = 先留改动点（它就是下一轮 worker 拿到的 feedback），再退回待办。
-        // 顺序不能反：退回后守护可能立刻认领，先落评论才能保证它一定带得上。
-        await hubComment(task.id, `↩ 打回重做：${reason.trim()}`)
-        await hubTransition({ id: task.id, to: 'todo', ...(ifVersion === undefined ? {} : { ifVersion }) })
+        // 打回 = 写评论 + 归还待办，两件事在 rejectTask 里一起做（顺序不能反：
+        // 退回后守护可能立刻认领，先落评论才能保证它一定带得上改动点）。
+        await rejectTask({
+          id: task.id,
+          by: by ?? 'general',
+          reason: reason.trim(),
+          ...(ifVersion === undefined ? {} : { ifVersion }),
+        })
         toast('ok', returnToast(task.id))
       }
       onDone()

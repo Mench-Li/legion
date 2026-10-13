@@ -35,6 +35,22 @@ const BACKGROUNDS = ['#e8eff8', '#f1eaf8', '#e3f2f0', '#faf0e3', '#eaeffb', '#f8
 /** 全量位面 key（25 岗位 + s01..s15），顺序即索引顺序。 */
 export const SLOT_KEYS: readonly string[] = [...BUILTIN_ROLE_KEYS, ...SPARE_KEYS]
 
+/**
+ * 把颜色按比例压暗（纯函数、确定性）。
+ *
+ * ★ 放在 `slots.ts` 而不是渲染组件里：明暗要成为**位面字段**，才能被
+ *   `TC-S6-01b`（两端位面逐 key `deepEqual`）守着。见 `types.ts` 的 `skinShade` 注释。
+ *
+ * 直接乘 sRGB 系数（不做线性空间转换）：这些色只用于**小尺寸头像的柔和明暗**，
+ * 要的是"同色系里更深一点"，不是物理正确的光照。
+ */
+export function shade(hex: string, factor: number): string {
+  const n = parseInt(hex.slice(1), 16)
+  const ch = [(n >> 16) & 255, (n >> 8) & 255, n & 255]
+    .map((v) => Math.max(0, Math.min(255, Math.round(v * factor))))
+  return '#' + ch.map((v) => v.toString(16).padStart(2, '0')).join('')
+}
+
 function slotAt(index: number): AvatarSlot {
   const skin = SKINS[index % SKINS.length]
   const hair = HAIRS[Math.floor(index / 4) % HAIRS.length]
@@ -42,7 +58,15 @@ function slotAt(index: number): AvatarSlot {
   const top = TOPS[index % TOPS.length]
   const accessory = ACCESSORIES[Math.floor(index / 8) % ACCESSORIES.length]
   const background = BACKGROUNDS[index % BACKGROUNDS.length]
-  return { key: SLOT_KEYS[index] ?? ('slot-' + index), skin, hair, hairStyle, top, accessory, background }
+  return {
+    key: SLOT_KEYS[index] ?? ('slot-' + index),
+    skin, hair, hairStyle, top, accessory, background,
+    // 暗端 = 基色 × 系数（脸颊/发根/衣褶的阴影）。系数在两端**必须一致** ——
+    // 它是位面字段，会被 parity 判据逐 key 比对。
+    skinShade: shade(skin, 0.84),
+    hairShade: shade(hair, 0.78),
+    topShade: shade(top, 0.82),
+  }
 }
 
 const SLOTS: readonly AvatarSlot[] = SLOT_KEYS.map((_, i) => slotAt(i))
@@ -52,6 +76,11 @@ const BY_KEY = new Map<string, AvatarSlot>(SLOTS.map(slot => [slot.key, slot]))
 export const PLACEHOLDER_SLOT: AvatarSlot = {
   key: 'placeholder', skin: '#cbd3dc', hair: '#8a95a3', hairStyle: 'short',
   top: '#9aa7b5', accessory: 'none', background: '#eef1f4',
+  // 占位也用同一套系数压暗（它必须与解析成功的那条路**用同一种画法**，
+  // 否则"回退的人形"与"正常的人形"会长得不是一个东西）。
+  skinShade: shade('#cbd3dc', 0.84),
+  hairShade: shade('#8a95a3', 0.78),
+  topShade: shade('#9aa7b5', 0.82),
 }
 
 const TOKEN_RE = /^human:[a-z0-9][a-z0-9-]*$/

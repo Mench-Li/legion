@@ -100,25 +100,42 @@ export function parseProviderReadiness(value) {
   if (names.length === 0) return { ok: false, reason: 'providers 是空对象（应省略该字段，而不是发空）' }
   if (names.length > MAX_PROVIDERS) return { ok: false, reason: `providers 条目超过 ${MAX_PROVIDERS} 个` }
 
+  // ★★ 2026-10-13 实机修正：**逐条丢**，不再"一条坏就整份丢"。
+  //
+  //   第一版是 all-or-nothing：任何一个 provider 的任何一个字段不合法 ⇒ 整份 `providers` 丢掉。
+  //   这是**诊断字段**上最坏的失败模式 —— 一个 provider 的怪值（比如某个 permissionMode
+  //   是个没见过的串）会让**其余全部**读数一起消失，界面上表现为"这台机器什么都没探到"。
+  //
+  //     > 一个"因为隔壁那条坏了，于是这条也不报"的读数，
+  //     > 与一个"本机确实什么都没有"的读数，在界面上是同一个样子。
+  //
+  //   而这条数据的用途恰恰是**让人看见真相**，所以宁可少一条，也不要一条都没有。
+  //   容器形状不对（不是对象 / 空对象 / 超量）仍然整份拒 —— 那是**协议**层面的错，
+  //   与"某台机器上某个 provider 报了个怪值"不是一回事。
   const out = {}
+  const dropped = []
   for (const name of names) {
-    if (name.trim() === '' || name.length > 64) return { ok: false, reason: 'provider 名不合法' }
+    const fail = (why) => { dropped.push(`${name}(${why})`) }
+    if (name.trim() === '' || name.length > 64) { fail('名字不合法'); continue }
     const entry = value[name]
-    if (entry === null || typeof entry !== 'object' || Array.isArray(entry)) {
-      return { ok: false, reason: `providers.${name} 必须是对象` }
-    }
+    if (entry === null || typeof entry !== 'object' || Array.isArray(entry)) { fail('不是对象'); continue }
     const clean = {}
+    let bad = null
     for (const [key, raw] of Object.entries(entry)) {
       const check = ENTRY_KEYS[key]
-      if (check === undefined) return { ok: false, reason: `providers.${name}.${key} 不是受支持的字段` }
-      if (!check(raw)) return { ok: false, reason: `providers.${name}.${key} 取值不合法` }
+      if (check === undefined) { bad = `${key} 不是受支持的字段`; break }
+      if (!check(raw)) { bad = `${key} 取值不合法`; break }
       clean[key] = raw
     }
+    if (bad !== null) { fail(bad); continue }
     // `state` 是唯一必填项：没有结论的条目没有意义。
-    if (clean.state === undefined) return { ok: false, reason: `providers.${name} 缺 state` }
+    if (clean.state === undefined) { fail('缺 state'); continue }
     out[name] = clean
   }
-  return { ok: true, value: out }
+  if (Object.keys(out).length === 0) {
+    return { ok: false, reason: `providers 没有一条可用（丢弃：${dropped.join('、')}）` }
+  }
+  return { ok: true, value: out, dropped }
 }
 
 /** 存库前的序列化（**只存通过校验的内容**）。 */

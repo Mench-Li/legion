@@ -145,21 +145,50 @@ describe('S1 头像基座', () => {
     for (const h of boundary) assert.ok(h.includes('<svg'), '非法 size 仍必须渲染人形')
   })
 
-  test('TC-S1-09 离线自足：无 <img、无 url( 外链、无网络调用（AC-R8-1）', () => {
+  /**
+   * 头像**外链**资源的黑名单 —— 只禁"要走出去拿东西"的写法。
+   *
+   * ★★ 2026-10-13 改判据：这条规矩原本是 `!src.includes('url(')`，**连内部渐变引用
+   *    （`url(#face)`）一起禁了**。而它的本意从头到尾是「头像不得依赖外链资源」——
+   *   于是它拦下的是**同文档里的一个 `#` 片段**，那不是外链。
+   *
+   *   代价是实测出来的：为了让头像"柔和/有明暗"（用户要的是豆包那种插画感），
+   *   渐变是标准做法，却被这条误伤，只能拿分层半透明去凑——
+   *   而 36px 下量颜色数，凑出来的是 114–203，参考图是 528–731（差 3–5 倍）。
+   *
+   *     > 一条"禁外链"的规矩，与一条"禁 `url(`"的规矩，
+   *     > 在**没人需要用到 `url(#…)`** 的时候是同一个东西——
+   *     > 直到有人要画渐变，而他得先猜出那条规矩到底在防什么。
+   *
+   *   现在按**本意**收口：外链形式全部继续禁（下面的 `EXTERNAL`），
+   *   `url(#…)` 放行。`TC-S1-09b` 用两侧对照把这条边界钉住。
+   */
+  const EXTERNAL = ['<img', 'url(http', 'url(https', 'url(//', 'url(data:', 'src=', 'onerror', 'xlink:href']
+  test('TC-S1-09 离线自足：无外链资源、无网络调用（AC-R8-1）', () => {
     const src = avatarCode()
-    for (const banned of ['<img', 'url(', 'src=', 'onerror']) {
-      assert.ok(!src.includes(banned), '头像不得依赖 ' + banned)
+    for (const banned of EXTERNAL) {
+      assert.ok(!src.includes(banned), '头像不得依赖外链资源：' + banned)
     }
+    // 内部渐变引用是**允许**的（它不出文档）——这一条是防"改判据时顺手把渐变也删了"
+    assert.ok(src.includes('url(#'), '本版头像用内部渐变做明暗；没有它说明画法被回退了')
   })
 
-  test('★ TC-S1-09b 变红验证：剥注释**没有**把这道门禁架空（代码里出现 url( 必须红）', () => {
-    // 上一版把"剥注释"补上来时，最容易出的事就是把门禁一起剥没了——
-    // 于是一条真违规会**静默通过**。这里用两条对照把边界钉住：
-    const violation = codeOnly("const a = 'x'\nconst bg = 'url(#grad)' // 真违规\n")
-    assert.ok(violation.includes('url('), '★ 代码行里的 url( 必须仍然可见 ⇒ 门禁没被剥空')
-    const commented = codeOnly("// 解释为什么不能用 url( 加左括号\nconst a = 'x'\n")
-    assert.ok(!commented.includes('url('), '整行注释里的同名字符串不该再误伤')
-    // 反向锚：源码确实读到了东西（否则"0 命中"可能只是因为读空了）
+  test('★ TC-S1-09b 边界对照：内部渐变放行、外链写法必红、剥注释没架空门禁', () => {
+    const isExternal = (code) => EXTERNAL.some((b) => code.includes(b))
+    // ① 内部渐变引用：不许判红（否则画不了明暗）
+    assert.equal(isExternal(codeOnly("const f = 'url(#face-grad)'\n")), false,
+      '★ url(#…) 是同文档引用，不是外链')
+    // ② 外链形式：一条都不许漏
+    for (const bad of ["url(http://x/a.svg)", "url(https://x/a.png)", "url(//cdn/a.svg)", "url(data:image/svg+xml;base64,AA)", '<img src="a.png">']) {
+      assert.equal(isExternal(codeOnly('const f = ' + JSON.stringify(bad) + '\n')), true,
+        '★ 外链写法必须被判红：' + bad)
+    }
+    // ③ 剥注释没有把门禁剥空（代码行里的违规仍可见）
+    assert.ok(codeOnly("const a=1\nconst b='url(http://x)' // 真违规\n").includes('url(http'),
+      '★ 代码行里的外链必须仍然可见')
+    assert.ok(!codeOnly("// 解释为什么不能用外链（如 url(http…）\nconst a=1\n").includes('url(http'),
+      '整行注释里的同类字符串不该误伤')
+    // ④ 反向锚：源码确实读到了东西
     assert.ok(avatarCode().includes('AgentAvatar') || avatarCode().includes('SLOT_KEYS'),
       'avatarCode() 必须真的读到源码')
   })

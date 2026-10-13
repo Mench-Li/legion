@@ -29,6 +29,14 @@ const BACKGROUNDS = ['#e8eff8', '#f1eaf8', '#e3f2f0', '#faf0e3', '#eaeffb', '#f8
 
 export const SLOT_KEYS = [...BUILTIN_ROLE_KEYS, ...SPARE_KEYS]
 
+/** 把颜色按比例压暗 —— 必须与 `src/avatar/slots.ts` 的 `shade()` **逐字同式**。 */
+export function shade(hex, factor) {
+  const n = parseInt(hex.slice(1), 16)
+  const ch = [(n >> 16) & 255, (n >> 8) & 255, n & 255]
+    .map((v) => Math.max(0, Math.min(255, Math.round(v * factor))))
+  return '#' + ch.map((v) => v.toString(16).padStart(2, '0')).join('')
+}
+
 function slotAt(index) {
   const skin = SKINS[index % SKINS.length]
   const hair = HAIRS[Math.floor(index / 4) % HAIRS.length]
@@ -36,7 +44,14 @@ function slotAt(index) {
   const top = TOPS[index % TOPS.length]
   const accessory = ACCESSORIES[Math.floor(index / 8) % ACCESSORIES.length]
   const background = BACKGROUNDS[index % BACKGROUNDS.length]
-  return { key: SLOT_KEYS[index] ?? ('slot-' + index), skin, hair, hairStyle, top, accessory, background }
+  return {
+    key: SLOT_KEYS[index] ?? ('slot-' + index),
+    skin, hair, hairStyle, top, accessory, background,
+    // 系数必须与桌面端一致（这三个是位面字段，TC-S6-01b 逐 key deepEqual）
+    skinShade: shade(skin, 0.84),
+    hairShade: shade(hair, 0.78),
+    topShade: shade(top, 0.82),
+  }
 }
 
 const SLOTS = SLOT_KEYS.map((_, i) => slotAt(i))
@@ -46,6 +61,9 @@ const BY_KEY = new Map(SLOTS.map(slot => [slot.key, slot]))
 export const PLACEHOLDER_SLOT = {
   key: 'placeholder', skin: '#cbd3dc', hair: '#8a95a3', hairStyle: 'short',
   top: '#9aa7b5', accessory: 'none', background: '#eef1f4',
+  skinShade: shade('#cbd3dc', 0.84),
+  hairShade: shade('#8a95a3', 0.78),
+  topShade: shade('#9aa7b5', 0.82),
 }
 
 const TOKEN_RE = /^human:[a-z0-9][a-z0-9-]*$/
@@ -68,31 +86,57 @@ const EYE_L = 12.1
 const EYE_R = 19.9
 const EYE_Y = 15.3
 
+/** 渐变 id：必须与桌面端的 `gid()` 同式（同 key ⇒ 同 id，重复定义内容也相同）。 */
+function gid(key, part) { return 'av-' + key + '-' + part }
+
+/** 渐变定义（与桌面端 `Defs` 同一份）。移动端要拼字符串，所以手写成 HTML。 */
+function defsMarkup(slot) {
+  const k = slot.key
+  return '<defs>'
+    + '<radialGradient id="' + gid(k, 'face') + '" cx="0.36" cy="0.30" r="0.85">'
+    + '<stop offset="0%" stop-color="' + slot.skin + '" /><stop offset="62%" stop-color="' + slot.skin + '" />'
+    + '<stop offset="100%" stop-color="' + slot.skinShade + '" /></radialGradient>'
+    + '<linearGradient id="' + gid(k, 'hair') + '" x1="0.25" y1="0" x2="0.7" y2="1">'
+    + '<stop offset="0%" stop-color="' + slot.hair + '" /><stop offset="100%" stop-color="' + slot.hairShade + '" /></linearGradient>'
+    + '<linearGradient id="' + gid(k, 'top') + '" x1="0" y1="0" x2="1" y2="0.55">'
+    + '<stop offset="0%" stop-color="' + slot.top + '" /><stop offset="100%" stop-color="' + slot.topShade + '" /></linearGradient>'
+    + '<linearGradient id="' + gid(k, 'bg') + '" x1="0" y1="0" x2="0.8" y2="1">'
+    + '<stop offset="0%" stop-color="#ffffff" /><stop offset="42%" stop-color="' + slot.background + '" />'
+    + '<stop offset="100%" stop-color="' + slot.background + '" /></linearGradient>'
+    + '<radialGradient id="' + gid(k, 'blush') + '" cx="0.5" cy="0.5" r="0.5">'
+    + '<stop offset="0%" stop-color="#ff8fa6" stop-opacity="0.55" />'
+    + '<stop offset="100%" stop-color="#ff8fa6" stop-opacity="0" /></radialGradient>'
+    + '</defs>'
+}
+
 function hairPath(slot) {
+  const fill = 'url(#' + gid(slot.key, 'hair') + ')'
   const cap = 'M5.5 13.6C5.5 7.3 10.1 3.8 16 3.8s10.5 3.5 10.5 9.8c-1.9-3-5.7-4.5-10.5-4.5s-8.6 1.5-10.5 4.5z'
-  if (slot.hairStyle === 'short') return '<path d="' + cap + '" fill="' + slot.hair + '" />'
+  if (slot.hairStyle === 'short') return '<path d="' + cap + '" fill="' + fill + '" />'
   if (slot.hairStyle === 'bob') {
-    return '<g fill="' + slot.hair + '"><path d="' + cap + '" />'
+    return '<g fill="' + fill + '"><path d="' + cap + '" />'
       + '<path d="M5.4 13.2c-1.3 4.4-1.1 8.1.5 10.6 1-3.4 1.4-7 1.1-10.6z" />'
       + '<path d="M26.6 13.2c1.3 4.4 1.1 8.1-.5 10.6-1-3.4-1.4-7-1.1-10.6z" /></g>'
   }
   if (slot.hairStyle === 'bun') {
-    return '<g fill="' + slot.hair + '"><circle cx="16" cy="4.1" r="2.7" /><path d="' + cap + '" /></g>'
+    return '<g fill="' + fill + '"><circle cx="16" cy="4.1" r="2.7" /><path d="' + cap + '" /></g>'
   }
-  return '<path d="M5.5 13.6C5.5 7.3 10.1 3.8 16 3.8s10.5 3.5 10.5 9.8c-1.4-1.6-2.6-2.6-4.2-3.1-.5 1-1.4 1.6-2.5 1.7-.2-1.4-.9-2.4-2-3-.9.9-2.2 1.4-3.8 1.4s-2.7-.5-3.4-1.4c-1.2.5-2.4 1.6-3.6 3.4-.2-1-.7-1.9-1.5-2.4z" fill="' + slot.hair + '" />'
+  return '<path d="M5.5 13.6C5.5 7.3 10.1 3.8 16 3.8s10.5 3.5 10.5 9.8c-1.4-1.6-2.6-2.6-4.2-3.1-.5 1-1.4 1.6-2.5 1.7-.2-1.4-.9-2.4-2-3-.9.9-2.2 1.4-3.8 1.4s-2.7-.5-3.4-1.4c-1.2.5-2.4 1.6-3.6 3.4-.2-1-.7-1.9-1.5-2.4z" fill="' + fill + '" />'
 }
 
 function accessoryMarkup(slot) {
   if (slot.accessory === 'glasses') {
-    return '<g fill="none" stroke="#33415a" stroke-width="0.75"><circle cx="' + EYE_L + '" cy="' + EYE_Y + '" r="3.1" />'
-      + '<circle cx="' + EYE_R + '" cy="' + EYE_Y + '" r="3.1" />'
-      + '<path d="M15.2 15.1h1.6" stroke-linecap="round" /></g>'
+    return '<circle cx="' + EYE_L + '" cy="' + EYE_Y + '" r="3.15" fill="#ffffff" fill-opacity="0.30" />'
+      + '<circle cx="' + EYE_R + '" cy="' + EYE_Y + '" r="3.15" fill="#ffffff" fill-opacity="0.30" />'
+      + '<g fill="none" stroke="#33415a" stroke-width="0.7"><circle cx="' + EYE_L + '" cy="' + EYE_Y + '" r="3.15" />'
+      + '<circle cx="' + EYE_R + '" cy="' + EYE_Y + '" r="3.15" />'
+      + '<path d="M15.25 15.1h1.5" stroke-linecap="round" /></g>'
   }
-  if (slot.accessory === 'beard') return '<path d="M9.6 15.6c-.4 4.6 2 8.2 6.4 8.2s6.8-3.6 6.4-8.2c-1.1 2.6-3.3 4-6.4 4s-5.3-1.4-6.4-4z" fill="' + slot.hair + '" fill-opacity="0.42" />'
-  if (slot.accessory === 'earring') return '<circle cx="5.9" cy="17.2" r="1" fill="#f2c56a" />'
+  if (slot.accessory === 'beard') return '<path d="M9.6 15.6c-.4 4.6 2 8.2 6.4 8.2s6.8-3.6 6.4-8.2c-1.1 2.6-3.3 4-6.4 4s-5.3-1.4-6.4-4z" fill="url(#' + gid(slot.key, 'hair') + ')" fill-opacity="0.52" />'
+  if (slot.accessory === 'earring') return '<circle cx="5.9" cy="17.2" r="1" fill="#f2c56a" stroke="#d9a83f" stroke-width="0.25" />'
   if (slot.accessory === 'cap') {
-    return '<g fill="' + slot.top + '"><path d="M5.6 12.8C5.6 6.8 10.2 3.7 16 3.7s10.4 3.1 10.4 9.1l-.3 1.5H5.9z" />'
-      + '<path d="M18.6 13.4h7.2c.9 0 1.5.8 1.2 1.6l-.5 1.3h-7.9z" /></g>'
+    return '<path d="M5.6 12.8C5.6 6.8 10.2 3.7 16 3.7s10.4 3.1 10.4 9.1l-.3 1.5H5.9z" fill="url(#' + gid(slot.key, 'top') + ')" />'
+      + '<path d="M18.6 13.4h7.2c.9 0 1.5.8 1.2 1.6l-.5 1.3h-7.9z" fill="' + slot.topShade + '" />'
   }
   return ''
 }
@@ -108,14 +152,18 @@ function clampSize(size) {
 export function renderAvatar(token, size) {
   const slot = resolveSlot(token) ?? PLACEHOLDER_SLOT
   const px = clampSize(size)
+  const k = slot.key
   return '<svg class="agent-avatar-svg" width="' + px + '" height="' + px + '" viewBox="0 0 32 32" role="img" aria-label="成员头像">'
-    + '<rect x="0" y="0" width="32" height="32" rx="9" fill="' + slot.background + '" />'
-    + '<circle cx="9" cy="6.5" r="12.5" fill="#ffffff" fill-opacity="0.34" />'
-    + '<path d="M4.2 32c0-6.4 5.3-9.8 11.8-9.8s11.8 3.4 11.8 9.8z" fill="' + slot.top + '" />'
-    + '<ellipse cx="16" cy="14.3" rx="10.6" ry="10.2" fill="' + slot.skin + '" />'
+    + defsMarkup(slot)
+    + '<rect x="0" y="0" width="32" height="32" rx="9" fill="url(#' + gid(k, 'bg') + ')" />'
+    + '<circle cx="9" cy="6.5" r="12.5" fill="#ffffff" fill-opacity="0.30" />'
+    + '<path d="M4.2 32c0-6.4 5.3-9.8 11.8-9.8s11.8 3.4 11.8 9.8z" fill="url(#' + gid(k, 'top') + ')" />'
+    + '<ellipse cx="16" cy="14.3" rx="10.6" ry="10.2" fill="url(#' + gid(k, 'face') + ')" />'
+    + '<path d="M9.2 20.4c1.2 2.6 3.7 4 6.8 4s5.6-1.4 6.8-4c-2 1.5-4.2 2.2-6.8 2.2s-4.8-.7-6.8-2.2z" fill="' + slot.skinShade + '" fill-opacity="0.55" />'
+    + '<ellipse cx="12.6" cy="8.4" rx="3.6" ry="2.2" fill="#ffffff" fill-opacity="0.22" transform="rotate(-18 12.6 8.4)" />'
     + hairPath(slot)
-    + '<ellipse cx="9.3" cy="17.9" rx="2.4" ry="1.5" fill="#ff8fa6" fill-opacity="0.42" />'
-    + '<ellipse cx="22.7" cy="17.9" rx="2.4" ry="1.5" fill="#ff8fa6" fill-opacity="0.42" />'
+    + '<ellipse cx="9.3" cy="17.9" rx="2.8" ry="2.0" fill="url(#' + gid(k, 'blush') + ')" />'
+    + '<ellipse cx="22.7" cy="17.9" rx="2.8" ry="2.0" fill="url(#' + gid(k, 'blush') + ')" />'
     + '<ellipse cx="' + EYE_L + '" cy="' + EYE_Y + '" rx="1.85" ry="2.3" fill="#2b3445" />'
     + '<ellipse cx="' + EYE_R + '" cy="' + EYE_Y + '" rx="1.85" ry="2.3" fill="#2b3445" />'
     + '<circle cx="' + (EYE_L - 0.6) + '" cy="' + (EYE_Y - 0.85) + '" r="0.78" fill="#ffffff" />'

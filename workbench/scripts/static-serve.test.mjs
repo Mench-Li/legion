@@ -42,6 +42,9 @@ describe('静态托管：产物缺失时给出可读 404（回归：曾 200 后�
     mkdirSync(join(builtRoot, 'assets'), { recursive: true })
     writeFileSync(join(builtRoot, 'index.html'), '<!doctype html><html><body><div id="app">built</div></body></html>')
     writeFileSync(join(builtRoot, 'assets', 'index-abc.js'), 'console.log("built asset")')
+    // 非 `.html`、也不在 `/assets/` 下 ⇒ 走"一天"那一档（三档策略的第③档）。
+    // ⚠ 刻意**不用** `favicon.ico`：下面那条 404 判据把它当"缺失资源"的样本，建了会互相打脸。
+    writeFileSync(join(builtRoot, 'robots.txt'), 'User-agent: *')
     const a = await startWithRoot(emptyRoot)
     serveEmpty = a.server
     emptyPort = a.port
@@ -99,6 +102,59 @@ describe('静态托管：产物缺失时给出可读 404（回归：曾 200 后�
     const r = await fetch(`http://127.0.0.1:${builtPort}/some/spa/route`)
     assert.equal(r.status, 200)
     assert.match(await r.text(), /id="app"/)
+  })
+
+  // ══════════════════════════════════════════════════════════════════════════
+  // ★★★ 2026-10-13：**静态文件必须带缓存策略**（从前后端产物只有 `content-type`）
+  //
+  // 实测事故：vite 每次构建都换产物名并删掉旧文件（`index-DxpVJAXj.js` →
+  // `index-o7z2j4Q6.js`）。而这个处理器发的 `index.html` **一个缓存头都没有**
+  // ⇒ 浏览器有资格长期留着旧壳 ⇒ 旧壳去要那个已被删掉的 JS ⇒ **404**
+  // ⇒ 单页应用整页死（界面框架在、里面什么都没有）：
+  //
+  //   用户原话：「模型加载不出来，任务也加载不出来」
+  //   ——而每一层的报错都指不到这一处（服务端全 200、产物也在）。
+  //
+  //   > 一份"永远不过期"的旧壳，与一份"其实是最新的"旧壳，
+  //   > 在用户眼里是同一块白屏 —— 而重建产物的人以为自己只是改了个按钮。
+  //
+  // 三档与**中枢那一侧同一条口径**（`team-hub/routes/static-tree.mjs` 的
+  // `cacheControlFor`）：`.html` → no-store；`/assets/` → 永久 + immutable；其余 → 一天。
+  // ⚠ 中枢那边记着一个坑：`immutablePrefix` 比的是**树内相对路径**，
+  //   写成完整 URL 路径（`/workbench/assets/…`）就永远不匹配 —— 这里同样按相对路径比。
+  // ══════════════════════════════════════════════════════════════════════════
+  it('★★★ 有产物：入口必须 `no-store`（否则发新版后用户一直拿旧壳 ⇒ 整页白屏）', async () => {
+    for (const p of ['/', '/index.html']) {
+      const r = await fetch(`http://127.0.0.1:${builtPort}${p}`)
+      assert.equal(r.status, 200)
+      assert.equal(r.headers.get('cache-control'), 'no-store',
+        `${p} 是入口，必须每次回源；实测事故就是它没有缓存头，旧壳引用了已被删掉的产物`)
+      await r.text()
+    }
+  })
+
+  it('★★★ 有产物：SPA 回退发的也是入口 ⇒ 同样 `no-store`（不能只在 `/` 上是对的）', async () => {
+    const r = await fetch(`http://127.0.0.1:${builtPort}/tasks/abc/def`)
+    assert.equal(r.status, 200)
+    assert.match(r.headers.get('content-type') ?? '', /text\/html/)
+    assert.equal(r.headers.get('cache-control'), 'no-store', '深链回落的也是 index.html，同一个问题')
+    await r.text()
+  })
+
+  it('★★★ 有产物：`/assets/` 下（文件名带内容哈希）⇒ 永久 + immutable', async () => {
+    const r = await fetch(`http://127.0.0.1:${builtPort}/assets/index-abc.js`)
+    assert.equal(r.status, 200)
+    const cc = r.headers.get('cache-control') ?? ''
+    assert.match(cc, /max-age=31536000/, `哈希产物应当永久缓存，实际：${cc}`)
+    assert.match(cc, /immutable/, `少了 immutable 会让浏览器每次回源校验，实际：${cc}`)
+    await r.text()
+  })
+
+  it('★ 有产物：其余文件 ⇒ 一天（既不是永久，也不是每次都回源）', async () => {
+    const r = await fetch(`http://127.0.0.1:${builtPort}/robots.txt`)
+    assert.equal(r.status, 200)
+    assert.equal(r.headers.get('cache-control'), 'public, max-age=86400')
+    await r.text()
   })
 
   // ── 候选 #8：未知**静态资源**必须 404，不得被 SPA 回退伪装成 200 HTML ──

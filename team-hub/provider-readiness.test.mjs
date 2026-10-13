@@ -137,6 +137,47 @@ test('★ 没有 declared 字段是合法的（旧守护 / 本机没读到）', 
   assert.equal(m.providers.p.declared, undefined)
 })
 
+// ── 2026-10-13：凭据模式 `authMode` 与端点 `endpointHost` ──
+// ★ 这两个字段**必须**在白名单里：不在 = 整条被丢（逐条收的代价），
+//   于是 `claude-code` 会因为"多了个 hub 不认识的字段"而从面板上**整条消失** ——
+//   而它恰恰是那条要告诉用户"你是 API 模式，不是没登录"的读数。
+
+test('★ authMode / endpointHost 能存下来（API 模式的读数不该被丢）', () => {
+  const r = parseProviderReadiness({ 'claude-code': {
+    state: 'ready', reason: 'API 模式', cli: 'found', auth: 'present',
+    authMode: 'api-settings', endpointHost: 'api.example.invalid', network: 'reachable',
+  } })
+  assert.equal(r.ok, true, '带了这两个字段不该被拒：' + JSON.stringify(r))
+  assert.equal(r.value['claude-code'].authMode, 'api-settings')
+  assert.equal(r.value['claude-code'].endpointHost, 'api.example.invalid')
+})
+
+test('★ 五种 authMode 都认；自造的值被拒', () => {
+  for (const mode of ['subscription', 'api-settings', 'env', 'none', 'not-required']) {
+    assert.equal(parseProviderReadiness({ p: { state: 'ready', authMode: mode } }).ok, true, mode)
+  }
+  for (const bad of ['api', 'oauth', '', 1, null]) {
+    assert.equal(parseProviderReadiness({ p: { state: 'ready', authMode: bad } }).ok, false, JSON.stringify(bad))
+  }
+})
+
+test('★ endpointHost 过长被拒（避免有人把整条 URL 塞进来）', () => {
+  assert.equal(parseProviderReadiness({ p: { state: 'ready', endpointHost: 'a'.repeat(253) } }).ok, true)
+  assert.equal(parseProviderReadiness({ p: { state: 'ready', endpointHost: 'a'.repeat(254) } }).ok, false)
+})
+
+test('★★ 端到端：API 模式的整条读数原样到达 /api/members', async () => {
+  mod.db.prepare('DELETE FROM members').run()
+  await post('/api/heartbeat', { by: 'apimode@A', scope: 'A', kind: 'worker', providers: {
+    'claude-code': { state: 'ready', reason: '凭据（CLI 配置里的 API 模式）在', cli: 'found', auth: 'present',
+      authMode: 'api-settings', endpointHost: 'api.example.invalid', network: 'reachable' },
+  } })
+  const m = (await get('/api/members')).body.find((x) => x.member === 'apimode@A')
+  assert.ok(m.providers['claude-code'], 'claude-code 这条必须留下')
+  assert.equal(m.providers['claude-code'].authMode, 'api-settings')
+  assert.equal(m.providers['claude-code'].endpointHost, 'api.example.invalid')
+})
+
 test('★ declared 往返：心跳带上能力位 ⇒ /api/members 读得到', async () => {
   mod.db.prepare('DELETE FROM members').run()
   await post('/api/heartbeat', { by: 'caps@A', scope: 'A', kind: 'worker', providers: {

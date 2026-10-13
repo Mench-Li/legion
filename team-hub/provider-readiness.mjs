@@ -71,6 +71,9 @@ function checkDeclared(value) {
   return null
 }
 
+/** 凭据从哪来 —— 与 `runtime/adapters/dsh/provider-readiness.mjs` 的 AUTH_MODE 一一对应。 */
+export const AUTH_MODES = Object.freeze(['subscription', 'api-settings', 'env', 'none', 'not-required'])
+
 /** 单个 provider 读数里允许出现的键。白名单：未知键说明两边版本不一致，宁可拒。 */
 const ENTRY_KEYS = Object.freeze({
   state: (v) => typeof v === 'string' && READINESS_STATES.includes(v),
@@ -82,6 +85,19 @@ const ENTRY_KEYS = Object.freeze({
   checkedAtMs: (v) => Number.isFinite(v),
   /** 2026-10-13：provider 自报的能力位（见 `checkDeclared`）。缺失 = 本机没读到，不是"不支持"。 */
   declared: (v) => checkDeclared(v) === null,
+  /**
+   * ★ 2026-10-13：凭据模式（订阅 / CLI 配置里的 API 模式 / 环境变量）。
+   *
+   * 为什么必须在这一行的白名单里：**不在白名单 = 整条被丢**（逐条收的代价），
+   * 于是 `claude-code` 会因为"多了一个 hub 不认识的字段"而从面板上**整条消失**。
+   * 而它恰恰是要告诉用户"你是 API 模式，不是没登录"的那一条。
+   */
+  authMode: (v) => typeof v === 'string' && AUTH_MODES.includes(v),
+  /**
+   * 探过的端点 **host**（只到 host，不含路径/查询串）。
+   * 让用户看出"在探哪个服务" —— 尤其是他配了自定义 baseURL 的时候。
+   */
+  endpointHost: (v) => typeof v === 'string' && v.length <= 253,
 })
 
 export const MAX_PROVIDERS = 32

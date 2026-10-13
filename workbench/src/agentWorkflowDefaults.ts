@@ -153,6 +153,10 @@ export interface ProviderReadinessLike {
   readonly reason?: string
   readonly version?: string
   readonly checkedAtMs?: number
+  /** 凭据模式（`subscription` / `api-settings` / `env` / `none` / `not-required`）。 */
+  readonly authMode?: string
+  /** 探过的端点 host。 */
+  readonly endpointHost?: string
   /**
    * provider 自报的能力位（2026-10-13）。这里刻意只声明"可能有这个字段"而不钉死内部形状 ——
    * 具体怎么读、怎么判"读到了没有"归 `nativeCapabilities.ts`（它必须能对**不可信的**字段做防御）。
@@ -180,6 +184,10 @@ export interface ProviderChoice {
   readonly reason: string | null
   readonly version: string | null
   readonly checkedAtMs: number | null
+  /** 凭据模式（`null` = 没上报）；界面据此区分"订阅态登录"与"API 模式"。 */
+  readonly authMode: string | null
+  /** 探过的端点 host（`null` = 没上报）。 */
+  readonly endpointHost: string | null
 }
 
 const KNOWN_STATES: readonly ReadinessState[] = ['ready', 'missing_cli', 'not_logged_in', 'no_network', 'unprobed', 'unknown']
@@ -248,6 +256,10 @@ export function providerChoices(
       reason: typeof entry?.reason === 'string' && entry.reason !== '' ? entry.reason : null,
       version: typeof entry?.version === 'string' && entry.version !== '' ? entry.version : null,
       checkedAtMs: typeof entry?.checkedAtMs === 'number' && Number.isFinite(entry.checkedAtMs) ? entry.checkedAtMs : null,
+      // 凭据模式与端点 host：只透传**已上报的字符串**，不在这里编造 ——
+      // 界面上"就绪（API 模式）"与"就绪（订阅登录）"必须是能分得开的两行。
+      authMode: typeof entry?.authMode === 'string' && entry.authMode !== '' ? entry.authMode : null,
+      endpointHost: typeof entry?.endpointHost === 'string' && entry.endpointHost !== '' ? entry.endpointHost : null,
     })
   }
   const group = (c: ProviderChoice): number => (c.ready ? 0 : c.state === null ? 2 : 1)

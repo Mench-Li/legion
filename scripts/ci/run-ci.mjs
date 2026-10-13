@@ -923,6 +923,11 @@ async function stageTest() {
         // 且坏掉的诊断字段**不许**把心跳带崩（否则整台守护会被标成离线）。
         'runtime/adapters/dsh/provider-readiness.test.mjs',
         'team-hub/provider-readiness.test.mjs',
+        // 2026-10-13：本地 Agent 的**能力位推导**（runtime/provider 优先：能读到的按读数走）。
+        // 守的是一处"发布成功、派工必失败"：`outputSchema` 此前硬编码 true，
+        // 而派工与认领都真的按声明逐位拒收。核心分歧是
+        // **读数缺席（不拦）** vs **读数说 false（必须拦）**。
+        'workbench/scripts/native-capabilities.test.mjs',
       ],
       cwd: ROOT,
     },

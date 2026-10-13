@@ -461,6 +461,21 @@ export interface ProviderReadiness {
   network?: string
   version?: string
   checkedAtMs?: number
+  /**
+   * provider **自报的能力位**（2026-10-13）：它是"能干什么"的真值，
+   * 与 `state`（"能不能跑"）合成完整读数。
+   *
+   * ★ **缺席 = 本机没读到**，与"读到了、值为 false"是两件事 ——
+   *   前者不拦发布，后者拦（见 `nativeCapabilities.ts`）。
+   *   这个区别是那一整套推导的立足点。
+   */
+  declared?: {
+    outputSchema?: boolean
+    toolFilter?: boolean
+    cancellation?: boolean
+    permissionMode?: string
+    systemProxyMode?: string
+  }
 }
 
 /** 一个成员（守护）上报的就绪度表；`providers` 为 null = 这台守护还没上报过。 */

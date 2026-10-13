@@ -3500,16 +3500,22 @@ function spaceWorker(ctx: AppContext, config: Config): void {
    *   （按状态码节流，避免每 30 秒刷屏）。"读不到"不许再伪装成"没有"。
    */
   const readFailSeen = new Map<string, number>()
+  /** 日志里只说**路径**（完整 URL 可能带查询串）。解析不出来就退回整串 ——
+   *  ⚠ 这个函数存在的理由：`new URL(url)` 本身会抛，而它出现在 **catch 里**，
+   *  在那里再抛一次就没人接了（异常路径上的异常最不该有）。 */
+  function pathOf(url: string): string {
+    try { return new URL(url).pathname } catch { return url }
+  }
   async function fetchJson<T>(url: string): Promise<T | null> {
     try {
       const res = await fetch(url, { headers: hubHeaders() })
       if (!res.ok) {
-        // 节流：同一个 (起源+状态) 每分钟最多说一次，说清**是哪个接口**与**什么状态**。
-        const key = `${res.status} ${new URL(url).pathname}`
+        // 节流：同一个 (状态+路径) 每分钟最多说一次，说清**是哪个接口**与**什么状态**。
+        const key = `${res.status} ${pathOf(url)}`
         const now = Date.now()
         if (now - (readFailSeen.get(key) ?? 0) > 60_000) {
           readFailSeen.set(key, now)
-          log(`hub 读失败：HTTP ${res.status} ${new URL(url).pathname}`
+          log(`hub 读失败：HTTP ${res.status} ${pathOf(url)}`
             + (res.status === 401 || res.status === 403
               ? '（鉴权被拒：hubToken 与中枢的令牌不一致，或该接口要求用户令牌）'
               : '')
@@ -3519,11 +3525,11 @@ function spaceWorker(ctx: AppContext, config: Config): void {
       }
       return await res.json() as T
     } catch (e) {
-      const key = `net ${new URL(url).pathname}`
+      const key = `net ${pathOf(url)}`
       const now = Date.now()
       if (now - (readFailSeen.get(key) ?? 0) > 60_000) {
         readFailSeen.set(key, now)
-        log(`hub 读异常：${new URL(url).pathname} —— ${String(e)} ⇒ 本次按"读不到"处理`)
+        log(`hub 读异常：${pathOf(url)} —— ${String(e)} ⇒ 本次按"读不到"处理`)
       }
       return null
     }

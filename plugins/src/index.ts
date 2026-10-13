@@ -114,6 +114,23 @@ import {
 // profile 名的三路解析（DSH_PROFILE → DSH_PROFILE_DIR 目录名 → argv 认 Desktop 宿主）。
 // 放在适配层且带单测：它决定面板能不能给出一条**真能粘贴**的修法命令。
 import { resolveProfileName } from '../../runtime/adapters/dsh/profile-name.mjs'
+
+// ⚠ 关于上面这两个 `.mjs` 适配层的**生效条件**（2026-10-13 实测踩到，写下来省下一次误判）：
+//
+//   · 改它们**不需要**重新编译本插件（`plugins/lib` 里的 import 是运行期解析，
+//     指向 `runtime/adapters/dsh/*.mjs` 的当前内容）——
+//     这一点很容易让人以为"改了就立刻生效"。
+//   · 但 ESM 模块在**进程启动时只加载一次**并被缓存：DSH 宿主进程活着的时候改 `.mjs`，
+//     跑的还是内存里那份旧代码。
+//
+//   ⇒ **改适配层要重启 DSH 宿主**（不是重新编译、也不是重启 team-hub）。
+//
+//   实测现场：我改完 adapter、只重启了 team-hub，就绪度照常刷新（TTL 到了），
+//   但 reason 文案还是旧的、`fork` 还是旧结论 —— 因为**新代码根本没进那个进程**。
+//
+//     > 一次"改了、也重（编译/重启了别的服务）了"的操作，
+//     > 与一次"改了、但那台机器没吃到"的操作，在**日志与读数都照常滚动**的时候是一样的 ——
+//     > 区别只在读出来的是新结论还是旧结论。
 import { materializeWorkflowCheckpoints, WORKFLOW_CHECKPOINT_EVIDENCE_PREFIX } from '../../runtime/contracts/agent-workflow-checkpoints.mjs'
 import { validateAgentWorkflowTestReport } from '../../runtime/contracts/agent-workflow.mjs'
 import { expectedExternalPermissionMode } from '../../runtime/contracts/agent-provider-policy.mjs'

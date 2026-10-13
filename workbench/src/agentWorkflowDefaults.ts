@@ -36,7 +36,7 @@
 // 一致：这类"默认值对不对"的判断必须能被判据钉住，而组件里的 `useState` 钉不住。
 // ============================================================================
 
-/** 工作流阶段的 Agent 工具。`dsh-native` = 本地执行服务（随 Legion 一起跑的那个）。 */
+/** 工作流阶段的 Agent 工具。`dsh-native` = DSH 执行服务（随 Legion 一起跑的那个）。 */
 export type ToolChoice = 'claude-code' | 'dsh-native' | 'codex'
 
 /** 闭环三阶段在界面上的角色键。 */
@@ -55,7 +55,7 @@ export type WorkflowRoleKey = 'designRole' | 'implementationRole' | 'reviewRole'
 export const DEFAULT_NATIVE_PROVIDER = 'spawn'
 
 /**
- * 三个阶段的**出厂默认工具**：全部走本地执行服务。
+ * 三个阶段的**出厂默认工具**：全部走 DSH 执行服务。
  *
  * 为什么不学原来的 `claude-code / dsh-native / codex`：那三个名字代表"一台机器上
  * 同时装了三个外部产品"的一种**特定**部署形态，而它既不是默认、也不是多数。
@@ -94,7 +94,7 @@ export interface ProviderObservation {
 }
 
 /**
- * 「本地执行服务 注册名」的候选值：**已知默认值** + **节点心跳实际上报的 provider**。
+ * 「DSH 执行服务 注册名」的候选值：**已知默认值** + **节点心跳实际上报的 provider**。
  *
  * 这个字段原本是一个纯文本输入框，提示语是"填写 ctx 上的 subagents 服务里的 provider 名称" ——
  * 要求用户知道 DSH 的内部服务名，而界面上**没有任何地方能查到它**。
@@ -133,7 +133,7 @@ export function defaultRoleFor(
 // ────────────────────────────────────────────────────────────────────────────
 // provider 就绪度 → 可选清单（2026-10-13）
 //
-// 「本地执行服务 注册名」原来是一个**自由文本输入框**，提示语写着
+// 「DSH 执行服务 注册名」原来是一个**自由文本输入框**，提示语写着
 // 「填写 ctx 上的 subagents 服务里的 provider 名称」——要求用户知道 DSH 的内部服务名，
 // 而界面上**没有任何地方能查到它**。用户的原话是「相当茫然，完全不知道怎么配置」。
 //
@@ -276,7 +276,7 @@ export function providerChoices(
 export function providerChoiceValidation(name: string, choices: readonly ProviderChoice[]): { ok: boolean; message: string | null } {
   const trimmed = String(name ?? '').trim()
   if (trimmed === '') {
-    return { ok: false, message: `请选择「本地执行服务 注册名」。不确定就选 ${DEFAULT_NATIVE_PROVIDER}（随 Legion 一起跑，不需要额外安装）。` }
+    return { ok: false, message: `请选择「DSH 执行服务 注册名」。不确定就选 ${DEFAULT_NATIVE_PROVIDER}（随 Legion 一起跑，不需要额外安装）。` }
   }
   const hit = choices.find(c => c.name === trimmed)
   if (hit !== undefined && hit.state !== null && !hit.ready) {

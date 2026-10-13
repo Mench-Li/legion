@@ -114,7 +114,7 @@ export function AgentWorkflowConfigurator({ scope }: Props): React.JSX.Element {
   const [newNodeId, setNewNodeId] = useState('')
   const [newNodeLabel, setNewNodeLabel] = useState('')
   const [roles, setRoles] = useState<Record<RoleKey, string>>({ designRole: '', implementationRole: '', reviewRole: '' })
-  // ★ 默认值 = **本地执行服务**（不是 Claude Code / Codex）。理由见 agentWorkflowDefaults.ts：
+  // ★ 默认值 = **DSH 执行服务**（不是 Claude Code / Codex）。理由见 agentWorkflowDefaults.ts：
   //   原来的硬编码默认值预设了"这台机器装了三个外部产品"，而实测本环境一个都没有 ——
   //   于是面板一打开就是两条缺失告警 + 一个查不到的必填项，用户无从下手。
   const [tools, setTools] = useState<Record<RoleKey, ToolChoice>>({ ...NATIVE_TOOL_DEFAULTS })
@@ -201,7 +201,7 @@ export function AgentWorkflowConfigurator({ scope }: Props): React.JSX.Element {
       //    `claude-code / dsh-native / codex` —— 即"这台机器装了三个外部产品"，
       //    而实测本环境：0 工具配置、0 执行节点、8 个流水线阶段的 agentToolConfig 全空。
       //    那份默认值**没有任何环境证据**，它只是把一个特定部署形态当成了默认。
-      //    现在的规则：**先看环境** —— 流水线阶段已指定工具就用它，否则用本地执行服务。
+      //    现在的规则：**先看环境** —— 流水线阶段已指定工具就用它，否则用DSH 执行服务。
       const nextTools = { ...NATIVE_TOOL_DEFAULTS } as Record<RoleKey, ToolChoice>
       for (const key of Object.keys(ROLE_LABEL) as RoleKey[]) {
         const role = workflow?.[key] ?? defaultRoleFor(nextPipeline.stages, key)
@@ -280,7 +280,7 @@ export function AgentWorkflowConfigurator({ scope }: Props): React.JSX.Element {
     const providerName = choice === 'dsh-native' ? dshProvider.trim() : choice
     // 报错要说**下一步做什么**。原来只有一句"请填写 已注册的子 Agent provider 名称"——
     // 而用户既不知道去哪查、也不知道默认值是什么（现在默认已填 `spawn`，这句基本不会再出现）。
-    if (!providerName) throw new Error(`请填写「本地执行服务 注册名」。不确定填什么就填 ${DEFAULT_NATIVE_PROVIDER}（Legion 守护自带的本地执行服务，无需额外安装）。`)
+    if (!providerName) throw new Error(`请填写「DSH 执行服务 注册名」。不确定填什么就填 ${DEFAULT_NATIVE_PROVIDER}（Legion 守护自带的DSH 执行服务，无需额外安装）。`)
     const adapter = choice === 'dsh-native' ? 'dsh-native' : 'dsh-subagent'
     const permissionProfile = choice === 'codex' ? 'codex-workspace-write'
       : choice === 'claude-code' ? 'claude-code-acceptEdits' : `dsh-native:${providerName}`
@@ -344,7 +344,7 @@ export function AgentWorkflowConfigurator({ scope }: Props): React.JSX.Element {
       setError('三个岗位都必须存在于当前已启用阶段链中。')
       return
     }
-    // ★ 用到了本地 Agent（或图阶段里也有）且读数明确说它不行 ⇒ 拦下。
+    // ★ 用到了 DSH（或图阶段里也有）且读数明确说它不行 ⇒ 拦下。
     //   现在拦，是为了不让用户拿到一份"保存成功、每次派工都抛错"的配置。
     if (usesNativeTool() && nativeDerivation.blockers.length > 0) {
       setError(nativeDerivation.blockers.join(' '))
@@ -522,7 +522,7 @@ export function AgentWorkflowConfigurator({ scope }: Props): React.JSX.Element {
     toolFilter: nativeToolFilter, localAgent: nativeLocalAgent,
     sessionResume: nativeSessionResume, cancellation: nativeCancellation,
   })
-  /** 这套配置里有没有用到本地 Agent（决定能力位推导的结果是否真的会被用到）。 */
+  /** 这套配置里有没有用到 DSH（决定能力位推导的结果是否真的会被用到）。 */
   const usesNativeTool = (): boolean =>
     Object.values(tools).includes('dsh-native') || graphStages.some(stage => stage.tool === 'dsh-native')
   /** 读数里**不可用**的那些：用来给"为什么选不了/为什么没绿"一个解释。 */
@@ -595,12 +595,12 @@ export function AgentWorkflowConfigurator({ scope }: Props): React.JSX.Element {
               <div style={{ marginTop: 4 }}>· 只有想要下面三件事之一时才需要它：① 把某个阶段**换成别的 Agent 工具**跑（Claude Code / Codex）；
                 ② 固定一条**自定义交接链**（阶段可并行或汇合，不按流水线顺序）；
                 ③ 把一条链**冻结成版本**，以后发布目标时点名复用。</div>
-              <div style={{ marginTop: 4 }}>· 最短路径：三行各选一个岗位（已按你的流水线预填）→ 工具保持「本地 Agent」→ 点「发布为可复用工作流版本」。</div>
+              <div style={{ marginTop: 4 }}>· 最短路径：三行各选一个岗位（已按你的流水线预填）→ 工具保持「DSH」→ 点「发布为可复用工作流版本」。</div>
               <div style={{ marginTop: 4 }}>· 想让任务**自动开跑**：设置 → <b>持续执行</b>。想让**写码阶段**动起来：任务详情 → <b>🤖 派 AI 执行</b>。这两件事都**不**在本页。</div>
             </div>
             <div style={{ color: 'var(--muted-2)', marginTop: 8 }}>
             本页只定义**交接链**，不会自动开启空间执行守护。发布目标时冻结工作流与工具版本；后续改动不改写已有目标。
-            Claude Code 与 Codex 需要各自的 外部执行服务；本地执行服务 的注册名与能力必须与运行环境一致。
+            Claude Code 与 Codex 需要各自的 外部执行服务；DSH 执行服务 的注册名与能力必须与运行环境一致。
             </div>
             {/* ★★ 2026-10-13：本机 provider **就绪度**（只读）。
                 这是"相当茫然"那个问题的正面回答：不再要求用户知道并提供 provider 名，
@@ -652,7 +652,7 @@ export function AgentWorkflowConfigurator({ scope }: Props): React.JSX.Element {
               <pre style={{ whiteSpace: 'pre-wrap', margin: '6px 0', padding: 8, background: 'var(--surface-2)' }}>{permissionModePatch}</pre>
             </div>}
             {providerRequirements.length === 0
-              ? <div style={{ color: 'var(--yellow)', marginTop: 8 }}>先填写实际的 本地执行服务 注册名，运行节点心跳后才能检查 provider 是否可用。</div>
+              ? <div style={{ color: 'var(--yellow)', marginTop: 8 }}>先填写实际的 DSH 执行服务 注册名，运行节点心跳后才能检查 provider 是否可用。</div>
               : missingProviderLabels.length > 0
               ? <div style={{ color: 'var(--yellow)', marginTop: 8 }}>
                 尚无符合节点绑定的就绪心跳报告这些 provider：{missingProviderLabels.join('、')}。请在执行节点的 执行服务配置 安装对应的子 Agent provider bundle 并重启；认证状态仍需真实启动任务确认。
@@ -689,7 +689,7 @@ export function AgentWorkflowConfigurator({ scope }: Props): React.JSX.Element {
               </select>
               <select value={tools[key]} onChange={e => setTools(prev => ({ ...prev, [key]: e.target.value as ToolChoice }))}>
                 <option value="claude-code">Claude Code</option>
-                <option value="dsh-native">本地 Agent</option>
+                <option value="dsh-native">DSH</option>
                 <option value="codex">Codex</option>
               </select>
               <select value={nodeIds[key]} onChange={e => setNodeIds(prev => ({ ...prev, [key]: e.target.value }))}>
@@ -721,7 +721,7 @@ export function AgentWorkflowConfigurator({ scope }: Props): React.JSX.Element {
                   且发布时它是必填（留空直接抛"请填写 已注册的子 Agent provider 名称"）。
                   现在候选来自三处合并（本机读数 ∪ 节点心跳 ∪ 已知默认值），**仍然可以自由输入**
                   —— 用 datalist 而不是 select，是为了不让"读数还没到"变成"选不了"。 */}
-              <label>本地执行服务 注册名
+              <label>DSH 执行服务 注册名
                 <input list="agent-provider-candidates" value={dshProvider} onChange={e => setDshProvider(e.target.value)}
                   placeholder={`默认 ${DEFAULT_NATIVE_PROVIDER}（随 Legion 一起跑，不需要额外安装）`} />
               </label>
@@ -731,7 +731,7 @@ export function AgentWorkflowConfigurator({ scope }: Props): React.JSX.Element {
                 </option>)}
               </datalist>
               <div style={{ color: 'var(--muted-2)' }}>
-                默认 <code>{DEFAULT_NATIVE_PROVIDER}</code> 是 Legion 守护自带的本地执行服务，不需要额外安装；
+                默认 <code>{DEFAULT_NATIVE_PROVIDER}</code> 是 Legion 守护自带的DSH 执行服务，不需要额外安装；
                 候选里的其他名字来自**本机自检读数**与节点心跳。填错时任务会派不出去，届时会在这里报出来。
               </div>
               {providerNameValidation.message !== null && <div style={{ color: providerNameValidation.ok ? 'var(--yellow)' : 'var(--red)' }}>
@@ -804,7 +804,7 @@ export function AgentWorkflowConfigurator({ scope }: Props): React.JSX.Element {
                     const tool = selected.slice(4) as ToolChoice
                     return { ...item, tool, toolConfigRef: null }
                   }))}>
-                    <option value="new:claude-code">新增/复用 Claude Code 配置</option><option value="new:dsh-native">新增/复用 本地执行服务 配置</option><option value="new:codex">新增/复用 Codex 配置</option>
+                    <option value="new:claude-code">新增/复用 Claude Code 配置</option><option value="new:dsh-native">新增/复用 DSH 执行服务 配置</option><option value="new:codex">新增/复用 Codex 配置</option>
                     {configs.filter(config => config.enabled).map(config => <option key={`${config.id}@${config.version}`} value={`ref:${config.id}@${config.version}`}>{config.providerName} · {config.id} v{config.version}</option>)}
                   </select>
                   <button type="button" className="btn ghost" disabled={graphStages.length <= 2} aria-label={`删除阶段 ${stage.id}`} onClick={() => {
@@ -825,7 +825,7 @@ export function AgentWorkflowConfigurator({ scope }: Props): React.JSX.Element {
                     <input aria-label={`${stage.id} 独立测试 argv JSON`} value={stage.testArgs} onChange={event => setGraphStages(current => current.map((item, at) => at === index ? { ...item, testArgs: event.target.value } : item))} placeholder='["--test"]' />
                     <input aria-label={`${stage.id} 独立测试超时毫秒`} type="number" min={1000} max={3600000} step={1000} value={stage.testTimeoutMs} onChange={event => setGraphStages(current => current.map((item, at) => at === index ? { ...item, testTimeoutMs: Number(event.target.value) } : item))} />
                   </div>}
-                  <select aria-label={`${stage.id} 模型配置`} title="模型档案覆盖仅支持 本地 Agent 工具；Claude Code/Codex 使用其自身模型设置" disabled={stage.toolConfigRef
+                  <select aria-label={`${stage.id} 模型配置`} title="模型档案覆盖仅支持 DSH 工具；Claude Code/Codex 使用其自身模型设置" disabled={stage.toolConfigRef
                     ? configs.find(config => config.id === stage.toolConfigRef?.id && config.version === stage.toolConfigRef?.version)?.adapter !== 'dsh-native'
                     : stage.tool !== 'dsh-native'} value={stage.modelConfigRef ? `${stage.modelConfigRef.id}@${stage.modelConfigRef.version}` : ''} onChange={event => {
                     const selected = event.target.value

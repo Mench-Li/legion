@@ -38,7 +38,7 @@ import {
 } from '../src/agentWorkflowDefaults.ts'
 
 describe('工作流面板的默认值', () => {
-  test('★ ① 默认工具**不得**预设外部产品：三个阶段都必须是本地执行服务', () => {
+  test('★ ① 默认工具**不得**预设外部产品：三个阶段都必须是 DSH 执行服务', () => {
     for (const [key, tool] of Object.entries(NATIVE_TOOL_DEFAULTS)) {
       assert.equal(tool, 'dsh-native',
         `${key} 的默认工具是 ${tool}。默认值只能选"随 Legion 一起跑、不需要额外安装"的那一个；` +
@@ -78,7 +78,7 @@ describe('工作流面板的默认值', () => {
     assert.ok(withNodes.includes(DEFAULT_NATIVE_PROVIDER))
     assert.ok(withNodes.includes('custom-native'), '心跳上报的本地 provider 应当进候选')
     assert.ok(withNodes.includes('another'), 'providerNames 字段也要认（两种字段名都在用）')
-    assert.ok(!withNodes.includes('codex'), 'codex 是外部 adapter，不该出现在"本地执行服务"候选里')
+    assert.ok(!withNodes.includes('codex'), 'codex 是外部 adapter，不该出现在"DSH 执行服务"候选里')
     assert.ok(!withNodes.includes('claude-code'), '同上')
     assert.equal(new Set(withNodes).size, withNodes.length, '候选不得重复')
     assert.deepEqual(withNodes, [...withNodes].sort(), '候选排序稳定（下拉顺序不该每次都变）')

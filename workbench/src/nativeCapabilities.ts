@@ -1,6 +1,6 @@
 // workbench/src/nativeCapabilities.ts
 // ============================================================================
-// 本地 Agent 工具（`dsh-native`）的**能力声明**：能读到的从 provider 自报的真值推导，
+// DSH 工具（`dsh-native`）的**能力声明**：能读到的从 provider 自报的真值推导，
 // 读不到的如实标注为用户声明。
 //
 // ## 为什么（这是一处"发布成功、派工必失败"的缺陷）
@@ -105,7 +105,7 @@ export interface Derivation {
 }
 
 /**
- * 推导本地 Agent 的能力声明。
+ * 推导 DSH 的能力声明。
  *
  * @param declared 本机读数里的 `declared`；`null`/`undefined` = **没读到**（不是"不支持"）
  * @param user     四项用户声明 —— 读数在场时只有 `localAgent`/`sessionResume` 生效

@@ -30,6 +30,9 @@ const MIME = Object.freeze({
   '.png': 'image/png',
   '.svg': 'image/svg+xml',
   '.ico': 'image/x-icon',
+  // ★ 2026-10-13：成员头像改用 256px WebP（照片走 PNG 每张 100KB+，WebP 约 8KB）。
+  //   这一条不加，手机上所有头像都 404 —— 而桌面端正常，所以只会在手机端暴露。
+  '.webp': 'image/webp',
   '.txt': 'text/plain; charset=utf-8',
 })
 

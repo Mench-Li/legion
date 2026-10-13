@@ -1,5 +1,17 @@
 // workbench/src/avatar/AgentAvatar.tsx
-// 参数化**柔和插画**头像（内联 SVG、零第三方依赖、零图片资源、零网络请求）。
+// 成员头像：**有图用图，没图用矢量**（两条来源，优先级明确）。
+//
+// ## 两级来源（2026-10-13 第二版）
+//
+//   ① `photo-assets.ts` 给这个位面 key 配了图 ⇒ 渲染 `<img>`（用户提供的写实/插画头像）
+//   ② 没配 ⇒ 渲染下面的**内联 SVG 矢量人形**（原本那条路径，一行未删）
+//
+// 判据放在**资产表**而不是运行时：查表就知道走哪条 ⇒ 不会先闪一张破图再回退。
+// 资产是否存在由 `avatar-photo.test.mjs` 在**提交时**守住（比运行时容错更早暴露问题）。
+//
+// ## 矢量那一路的画风口径（它是"没图"时的正式外观，不是临时占位）
+//
+// 下面是矢量路径的历史与口径，仍然有效。
 //
 // ## 画风口径（2026-10-13 第二版：扁平 → 有明暗）
 //
@@ -22,10 +34,11 @@
 // 但那条判据的**本意**是「头像不得依赖**外链**资源」——`url(#face)` 是**同文档片段**，
 // 根本不是外链。是"禁外链"被写成了"禁 `url(`"。
 //
-// 已把判据收回到本意（外链形式继续禁：`url(http` / `url(//` / `url(data:` / `<img` …），
+// 已把判据收回到本意（外链形式继续禁：`url(http` / `url(//` / `url(data:` …），
 // 并用 `TC-S1-09b` 两侧对照钉住边界。**渐变 id 必须逐实例唯一**（见 `gid()`），
 // 否则同页面多个头像会抢同一个 id、颜色串台。
 import { resolveSlot, PLACEHOLDER_SLOT } from './slots'
+import { photoFileFor, AVATAR_PHOTO_BASE } from './photo-assets'
 import type { AvatarSlot } from './types'
 
 export interface AgentAvatarProps {
@@ -159,11 +172,8 @@ function Accessory({ slot }: { slot: AvatarSlot }): React.JSX.Element | null {
   return null
 }
 
-export default function AgentAvatar(props: AgentAvatarProps): React.JSX.Element {
-  const { token, size, className } = props
-  const slot = resolveSlot(token) ?? PLACEHOLDER_SLOT
-  const px = clampSize(size)
-  const cls = className ? 'agent-avatar-svg ' + className : 'agent-avatar-svg'
+/** 矢量人形（原路径）：**所有**位面 key 都能渲，因此它同时是"没配图"的显示与"永远画得出来"的底。 */
+function VectorAvatar({ slot, px, cls }: { slot: AvatarSlot; px: number; cls: string }): React.JSX.Element {
   return (
     <svg className={cls} width={px} height={px} viewBox="0 0 32 32" role="img" aria-label="成员头像">
       <Defs slot={slot} />
@@ -195,4 +205,40 @@ export default function AgentAvatar(props: AgentAvatarProps): React.JSX.Element 
       <Accessory slot={slot} />
     </svg>
   )
+}
+
+/**
+ * 头像：**有图用图，没图用矢量**。
+ *
+ * ★ 判据不是"运行时发现图挂了再回退"（那会先闪一下破图），而是**查资产表**：
+ *   `photoFileFor(key)` 有值才走 `<img>`。表里没写的 key（例如 20 张图覆盖不到的 `s10`）
+ *   直接走矢量 —— 于是"缺图"这件事在**渲染之前**就已经定了，界面上不会出现破图。
+ *
+ * ★ 资产本身的存在性由 `workbench/scripts/avatar-photo.test.mjs` 在**提交时**守住
+ *   （每个映射都必须能在桌面与手机两处找到、且逐字节一致）。这比"运行时容错"
+ *   更早发现问题：图没了是**构建期**的错，不是用户屏幕上的错。
+ */
+export default function AgentAvatar(props: AgentAvatarProps): React.JSX.Element {
+  const { token, size, className } = props
+  const slot = resolveSlot(token) ?? PLACEHOLDER_SLOT
+  const px = clampSize(size)
+  const file = photoFileFor(slot.key)
+  if (file !== null) {
+    // `alt=""`：这是**装饰性**头像（旁边总有成员名文本），空 alt 让读屏器跳过它，
+    // 避免"头像 + 名字"被念两遍。不写 alt 反而会暴露文件名。
+    return (
+      <img
+        className={className ? 'agent-avatar-img ' + className : 'agent-avatar-img'}
+        src={AVATAR_PHOTO_BASE + file}
+        width={px}
+        height={px}
+        alt=""
+        draggable={false}
+        loading="lazy"
+        decoding="async"
+      />
+    )
+  }
+  const cls = className ? 'agent-avatar-svg ' + className : 'agent-avatar-svg'
+  return <VectorAvatar slot={slot} px={px} cls={cls} />
 }

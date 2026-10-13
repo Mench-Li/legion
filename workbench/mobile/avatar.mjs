@@ -29,6 +29,42 @@ const BACKGROUNDS = ['#e8eff8', '#f1eaf8', '#e3f2f0', '#faf0e3', '#eaeffb', '#f8
 
 export const SLOT_KEYS = [...BUILTIN_ROLE_KEYS, ...SPARE_KEYS]
 
+/**
+ * 令牌 key → 头像图片文件（**镜像** `src/avatar/photo-assets.ts`）。
+ *
+ * 与位面表同样的规矩：两份表会漂移，所以由 `avatar-photo.test.mjs` **逐项比对**
+ * （key 集合 + 文件名 + 文件存在 + 两端文件逐字节相同）。
+ * 只改一端 = 手机上看到的脸与桌面上不是同一张。
+ */
+export const AVATAR_PHOTOS = Object.freeze({
+  requirement: 'agent-avatar-01.webp',
+  researcher: 'agent-avatar-02.webp',
+  breaker: 'agent-avatar-03.webp',
+  'test-designer': 'agent-avatar-04.webp',
+  coder: 'agent-avatar-05.webp',
+  reviewer: 'agent-avatar-06.webp',
+  tester: 'agent-avatar-07.webp',
+  devops: 'agent-avatar-08.webp',
+  assistant: 'agent-avatar-09.webp',
+  'research-assistant': 'agent-avatar-10.webp',
+  writer: 'agent-avatar-11.webp',
+  s01: 'agent-avatar-12.webp',
+  s02: 'agent-avatar-13.webp',
+  s03: 'agent-avatar-14.webp',
+  s04: 'agent-avatar-15.webp',
+  s05: 'agent-avatar-16.webp',
+  s06: 'agent-avatar-17.webp',
+  s07: 'agent-avatar-18.webp',
+  s08: 'agent-avatar-19.webp',
+  s09: 'agent-avatar-20.webp',
+})
+
+/** 该 key 有没有配图；没有返回 null（调用方回落矢量人形）。 */
+export function photoFileFor(key) {
+  const hit = AVATAR_PHOTOS[key]
+  return hit === undefined ? null : hit
+}
+
 /** 把颜色按比例压暗 —— 必须与 `src/avatar/slots.ts` 的 `shade()` **逐字同式**。 */
 export function shade(hex, factor) {
   const n = parseInt(hex.slice(1), 16)
@@ -148,10 +184,30 @@ function clampSize(size) {
   return rounded
 }
 
-/** 渲染内联 SVG 吉祥物（纯字符串，无网络请求、无文本节点）。 */
+/**
+ * 渲染成员头像：**有图用图，没图用矢量**（与桌面 `AgentAvatar` 同一条判据）。
+ *
+ * 返回的是一段 HTML 字符串（调用方直接 `innerHTML`），所以两条路都能返回，
+ * 上层三处调用（成员药丸条、头部、任务列表）**一行都不用改**。
+ *
+ * `src` 用相对路径 `./avatars/…`：手机页面的静态根是 `/mobile/`（`static-tree.mjs`
+ * 会把无尾斜杠的 `/mobile` 重定向过去），于是它解析成 `/mobile/avatars/…`。
+ * **只允许同源相对路径** —— 头像不许引外链（`avatar-photo.test.mjs` 守着这一条）。
+ */
 export function renderAvatar(token, size) {
   const slot = resolveSlot(token) ?? PLACEHOLDER_SLOT
   const px = clampSize(size)
+  const photo = photoFileFor(slot.key)
+  if (photo !== null) {
+    // `alt=""`：装饰性头像（旁边总有成员名），空 alt 让读屏器跳过，避免名字被念两遍。
+    return '<img class="agent-avatar-img" src="./avatars/' + photo + '" width="' + px + '" height="' + px
+      + '" alt="" draggable="false" loading="lazy" decoding="async" />'
+  }
+  return renderVectorAvatar(slot, px)
+}
+
+/** 内联 SVG 矢量人形（纯字符串，无网络请求、无文本节点）。 */
+function renderVectorAvatar(slot, px) {
   const k = slot.key
   return '<svg class="agent-avatar-svg" width="' + px + '" height="' + px + '" viewBox="0 0 32 32" role="img" aria-label="成员头像">'
     + defsMarkup(slot)

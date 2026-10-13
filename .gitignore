@@ -1,6 +1,20 @@
 # 依赖与构建产物
 node_modules/
 
+# ★ 2026-10-13：用户提供的**头像原图**（20 张 1254x1254 PNG，合计 42.6 MB）—— 不入库。
+#
+#   为什么必须挡在这里：`assets/` 这个目录**原本没有任何规则覆盖**，一次 `git add -A`
+#   就会把 42.6 MB 的二进制推进历史 —— 而历史里的二进制是**删不掉的**（只能重写历史）。
+#   这与下面 `desktop/dist`、`reports/*/` 那两条是同一类事，只是这次是图片。
+#
+#   真正入库的是**派生产物**：`workbench/public/avatars/` 与 `workbench/mobile/avatars/`
+#   的 256px WebP，20 张合计 159 KB（原图的 1/274）。派生关系与来源登记在
+#   `workbench/src/avatar/photo-assets.ts`，一致性由 `avatar-photo.test.mjs` 守着。
+#
+#   > 一个"忘了忽略素材目录"的仓库，与一个"素材已经被提交过"的仓库，
+#   > 在 `git status` 上只差一次 `-A`。
+assets/agent-avatars/
+
 # 运行时状态
 state.json
 mesh/store/

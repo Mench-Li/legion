@@ -74,6 +74,29 @@ export const PROVIDER_SPECS = Object.freeze({
     kind: 'native',
     reason: '随 Legion 守护进程内运行，不需要额外安装或登录',
   }),
+  /**
+   * `fork` —— DSH**另一个**自带的进程内后端（2026-10-13 实机补）。
+   *
+   * 实机读数是 `unprobed`（"没有探测规格"），而那是**低估**：它并不是什么来路不明的注册项。
+   * 证据（都在 DSH 检出里）：
+   *   · `packages/subagent/subagent-fork-in-process/src/index.ts:23`
+   *     `export const name = 'subagent-fork-in-process'`；
+   *   · 同文件 `:37` `providerName: z.string().default('fork')`
+   *     ⇒ **这个 DSH 版本自己的默认 provider 就是 `fork`**；
+   *   · 同文件 `:58` 注释写明它 "Supports `depthLimit` and `outputSchema`"
+   *     —— 也就是说它连工作流那条**硬要求**（结构化输出）都满足。
+   *
+   *   > 把"我还没写规格"说成"已注册不等于可用"，
+   *   > 与把"确实不可用"说成同一句话，在界面上是同一行字 ——
+   *   > 而前者会让用户去排查一个本来就好用的东西。
+   *
+   * 所以它和 `spawn` 同类：进程内、无外部依赖 ⇒ 恒 ready。
+   * （它支不支持结构化输出由**注册表**上报的 `declared` 决定，不是这里说了算。）
+   */
+  fork: Object.freeze({
+    kind: 'native',
+    reason: '随 DSH 进程内运行的 forked 子代理后端（DSH 自带的默认 provider），不需要额外安装或登录',
+  }),
   'claude-code': Object.freeze({
     kind: 'external',
     cli: 'claude',

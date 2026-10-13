@@ -320,8 +320,24 @@ describe('探测目标：注册表 ∪ 规格表', () => {
   })
 })
 
-describe('规格表本身', () => {  test('内置 provider 的 spec 必须标成 native，外部 provider 必须给 CLI 与登录提示', () => {
+describe('规格表本身', () => {
+  test('★ 两个进程内后端都必须是 native/ready（fork 是实机补的）', async () => {
+    // 实机上 `fork` 曾被报成 `unprobed`（= "没有探测规格"），而它是
+    // `@deepseek-ai/dsh-subagent-fork-in-process` 注册的、DSH 自带且**默认**的进程内后端。
+    //   > 把"我还没写规格"说成"已注册不等于可用"，
+    //   > 与把"确实不可用"说成同一句话，在界面上是同一行字 ——
+    //   > 而前者会让用户去排查一个本来就好用的东西。
     assert.equal(PROVIDER_SPECS.spawn.kind, 'native')
+    assert.equal(PROVIDER_SPECS.fork.kind, 'native', 'fork 是 DSH 自带进程内后端，不该算 unprobed')
+    for (const name of ['spawn', 'fork']) {
+      const r = await probeProvider(name, deps())
+      assert.equal(r.state, READINESS_STATE.READY, name + ' 应当 ready')
+      assert.notEqual(r.state, READINESS_STATE.UNPROBED, name + ' 不该是 unprobed')
+    }
+  })
+
+  test('内置 provider 的 spec 必须标成 native，外部 provider 必须给 CLI 与登录提示', () => {
+    for (const name of ['spawn', 'fork']) assert.equal(PROVIDER_SPECS[name].kind, 'native', name)
     for (const name of ['claude-code', 'codex']) {
       const spec = PROVIDER_SPECS[name]
       assert.equal(spec.kind, 'external', name)

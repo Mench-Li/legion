@@ -159,16 +159,23 @@ describe('接线判据（静态读源码）：判定对了还要真的接上', (
     assert.match(modal, /const usable = isUsableReason\(reason\)/)
   })
 
-  it('★ 重做走 /api/rework；打回走 comment + transition（顺序不能反）', () => {
+  it('★ 重做走 /api/rework；打回走 rejectTask（"评论先行"这条不变量在它里面守着）', () => {
     const modal = read('src/components/ReworkModal.tsx')
     assert.match(modal, /await hubRework\(/)
-    const commentsAt = modal.indexOf('await hubComment(')
-    const transitionAt = modal.indexOf('await hubTransition(')
-    assert.ok(commentsAt > 0 && transitionAt > commentsAt,
-      '先落评论再退回：退回后守护可能立刻认领，先落评论才保证它带得上改动点')
+    // ★ 2026-10-12 搬家：打回原先在**这里**自己拼 comment + transition，现在收进
+    //   `rejectTask()`（`src/api.ts`）—— 三个调用点共用一份实现。不变量没变（评论必须先行），
+    //   变的是它归谁守：两份实现的下场是某一天给出两句不一样的话。
+    assert.match(modal, /await rejectTask\(\{/)
+    assert.equal(/hubComment\(/.test(modal), false, '弹窗不再自己拼评论')
     const api = read('src/api.ts')
     assert.match(api, /export async function hubRework/)
     assert.match(api, /hubPost\('\/api\/rework'/)
+    // 不变量搬到 api.ts 之后，**得有人继续钉着它**：下面这一条 + reject-path.test.mjs 的运行时用例
+    const at = api.indexOf('export function rejectTask')
+    assert.ok(at > 0, '找不到 rejectTask')
+    const body = api.slice(at, at + 1600)
+    assert.ok(body.indexOf('hubComment(') < body.indexOf('hubTransition('),
+      '先落评论再退回：退回后守护可能立刻认领，先落评论才保证它带得上改动点')
   })
 
   it('★ 重做按钮的实参要带 ifVersion 与 scope（乐观锁/分区不能丢）', () => {

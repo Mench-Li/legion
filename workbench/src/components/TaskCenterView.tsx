@@ -635,13 +635,14 @@ export function TaskCenterView({ scope, hubMode, spaces = [], onSelectScope, onD
         />
       )}
 
-      {/* 往回拖（重做 / 打回）：改动点必填，收齐后由对话框自己发 /api/rework 或 comment+transition */}
+      {/* 往回拖（重做 / 打回）：改动点必填；收齐后由对话框调 /api/rework（重做）或 rejectTask（打回） */}
       {dropAsk && (
         <ReworkModal
           task={{ id: dropAsk.item.id, title: dropAsk.item.title, role: dropAsk.item.role }}
           intent={dropAsk.intent}
           scope={dropAsk.item.scope ?? scope}
           ifVersion={dropAsk.item.version}
+          by={bindOf(dropAsk.item)}
           onClose={() => setDropAsk(null)}
           onDone={reload}
         />

@@ -1971,6 +1971,10 @@ async function stageTest() {
     // 这条路径此前是**静默**的两种坏结局（卡片拖不动 / 拖动了但下游一条都不重跑），
     // 所以它不是"再加一组 UI 用例"，而是把那个动作的判据补上。
     { label: 'rework-plan（看板往回拖：重做/打回的语义判定 + 必填改动点 + 接线判据）', files: ['workbench/scripts/rework-plan.test.mjs'], cwd: ROOT, nodeArgs: ['--experimental-strip-types'] },
+    // 2026-10-12：**打回**那条路的两处坏 —— 理由只显示给自己看（HubSchedulerModal）
+    // 与打完拿一句像"路径拼错了"的 404（rejectTask 打已退役的 /api/reject）。
+    // 这两个弹窗此前**一个套件都没登记**，而"没人跑的用例"与"没有用例"是同一个东西。
+    { label: 'reject-path（打回：理由真的送达 + 已退役的 /api/reject 不再被打 + 接线判据）', files: ['workbench/scripts/reject-path.test.mjs'], cwd: ROOT, nodeArgs: ['--experimental-strip-types'] },
     { label: 'rules（规范数据面）', files: ['team-hub/rules.test.mjs'], cwd: ROOT },
     { label: 'artifact（产物读取）', files: ['team-hub/artifact-content.test.mjs'], cwd: ROOT },
     { label: 'security（监听安全配置）', files: ['team-hub/security.test.mjs'], cwd: ROOT },

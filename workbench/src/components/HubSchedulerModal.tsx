@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { fetchHubActivity, fetchHubTasks, hubClaim, hubComment, hubHold, hubReassign, hubTransition } from '../api'
 import type { CardStatus, HubActivity, HubTask } from '../types'
+import { ReworkModal } from './ReworkModal'
 import { toast } from './Toast'
 
 interface HubSchedulerModalProps {
@@ -65,6 +66,8 @@ export function HubSchedulerModal({ scope, onClose }: HubSchedulerModalProps): R
   const [activities, setActivities] = useState<HubActivity[]>([])
   const [expanded, setExpanded] = useState<Set<string>>(new Set())
   const [loadErr, setLoadErr] = useState<string | null>(null)
+  /** 待打回的任务（改动点必填 → ReworkModal 收齐后写评论 + 归还待办）。 */
+  const [rejectAsk, setRejectAsk] = useState<HubTask | null>(null)
 
   const load = async (): Promise<void> => {
     try {
@@ -117,11 +120,27 @@ export function HubSchedulerModal({ scope, onClose }: HubSchedulerModalProps): R
   const bindOf = (t: HubTask): string => t.soldier ?? t.role ?? 'general'
 
   const review = (t: HubTask): Promise<void> => act(() => hubTransition({ id: t.id, to: 'done', by: 'general', ifVersion: t.version }), `${t.id} 已验收通过 ✓`)
-  const reject = (t: HubTask): Promise<void> => {
-    const reason = window.prompt(`打回 ${t.id} 的原因（将把任务归还待办）`)
-    if (reason === null) return Promise.resolve()
-    return act(() => hubTransition({ id: t.id, to: 'todo', by: bindOf(t), ifVersion: t.version }), `${t.id} 已打回：${reason.trim() || '无理由'}`)
-  }
+  /**
+   * 打回：**改动点必填**，由 `ReworkModal` 收齐后写评论 + 归还待办。
+   *
+   * ★ 这里从前是这样写的：
+   *
+   *     const reason = window.prompt(`打回 ${t.id} 的原因（将把任务归还待办）`)
+   *     if (reason === null) return
+   *     return act(() => hubTransition({ id: t.id, to: 'todo', ... }),
+   *                `${t.id} 已打回：${reason.trim() || '无理由'}`)
+   *
+   *   `reason` **只出现在 toast 文案里**，一次都没有发给服务端。于是：将军认真写了
+   *   「头像有黑边」，界面回一句「已打回：头像有黑边」——而 worker 拿到的是一个
+   *   光秃秃的 todo，没有任何反馈。它会按原样再交一次，然后将军再打回一次。
+   *
+   *   > 一个"把理由显示给自己看"的按钮，
+   *   > 与一个"把理由交给执行者"的按钮，在**按下它的那一刻**长得完全一样——
+   *   > 区别要到下一轮交付时才看得见，而那时它表现为"这个 agent 怎么老是不改"。
+   *
+   *   与看板拖拽那条路是同一个毛病、同一处修法（那次的判据在 `rework-plan.test.mjs`）。
+   */
+  const reject = (t: HubTask): void => setRejectAsk(t)
   const returnTodo = (t: HubTask): Promise<void> => act(() => hubTransition({ id: t.id, to: 'todo', by: bindOf(t), ifVersion: t.version }), `${t.id} 已归还待办`)
   const unblock = (t: HubTask): Promise<void> => act(() => hubTransition({ id: t.id, to: 'todo', by: bindOf(t), ifVersion: t.version, force: true }), `${t.id} 已解阻`)
   const submitReview = (t: HubTask): Promise<void> => act(() => hubTransition({ id: t.id, to: 'in_review', by: bindOf(t), ifVersion: t.version }), `${t.id} 已提交验收`)
@@ -333,6 +352,19 @@ export function HubSchedulerModal({ scope, onClose }: HubSchedulerModalProps): R
           <button className="btn ghost" onClick={onClose}>关闭</button>
         </div>
       </div>
+
+      {/* 打回：改动点必填，收齐后由 rejectTask 写评论 + 归还待办（理由必须真的送达执行者） */}
+      {rejectAsk && (
+        <ReworkModal
+          task={{ id: rejectAsk.id, title: rejectAsk.title, role: rejectAsk.role ?? undefined }}
+          intent="return"
+          scope={rejectAsk.scope ?? scope}
+          ifVersion={rejectAsk.version}
+          by={bindOf(rejectAsk)}
+          onClose={() => setRejectAsk(null)}
+          onDone={() => { setRejectAsk(null); void load() }}
+        />
+      )}
     </div>
   )
 }

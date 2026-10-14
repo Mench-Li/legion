@@ -304,6 +304,52 @@ systemctl restart legion-hub
 | 安装包与升级包对 `roles-ozon.json` 判据不一致 | 造载荷时报 `payload-forbidden-entry` | 已统一到 `payload-filter.mjs` 的 `isShippableRootRoleFile()` |
 | `prepare-nsis.mjs` 找不到 `app-builder-lib` | `ERR_MODULE_NOT_FOUND` | pnpm 默认布局把传递依赖留在 `.pnpm`；需 `node-linker=hoisted` 或物化 |
 | 测速：Cloudflare 前置很慢 | 境内实测 0–0.63 MB/s（OSS 1.28–1.70 MB/s） | 更新通道走 OSS；nginx 那份留作镜像 |
+| **OSS 账号欠费** | 整桶 **403**，正文 `<Code>AccountArrear</Code>`（不是 404，不是权限错） | 见 §4.1 —— **这一条会同时打断自动更新与国内下载线路** |
+
+### 4.1 ★★★ OSS 欠费：一个会**静默打断自动更新**的单点
+
+2026-10-14 实测：京东云 OSS 整桶返回
+
+```xml
+<Error><statusCode>403</statusCode><Code>AccountArrear</Code>
+<Message>There is an arrear problem with this OSS account ...</Message></Error>
+```
+
+而**打包进客户端的** `product/release/update-config.json` 里，
+`stable` / `canary` 的 `origin` 正是 `https://legion-releases.s3.cn-north-1.jdcloud-oss.com`。
+`updates.legion-si.online`（nginx 那份）只是**镜像**，写在
+`update-config.example.json` 里。
+
+后果（三件，都是"看不出来"的那一类）：
+
+1. **已安装的客户端检查不了更新**。`client.mjs` **没有多 origin 回退** ——
+   配置里写哪个就只读哪个，取不到就是取不到。
+2. **这一条无法远程修**。客户端读的是**打包进去的**那份配置；
+   设计又刻意不提供"远程替换信任根 / 地址"的入口（§5 line 128）。
+   ⇒ 只能 **把 OSS 账号欠费缴清**，或 **发一版新客户端并让用户手动装**。
+3. **`/etc/legion-download-lines.json` 里 `cn` 那条线路指向 OSS** ⇒ 国内线路是死链，
+   而 `global` 那条（`updates.legion-si.online`）是活的。
+
+**为什么容易漏掉**：两个托管**同时可用**时它们内容逐字节相同，所以"OSS 挂了"
+在 `updates.legion-si.online` 上做的一切检查里都是**绿**的。
+
+> 一个"镜像还活着"的托管，
+> 与一个"主托管还活着"的托管，在只测镜像的时候是同一个东西 ——
+> 只不过前者能掩盖后者已经死了很久。
+
+**怎么发现**（`verify-host` 默认打的是配置里那个 origin，两边都要各跑一次）：
+
+```bash
+# 客户端实际用的那个（会红）
+node scripts/update/verify-host.mjs --origin https://legion-releases.s3.cn-north-1.jdcloud-oss.com \
+  --prefix /legion --channel stable --trust /tmp/legion-trust.json
+# 镜像（会绿，别只看这个）
+node scripts/update/verify-host.mjs --origin https://updates.legion-si.online \
+  --prefix /legion --channel stable --trust /tmp/legion-trust.json
+```
+
+欠费缴清后要**回读 OSS 那一侧**确认对象还在（整桶 403 时看不到对象是否完好）。
+
 
 ## 5. ★★ Smart App Control：现在**装不了、也构建不了**
 

@@ -1435,6 +1435,89 @@ immutable）
 
 ---
 
+## 16. 修掉 `rel-0.1.3` / `rel-0.1.4` 的 GBK 说明（含**线上 stable 通道**）
+
+§15.5 查出的那件事（当前 stable 的说明是 GBK、客户端整份拒收），这一节把它修掉。
+
+### 16.1 范围：两棵树、四处，且**通道必须动**
+
+| 位置 | 当时的状态 | 处置 |
+| --- | --- | --- |
+| `prod/releases/rel-0.1.3` | notes **GBK**，无 feed 指向 | 转 UTF-8 + 重签清单 |
+| `prod/releases/rel-0.1.4` | notes **GBK**，**stable 通道指向它** | 转 UTF-8 + 重签清单 + **重签通道** |
+| `feeds/stable/win-x64.json` | seq=4，指向旧清单摘要 | **seq → 5**，摘要换成新清单 |
+| Hub 那棵树（`/var/lib/legion-hub/releases`） | 一是 notes 也 GBK；二是 `rel-0.1.4` 的清单**声明了一个磁盘上不存在的 notes**（线上 `notes-0.1.4.txt` = **404**） | 同样换 UTF-8；补上被引用的那个文件名 |
+
+★★ **通道的 `sequence` 必须加一，不能沿用 4。** `judgeSequence` 对
+"同号但摘要不同"回 `SEQUENCE_CONFLICT` 且 `accept:false` ——
+沿用 4 号会让**所有已经接受过 4 号的客户端永远拒绝**这份新通道，**不可自愈**。
+实测确认：喂进"已接受 seq=4"的状态，新通道得到 `feed-sequence-advanced` / `accept:true`。
+
+★ 这次与 §15 一样，**笔记内容不需要重建** —— GBK 解出来是**干净的中文**
+（与 0.1.1 那种有损乱码不同），只换编码：
+
+```
+rel-0.1.3:  GBK 215 B → UTF-8 289 B
+rel-0.1.4:  GBK 257 B → UTF-8 338 B
+```
+
+### 16.2 复现自检（动之前先证明管线与生产一致）
+
+三份要重签的文件，用生产私钥把**原样** payload 重签一遍，产出必须与磁盘**逐字节相同**：
+
+| 文件 | 结果 |
+| --- | --- |
+| `prod/releases/rel-0.1.3/manifest.json` | **逐字节一致** ✓ |
+| `prod/releases/rel-0.1.4/manifest.json` | **逐字节一致** ✓ |
+| `prod/feeds/stable/win-x64.json` | **逐字节一致** ✓ |
+
+### 16.3 生产验证
+
+**`verify-host`（仓库自己的 11 项端到端回读，走 nginx 生产面）：全部 `ok`，退出码 0。**
+
+```
+ok  host-config / feed-cache-policy(no-store) / feed-signature / feed-schema(sequence=5)
+ok  release-fetch / release-digest / release-signature / release-schema
+ok  artifact-package / artifact-installer / artifact-notes(338 字节已回读，清单声明 338)
+```
+
+另外：两份清单验签 `verified`、摘要与大小与实际一致、`decodePlainText` 接受；
+公网回读与磁盘逐字节一致、**U+FFFD 0 个**；Hub 那棵树 `notes-0.1.4.txt` 由
+**404 → 200**，`latestInstaller()` 仍挑 `rel-0.1.4`（installer 的 mtime 没被碰）。
+
+备份：`/srv/legion-updates/backup-226/`（含 `hub/` 子目录）。
+
+### 16.4 ★★★ 顺带查出一件**比 notes 严重得多**的事：OSS 账号欠费
+
+修完之后按惯例核"客户端到底从哪个源读"，结果发现**打包进客户端的**
+`product/release/update-config.json` 里，`stable` 指向的是**京东云 OSS**，
+而不是 `updates.legion-si.online`（后者只是**镜像**，写在 `example` 里）。
+
+而 OSS 整桶返回：
+
+```xml
+<Code>AccountArrear</Code>
+<Message>There is an arrear problem with this OSS account ...</Message>
+```
+
+⇒ **已安装的客户端现在检查不了更新**，而且这一条**无法从这里修**：
+`client.mjs` 没有多 origin 回退，客户端读的是**打包进去的**那份配置，
+设计又刻意不提供远程替换入口。处置与判读见
+[UPDATE-HOST-RUNBOOK.md](UPDATE-HOST-RUNBOOK.md) §4.1。
+
+★ 之所以一直没被发现，是因为**镜像那一侧的一切检查都是绿的**。
+
+> 一个"镜像还活着"的托管，
+> 与一个"主托管还活着"的托管，在只测镜像的时候是同一个东西 ——
+> 只不过前者能掩盖后者已经死了很久。
+
+★ 另外纠正一处**我自己的假阳性**：检查 `update-config.json` 时，
+PowerShell 终端把它的中文注释显示成了乱码，我一度以为那个文件也坏了。
+按**原始字节**复核：589 个汉字、0 个替换字符、0 个可疑双重编码字符 —— **它是好的**。
+（同一类显示假象本轮已经踩过两次，规矩见 §14.3。）
+
+---
+
 ## 附录 A：发布检查单（每次发布逐项打勾）
 
 - [ ] CI 全绿：`node scripts/ci/run-ci.mjs` exit 0（evidence 归档 docs/T093-evidence/）

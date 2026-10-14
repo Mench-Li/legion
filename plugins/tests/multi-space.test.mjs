@@ -2,7 +2,7 @@ import assert from 'node:assert/strict'
 import { join } from 'node:path'
 import test from 'node:test'
 
-import { childLogFile, errorCodeOf, fetchSpaceViews, isSupervisor, planSpaceRunners, resolveAgentNodeId, statusFileNames } from '../lib/index.js'
+import { childLogFile, errorCodeOf, fetchSpaceViews, isSupervisor, machineIdForNode, planSpaceRunners, resolveAgentNodeId, statusFileNames } from '../lib/index.js'
 
 /**
  * SP-P1 多空间编排：监督者的**决策**是纯函数，这里逐条钉住它的边界。
@@ -363,4 +363,62 @@ test('TC-SP-P1-25 ★★★ 首次心跳失败**不许静默**（源码级：日
   assert.match(src, /lastNodeHeartbeatError = msg/, '要记住上一次的错误内容')
   assert.match(src, /nodeReportedReady \|\| msg !== lastNodeHeartbeatError/,
     '两个条件都要：曾经就绪过 ⇒ 每次失败都值得喊；否则内容变化就喊')
+})
+
+// ════════════════════════════════════════════════════════════════════════════
+// C 档（2026-10-13）：机器标识 + 负载上报
+//
+// 机器标识只服务一个判断：**两个节点是不是同一台机器**（同机可改派 / 跨机要排队）。
+// 所以它错的方向**必须**是"把跨机误判成同机"（退化成抢占式均衡，无害），
+// **绝不能**是"把两台机器判成同一台还编造一个默认值"（会让跨机的链被放行）。
+// ════════════════════════════════════════════════════════════════════════════
+
+test('TC-SP-P1-26 ★★ machineId 取主机名；取不到才退化成平台名（不编造固定默认值）', () => {
+  assert.equal(machineIdForNode(() => 'my-desktop', 'win32'), 'my-desktop')
+  // 前后空白要去掉，否则 ' host-a' 与 'host-a' 会被判成两台机器
+  assert.equal(machineIdForNode(() => '  my-desktop  ', 'win32'), 'my-desktop')
+  // 主机名取不到 ⇒ 退化，但**不许**退化成一个会让所有机器都相同的固定串以外的写法；
+  // 平台名至少保留了"不同平台不同机"这个正确方向。
+  assert.equal(machineIdForNode(() => '', 'linux'), 'platform:linux')
+  assert.equal(machineIdForNode(() => '   ', 'linux'), 'platform:linux')
+  assert.equal(machineIdForNode(() => { throw new Error('受限环境') }, 'darwin'), 'platform:darwin')
+  // 主机名抛错不许把心跳整条搞挂
+  assert.doesNotThrow(() => machineIdForNode(() => { throw new Error('x') }))
+  // 不同平台必须得到不同结果（否则"同机判定"会把跨平台判成同机）
+  assert.notEqual(machineIdForNode(() => '', 'win32'), machineIdForNode(() => '', 'linux'))
+  // 过长要截断（hub 侧上限 128）
+  assert.equal(machineIdForNode(() => 'x'.repeat(300)).length, 128)
+})
+
+test('TC-SP-P1-27 ★★★ 负载必须报"当前在跑几个 / 上限几个"（源码级，闭包内不变量）', async () => {
+  const { readFileSync } = await import('node:fs')
+  const root = new URL('..', import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, '$1')
+  const src = readFileSync(join(root, 'src', 'index.ts'), 'utf8')
+
+  // ① 报的是 inflight 的**当前大小**，不是累计计数 —— 累计值只会单调增长，永远判不出空闲
+  //
+  //   ★ 这里刻意不用形如 `busy:\s*(?!inflight\.size)` 的"前瞻排除"写法：
+  //     `\s*` 可以匹配**零个**字符，于是前瞻会在"空格 + inflight"那个位置成功 ⇒ **恒真**。
+  //     第一版就是这么写的，它把正确的代码报成了错的（"尺子错了，不是东西错了"）。
+  //     改成"全文件只有一处 `busy:`，且它必须长这样" —— 结构性断言不会自我欺骗。
+  const busyLines = src.split('\n').map((l) => l.trim()).filter((l) => l.includes('busy:'))
+  assert.equal(busyLines.length, 1, `全文件只许有一处 busy: 上报，实际 ${busyLines.length} 处：${JSON.stringify(busyLines)}`)
+  assert.match(busyLines[0], /^load: \{ busy: inflight\.size, capacity: config\.maxWorkers \},$/,
+    'busy 必须是 inflight.size（此刻在跑几个），capacity 是 maxWorkers（上限）')
+
+  // ② 机器标识必须上报，且走那个纯函数（不许就地 hostname() 绕过兜底）
+  assert.match(src, /machineId: machineIdForNode\(\)/, '心跳要带 machineId')
+
+  // ③ 自注册之后必须**立刻重试心跳**，否则会留下一个"已登记但还没有负载/机器身份"的窗口 ——
+  //    而那一轮恰好可能就被自动选择器读到（选中一个 busy=null 的节点）。
+  //    ★ 注意 load/machineId 是**心跳(presence)**才有的字段，configs 端点不接受它们
+  //      （config 表存的是声明：provider/能力；负载与机器身份是随心跳来的事实）。
+  //      所以这里钉的不是"注册时带上"，而是"注册完马上补上心跳"。
+  const at = src.indexOf("await hubPost('/api/agent-nodes/configs'")
+  assert.ok(at > 0, '要能找到自注册调用点')
+  const after = src.slice(at, at + 900)
+  assert.match(after, /nodeRegistered = true/, '登记成功要置位')
+  assert.match(after, /await sendNodeHeartbeat\(\)/, '★ 登记后必须立刻重试心跳，别留下没有负载/机器身份的窗口')
+  assert.ok(after.indexOf('nodeRegistered = true') < after.indexOf('await sendNodeHeartbeat()'),
+    '顺序要对：先置位再重试（否则重试失败会被当成"还没登记"反复注册）')
 })

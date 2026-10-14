@@ -88,6 +88,27 @@ export function createHarnessStore({ db } = {}) {
       providers_json TEXT NOT NULL,
       capabilities_json TEXT NOT NULL,
       last_seen_at_ms INTEGER NOT NULL)`)
+  // 2026-10-13（C 档）：节点的**忙闲**与**机器标识**。
+  //
+  // 为什么需要：自动选节点要判"哪台闲"，而在此之前 hub 对节点负载**一无所知** ——
+  //   守护的忙闲是它进程内的 `inflight.size < maxWorkers`，**从不外传**；
+  //   hub 只存了配置里的 maxWorkers（意图），没存实际在跑几个（事实）。
+  //   ⇒ 没有这两列，"按空闲自主选择"只能拍脑袋。
+  //
+  // 为什么要 machine_id：自动绑定的判据不是"哪个闲"，而是"**是不是同一台机器**" ——
+  //   同机可以改派（抢占式均衡），跨机必须排队（一条链不能跨机，交接尚未实现）。
+  //   没有它，就没有"同机/跨机"这个区分，也就没有用户要的那条策略。
+  //
+  // ★ 三列都可空：老守护不上报 ⇒ NULL（= 未知），绝不能当成 0（= 空闲）。
+  for (const [column, ddl] of [
+    ['busy_workers', 'busy_workers INTEGER'],
+    ['capacity_workers', 'capacity_workers INTEGER'],
+    ['machine_id', 'machine_id TEXT'],
+  ]) {
+    if (!db.prepare('PRAGMA table_info(agent_node_presence)').all().some((c) => c.name === column)) {
+      db.exec(`ALTER TABLE agent_node_presence ADD COLUMN ${ddl}`)
+    }
+  }
 
   // Reusable workflow definitions are versioned independently from the
   // mutable space_stages pipeline. Runs will snapshot one exact definition.
@@ -151,6 +172,49 @@ export function createHarnessStore({ db } = {}) {
     for (const key of allowed) if (typeof out[key] !== 'boolean') throw new Error(`node capabilities.${key} 必须明确声明`)
     return out
   }
+
+  /**
+   * 节点负载（2026-10-13，C 档）：`{ busy, capacity }`。
+   *
+   * ★ 三种输入必须分开处理，**不许把它们混成一个值**：
+   *   · 缺席（老守护）/ null  ⇒ **null = 未知**（不是 0！）
+   *   · 给了合法对象          ⇒ `{busy, capacity}`
+   *   · 给了坏东西            ⇒ **抛错**（不静默降级成"未知"）
+   *
+   * 为什么"未知"必须是 null 而不是 0：忙闲要被用来**挑机器**。
+   * 把"不知道"当成"空闲"，选择器会把最不可信的节点排在第一位 ——
+   * 而任务发过去之后没人认领，界面上只说"任务不动"。
+   *
+   *   > 一个"不知道忙不忙"的节点，与一个"确实空闲"的节点，
+   *   > 如果都用 0 表示，那选择器就永远分不出该把活儿交给谁。
+   */
+  const parseNodeLoad = (value) => {
+    if (value === undefined || value === null) return null
+    if (typeof value !== 'object' || Array.isArray(value)) throw new Error('node load 必须是 { busy, capacity } 对象')
+    const { busy, capacity } = value
+    if (!Number.isInteger(busy) || !Number.isInteger(capacity)) throw new Error('node load.busy / load.capacity 必须是整数')
+    // capacity 与 maxWorkers 同域（1..8）：它们是同一件事的"意图"与"事实"，
+    // 域不一致会让两处读数没法互相比对。
+    if (capacity < 1 || capacity > 8) throw new Error('node load.capacity 必须是 1..8 的整数')
+    if (busy < 0 || busy > capacity) throw new Error('node load.busy 必须在 0..capacity 之间')
+    return { busy, capacity }
+  }
+
+  /**
+   * 机器标识（2026-10-13，C 档）：用来判"两个节点是不是同一台机器"。
+   *
+   * 判据：同机 ⇒ 可以改派（抢占式均衡）；跨机 ⇒ 必须排队（一条链不能跨机）。
+   * ★ 缺席 ⇒ null（未知）。**不允许**在这里编造一个默认值 —— 那会让两台不同的机器
+   * 因为"都被填了默认值"而被判成同一台，于是跨机的链被当成同机放行。
+   */
+  const parseMachineId = (value) => {
+    if (value === undefined || value === null || value === '') return null
+    if (typeof value !== 'string') throw new Error('machineId 必须是字符串')
+    const trimmed = value.trim()
+    if (trimmed === '') return null
+    if (trimmed.length > 128) throw new Error('machineId 过长（<=128）')
+    return trimmed
+  }
   const nodeConfigFromRow = (row) => ({
     id: row.id, version: row.version, label: row.label, scope: row.scope,
     providerNames: JSON.parse(row.provider_names_json), capabilities: JSON.parse(row.capabilities_json),
@@ -158,14 +222,26 @@ export function createHarnessStore({ db } = {}) {
   })
   const nodePresence = (node, nowMs = Date.now()) => {
     const row = db.prepare('SELECT * FROM agent_node_presence WHERE node_id=?').get(node.id)
-    if (row === undefined) return { status: 'unknown', lastSeenAtMs: null, observedProviders: [], observedCapabilities: null }
+    if (row === undefined) return { status: 'unknown', lastSeenAtMs: null, observedProviders: [], observedCapabilities: null, busy: null, capacity: null, machineId: null }
     const fresh = row.config_version === node.version && row.scope === node.scope && nowMs - row.last_seen_at_ms <= 60_000
     const observedProviders = JSON.parse(row.providers_json)
     const observedCapabilities = JSON.parse(row.capabilities_json)
     const providersReady = node.providerNames.every((name) => observedProviders.includes(name))
     const capabilitiesReady = Object.entries(node.capabilities).every(([key, required]) => required !== true || observedCapabilities[key] === true)
     const status = !node.enabled ? 'disabled' : !fresh ? 'offline' : providersReady && capabilitiesReady ? 'ready' : 'incompatible'
-    return { status, lastSeenAtMs: row.last_seen_at_ms, observedProviders, observedCapabilities }
+    // ★★ 负载只在**新鲜**时才报出来，过期一律 null（= 未知）。
+    //
+    //   为什么这条必须有：一个**过期的**忙闲读数与一个**真的空闲**，在数值上一模一样
+    //   （都是 busy=0）。若直接把库里的旧值透出去，选择器会把一台**已经失联**的机器
+    //   当成"最闲的那台"挑走 —— 而任务过去之后没有任何人认领。
+    //
+    //     > 一个"上个月很闲"的读数，与一个"现在很闲"的读数，
+    //     > 在**数值上**是同一个东西 —— 区别只在它被用来做决定的那一刻。
+    //
+    //   machineId 不同：它是**身份**、不随时间衰减，所以只要有过上报就照实返回。
+    const busy = fresh && typeof row.busy_workers === 'number' ? row.busy_workers : null
+    const capacity = fresh && typeof row.capacity_workers === 'number' ? row.capacity_workers : null
+    return { status, lastSeenAtMs: row.last_seen_at_ms, observedProviders, observedCapabilities, busy, capacity, machineId: row.machine_id ?? null }
   }
 
   // ★ 默认 provider 的底行：不存在则补上，且**不由外部写入覆盖**（名字固定）。
@@ -352,7 +428,7 @@ export function createHarnessStore({ db } = {}) {
       })
     },
 
-    heartbeatAgentNode({ id, version, scope, providerNames, capabilities, nowMs = Date.now() } = {}) {
+    heartbeatAgentNode({ id, version, scope, providerNames, capabilities, load, machineId, nowMs = Date.now() } = {}) {
       const node = this.getAgentNodeConfig({ id, version, scope })
       if (node === null) {
         // ★ 2026-10-13：把原来的**一句含糊话**拆成两种可判别的原因。
@@ -376,11 +452,15 @@ export function createHarnessStore({ db } = {}) {
       if (!Array.isArray(providerNames) || providerNames.some((name) => typeof name !== 'string' || name.trim() === '')) throw new Error('observed providerNames 必须是字符串数组')
       const providers = [...new Set(providerNames.map((name) => name.trim()))]
       const caps = parseNodeCapabilities(capabilities)
-      db.prepare(`INSERT INTO agent_node_presence (node_id, config_version, scope, providers_json, capabilities_json, last_seen_at_ms)
-        VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(node_id) DO UPDATE SET config_version=excluded.config_version,
+      const nodeLoad = parseNodeLoad(load)
+      const machine = parseMachineId(machineId)
+      db.prepare(`INSERT INTO agent_node_presence (node_id, config_version, scope, providers_json, capabilities_json, last_seen_at_ms, busy_workers, capacity_workers, machine_id)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(node_id) DO UPDATE SET config_version=excluded.config_version,
         scope=excluded.scope, providers_json=excluded.providers_json, capabilities_json=excluded.capabilities_json,
-        last_seen_at_ms=excluded.last_seen_at_ms`)
-        .run(node.id, node.version, node.scope, JSON.stringify(providers), JSON.stringify(caps), nowMs)
+        last_seen_at_ms=excluded.last_seen_at_ms, busy_workers=excluded.busy_workers,
+        capacity_workers=excluded.capacity_workers, machine_id=excluded.machine_id`)
+        .run(node.id, node.version, node.scope, JSON.stringify(providers), JSON.stringify(caps), nowMs,
+          nodeLoad === null ? null : nodeLoad.busy, nodeLoad === null ? null : nodeLoad.capacity, machine)
       return this.listAgentNodeConfigs({ scope: node.scope, nowMs }).find((item) => item.id === node.id)
     },
 

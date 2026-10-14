@@ -25,7 +25,7 @@ import { spawn } from 'node:child_process'
 import { createHash, randomUUID } from 'node:crypto'
 import { appendFileSync, cpSync, mkdirSync, writeFileSync, existsSync, readFileSync, rmSync, readdirSync, statSync } from 'node:fs'
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
-import { homedir } from 'node:os'
+import { homedir, hostname } from 'node:os'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { foldSubagentDescriptor, type SubagentRuntime } from '@deepseek-ai/dsh-subagent'
@@ -3881,6 +3881,17 @@ function spaceWorker(ctx: AppContext, config: Config): void {
             scope,
             by: `${config.role}@${scope}`,
             providerNames,
+            // ── 负载（2026-10-13，C 档）────────────────────────────────────
+            // `inflight` 就是本守护**此刻真的在跑几个**任务的集合；`maxWorkers` 是它的上限。
+            // 在此之前这两个数只活在进程里，hub 一无所知 ⇒ "哪台闲"没人能判。
+            //   注意读的是**当前大小**（每次心跳重新数），不是累计值。
+            load: { busy: inflight.size, capacity: config.maxWorkers },
+            // ── 机器标识（同上）────────────────────────────────────────────
+            // 自动选节点的判据不是"哪个闲"，而是"**是不是同一台机器**"：
+            // 同机可以改派（抢占式均衡），跨机必须排队（一条链不能跨机，交接尚未实现）。
+            // 用 os.hostname() 就够 —— 它稳定、零配置，且对"两台机器重名"这种小概率情形，
+            // 代价只是把跨机误判成同机（退化成抢占式均衡），不会造成数据损坏。
+            machineId: machineIdForNode(),
             capabilities: nodeCapabilities,
           })
 
@@ -4245,6 +4256,24 @@ export interface SpaceRuntimeView {
  * 「主 scope」归属：优先给父配置自己声明的 scope；父 scope 不在接管集合里时**交给第一个空间**——
  * 否则当父 scope 未开通时没人再维护 `daemon.json`，看板/健康页的守护卡片会永久停留在旧数据。
  */
+/**
+ * 本机的**机器标识**（2026-10-13，C 档）：`hostname`，取不到就退化成平台名。
+ *
+ * 用途只有一个：判"两个执行节点是不是同一台机器" —— 同机可改派、跨机要排队。
+ * ★ 刻意**不**在这里编造一个固定默认值（比如 `'unknown'`）：
+ *   那会让**所有**读不到主机名的机器被当成**同一台**，于是跨机的链被判成同机放行。
+ *   退化成平台名（如 `win32`）至少还保留了"不同平台不同机"这个正确方向。
+ * ★ 也**不**读环境变量做覆盖：这一位是机器身份，不是人配的东西；
+ *   真要覆盖时应该走部署层，而不是让每台机器各自填一个可能互相矛盾的值。
+ */
+export function machineIdForNode(hostnameFn: () => string = hostname, platform = process.platform): string {
+  try {
+    const name = String(hostnameFn()).trim()
+    if (name !== '') return name.slice(0, 128)
+  } catch { /* 主机名取不到（极少数受限环境）⇒ 退化成平台名 */ }
+  return `platform:${platform}`
+}
+
 /**
  * 取出一个错误的 **hub error code**（`AGENT_NODE_UNKNOWN` 之类）；取不到返回 `''`。
  *

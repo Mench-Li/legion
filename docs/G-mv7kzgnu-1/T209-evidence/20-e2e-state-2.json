@@ -1,0 +1,304 @@
+{
+  "env": {
+    "node": "v24.19.0",
+    "cwd": "D:\\project\\DSH\\legion\\.legion-worktrees\\T-209",
+    "liveDb": "D:/project/DSH/legion/team-hub/team.db",
+    "liveDbBytes": 64532480,
+    "liveDbMtime": "2026-10-14T04:51:50.638Z",
+    "snapshot": "C:\\Users\\11150\\AppData\\Local\\Temp\\dsh-HTPO54\\t209-e2e-LDGZOJ\\team.db"
+  },
+  "e2e1": {
+    "httpStatus": 200,
+    "softwareAgents": 12,
+    "invalidCount": 0,
+    "invalid": [],
+    "external": [
+      {
+        "role": "general",
+        "avatar": "human:s11",
+        "resolvedKey": "s11",
+        "photo": null,
+        "external": true,
+        "scope": "software"
+      },
+      {
+        "role": "soldier-a",
+        "avatar": "human:s12",
+        "resolvedKey": "s12",
+        "photo": null,
+        "external": true,
+        "scope": "software"
+      },
+      {
+        "role": "soldier-auto",
+        "avatar": "human:s14",
+        "resolvedKey": "s14",
+        "photo": null,
+        "external": true,
+        "scope": "software"
+      },
+      {
+        "role": "soldier-b",
+        "avatar": "human:s13",
+        "resolvedKey": "s13",
+        "photo": null,
+        "external": true,
+        "scope": "software"
+      }
+    ]
+  },
+  "e2e2": {
+    "rosterHttpStatus": 200,
+    "rosterTotal": 29,
+    "rosterInvalidNonEmpty": 0,
+    "rosterEmojiAvatar": 0,
+    "rosterEmptyAvatar": 0,
+    "agentsHttpStatus": 200,
+    "agentsTotal": 23,
+    "agentsInvalidNonEmpty": 0,
+    "agentInvalidList": []
+  },
+  "e2e3": {
+    "total": 12,
+    "distinctAvatars": 12,
+    "distinctKeys": 12,
+    "distinctPhotos": 12,
+    "avatars": [
+      "human:requirement",
+      "human:researcher",
+      "human:breaker",
+      "human:test-designer",
+      "human:coder",
+      "human:reviewer",
+      "human:tester",
+      "human:devops",
+      "human:s11",
+      "human:s12",
+      "human:s14",
+      "human:s13"
+    ],
+    "keys": [
+      "requirement",
+      "researcher",
+      "breaker",
+      "test-designer",
+      "coder",
+      "reviewer",
+      "tester",
+      "devops",
+      "s11",
+      "s12",
+      "s14",
+      "s13"
+    ],
+    "photos": [
+      "agent-avatar-01.webp",
+      "agent-avatar-02.webp",
+      "agent-avatar-03.webp",
+      "agent-avatar-04.webp",
+      "agent-avatar-05.webp",
+      "agent-avatar-06.webp",
+      "agent-avatar-07.webp",
+      "agent-avatar-08.webp",
+      "vector:s11",
+      "vector:s12",
+      "vector:s14",
+      "vector:s13"
+    ],
+    "externalKeys": [
+      "s11",
+      "s12",
+      "s14",
+      "s13"
+    ],
+    "builtinKeys": [
+      "requirement",
+      "researcher",
+      "breaker",
+      "test-designer",
+      "coder",
+      "reviewer",
+      "tester",
+      "devops"
+    ]
+  },
+  "e2e4": {
+    "repeatsStable": true,
+    "repeats": [
+      [
+        [
+          "general",
+          "human:s11"
+        ],
+        [
+          "soldier-a",
+          "human:s12"
+        ],
+        [
+          "soldier-auto",
+          "human:s14"
+        ],
+        [
+          "soldier-b",
+          "human:s13"
+        ]
+      ],
+      [
+        [
+          "general",
+          "human:s11"
+        ],
+        [
+          "soldier-a",
+          "human:s12"
+        ],
+        [
+          "soldier-auto",
+          "human:s14"
+        ],
+        [
+          "soldier-b",
+          "human:s13"
+        ]
+      ],
+      [
+        [
+          "general",
+          "human:s11"
+        ],
+        [
+          "soldier-a",
+          "human:s12"
+        ],
+        [
+          "soldier-auto",
+          "human:s14"
+        ],
+        [
+          "soldier-b",
+          "human:s13"
+        ]
+      ]
+    ],
+    "ozonMarket": [
+      {
+        "role": "soldier-market",
+        "avatar": "human:s15",
+        "resolvedKey": "s15",
+        "photo": null,
+        "external": true,
+        "scope": "ozon"
+      }
+    ],
+    "otherSpaces": {
+      "default": [
+        [
+          "assistant",
+          "human:assistant"
+        ],
+        [
+          "research-assistant",
+          "human:research-assistant"
+        ],
+        [
+          "writer",
+          "human:writer"
+        ]
+      ],
+      "gf001": [
+        [
+          "planner",
+          "human:s02"
+        ],
+        [
+          "implementer",
+          "human:s01"
+        ],
+        [
+          "reviewer",
+          "human:reviewer"
+        ]
+      ],
+      "ozon": [
+        [
+          "soldier-research",
+          "human:s08"
+        ],
+        [
+          "soldier-selection",
+          "human:s09"
+        ],
+        [
+          "soldier-compliance",
+          "human:s03"
+        ],
+        [
+          "soldier-profit",
+          "human:s07"
+        ],
+        [
+          "soldier-sourcing",
+          "human:s10"
+        ],
+        [
+          "soldier-listing",
+          "human:s04"
+        ],
+        [
+          "soldier-ops-store",
+          "human:s06"
+        ],
+        [
+          "soldier-ops-social",
+          "human:s05"
+        ],
+        [
+          "soldier-ad-creative",
+          "human:s01"
+        ],
+        [
+          "soldier-ad-delivery",
+          "human:s02"
+        ],
+        [
+          "soldier-market",
+          "human:s15"
+        ]
+      ]
+    }
+  },
+  "e2e6": {
+    "rosterCountBefore": 24,
+    "rosterCountAfter": 24,
+    "taskCountBefore": 207,
+    "taskCountAfter": 207,
+    "tasksUnchanged": true,
+    "agentCountMismatch": [],
+    "agentCountByName": {
+      "default": 3,
+      "gf001": 3,
+      "ozon": 10,
+      "software": 8
+    },
+    "agentsRoleSetMatchesRoster": true
+  },
+  "restart": {
+    "prevSnapshot": "C:\\Users\\11150\\AppData\\Local\\Temp\\dsh-HTPO54\\t209-e2e-8ZPaMN\\team.db",
+    "curSnapshot": "C:\\Users\\11150\\AppData\\Local\\Temp\\dsh-HTPO54\\t209-e2e-LDGZOJ\\team.db",
+    "namedStable": true,
+    "prevNamed": {
+      "general": "human:s11",
+      "soldier-a": "human:s12",
+      "soldier-auto": "human:s14",
+      "soldier-b": "human:s13"
+    },
+    "curNamed": {
+      "general": "human:s11",
+      "soldier-a": "human:s12",
+      "soldier-auto": "human:s14",
+      "soldier-b": "human:s13"
+    },
+    "ozonMarketStable": true,
+    "otherSpacesStable": true
+  }
+}

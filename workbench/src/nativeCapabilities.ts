@@ -38,10 +38,10 @@
 // | `toolFilter`   | **有** | 同上 |
 // | `cancellation` | **有** | 同上（本仓适配器恒为 true：DSH run handle 提供 `dispose()`） |
 // | `localAgent`   | **没有** | 它说的是"运行时交回的句柄带不带本地 Agent"（集成模式下硬要求），provider 描述符里**没有这一位** |
-// | `sessionResume`| **没有** | 全仓检索：**没有任何消费方**，只在能力表里被读写 |
+// | `sessionResume`| **没有** | 全仓检索：**没有任何消费方**，只在能力表里被读写 ⇒ 2026-10-13 起**不再问用户**，写死 false |
 //
-// 所以本模块**只推导前三项**；后两位如实标注为"本机读不出来、需你确认"。
-// 把后两位也"推导"出来（比如猜 true）会比现状更坏：那会把一个猜测伪装成读数。
+// 所以本模块**只推导前三项**；`localAgent` 如实标注为「本机读不出来、需你确认」。
+// 把 `localAgent` 也"推导"出来（比如猜 true）会比现状更坏：那会把一个猜测伪装成读数。
 //
 // 读数**缺席**时（旧守护不上报、或本轮自检还没跑到）三项也退回用户声明 ——
 // 保持既有行为，但界面必须说清"这只是声明"。
@@ -67,23 +67,42 @@ export interface DeclaredCapabilities {
   readonly systemProxyMode?: string
 }
 
-/** 用户为**读数推不出来**的能力位所做的声明（读数在场时仅后两位生效）。 */
+/** 用户为**读数推不出来**的能力位所做的声明（读数在场时仅 `localAgent` 生效）。 */
 export interface UserDeclaredCapabilities {
   readonly toolFilter: boolean
   readonly localAgent: boolean
-  readonly sessionResume: boolean
   readonly cancellation: boolean
 }
 
 /** 有真来源、能从读数推导的三位。 */
 export const DERIVED_KEYS = Object.freeze(['outputSchema', 'toolFilter', 'cancellation'] as const)
-/** 没有真来源、只能由用户声明的两位。 */
-export const ASSUMED_KEYS = Object.freeze(['localAgent', 'sessionResume'] as const)
+/**
+ * 没有真来源、只能由用户声明的一位（2026-10-13 起只剩 `localAgent`）。
+ *
+ * ★ `sessionResume` 原来也在这里，现在**移出去了**：它没有消费方（见下方常量说明），
+ *   而"让用户为一件没人读的事做声明"本身就是多余的界面负担 ——
+ *   用户在一个可选的高级面板里被问了一个**答案不会被用到**的问题。
+ *
+ *   > 一个"问了但没人用"的选项，
+ *   > 与一个"根本没问"的选项，在**用户点它的时候**看起来一样 ——
+ *   > 区别只在他以为自己的选择起了作用。
+ */
+export const ASSUMED_KEYS = Object.freeze(['localAgent'] as const)
 
 export const ASSUMED_REASONS: Readonly<Record<typeof ASSUMED_KEYS[number], string>> = Object.freeze({
   localAgent: '本机读不出来：它说的是"运行时交回的句柄带不带本地 Agent"（集成模式下硬要求），provider 描述符里没有这一位。',
-  sessionResume: '本机读不出来，且当前没有任何消费方确认它 —— 如实声明即可，留着是为了将来接续会话。',
 })
+
+/**
+ * `sessionResume` 的固定取值（2026-10-13）。
+ *
+ * 它**留在数据模型里**（`team-hub/harness-store.mjs` 的 `allowed` 要求每个键显式声明布尔），
+ * 但**不再由用户设置**：全仓检索过，它只有**声明点**、**零消费方**
+ * （`plugins/src/index.ts` 里没有任何分支读它；`localAgent` 则真的会在集成模式下拦人）。
+ *
+ * 所以如实写死 `false` —— 而不是"留个复选框让用户声明一个不会被读的值"。
+ */
+const SESSION_RESUME_UNUSED = false
 
 export interface Derivation {
   /** 合并后的完整声明，可直接送给 `registerAgentToolConfig`。 */
@@ -108,7 +127,7 @@ export interface Derivation {
  * 推导 DSH 的能力声明。
  *
  * @param declared 本机读数里的 `declared`；`null`/`undefined` = **没读到**（不是"不支持"）
- * @param user     四项用户声明 —— 读数在场时只有 `localAgent`/`sessionResume` 生效
+ * @param user     三项用户声明 —— 读数在场时只有 `localAgent` 生效（`toolFilter`/`cancellation` 由读数接管）
  */
 export function deriveNativeCapabilities(
   declared: DeclaredCapabilities | null | undefined,
@@ -136,7 +155,7 @@ export function deriveNativeCapabilities(
         outputSchema: declared.outputSchema === true,
         toolFilter: declared.toolFilter === true,
         localAgent: user.localAgent,
-        sessionResume: user.sessionResume,
+        sessionResume: SESSION_RESUME_UNUSED,
         cancellation: declared.cancellation === true,
       }
     : {
@@ -146,7 +165,7 @@ export function deriveNativeCapabilities(
         outputSchema: true,
         toolFilter: user.toolFilter,
         localAgent: user.localAgent,
-        sessionResume: user.sessionResume,
+        sessionResume: SESSION_RESUME_UNUSED,
         cancellation: user.cancellation,
       }
 

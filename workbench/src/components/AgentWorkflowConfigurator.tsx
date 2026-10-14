@@ -1,5 +1,5 @@
 import { useRef, useState } from 'react'
-import { fetchAgentNodes, fetchAgentToolConfigs, fetchAgentWorkflowDefinitions, fetchAgentWorkflowHistory, fetchAgentWorkflowInstances, fetchMemberReadiness, fetchModelProfiles, fetchSpacePipeline, registerAgentNode, registerAgentToolConfig, registerAgentWorkflowDefinition, saveSpacePipeline, setGoalStatus } from '../api'
+import { fetchAgentNodes, fetchAgentToolConfigs, fetchAgentWorkflowDefinitions, fetchAgentWorkflowHistory, fetchAgentWorkflowInstances, fetchMemberReadiness, fetchModelProfiles, fetchSpacePipeline, registerAgentToolConfig, registerAgentWorkflowDefinition, saveSpacePipeline, setGoalStatus } from '../api'
 import type { AgentNodeRecord, AgentToolConfigRecord, AgentWorkflowDefinition, AgentWorkflowHistory, AgentWorkflowInstanceSummary, HubModelProfile, SpacePipelineConfig } from '../api'
 import { formatCodexSystemProxyMode } from '../agentWorkflowView'
 import {
@@ -49,13 +49,16 @@ const EXTERNAL_CAPABILITIES: AgentToolConfigRecord['capabilities'] = {
   textInput: true, textOutput: true, outputSchema: false, toolFilter: false,
   localAgent: false, sessionResume: false, cancellation: true,
 }
-/** 能力位的中文标签（界面与推导结果共用一套词，避免两处措辞漂移）。 */
+/** 能力位的中文标签（界面与推导结果共用一套词，避免两处措辞漂移）。
+ *
+ * ★ 这里**没有 `sessionResume`** —— 它在 2026-10-13 之后不再由用户设置，
+ *   而一份"有标签、却没有对应复选框"的映射，只会让下一个人去找那个不存在的开关。
+ *   该字段本身仍在数据模型里（hub 的 schema 要求显式布尔），见 `nativeCapabilities.ts`。 */
 const ABILITY_LABEL: Record<string, string> = {
   outputSchema: '支持结构化输出（outputSchema）',
   toolFilter: '支持工具过滤',
   cancellation: '支持取消执行',
   localAgent: '提供本地 Agent 拦截能力',
-  sessionResume: '支持会话续接',
 }
 
 function observedPermissionModes(node: AgentNodeRecord): string {
@@ -111,8 +114,6 @@ export function AgentWorkflowConfigurator({ scope }: Props): React.JSX.Element {
   const [cancelConfirmId, setCancelConfirmId] = useState<string | null>(null)
   const [nodes, setNodes] = useState<AgentNodeRecord[]>([])
   const [nodeIds, setNodeIds] = useState<Record<RoleKey, string>>({ designRole: '', implementationRole: '', reviewRole: '' })
-  const [newNodeId, setNewNodeId] = useState('')
-  const [newNodeLabel, setNewNodeLabel] = useState('')
   const [roles, setRoles] = useState<Record<RoleKey, string>>({ designRole: '', implementationRole: '', reviewRole: '' })
   // ★ 默认值 = **DSH 执行服务**（不是 Claude Code / Codex）。理由见 agentWorkflowDefaults.ts：
   //   原来的硬编码默认值预设了"这台机器装了三个外部产品"，而实测本环境一个都没有 ——
@@ -131,7 +132,6 @@ export function AgentWorkflowConfigurator({ scope }: Props): React.JSX.Element {
   const [reviewImplementationRoute, setReviewImplementationRoute] = useState('implement')
   const [nativeToolFilter, setNativeToolFilter] = useState(true)
   const [nativeLocalAgent, setNativeLocalAgent] = useState(true)
-  const [nativeSessionResume, setNativeSessionResume] = useState(false)
   const [nativeCancellation, setNativeCancellation] = useState(true)
   const instanceRequestId = useRef(0)
 
@@ -215,7 +215,6 @@ export function AgentWorkflowConfigurator({ scope }: Props): React.JSX.Element {
           setDshProvider(config.providerName)
           setNativeToolFilter(config.capabilities.toolFilter)
           setNativeLocalAgent(config.capabilities.localAgent)
-          setNativeSessionResume(config.capabilities.sessionResume)
           setNativeCancellation(config.capabilities.cancellation)
         }
       }
@@ -291,7 +290,7 @@ export function AgentWorkflowConfigurator({ scope }: Props): React.JSX.Element {
     const capabilities = choice === 'dsh-native'
       ? deriveNativeCapabilities(declaredFor(readiness, providerName), {
         toolFilter: nativeToolFilter, localAgent: nativeLocalAgent,
-        sessionResume: nativeSessionResume, cancellation: nativeCancellation,
+        cancellation: nativeCancellation,
       }).capabilities
       : EXTERNAL_CAPABILITIES
     const compatible = configs.filter(item => item.enabled && item.providerName === providerName
@@ -314,24 +313,6 @@ export function AgentWorkflowConfigurator({ scope }: Props): React.JSX.Element {
     return { id, version }
   }
 
-  const createNode = async (): Promise<void> => {
-    const id = newNodeId.trim()
-    const label = newNodeLabel.trim()
-    if (!id || !label) { setError('请填写节点 ID 和显示名称。'); return }
-    setSaving(true)
-    setError('')
-    try {
-      await registerAgentNode({ id, label, scope })
-      setNodes(await fetchAgentNodes(scope))
-      setNewNodeId('')
-      setNewNodeLabel('')
-      toast('ok', `节点 ${label} 已登记；请在对应 执行服务 配置相同 agentNodeId 并重启以开始心跳。`)
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e))
-    } finally {
-      setSaving(false)
-    }
-  }
 
   const save = async (): Promise<void> => {
     if (!pipeline) return
@@ -466,7 +447,6 @@ export function AgentWorkflowConfigurator({ scope }: Props): React.JSX.Element {
         setDshProvider(config.providerName)
         setNativeToolFilter(config.capabilities.toolFilter)
         setNativeLocalAgent(config.capabilities.localAgent)
-        setNativeSessionResume(config.capabilities.sessionResume)
         setNativeCancellation(config.capabilities.cancellation)
       }
       const tool: ToolChoice = config?.adapter === 'dsh-subagent' && config.providerName === 'codex' ? 'codex'
@@ -520,7 +500,7 @@ export function AgentWorkflowConfigurator({ scope }: Props): React.JSX.Element {
    */
   const nativeDerivation = deriveNativeCapabilities(declaredFor(readiness, dshProvider.trim()), {
     toolFilter: nativeToolFilter, localAgent: nativeLocalAgent,
-    sessionResume: nativeSessionResume, cancellation: nativeCancellation,
+    cancellation: nativeCancellation,
   })
   /** 这套配置里有没有用到 DSH（决定能力位推导的结果是否真的会被用到）。 */
   const usesNativeTool = (): boolean =>
@@ -699,13 +679,17 @@ export function AgentWorkflowConfigurator({ scope }: Props): React.JSX.Element {
             </div>)}
             <div style={{ marginTop: 10, padding: 8, border: '1px solid var(--line)', borderRadius: 6 }}>
               <b>执行节点</b>
-              {nodes.length === 0 ? <div style={{ color: 'var(--muted-2)' }}>尚未登记节点。留空时由任一在线 执行节点 认领。</div> : nodes.map(node => <div key={node.id} style={{ color: 'var(--muted-2)' }}>{node.label} · {node.id} · {node.status}{node.observedProviders.length ? ` · ${node.observedProviders.join(', ')}` : ''} · {observedPermissionModes(node)}</div>)}
-              <div style={{ display: 'flex', gap: 8, marginTop: 8, flexWrap: 'wrap' }}>
-                <input value={newNodeId} onChange={e => setNewNodeId(e.target.value)} placeholder="节点 ID，如 workstation-a" />
-                <input value={newNodeLabel} onChange={e => setNewNodeLabel(e.target.value)} placeholder="显示名称" />
-                <button type="button" className="btn ghost" disabled={saving} onClick={() => void createNode()}>登记节点</button>
-              </div>
-              <div style={{ color: 'var(--muted-2)' }}>节点是运行 Legion worker 的 执行服务实例，不是 Claude/Codex 产品。Provider、能力和 生效权限模式由 daemon 心跳报告；外部阶段只有匹配冻结权限模式时才会派工。登记不会复制登录凭据。随后需在 daemon 配置中设置相同的 agentNodeId。</div>
+              {/* ★ 2026-10-13：**删掉了手工「登记节点」输入框**。
+                  理由：A 档之后守护会**自己登记**（首次心跳发现本空间没有这个节点就注册一次，
+                  新空间同理）⇒ 这里原来要求用户先知道一个节点 ID 与显示名称，
+                  而那两个值他既无从查、也不该关心 —— 那正是"相当茫然"的一部分。
+                  ★ 代价（如实记下）：不能再"为还没启动的机器预留节点"。但那个能力价值有限 ——
+                  节点不就绪时绑定本来就会被发布校验拒绝。
+                  见 `plugins/src/index.ts` 的自注册分支与 `docs/FEATURES.md` §3.21。 */}
+              {nodes.length === 0
+                ? <div style={{ color: 'var(--muted-2)' }}>本空间还没有节点。执行服务启动后**会自己登记**（不需要你填任何东西）；留空时由任一在线节点认领。</div>
+                : nodes.map(node => <div key={node.id} style={{ color: 'var(--muted-2)' }}>{node.label} · {node.id} · {node.status}{node.observedProviders.length ? ` · ${node.observedProviders.join(', ')}` : ''} · {observedPermissionModes(node)}</div>)}
+              <div style={{ color: 'var(--muted-2)' }}>节点是运行 Legion worker 的 执行服务实例，不是 Claude/Codex 产品。Provider、能力和 生效权限模式由 daemon 心跳报告；外部阶段只有匹配冻结权限模式时才会派工。节点身份由守护按 `agentNodeId`（支持 `{'{scope}'}` 占位符）自行上报，不会复制登录凭据。</div>
               {nodes.some(node => node.providerNames.includes('codex')) && <div style={{ color: 'var(--muted-2)', marginTop: 6 }}>
                 Codex 网络代理状态（逐节点）：{nodes.filter(node => node.providerNames.includes('codex')).map(node => `${node.label}：${formatCodexSystemProxyMode(observedCodexSystemProxyMode(node))}`).join('；')}。
               </div>}
@@ -759,12 +743,12 @@ export function AgentWorkflowConfigurator({ scope }: Props): React.JSX.Element {
                   {nativeDerivation.derived.length > 0 ? '（读数）' : '（声明）'}
                 </label>)}
                 <div style={{ color: 'var(--muted-2)', marginTop: 6 }}>
-                  下列两项**本机读不出来**，需要你确认：
+                  {ASSUMED_KEYS.length === 1 ? '下列这一项**本机读不出来**，需要你确认：' : `下列 ${ASSUMED_KEYS.length} 项**本机读不出来**，需要你确认：`}
                 </div>
                 {ASSUMED_KEYS.map(key => <label key={key} style={{ display: 'block' }}>
                   <input type="checkbox"
-                    checked={key === 'localAgent' ? nativeLocalAgent : nativeSessionResume}
-                    onChange={e => { if (key === 'localAgent') setNativeLocalAgent(e.target.checked); else setNativeSessionResume(e.target.checked) }} />
+                    checked={nativeLocalAgent}
+                    onChange={e => setNativeLocalAgent(e.target.checked)} />
                   {' '}{ABILITY_LABEL[key]}
                   <div style={{ marginLeft: 18, color: 'var(--muted-2)' }}>{ASSUMED_REASONS[key]}</div>
                 </label>)}

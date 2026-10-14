@@ -9,7 +9,7 @@ import { toast } from './Toast'
 import { deliveryBadgeOf, schedulingBadgeOf } from '../deliveryBadge.ts'
 import { planDrop } from '../reworkPlan.ts'
 import { sortByMostRecent } from '../taskOrder.ts'
-import { buildGoalFilter, goalFilterLabel, matchesGoalFilter } from '../taskGoalFilter.ts'
+import { buildGoalFilter, goalFilterLabel, hasRealGoal, matchesGoalFilter, rankGoalOptions } from '../taskGoalFilter.ts'
 import { ReworkModal } from './ReworkModal'
 import { TaskDetailModal } from './TaskDetailModal'
 
@@ -29,10 +29,12 @@ import { TaskDetailModal } from './TaskDetailModal'
  *  - 按工作空间（scope）查看 scrum 任务：拉 team-hub v2 `/api/board?scope=`（真分区；
  *    scope=null = 全部空间聚合，卡片带空间名）。**唯一数据源就是中枢** ——
  *    从前还有一条"文件模式只读"的回退，随那条被取消的旧看板一起删掉了。
- *  - 过滤轴（面板内三条，叠加生效）：**🎯 目标**（胶囊，含「未挂目标」）· 👥 岗位/执行者 ·
- *    🔍 id/标题搜索。目标那条轴收在 `../taskGoalFilter.ts`（纯函数）：胶囊计数取全量口径
- *    （不含已取消），顺序固定，点选前后位置不跳；目标文案来自上层传入的 `goals`
- *    （「全部空间」模式读不到目标记录 ⇒ 如实退化成显示目标 id，不猜文案）。
+ *  - 过滤轴（面板内三条，叠加生效）：**🎯 目标**（下拉 + 输入模糊匹配）· 👥 岗位/执行者 ·
+ *    🔍 id/标题搜索。目标那条轴收在 `../taskGoalFilter.ts`（纯函数）：计数取全量口径
+ *    （不含已取消），顺序固定；模糊匹配打在**完整**目标文案与目标 id 上（子序列也算命中），
+ *    「未挂目标」是列表里的显式一项。为什么是下拉而不是一排胶囊：目标会长到几十个，
+ *    一排胶囊会把过滤区撑成好几行、把泳道挤下去。
+ *    目标文案来自上层传入的 `goals`（「全部空间」模式读不到目标记录 ⇒ 如实退化成显示目标 id，不猜文案）。
  *  - 点击卡片 → 打开既有任务详情（TaskDetailModal：验收/打回/评论/转派/拦截/派 AI），状态变更后联动刷新。
  *
  * 实时性：hub 审计 SSE（/api/events）按 action 过滤任务类事件即时刷新 + 20s 轮询兜底。
@@ -212,6 +214,10 @@ export function TaskCenterView({ scope, hubMode, spaces = [], goals = [], onSele
   const [roleFilter, setRoleFilter] = useState<string | null>(null)
   /** 🎯 目标过滤（键 = goalId 或「未挂目标」哨兵；null = 全部目标）。 */
   const [goalFilter, setGoalFilter] = useState<string | null>(null)
+  /** 目标下拉的开合、搜索串与键盘游标（游标 = 列表项下标，-1 = 没动过）。 */
+  const [goalOpen, setGoalOpen] = useState(false)
+  const [goalQuery, setGoalQuery] = useState('')
+  const [goalCursor, setGoalCursor] = useState(-1)
   const [dragId, setDragId] = useState<string | null>(null)
   const [dropCol, setDropCol] = useState<CardStatus | null>(null)
   const [busyDrop, setBusyDrop] = useState(false)
@@ -221,6 +227,8 @@ export function TaskCenterView({ scope, hubMode, spaces = [], goals = [], onSele
   const isAll = hubMode && scope === null
   /** 泳道容器：切视角时把「第一个有匹配的列」滚进视野（受阻/已完成 默认在横向滚动区外侧）。 */
   const boardRef = useRef<HTMLDivElement | null>(null)
+  /** 目标下拉的容器：点外面关掉它（不用遮罩：遮罩会把泳道的拖拽一起挡掉）。 */
+  const goalPickerRef = useRef<HTMLDivElement | null>(null)
 
   const load = useCallback(async (): Promise<void> => {
     try {
@@ -270,6 +278,26 @@ export function TaskCenterView({ scope, hubMode, spaces = [], goals = [], onSele
   }
   useEffect(() => { if (selectedView) setView(selectedView) }, [selectedView])
 
+  /**
+   * 目标下拉：点外面关掉。
+   *
+   * 不用全屏遮罩 —— 遮罩会盖住泳道，把"一边看卡片一边换目标"这件事变成两次点击。
+   * 监听挂在 document 的 mousedown 上（不是 click）：按下就关，比等 click 更跟手。
+   */
+  useEffect(() => {
+    if (!goalOpen) return
+    const onDown = (e: MouseEvent): void => {
+      if (!goalPickerRef.current?.contains(e.target as Node)) setGoalOpen(false)
+    }
+    const onKey = (e: KeyboardEvent): void => { if (e.key === 'Escape') setGoalOpen(false) }
+    document.addEventListener('mousedown', onDown)
+    document.addEventListener('keydown', onKey)
+    return () => {
+      document.removeEventListener('mousedown', onDown)
+      document.removeEventListener('keydown', onKey)
+    }
+  }, [goalOpen])
+
   const spaceName = useCallback(
     (id?: string): string => {
       if (!id) return '未分区'
@@ -302,6 +330,44 @@ export function TaskCenterView({ scope, hubMode, spaces = [], goals = [], onSele
     for (const g of goals) if (g.id && g.objective) m.set(g.id, g.objective)
     return m
   }, [goals])
+
+  /** 「全部目标」右侧的数字 = 该范围内未被取消的任务数（与胶囊口径一致）。 */
+  const goalTotal = useMemo(() => (rows ?? []).filter(r => r.status !== 'canceled').length, [rows])
+
+  /** 下拉内容：空搜索 = 全量（顺序固定），输入 = 模糊匹配后按分数排序。 */
+  const goalMenu = useMemo(() => rankGoalOptions(goalOptions, goalQuery, goalTotal), [goalOptions, goalQuery, goalTotal])
+
+  /** 触发按钮上的说法：没筛 = 「全部目标」，筛着的那个目标显示**完整文案 + id**。 */
+  const goalCurrent = useMemo(() => goalOptions.find(o => o.key === goalFilter) ?? null, [goalOptions, goalFilter])
+
+  const chooseGoal = (key: string | null): void => {
+    setGoalFilter(key)
+    setGoalOpen(false)
+    setGoalQuery('')
+    setGoalCursor(-1)
+  }
+
+  /** 下拉里的键盘操作：↑↓ 移游标、Enter 选中、Esc 关闭（与原生 select 一致的手感）。 */
+  const onGoalKeyDown = (e: React.KeyboardEvent<HTMLInputElement>): void => {
+    if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+      e.preventDefault()
+      const dir = e.key === 'ArrowDown' ? 1 : -1
+      const n = goalMenu.length
+      if (n === 0) return
+      setGoalCursor(prev => (prev < 0 ? (dir > 0 ? 0 : n - 1) : (prev + dir + n) % n))
+      return
+    }
+    if (e.key === 'Enter') {
+      e.preventDefault()
+      const hit = goalMenu[goalCursor] ?? goalMenu[0]
+      if (hit) chooseGoal(hit.key)
+      return
+    }
+    if (e.key === 'Escape') {
+      e.preventDefault()
+      setGoalOpen(false)
+    }
+  }
 
   /** 搜索 + 岗位 + 目标过滤后的任务（不含将军视角过滤）。 */
   const filtered = useMemo(() => {
@@ -548,8 +614,7 @@ export function TaskCenterView({ scope, hubMode, spaces = [], goals = [], onSele
     )
     : null
 
-  /** 已选中的目标在过滤条标题上**显示 id**（卡片上的 🎯 徽标就是 id，两边要能对上）。 */
-  const goalFilterId = goalOptions.find(o => o.key === goalFilter)?.goalId ?? null
+  /** 筛着但选项读不到时（如切换空间后目标没了），空态要能念出筛的是哪个键。 */
   const goalFilterWording = goalFilterLabel(goalOptions, goalFilter)
 
   return (
@@ -575,6 +640,58 @@ export function TaskCenterView({ scope, hubMode, spaces = [], goals = [], onSele
                 </option>
               ))}
             </select>
+          )}
+          {/* 🎯 目标下拉：一个真实目标都没有时整条不出现（那时唯一的选项是「未挂目标」，等于没得筛） */}
+          {hasRealGoal(goalOptions) && (
+          <div className="tc-goal-picker" ref={goalPickerRef}>
+            <button
+              type="button"
+              className={`tc-goal-trigger${goalFilter ? ' on' : ''}`}
+              onClick={() => { setGoalOpen(v => !v); setGoalCursor(-1) }}
+              aria-haspopup="listbox"
+              aria-expanded={goalOpen}
+              title={goalCurrent
+                ? `当前按目标筛选：${goalCurrent.title}（点开可换或取消）`
+                : '按目标筛选任务（点开可搜目标名 / 目标 id）'}
+            >
+              {/* 「目标：」四个字常驻：只显示目标文案时，用户认不出这是哪条轴 */}
+              🎯 目标：{goalCurrent ? goalCurrent.label : '全部'}
+              {goalCurrent && <span className="tc-pill-cnt">{goalCurrent.count}</span>}
+              <span className="tc-caret">▾</span>
+            </button>
+            {goalOpen && (
+              <div className="tc-goal-menu">
+                <input
+                  className="tc-goal-search"
+                  autoFocus
+                  placeholder="输入目标名 / 目标 id 模糊匹配…"
+                  value={goalQuery}
+                  onChange={e => { setGoalQuery(e.target.value); setGoalCursor(0) }}
+                  onKeyDown={onGoalKeyDown}
+                  aria-label="搜索目标"
+                />
+                <div className="tc-goal-list" role="listbox" aria-label="目标列表">
+                  {goalMenu.map((entry, i) => (
+                    <button
+                      type="button"
+                      key={entry.key ?? '__all__'}
+                      role="option"
+                      aria-selected={goalFilter === entry.key}
+                      className={`tc-goal-opt${goalFilter === entry.key ? ' on' : ''}${i === goalCursor ? ' cursor' : ''}`}
+                      title={entry.title}
+                      onClick={() => chooseGoal(entry.key)}
+                      onMouseEnter={() => setGoalCursor(i)}
+                    >
+                      <span className="tc-goal-opt-label">{entry.label}</span>
+                      <span className="tc-pill-cnt">{entry.count}</span>
+                    </button>
+                  ))}
+                  {/* 目标一条都没匹配上时说清是"搜不到"，不是"这里什么都没有" */}
+                  {goalMenu.length === 0 && <div className="tc-goal-none">没有匹配的目标</div>}
+                </div>
+              </div>
+            )}
+          </div>
           )}
           <input
             className="tc-search"
@@ -610,33 +727,8 @@ export function TaskCenterView({ scope, hubMode, spaces = [], goals = [], onSele
         <span className="tc-sum-total">共 {(rows ?? []).length} 任务{hubMode ? (isAll ? ' · 跨全部空间' : '') : ''}</span>
       </div>
 
-      {/* 🎯 目标过滤条：一条目标一个胶囊（含「未挂目标」），计数为全量口径、顺序固定 */}
-      {goalOptions.length > 0 && (
-        <div className="panel tc-filter">
-          <span className="tc-filter-label">
-            🎯 目标{goalFilter ? ` · ${goalFilterId ?? goalFilterWording ?? goalFilter}` : ''}
-          </span>
-          <div className="tc-pills">
-            <button className={`tc-pill${goalFilter === null ? ' on' : ''}`} onClick={() => setGoalFilter(null)}>
-              全部
-            </button>
-            {goalOptions.map(o => (
-              <button
-                key={o.key}
-                className={`tc-pill tc-pill-goal${goalFilter === o.key ? ' on' : ''}`}
-                onClick={() => setGoalFilter(goalFilter === o.key ? null : o.key)}
-                title={`${o.title}（按目标过滤；再次点击取消）`}
-              >
-                {o.label} <span className="tc-pill-cnt">{o.count}</span>
-              </button>
-            ))}
-          </div>
-          {clearLink}
-        </div>
-      )}
-
       {/* 角色/岗位过滤条 */}
-      {(roles.length > 0 || (visible.length === 0 && rows !== null)) && (
+      {(roles.length > 0 || clearLink !== null || (visible.length === 0 && rows !== null)) && (
         <div className="panel tc-filter">
           <span className="tc-filter-label">👥 岗位/执行者</span>
           <div className="tc-pills">
@@ -645,8 +737,7 @@ export function TaskCenterView({ scope, hubMode, spaces = [], goals = [], onSele
             </button>
             {roleOptions}
           </div>
-          {/* 目标条在时「清除过滤」已经挂在它末尾，这里不重复给第二个 */}
-          {goalOptions.length === 0 ? clearLink : null}
+          {clearLink}
         </div>
       )}
 

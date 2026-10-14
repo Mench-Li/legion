@@ -3375,9 +3375,87 @@ body {
 
 .tc-pill.on { color: var(--accent); border-color: rgba(91, 140, 255, 0.5); }
 
-/* 🎯 目标胶囊：与卡片上的「🎯 目标」徽标同色（同一条轴在两处要能认出来） */
-.tc-pill-goal { max-width: 320px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.tc-pill-goal.on { color: var(--purple); border-color: rgba(167, 139, 250, 0.5); }
+/* 🎯 目标下拉（目标会长到几十个：一排胶囊会把过滤区撑成好几行、把泳道挤下去，
+   所以这条轴是**下拉 + 输入模糊匹配**。位置在头部右侧，与工作空间下拉/搜索同一排） */
+.tc-goal-picker { position: relative; }
+
+.tc-goal-trigger {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  max-width: 260px;
+  background: var(--panel-2);
+  color: var(--text);
+  border: 1px solid var(--line-2);
+  border-radius: 6px;
+  font-family: inherit;
+  font-size: 12px;
+  padding: 4px 8px;
+  cursor: pointer;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.tc-goal-trigger:hover { border-color: rgba(91, 140, 255, 0.5); }
+/* 筛着时用卡片上 🎯 徽标的同色（同一条轴在两处要能认出来） */
+.tc-goal-trigger.on { color: var(--purple); border-color: rgba(167, 139, 250, 0.5); }
+.tc-goal-trigger .tc-caret { opacity: 0.6; font-size: 10px; }
+
+.tc-goal-menu {
+  position: absolute;
+  top: calc(100% + 4px);
+  right: 0;
+  z-index: 60;
+  width: 320px;
+  max-width: 90vw;
+  background: var(--panel);
+  border: 1px solid var(--line-2);
+  border-radius: 8px;
+  box-shadow: 0 14px 40px rgba(0, 0, 0, 0.5);
+  padding: 6px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.tc-goal-search {
+  background: var(--panel-2);
+  color: var(--text);
+  border: 1px solid var(--line-2);
+  border-radius: 6px;
+  font-size: 12px;
+  font-family: inherit;
+  padding: 5px 8px;
+}
+
+.tc-goal-search:focus { outline: none; border-color: rgba(91, 140, 255, 0.6); }
+
+/* 列表自身滚动：目标再多也只在框里滚，不把页面撑长 */
+.tc-goal-list { max-height: 46vh; overflow-y: auto; display: flex; flex-direction: column; gap: 2px; }
+
+.tc-goal-opt {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  text-align: left;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  color: var(--text-2);
+  font-family: inherit;
+  font-size: 12px;
+  padding: 5px 8px;
+  cursor: pointer;
+}
+
+.tc-goal-opt-label { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tc-goal-opt .tc-pill-cnt { flex: none; }
+.tc-goal-opt:hover, .tc-goal-opt.cursor { background: rgba(91, 140, 255, 0.1); }
+.tc-goal-opt.on { color: var(--purple); border-color: rgba(167, 139, 250, 0.45); background: rgba(167, 139, 250, 0.1); }
+
+.tc-goal-none { color: var(--muted-2); font-size: 11px; padding: 10px 8px; text-align: center; }
 
 .tc-pill-cnt { opacity: 0.6; margin-left: 2px; font-size: 10px; }
 

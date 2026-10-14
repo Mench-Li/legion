@@ -684,34 +684,65 @@ systemctl list-timers legion-hub-storage-check.timer    # 看 LAST 那一列
 **没有**进表 —— 它们可能是 bundle 里拼接路径的**片段**（裸 `/api/reject`
 看着不像一个完整端点）。**未核实**，所以宁可不说，也不说错。
 
-### ★★ 6.4b 一个必须记下的事：生产上的 SPA **无法从仓库复现**
+### ★★★ 6.4b 生产上的 SPA **是可以复现的**（这一节原先写的是反的）
 
-部署里的 `/workbench/` 产物是 `assets/index-BjYkts4m.js`。为了知道"重建它会不会
-连带带上别的改动"，我把动过 `workbench/src` 的提交**各自构建了一遍**：
+> ⚠️ **更正（2026-10-14）**：这一节原先的结论是"生产上的 SPA **无法从仓库复现**"，
+> 并列了一张"每个提交各构建一遍、没一个对得上"的表。**那个结论是错的，
+> 那张表里的哈希也全部不可信** —— 因为它们都是用 `--base=/workbench/` 构建的，
+> 而仓库的 `workbench/vite.config.ts` 写的是 **`base: './'`**。
+> 换一个 base 会同时改变 `index.html` 里的引用**和**入口 chunk 的哈希，
+> 所以"对不上"是被我自己造出来的。
+>
+> 下面这行注释就在那个配置文件里，是它的作者为"两个宿主要一份产物"写的：
+>
+>     // ★ `base: './'`（**相对**）是"一份产物、两个宿主"的前提：
+>     //   · serve.mjs 挂在 `/`（本地/桌面端）→ 资源解析成 `/assets/…`；
+>     //   · 中枢挂在 `/workbench/`（远程）→ 资源解析成 `/workbench/assets/…`。
+>
+>   > 一次"用错参数构建、然后宣布无法复现"的调查，
+>   > 与一次"真的无法复现"的调查，在结论上都写着"复现不了" ——
+>   > 只不过前者把一份**好的**产物说成了孤本。
 
-| 来源 | 产出的 bundle |
-| --- | --- |
-| `f9a1b4b3` | `index-ClRLzxPM.js` |
-| `260cc742` | `index-MNOx9ITs.js` |
-| `833546e7` | `index-CdCnA807.js` |
-| `2c67dfb6` | `index-CVFe7rHD.js` |
-| `ca7589c9`（该目录的最后一个提交） | `index-SGdYgfb7.js` |
-| `origin/main`（41ee12f3） | `index-SGdYgfb7.js` |
-| **生产上的** | **`index-BjYkts4m.js`** ← 没有一个候选对得上 |
+**正确的复现方式**（`base` 走配置，**不要**在命令行覆盖）：
 
-换 `--base=/workbench/` 也不对（产出 `index-BTUIzIla.js`）；产物里没有绝对路径。
+```bash
+git worktree add /tmp/wt --detach <要复现的提交>
+cd /tmp/wt/workbench && npx vite build      # 不要加 --base
+```
 
-> **结论：部署里的那份 SPA 不是从当前历史里的任何提交构建的。**
+实测：用 `9c3ae86a` 构建，产出与生产**逐字节相同**（含文件名哈希）：
 
-后果很实际：**下一次重建会把若干提交的前端改动一起带上** ——
-而它们的后端配对未经验证。所以这一轮**没有**部署重建的 SPA（那是"假验证"）。
+| | 生产 | 用 `9c3ae86a` 重建 |
+| --- | --- | --- |
+| 入口 | `index-BjYkts4m.js` 678177 B | **同一个** ✓ |
+| 样式 | `index-DhBSBG1s.css` 105502 B | **同一个** ✓ |
+| Scene3D | `Scene3D-C8hVyUWg.js` 951528 B | **同一个** ✓ |
 
-`workbench/src/api.ts` 里 `readJson` 的那处修复（让它保留后端的
-`code`/`error`/`hint`，而不是只抛 `statusText`）**已经在源码里、`tsc --noEmit` 通过**，
-但**没有部署** —— 它会随下一次**有出处的** SPA 发布一起生效。
+**所以线上那份 SPA 有确切出处**：`9c3ae86a`（部署于 2026-10-12T03:26:42Z，
+而那一刻 main 的 HEAD 正是它）。**问题不是"复现不了"，而是"它落后了"**：
+`origin/main` 上改动 `workbench/src` 的提交比它多 **30 个**（截至 2026-10-14），
+其中含一条 `fix(security)`。`workbench/src/api.ts` 里 `readJson` 的那处修复
+就在这 30 个里，所以线上界面至今显示的是 `501 Not Implemented`。
 
-在那之前，浏览器里的界面显示的是 `501 Not Implemented`
-（比 `not found` 好，但还不是那句中文）。
+### ★★★ 6.4c 但**不能只部署 SPA** —— 它与中枢是成对的
+
+"SPA 只是静态文件、先单独发上去"这个念头很自然，也已验证过是**不安全**的：
+
+1. **凭证协议换过。** `9c3ae86a` 那版 SPA 在写请求里**发 `secretRef`**
+   （`DshProvidersPanel.tsx`: `baseURL: …, secretRef: form.key || …`），
+   而 main 那版改发 **`credentialValue`**、由服务端按现有槽位落名（BUG-028）。
+   生产的中枢**没有**那个修复（`routes/model-providers.mjs` 里 `publicProvider` = 0 次）。
+   而旧服务端的 `update` 语义是"**留空 `secretRef` = 清掉引用**"
+   —— 9c3ae86a 那版 SPA 的文件头自己就写着这句话。
+   ⇒ 新 SPA + 旧中枢 = **保存供应商时会静默清掉凭证引用**。
+2. **新 SPA 调一个还不存在的端点。** 新 SPA 有"验收不满意就重做"，打 `/api/rework`；
+   生产上实测 **404**（那是 `e70c81bc` 的配对端点）。
+
+  > 一个"新旧搭着能用"的组合，
+  > 与一个"保存时静默清掉用户的凭证引用"的组合，
+  > 在只跑一遍冒烟检查的时候是同一个东西 —— 冒烟不会去配一把真钥匙。
+
+**所以 SPA 与中枢要么一起动，要么都不动。** 这一轮**没有**部署任何一半。
 
 ---
 

@@ -384,8 +384,27 @@ describe('手机端接口契约（照 app.mjs 的顺序）', () => {
       body: { workerId: 'contract-probe', scope: ctx.scope }, token: ctx.access,
     })
     assert.equal(claimed.status, 200, claimed.text.slice(0, 200))
+    // ★★ 失败信息里必须带上**真正的原因码**（`contention.code`）。
+    //
+    // 上面那个 `reason` 是个**兜底桶**：`run-store.mjs` 的 claim 把非
+    // `FILE_CONTENTION` / `SINGLE_WRITER_REQUIRED` 的冲突一律报成
+    // `write-reservation-failed`，把可操作的码（如 `REPO_UNBOUND`）藏在
+    // `contention` 里。于是这条用例转红时只说"写预留失败"，
+    // **看不出是工作区没检出可交付分支**。
+    //
+    // 实测代价：在 `git worktree add --detach` 出来的工作区里跑它，
+    // HEAD 游离 ⇒ `symbolic-ref -q HEAD` 失败 ⇒ `REPO_UNBOUND` ⇒ 转红。
+    // 而"红在 REPO_UNBOUND"与"红在产品缺陷"看起来一模一样，
+    // 于是它被当成一条**长期红的既有失败**记了下来（错的是记录，不是产品）。
+    //
+    //   > 一个"把可操作的错误码藏进兜底桶"的失败信息，
+    //   > 与一个"真说不清哪里错"的失败，在用例输出里都写着"失败"——
+    //   > 只不过前者会让人把它当成产品的毛病，记进"既有失败"清单里。
+    const claimFailure = claimed.json.contention?.code
+      ? `${claimed.json.reason}（contention.code=${claimed.json.contention.code}：${claimed.json.contention.reason ?? ''}）`
+      : String(claimed.json.reason)
     assert.equal(claimed.json.claimed?.taskId, taskId,
-      `新任务应真的可被认领；拿到 ${JSON.stringify(claimed.json.claimed)}，reason=${claimed.json.reason}`)
+      `新任务应真的可被认领；拿到 ${JSON.stringify(claimed.json.claimed)}，reason=${claimFailure}`)
     // 还回去，别影响后面的用例。
     await call('POST', '/api/runtime/release', {
       body: {

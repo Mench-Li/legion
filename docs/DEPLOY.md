@@ -1682,7 +1682,81 @@ import **全是字面量**、非相对的只有 `node:*` 内置 ⇒ 静态闭包
 
 ---
 
-## 附录 A：发布检查单（每次发布逐项打勾）
+## 18. ★★ 两个把"环境问题"误读成"产品缺陷"的坑（2026-10-14）
+
+这一节是**一次真实的误诊记录**，因为它的形状很容易重犯。
+
+### 18.1 症状：一条"长期红的既有失败"
+
+`team-hub/mobile-api-contract.test.mjs` ⑯ 是守**产品主标题动作**的一条用例：
+「手机建出的任务**真的可被认领**」（不是躺在 `backlog` 里）。它在我的
+`git worktree add --detach` 工作区里**一直红**：
+
+```
+AssertionError: 新任务应真的可被认领；拿到 null，reason=write-reservation-failed
+```
+
+于是它被记进了"既有失败清单"——**记错了**。
+
+### 18.2 真正的原因：`REPO_UNBOUND`，而且是我自己的工作区建法
+
+`reason` 是个**兜底桶**：`team-hub/run-store.mjs` 的 claim 把非
+`FILE_CONTENTION` / `SINGLE_WRITER_REQUIRED` 的冲突**一律**报成
+`write-reservation-failed`，把可操作的码藏进同级的 `contention` 字段。
+把 `contention` 打出来才看见：
+
+    contention: { ok:false, code:'REPO_UNBOUND',
+                  reason:'绑定工作区未检出可交付分支，请先切换到目标分支' }
+
+而 `resolveDeliveryBinding()` 的判定是两分叉（`team-hub/server.mjs`）：
+
+| 绑定目录 | 判定 |
+| --- | --- |
+| **不是** git 仓库（`capability !== 'git'`） | 返回绑定，`targetRef: null` —— **不报错** |
+| 是 git 仓库但 `symbolic-ref -q HEAD` 失败（**游离 HEAD**） | `REPO_UNBOUND` |
+
+`git worktree add --detach` 建出来的工作区**正是游离 HEAD** ⇒ 写预留被拒
+⇒ 认领失败。而主检出（在 `main` 分支上）跑同一条用例：**17/17 全绿**。
+
+> 一条"只在游离 HEAD 的工作区里红"的用例，
+> 与一条"真的红了"的用例，在输出上都写着 `reason=write-reservation-failed`——
+> 只不过前者会被记成产品的毛病，一记就是好几轮。
+
+**为什么生产不受影响**：`spaces.local_dir` 是空串 ⇒ 回退到 `ROOT`
+（`/srv/legion-hub/app`），而它**不是 git 仓库** ⇒ 走"非 git"那条 ⇒ 不报错。
+
+### 18.3 因此做的两处改动
+
+1. **用例的失败信息带上真正的原因码**（`team-hub/mobile-api-contract.test.mjs` ⑯）：
+   现在红的时候直接写
+   `reason=write-reservation-failed（contention.code=REPO_UNBOUND：绑定工作区未检出可交付分支，请先切换到目标分支）`。
+   一个把可操作错误码藏进兜底桶的失败信息，会让下一个人花掉同样的一个小时。
+2. **本节**：把"在工作区里跑测试"与"在真实环境里跑"分开写。
+
+### 18.4 ★★★ 顺带发现一个**部署侧**的真隐患
+
+上面那张表反过来读就是一个部署隐患：
+
+> **如果哪天把中枢部署成"一个 git 检出"，而那个检出处在游离 HEAD
+> （`git checkout <sha>` —— 部署固定版本时非常常见），
+> 那么生产上每一次认领都会以 `REPO_UNBOUND` 失败。**
+
+症状与 §18 里那个老 bug 完全一样地"安静"：手机/网页能建任务、任务进 `todo`、
+时间线回执也对，**只是没有任何 Agent 会碰它**，而日志里只有一句
+`write-reservation-failed`。
+
+当前的部署方式（tar 铺成一棵**普通目录**，`/srv/legion-hub/app` 没有 `.git`）
+**恰好避开了**这条路径 —— 但那是"恰好"，不是"设计"。所以：
+
+- 部署**不要**用 `git clone` + `git checkout <sha>`（游离 HEAD）；
+  要么保持普通的目录树（现状），要么用 `git checkout -B main` 落在**分支**上。
+- 判断当前部署属于哪种：
+
+      git -C /srv/legion-hub/app rev-parse --is-inside-work-tree   # 非 git = 安全
+      git -C /srv/legion-hub/app symbolic-ref -q HEAD              # 有输出 = 在分支上
+
+---
+
 
 - [ ] CI 全绿：`node scripts/ci/run-ci.mjs` exit 0（evidence 归档 docs/T093-evidence/）
 - [ ] L1 三件套探活 + whiteboard /healthz（§5.2/§5.4）

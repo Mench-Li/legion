@@ -4,21 +4,23 @@ import { Grid, Html, Line, OrbitControls } from '@react-three/drei'
 import * as THREE from 'three'
 import type { ScenePreset } from '../types'
 import type { SceneAgent, SceneCue } from '../scene/sceneState'
+import type { SceneBoardVisit, SceneTaskChip } from '../scene/sceneBoard'
 import { layoutScene } from '../scene/sceneLayout'
 import type { SceneLayout } from '../scene/sceneLayout'
+import { SCENE_THEMES } from '../scene/sceneTheme'
 import { Employee3D } from './Employee3D'
+import { OfficeDressing } from './OfficeDressing'
+import { TaskBoard3D } from './TaskBoard3D'
 import { SceneAgentList } from './SceneAgentList'
+import '../scene/officeScene.css'
 
 interface Scene3DProps {
   agents: SceneAgent[]; cues: SceneCue[]; preset: ScenePreset; goalLabel: string
+  /** 谁现在该去走一趟看板（认领取卡 / 完结贴卡）。与 `cues` 同一次快照的产物。 */
+  boardVisits?: SceneBoardVisit[]
+  /** 看板上要显示的卡片（本空间的任务）。缺省 ⇒ 只画一块空板，不编数据。 */
+  boardTasks?: SceneTaskChip[]
   motionEnabled?: boolean; onAgentClick?: (role: string) => void
-}
-
-const PRESETS: Record<ScenePreset, { floor: string; desk: string; accent: string; light: string; label: string }> = {
-  office: { floor: '#15283a', desk: '#41607b', accent: '#5e9ed2', light: '#b9d8ff', label: '办公室' },
-  studio: { floor: '#30263a', desk: '#765579', accent: '#dc9acb', light: '#f8c8ec', label: '创作室' },
-  lab: { floor: '#193138', desk: '#3a6972', accent: '#67d9c7', light: '#b2fff1', label: '实验室' },
-  operations: { floor: '#342a21', desk: '#796443', accent: '#e8bf69', light: '#fff0ba', label: '运营中心' },
 }
 
 function webglAvailable(): boolean {
@@ -44,25 +46,45 @@ function CameraRig({ layout }: { layout: SceneLayout }): null {
   return null
 }
 
-function OfficeWorld({ agents, cues, layout, preset, goalLabel, motion, compact, onAgentClick }: Scene3DProps & { layout: SceneLayout; motion: boolean; compact: boolean }): React.JSX.Element {
-  const theme = PRESETS[preset]
+/**
+ * 看板前"别跟别人挤同一点"的横向错位：按身份种子确定。
+ * 用种子（而不是"到场顺序"）是为了让同一个人每次都站同一个位置 ——
+ * 否则同一个人每次办事站的地方都不同，看起来像场景在抖。
+ */
+export function boardLaneOffset(seed: number, index = 0): number {
+  return (((seed + index * 3) % 5) - 2) * 0.52
+}
+
+function OfficeWorld({ agents, cues, boardVisits = [], boardTasks = [], layout, preset, goalLabel, motion, compact, onAgentClick }: Scene3DProps & { layout: SceneLayout; motion: boolean; compact: boolean }): React.JSX.Element {
+  const theme = SCENE_THEMES[preset]
   const stations = new Map(layout.stations.map(station => [station.key, station]))
   const liveCues = cues.filter(cue => cue.expiresAtMs > Date.now())
+  /**
+   * 板上高亮哪张卡：取**最早过期**的那一条（= 最早出发的那一位）。
+   * 同时有两个人来办事时板面只报一件 —— 报两件会互相盖住，
+   * 而"谁在办哪张卡"在他自己的气泡与板底那一行里仍然分别可见。
+   */
+  const activeVisit = boardVisits.filter(visit => visit.expiresAtMs > Date.now())
+    .sort((a, b) => a.expiresAtMs - b.expiresAtMs)[0] ?? null
   return <>
     <color attach="background" args={['#0b111a']} />
-    <ambientLight intensity={1.3} />
-    <hemisphereLight color={theme.light} groundColor="#17202a" intensity={1.5} />
-    <directionalLight position={[8, 14, 10]} intensity={2.5} color={theme.light} castShadow />
+    <ambientLight intensity={1.15} />
+    <hemisphereLight color={theme.light} groundColor="#17202a" intensity={1.4} />
+    <directionalLight position={[8, 14, 10]} intensity={2.3} color={theme.light} castShadow />
     <CameraRig layout={layout} />
     <mesh rotation={[-Math.PI / 2, 0, 0]} position={[0, -0.025, 0]} receiveShadow>
       <planeGeometry args={[layout.floorWidth, layout.floorDepth]} /><meshStandardMaterial color={theme.floor} roughness={1} />
     </mesh>
     <Grid position={[0, 0, 0]} args={[layout.floorWidth, layout.floorDepth]} cellSize={0.5} cellColor={theme.desk}
       sectionSize={2} sectionColor={theme.accent} sectionThickness={0.5} infiniteGrid={false} fadeDistance={80} />
+    {/* 办公室布景：墙、窗、吊灯、地毯、会议桌、书架、茶水角、绿植（只落在安全带里，见其文件头） */}
+    <OfficeDressing layout={layout} theme={theme} />
     {layout.stations.map(station => <group key={station.key} position={[station.x, 0, station.z]}>
       <mesh position={[0, 0.48, -0.76]} castShadow><boxGeometry args={[1.55, 0.14, 0.74]} /><meshStandardMaterial color={theme.desk} roughness={0.85} /></mesh>
       <mesh position={[0, 0.77, -0.95]} castShadow><boxGeometry args={[0.62, 0.48, 0.07]} /><meshStandardMaterial color="#18293a" emissive={theme.accent} emissiveIntensity={0.25} /></mesh>
       <mesh position={[0, 0.52, -0.38]}><boxGeometry args={[0.42, 0.025, 0.16]} /><meshStandardMaterial color="#192535" /></mesh>
+      {/* 桌下的机箱：让工位看起来"有人用过"，也补上桌下的空档 */}
+      <mesh position={[0, 0.3, -0.4]}><boxGeometry args={[0.34, 0.6, 0.34]} /><meshStandardMaterial color="#243447" /></mesh>
     </group>)}
     <group>
       <mesh position={[0, 0.2, 0]}><boxGeometry args={[1.2, 0.4, 1.2]} /><meshStandardMaterial color={theme.desk} /></mesh>
@@ -81,11 +103,17 @@ function OfficeWorld({ agents, cues, layout, preset, goalLabel, motion, compact,
         <boxGeometry args={[0.65, 0.48, 0.14]} /><meshStandardMaterial color="#bed8ec" />
       </mesh>}
     </group>)}
+    {/* 微缩任务看板：Agent 认领/完结时会走到它前面办一下 */}
+    <TaskBoard3D tasks={boardTasks} board={layout.board} activeVisit={activeVisit} />
     {agents.map(agent => {
       const station = stations.get(agent.key)
       if (!station) return null
       const celebrating = motion && liveCues.some(cue => cue.kind === 'completed' && cue.fromRole === agent.role)
-      return <Employee3D key={agent.key} agent={agent} x={station.x} z={station.z} motion={motion} celebrate={celebrating} compact={compact} onSelect={() => onAgentClick?.(agent.role)} />
+      const visit = boardVisits.find(item => item.role === agent.role && item.expiresAtMs > Date.now()) ?? null
+      const lane = boardLaneOffset(agent.appearanceSeed, station.column)
+      return <Employee3D key={agent.key} agent={agent} x={station.x} z={station.z} motion={motion} celebrate={celebrating} compact={compact}
+        onSelect={() => onAgentClick?.(agent.role)} boardVisit={visit}
+        boardStandX={layout.board.x + lane} boardStandZ={layout.board.standZ} />
     })}
     {motion && liveCues.filter(cue => cue.kind === 'handoff').map(cue => {
       const from = agents.find(agent => agent.role === cue.fromRole)
@@ -97,7 +125,7 @@ function OfficeWorld({ agents, cues, layout, preset, goalLabel, motion, compact,
   </>
 }
 
-export function Scene3D({ agents, cues, preset, goalLabel, motionEnabled = true, onAgentClick }: Scene3DProps): React.JSX.Element {
+export function Scene3D({ agents, cues, preset, goalLabel, boardVisits = [], boardTasks = [], motionEnabled = true, onAgentClick }: Scene3DProps): React.JSX.Element {
   const container = useRef<HTMLDivElement>(null)
   const [width, setWidth] = useState(1000)
   const keys = agents.map(agent => agent.key).join('\n')
@@ -125,20 +153,25 @@ export function Scene3D({ agents, cues, preset, goalLabel, motionEnabled = true,
     return () => document.removeEventListener('visibilitychange', update)
   }, [])
   useEffect(() => {
-    const nextExpiry = cues.map(cue => cue.expiresAtMs).filter(expiry => expiry > Date.now()).sort((a, b) => a - b)[0]
+    // 提示与"走看板"都会过期：按**两者中更早**的那个到期时间安排一次重渲染。
+    // 只盯 `cues` 的话，最后一位走回工位后会僵在板前 —— 画面里没人动，也没人报错。
+    const expiries = [...cues.map(cue => cue.expiresAtMs), ...boardVisits.map(visit => visit.expiresAtMs)]
+      .filter(expiry => expiry > Date.now()).sort((a, b) => a - b)
+    const nextExpiry = expiries[0]
     if (nextExpiry === undefined) return
     const timer = window.setTimeout(() => setCueTick(value => value + 1), Math.max(0, nextExpiry - Date.now()))
     return () => window.clearTimeout(timer)
-  }, [cues, cueTick])
+  }, [cues, boardVisits, cueTick])
   const motion = motionEnabled && motionOn && !reduced && visible
   const fallback = <div className="scene-webgl-fallback">3D 场景暂不可用，可从下面的员工列表查看状态{onAgentClick ? '与任务' : ''}。</div>
   return <div className="pixel-scene-content" ref={container}>
     <div className="pixel-scene-canvas">
       {available ? <SceneBoundary fallback={fallback}><Canvas orthographic shadows frameloop={motion ? 'always' : 'demand'} dpr={[1, 1.5]}>
-        <OfficeWorld agents={agents} cues={cues} preset={preset} goalLabel={goalLabel} motion={motion} compact={agents.length > 12 || width < 700} onAgentClick={onAgentClick} layout={layout} />
+        <OfficeWorld agents={agents} cues={cues} boardVisits={boardVisits} boardTasks={boardTasks} preset={preset} goalLabel={goalLabel}
+          motion={motion} compact={agents.length > 12 || width < 700} onAgentClick={onAgentClick} layout={layout} />
       </Canvas></SceneBoundary> : fallback}
     </div>
-    <div className="pixel-scene-toolbar"><span>{PRESETS[preset].label} · {agents.length} 位员工</span>
+    <div className="pixel-scene-toolbar"><span>{SCENE_THEMES[preset].label} · {agents.length} 位员工</span>
       <button type="button" onClick={() => setMotionOn(value => !value)} aria-pressed={motionOn}>{motionOn ? '暂停动画' : '开启动画'}</button>
     </div>
     <SceneAgentList agents={agents} onAgentClick={onAgentClick} />

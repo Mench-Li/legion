@@ -3,6 +3,7 @@ import type { BoardData, CardStatus, GoalInfo, GoalStatus, RosterAgent, SpaceInf
 import type { StatusCard } from '../missions'
 import { currentGoalProgress, identitySeed, projectSceneAgents } from '../scene/sceneState'
 import type { SceneAgent, SceneCue, SceneFacts } from '../scene/sceneState'
+import type { SceneBoardVisit } from '../scene/sceneBoard'
 import { AgentTasksModal } from './AgentTasksModal'
 import { TaskDetailModal } from './TaskDetailModal'
 import { GoalsBoard } from './GoalsBoard'
@@ -64,6 +65,8 @@ interface CenterPanelProps {
   hubActive?: boolean
   sceneFacts?: SceneFacts | null
   sceneCues?: SceneCue[]
+  /** 谁现在该去走一趟看板（认领取卡 / 完结贴卡）。与 `sceneCues` 同一次快照的产物。 */
+  sceneVisits?: SceneBoardVisit[]
   sceneError?: string
   /** 目标状态迁移（暂停/恢复/取消；仅将军）。 */
   onGoalStatus?: (goalId: string, status: GoalStatus, label: string) => Promise<void>
@@ -84,7 +87,7 @@ function fromRoster(a: RosterAgent): AgentView {
   }
 }
 
-export function CenterPanel({ board, labels, active, rosterAgents, scope, spaces, goalInfo, hubActive = false, sceneFacts, sceneCues = [], sceneError = '', onGoalStatus, onSaveContext, onContactAgent }: CenterPanelProps): React.JSX.Element {
+export function CenterPanel({ board, labels, active, rosterAgents, scope, spaces, goalInfo, hubActive = false, sceneFacts, sceneCues = [], sceneVisits = [], sceneError = '', onGoalStatus, onSaveContext, onContactAgent }: CenterPanelProps): React.JSX.Element {
   const isRoster = hubActive || (rosterAgents !== null && rosterAgents !== undefined)
   // 多目标：进度 = 该空间未取消目标的任务合计（各目标各自链独立统计后加总）；未就绪显示占位，绝不回退 v1 board.goal
   const hubGoals = hubActive && goalInfo ? goalInfo.goals : []
@@ -111,7 +114,7 @@ export function CenterPanel({ board, labels, active, rosterAgents, scope, spaces
         const key = `${scope ?? 'v1'}\0${a.role}`
         return { key, scope: scope ?? 'v1', role: a.role, name: a.name, avatar: a.avatar,
           external: false, mode: a.mode, activity: a.mode === 'busy' ? 'work' : a.mode,
-          taskIds: a.tasks.map(t => t.id), focusTaskId: a.tasks[0]?.id ?? null,
+          taskIds: a.tasks.map(t => t.id), tasks: a.tasks, focusTaskId: a.tasks[0]?.id ?? null,
           focusTitle: a.tasks[0]?.title ?? null, taskCount: a.tasks.length,
           stationId: key, appearanceSeed: identitySeed(key) }
       })
@@ -295,7 +298,7 @@ export function CenterPanel({ board, labels, active, rosterAgents, scope, spaces
               <i className="dot idle" />
               待命
             </span>
-            <span className="legend-hint">🖱 拖动旋转 · 滚轮缩放 · 状态实时投影</span>
+            <span className="legend-hint">🖱 拖动旋转 · 滚轮缩放 · 悬浮气泡看该员工全部任务 · 认领/完结时他会走向看板</span>
           </div>
           {hubActive && scope && !sceneFacts && rosterAgents == null ? (
             <div className="scene-loading">{sceneError ? '无法读取空间员工，请刷新重试' : '正在读取空间员工…'}</div>
@@ -304,6 +307,8 @@ export function CenterPanel({ board, labels, active, rosterAgents, scope, spaces
               key={scope ?? 'all'}
               agents={sceneAgents}
               cues={sceneCues.filter(cue => cue.scope === scope)}
+              boardVisits={sceneVisits.filter(visit => visit.scope === scope)}
+              boardTasks={(sceneFacts?.tasks ?? []).filter(task => task.status !== 'canceled').map(task => ({ id: task.id, title: task.title, status: task.status }))}
               preset={spaces?.find(space => space.id === scope)?.scenePreset ?? 'office'}
               goalLabel={sceneGoalLabel}
               onAgentClick={isRoster ? openAgent : undefined}

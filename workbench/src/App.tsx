@@ -25,6 +25,7 @@ import { notifySystem } from './desktopNotify'
 import type { NotifyItem } from './notify'
 import { createSceneController } from './scene/sceneController'
 import type { SceneCue, SceneFacts } from './scene/sceneState'
+import type { SceneBoardVisit } from './scene/sceneBoard'
 import { buildMissions } from './missions'
 import { boardFromHubTasks } from './hubBoard'
 import type { ActivityEvent, BoardData, GoalInfo, GoalStatus, Mission, RosterAgent, SpaceInfo } from './types'
@@ -120,6 +121,7 @@ export default function App(): React.JSX.Element {
   const [roster, setRoster] = useState<RosterAgent[] | null>(null)
   const [sceneFacts, setSceneFacts] = useState<SceneFacts | null>(null)
   const [sceneCues, setSceneCues] = useState<SceneCue[]>([])
+  const [sceneVisits, setSceneVisits] = useState<SceneBoardVisit[]>([])
   const [sceneError, setSceneError] = useState('')
   const sceneRefreshRef = useRef<(() => Promise<void>) | null>(null)
   const [goalInfo, setGoalInfo] = useState<GoalInfo | null>(null)
@@ -268,9 +270,10 @@ export default function App(): React.JSX.Element {
     }
     const controller = createSceneController({
       scope, subscribe: subscribeHubAudit, fetchRoster, fetchTasks: fetchHubTasks,
-      onSnapshot: (facts, cues) => {
+      onSnapshot: (facts, cues, visits) => {
         setSceneFacts(facts)
         setSceneCues(cues)
+        setSceneVisits(visits)
         setRoster([...facts.roster])
       },
       onError: setSceneError,
@@ -732,7 +735,7 @@ export default function App(): React.JSX.Element {
           ) : active === 'snapshots' ? (
             <SnapshotView scope={scope} hubMode={hubMode} />
           ) : (
-            <CenterPanel board={displayBoard} labels={labels} active={active === 'goals' ? 'goals' : 'home'} rosterAgents={hubMode ? roster : null} scope={scope} spaces={hubSpaces} goalInfo={hubMode ? goalInfo : null} hubActive={hubMode} sceneFacts={sceneFacts?.scope === scope ? sceneFacts : null} sceneCues={sceneCues} sceneError={sceneError} onGoalStatus={hubMode ? handleGoalStatus : undefined} onSaveContext={hubMode ? handleGoalContext : undefined} onContactAgent={pickAgent} />
+            <CenterPanel board={displayBoard} labels={labels} active={active === 'goals' ? 'goals' : 'home'} rosterAgents={hubMode ? roster : null} scope={scope} spaces={hubSpaces} goalInfo={hubMode ? goalInfo : null} hubActive={hubMode} sceneFacts={sceneFacts?.scope === scope ? sceneFacts : null} sceneCues={sceneCues} sceneVisits={sceneVisits} sceneError={sceneError} onGoalStatus={hubMode ? handleGoalStatus : undefined} onSaveContext={hubMode ? handleGoalContext : undefined} onContactAgent={pickAgent} />
           )
         ) : (
           <div className="center-col" />

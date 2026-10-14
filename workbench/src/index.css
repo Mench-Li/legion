@@ -855,6 +855,7 @@ body {
 .scene-empty { color: #9db5ca; font-size: 12px; align-self: center; }
 .scene-error { position: absolute; z-index: 70; top: 10px; right: 10px; max-width: 55%; padding: 5px 8px; border: 1px solid #875751; border-radius: 5px; background: #3e2525; color: #ffd0cc; font-size: 11px; }
 .scene-3d .scene-legend { bottom: 105px; flex-wrap: wrap; max-width: calc(100% - 24px); border-radius: 8px; }
+.scene-3d .scene-task-summary { top: 12px; bottom: auto; right: 12px; width: max-content; max-width: calc(100% - 24px); }
 @media (max-width: 950px) { .scene-3d .scene-legend { gap: 5px; font-size: 9px; } .scene-legend .legend-hint { display: none; } }
 
 .scene-loading {

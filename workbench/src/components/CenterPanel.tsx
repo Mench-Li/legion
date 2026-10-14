@@ -102,6 +102,16 @@ export function CenterPanel({ board, labels, active, rosterAgents, scope, spaces
   const sceneGoalLabel = hubActive
     ? (activeGoalPct === null ? '当前目标 暂无' : `当前目标 ${activeGoalPct}%`)
     : `目标 ${v1Goal.progress.percent}%`
+  // 与场景气泡共用“未完成且未取消”的口径；v1 则从当前看板列统计。
+  const sceneTasks = hubActive
+    ? visibleSceneTasks((sceneFacts && sceneFacts.scope === scope ? sceneFacts.tasks : []).filter(task => !task.scope || task.scope === scope))
+    : visibleSceneTasks(board.columns.flatMap(column => column.cards.map(card => ({ ...card, status: column.id }))))
+  const sceneTaskCounts = {
+    busy: sceneTasks.filter(task => task.status === 'in_progress').length,
+    review: sceneTasks.filter(task => task.status === 'in_review').length,
+    blocked: sceneTasks.filter(task => task.status === 'blocked').length,
+    todo: sceneTasks.filter(task => task.status === 'todo' || task.status === 'backlog').length,
+  }
   // 中核对当前空间的兜底过滤：只保留属于本空间的智能体（杜绝「全部空间」数据泄漏/窜台）
   const currentRoster = scope
     ? (rosterAgents ?? []).filter(a => !a.scope || a.scope === scope)
@@ -282,24 +292,12 @@ export function CenterPanel({ board, labels, active, rosterAgents, scope, spaces
       ) : (
         <div className="scene-3d">
           {sceneError && <div className="scene-error">状态更新中断：{sceneError}</div>}
-          <div className="scene-legend">
-            <span className="legend-title">⚔ {scope ?? '全局'}编队{isRoster ? ` · ${agents.length} 岗` : ''}</span>
-            <span>
-              <i className="dot busy" />
-              进行中
-            </span>
-            <span>
-              <i className="dot review" />
-              待验收
-            </span>
-            <span>
-              <i className="dot blocked" />
-              受阻
-            </span>
-            <span>
-              <i className="dot idle" />
-              待命
-            </span>
+          <div className="scene-legend scene-task-summary" aria-label="团队场景任务统计">
+            <span className="legend-title">⚔ {scope ?? '全局'}编队 · {agents.length} 岗 · 在办任务 {sceneTasks.length} 项</span>
+            <span><i className="dot busy" />进行中 {sceneTaskCounts.busy}</span>
+            <span><i className="dot review" />待验收 {sceneTaskCounts.review}</span>
+            <span><i className="dot blocked" />受阻 {sceneTaskCounts.blocked}</span>
+            <span><i className="dot idle" />待办 {sceneTaskCounts.todo}</span>
           </div>
           {hubActive && scope && !sceneFacts && rosterAgents == null ? (
             <div className="scene-loading">{sceneError ? '无法读取空间员工，请刷新重试' : '正在读取空间员工…'}</div>

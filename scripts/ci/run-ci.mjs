@@ -2244,6 +2244,13 @@ async function stageTest() {
     //   且读失败不许静默。缺陷原形是 `fetchJson` 的裸 `fetch(url)` + `if (!res.ok) return null`
     //   ⇒ 守护每次拉回复队列都被 401 拒 ⇒ 调用方读成"空队列" ⇒ 全静默、消息停在 awaiting。
     { label: 'hub-read-auth（hub 读必须带令牌；读失败不许伪装成"空队列"）', files: ['plugins/tests/hub-read-auth.test.mjs'], cwd: ROOT, nodeArgs: ['--experimental-strip-types'] },
+    // ★★★ 2026-10-14（将军：目标全 done，但界面上"还是没有头像"）：BUG-037。
+    //   合入主分支 ≠ 用户看到的东西变了 —— `dist/` 是 gitignored 的构建产物，
+    //   `git merge` 一个字节都带不过去，而运行中的指挥台读的正是主工作区的 dist。
+    //   这一次还叠了第二层：部署阶段的 `vite build` 其实报了 `spawn EPERM`，
+    //   而它被"排除 build 阶段的 CI + 只打服务端 HTTP 的冒烟"绕过去了 ⇒ 照样 done。
+    //   所以判据是两半：**合入后必须重建产物**，且**重建失败不算交付完成**（停 in_review）。
+    { label: 'artifact-delivery（BUG-037：合入后必须重建主工作区产物；重建失败不算交付完成）', files: ['plugins/tests/artifact-delivery.test.mjs'], cwd: ROOT, nodeArgs: ['--experimental-strip-types'] },
     { label: 'delivery-ui（S7 交付/调度徽标前端纯函数）', files: ['workbench/scripts/delivery-ui.test.mjs'], cwd: ROOT, nodeArgs: ['--experimental-strip-types'] },
     // `dual-write-smoke` 守「两个进程同时启动、迁移同一新库」的**行为**，
     // 并在第 3 个锚点里按**源码**禁掉两种坏写法（自己 exec ALTER / try-catch 吞掉 ALTER）。

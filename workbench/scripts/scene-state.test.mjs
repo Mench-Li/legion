@@ -63,3 +63,42 @@ test('交接要求同目标、明确双人归属及真实依赖认领', () => {
   assert.equal(deriveSceneCues(before, { ...after, tasks: [{ ...prior, scope: 'other' }, next] }, [e], 1500, true).length, 0)
   assert.equal(deriveSceneCues(before, after, [{ ...e, payload: { soldier: 'other' } }], 1500, true).length, 0)
 })
+
+// ── 气泡要显示"他的所有任务"，所以投影里必须带全量清单 ──────────────────────
+test('★ 投影带上全量任务 chips：标题、状态、按"最要紧优先"排序、取消的不出现', () => {
+  const roster = [agent('dev')]
+  const titled = (id, status, title, extra = {}) => ({ ...task(id, 'dev', status, extra), title })
+  const tasks = [
+    titled('T-9', 'canceled', '已取消的'),
+    titled('T-5', 'done', '做完了的'),
+    titled('T-3', 'todo', '还没开始的'),
+    titled('T-1', 'blocked', '卡住的'),
+    titled('T-2', 'in_review', '等验收的'),
+    titled('T-4', 'in_progress', '在做的'),
+    titled('T-6', 'other', '别人的', { role: 'other' }),
+  ]
+  const [dev] = projectSceneAgents('lab', roster, tasks)
+  assert.deepEqual(dev.tasks.map(t => t.id), ['T-1', 'T-2', 'T-4', 'T-3', 'T-5'],
+    '受阻 → 待验收 → 进行中 → 待办 → 完成：气泡里最要紧的排最前')
+  assert.deepEqual(dev.tasks.map(t => t.title), ['卡住的', '等验收的', '在做的', '还没开始的', '做完了的'], '标题要带出来（气泡上显示的就是它）')
+  assert.equal(dev.tasks.find(t => t.id === 'T-1').status, 'blocked')
+  assert.equal(dev.taskCount, 5, '计数与 chips 必须同源（否则气泡里"5 项"却只列出 4 条）')
+  assert.deepEqual(dev.taskIds, dev.tasks.map(t => t.id))
+  assert.equal(dev.focusTaskId, 'T-1')
+  assert.equal(dev.focusTitle, '卡住的')
+  assert.equal(dev.mode, 'blocked', '气色取最要紧那件事')
+  // 同一份事实两次投影必须逐字一致（气泡悬浮时会重算，抖动会让人以为任务变了）
+  assert.deepEqual(projectSceneAgents('lab', roster, tasks)[0].tasks, dev.tasks)
+})
+
+test('★ 空任务与只有已完成任务：气泡仍要有话说（不是空白）', () => {
+  const roster = [agent('dev')]
+  const none = projectSceneAgents('lab', roster, [])[0]
+  assert.deepEqual(none.tasks, [])
+  assert.equal(none.taskCount, 0)
+  assert.equal(none.focusTitle, null, '没有任务就是没有，不编一句假的')
+  assert.equal(none.mode, 'idle')
+  const done = projectSceneAgents('lab', roster, [{ ...task('T-1', 'dev', 'done'), title: '收尾' }])[0]
+  assert.deepEqual(done.tasks.map(t => t.id), ['T-1'], '做完的任务也要留在气泡里（否则人会突然"没有历史"）')
+  assert.equal(done.mode, 'idle', '只剩已完成 ⇒ 气色回待命')
+})

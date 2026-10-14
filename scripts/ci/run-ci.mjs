@@ -1080,6 +1080,11 @@ async function stageTest() {
         'workbench/scripts/scene-layout.test.mjs',
         'workbench/scripts/scene-ownership.test.mjs',
         'workbench/scripts/scene-state.test.mjs',
+        // ★ 2026-10-14 办公室场景：看板/气泡的状态契约与"谁该去走一趟看板"的派生，
+        //   以及四件事（布景/看板/气泡/走看板的动作）**接线**是否真的接上。
+        //   判据 ⑤ 专门守"状态颜色只许有一份"——那是这类改动最容易留下的沉默缺陷。
+        'workbench/scripts/scene-board.test.mjs',
+        'workbench/scripts/scene-office-wiring.test.mjs',
         'workbench/scripts/sw-shell.test.mjs',
       ],
       cwd: ROOT,

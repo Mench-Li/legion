@@ -1,0 +1,56 @@
+﻿# T-210 目标/回归套件逐支直跑（node <suite>.test.mjs）
+# at=2026-10-14T13:16:43.7890721+08:00
+
+### team-hub/team-views-routes.test.mjs  EXIT=0
+ℹ tests 20
+ℹ pass 20
+ℹ fail 0
+ℹ skipped 0
+
+### team-hub/scripts/migrate-avatars.test.mjs  EXIT=0
+ℹ tests 7
+ℹ pass 7
+ℹ fail 0
+ℹ skipped 0
+
+### team-hub/scripts/seed-roster.test.mjs  EXIT=0
+ℹ tests 6
+ℹ pass 6
+ℹ fail 0
+ℹ skipped 0
+
+### workbench/scripts/external-avatar-parity.test.mjs  EXIT=0
+ℹ tests 5
+ℹ pass 5
+ℹ fail 0
+ℹ skipped 0
+
+### workbench/scripts/agent-avatar.test.mjs  EXIT=0
+ℹ tests 12
+ℹ pass 12
+ℹ fail 0
+ℹ skipped 0
+
+### workbench/scripts/avatar-photo.test.mjs  EXIT=0
+ℹ tests 10
+ℹ pass 10
+ℹ fail 0
+ℹ skipped 0
+
+### workbench/mobile/avatar-parity.test.mjs  EXIT=0
+ℹ tests 6
+ℹ pass 6
+ℹ fail 0
+ℹ skipped 0
+
+### workbench/scripts/agent-avatar-surfaces.test.mjs  EXIT=0
+ℹ tests 9
+ℹ pass 9
+ℹ fail 0
+ℹ skipped 0
+
+### workbench/scripts/agent-avatar-settings.test.mjs  EXIT=0
+ℹ tests 8
+ℹ pass 8
+ℹ fail 0
+ℹ skipped 0

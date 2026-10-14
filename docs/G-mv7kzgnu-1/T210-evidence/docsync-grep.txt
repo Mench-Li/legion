@@ -1,0 +1,10 @@
+﻿# T-210 docSync 三处机械命中（功能手册小节 / 功能索引 / README 引导段）
+# 判据：三处都能搜到「外部执行者 / soldier / 头像」的同步口径
+
+=== [1] docs/FEATURES.md §3.2 外部执行者头像小节 ===
+78: - **外部执行者（未入编队）的头像（2026-10-14）**：目录里那几个「· 执行中」的条目（`soldier-a` / `soldier-b` / `soldier-auto` / `general`，以及其它空间同类的 `soldier-market`）**不是 roster 行**，由 `/api/roster` 按 `tasks.soldier` 实时合成。头像取自 `team-hub/agent-avatars.mjs` 的 `EXTERNAL_AVATAR_TOKENS` 冻结表（`general=human:s11` … `soldier-market=human:s15`）；未登记名字按确定性兜底分到空闲备用位面 `s01..s10`，池满回落空串（占位人形，绝不产 emoji）。客户端在 `workbench/src/avatar/external-agents.ts` 保留同一张表（侧栏用户卡 / 左轨徽标 / 技能授权标签在目录查不到时用它兜底），两端由 `node workbench/scripts/external-avatar-parity.test.mjs` 逐项锁死。新增一个已点名身份：两端表各加一行 + 跑该套件。
+79: - **期望结果**：每空间只见自己的专属编队；未入编但认领了该空间任务的执行者（`soldier-a` / `soldier-b` / `soldier-auto` / `general`）以「xxx · 执行中」合流展示，并同样拿 `human:<key>` 人形令牌（服务端冻结表 / 确定性兜底，不再硬编码齿轮 emoji）。同一成员在人员目录、Agent 工作区头部、中心面板、3D 场景列表、模型设置、技能授权、任务弹窗与移动端显示**同一名称与同一头像**（单一来源 = roster 的 name/avatar；外部执行者的名字→令牌映射两侧由 `external-avatar-parity` 套件 lockstep）；令牌缺失/非法时回落确定性占位人形，**不出现破图**（图片路径由资产表先行判定，资产存在性由测试在提交时守住）。
+=== [2] docs/FEATURES.md §4 功能索引 F-02 ===
+310: F-02 | 空间与专属编队（含外部执行者头像） | 3.2 空间与专属编队 | 左侧「工作空间」/「＋ 新建空间」 | 已上线
+=== [3] README.md 引导段 ===
+147: 工作空间是真实数据分区，可维护名称、专属角色编队、本地目录和远程仓库绑定。编队成员有**两段式展示名**（拟人称呼 + 职能副标题）与**确定性的人形头像**（非 emoji、离线自足；有图用图、没图用矢量，新建时按 role 自动分配，暂不需要配置）；未入编队但认领了空间任务的执行者（`soldier-*`、`general`）也拿同一套 `human:<key>` 人形令牌，不再是齿轮占位。同一成员在桌面与手机各展示面同名同像。新建空间时可从全局智能体目录选人入编；删除空间前展示任务、目标、会话、技能等影响，并要求精确输入确认文本。`software` 和 `default` 为受保护空间。

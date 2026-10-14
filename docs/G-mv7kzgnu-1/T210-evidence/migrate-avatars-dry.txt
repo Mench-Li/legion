@@ -1,0 +1,5 @@
+﻿# node team-hub/scripts/migrate-avatars.mjs --dry  (live 库只读预演)
+# EXIT=0
+# output:
+migrate-avatars: 预演（--dry，未写库）：扫描 0 行，头像迁移 0 行
+migrate-avatars: 没有需要迁移的行（全部已是合法令牌）

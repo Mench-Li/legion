@@ -1,0 +1,6 @@
+﻿# node scripts/ci/check-docs.mjs
+# EXIT=0
+# output:
+  历史 evidence banner 覆盖完整（docs/ 下证据快照目录全部标注）
+  表格行形状完整（docs/ + README 共 17219 个表行，收尾与孤儿行 0 处异常）
+check-docs: PASS（README.md + docs/FEATURES.md 结构/链接/索引一致，11 类校验项全绿）

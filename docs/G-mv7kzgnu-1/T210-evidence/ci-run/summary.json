@@ -1,0 +1,47 @@
+{
+  "root": "D:\\project\\DSH\\legion\\.legion-worktrees\\T-210",
+  "outDir": "D:\\project\\DSH\\legion\\.legion-worktrees\\T-210\\docs\\G-mv7kzgnu-1\\T210-evidence\\ci-run",
+  "finishedAt": "2026-10-14T05:18:08.918Z",
+  "stages": [
+    {
+      "name": "syntax",
+      "status": "PASS",
+      "ms": 22536,
+      "skipped": 0
+    },
+    {
+      "name": "env",
+      "status": "FAIL",
+      "ms": 4379,
+      "skipped": 0
+    },
+    {
+      "name": "boundary",
+      "status": "PASS",
+      "ms": 1098,
+      "skipped": 0
+    },
+    {
+      "name": "deps",
+      "status": "PASS",
+      "ms": 5,
+      "skipped": 0
+    },
+    {
+      "name": "doc",
+      "status": "PASS",
+      "ms": 2468,
+      "skipped": 0
+    }
+  ],
+  "failed": 1,
+  "skippedTotal": 0,
+  "tree": {
+    "known": true,
+    "head": "f6f1f412",
+    "dirty": true,
+    "modifiedCount": 0,
+    "untrackedCount": 1,
+    "fingerprint": "3746609fe64f1e9f"
+  }
+}

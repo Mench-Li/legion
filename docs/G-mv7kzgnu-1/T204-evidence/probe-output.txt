@@ -1,0 +1,53 @@
+db = D:/project/DSH/legion/team-hub/team.db  (mtime 2026-10-14T04:16:41.607Z, readOnly)
+
+== scope default | roster 3 | 非法令牌 roster 0 | external 0
+   roster   assistant              | 小通        | human:assistant        -> PHOTO:assistant
+   roster   research-assistant     | 小辑        | human:research-assistant -> PHOTO:research-assistant
+   roster   writer                 | 执笔        | human:writer           -> PHOTO:writer
+
+== scope gf001 | roster 3 | 非法令牌 roster 0 | external 0
+   roster   planner                | 计划工程师     | human:s02              -> PHOTO:s02
+   roster   implementer            | 实现工程师     | human:s01              -> PHOTO:s01
+   roster   reviewer               | 评审工程师     | human:reviewer         -> PHOTO:reviewer
+
+== scope ozon | roster 10 | 非法令牌 roster 0 | external 1
+   roster   soldier-research       | 调研参谋      | human:s08              -> PHOTO:s08
+   roster   soldier-selection      | 选品参谋      | human:s09              -> PHOTO:s09
+   roster   soldier-compliance     | 合规核验参谋    | human:s03              -> PHOTO:s03
+   roster   soldier-profit         | 利润测算参谋    | human:s07              -> PHOTO:s07
+   roster   soldier-sourcing       | 寻源参谋      | human:s10              -> VECTOR:s10
+   roster   soldier-listing        | 上架参谋      | human:s04              -> PHOTO:s04
+   roster   soldier-ops-store      | 店铺运营参谋    | human:s06              -> PHOTO:s06
+   roster   soldier-ops-social     | 社媒运营参谋    | human:s05              -> PHOTO:s05
+   roster   soldier-ad-creative    | 素材制作参谋    | human:s01              -> PHOTO:s01
+   roster   soldier-ad-delivery    | 广告投放参谋    | human:s02              -> PHOTO:s02
+   EXTERNAL soldier-market         | name="soldier-market · 执行中" | avatar="⚙️" (team-views.mjs:119 硬编码) -> ILLEGAL=placeholder   tasks=T-162:done,T-163:done
+
+== scope software | roster 8 | 非法令牌 roster 0 | external 4
+   roster   requirement            | 析言        | human:requirement      -> PHOTO:requirement
+   roster   researcher             | 探微        | human:researcher       -> PHOTO:researcher
+   roster   breaker                | 分略        | human:breaker          -> PHOTO:breaker
+   roster   test-designer          | 构验        | human:test-designer    -> PHOTO:test-designer
+   roster   coder                  | 衡码        | human:coder            -> PHOTO:coder
+   roster   reviewer               | 鉴微        | human:reviewer         -> PHOTO:reviewer
+   roster   tester                 | 寻瑕        | human:tester           -> PHOTO:tester
+   roster   devops                 | 启舟        | human:devops           -> PHOTO:devops
+   EXTERNAL soldier-a              | name="soldier-a · 执行中" | avatar="⚙️" (team-views.mjs:119 硬编码) -> ILLEGAL=placeholder   tasks=T-001:done
+   EXTERNAL soldier-b              | name="soldier-b · 执行中" | avatar="⚙️" (team-views.mjs:119 硬编码) -> ILLEGAL=placeholder   tasks=T-002:done
+   EXTERNAL general                | name="general · 执行中" | avatar="⚙️" (team-views.mjs:119 硬编码) -> ILLEGAL=placeholder   tasks=T-003:done
+   EXTERNAL soldier-auto           | name="soldier-auto · 执行中" | avatar="⚙️" (team-views.mjs:119 硬编码) -> ILLEGAL=placeholder   tasks=T-004:done
+
+TOTAL: 渲染成同一张灰阶占位人形的条目 = 5（其中 software 的 4 条 = 本目标对象）
+
+图片资产：20 个 key；被 roster 实际使用的图片 key = 20 / 20
+备用位面：共 15 个；全库已占用 s01,s02,s03,s04,s05,s06,s07,s08,s09,s10；空闲 s11,s12,s13,s14,s15
+位面表：40 个 key，两两不同的特征签名 = 40（构造性唯一）
+   空闲位面 s11 -> {"key":"s11","skin":"#bd8557","hair":"#3a3a44","hairStyle":"bob","top":"#e6a0bd","accessory":"cap","background":"#f8e9f1","skinShade":"#9f7049","hairShade":"#2d2d35","topShade":"#bd839b"} | 有图? false
+   空闲位面 s12 -> {"key":"s12","skin":"#f7d9bd","hair":"#7d4d6e","hairStyle":"bob","top":"#84b6e8","accessory":"cap","background":"#e8eff8","skinShade":"#cfb69f","hairShade":"#623c56","topShade":"#6c95be"} | 有图? false
+   空闲位面 s13 -> {"key":"s13","skin":"#efc49c","hair":"#7d4d6e","hairStyle":"bob","top":"#b6a0e2","accessory":"cap","background":"#f1eaf8","skinShade":"#c9a583","hairShade":"#623c56","topShade":"#9583b9"} | 有图? false
+   空闲位面 s14 -> {"key":"s14","skin":"#dca876","hair":"#7d4d6e","hairStyle":"bob","top":"#63c8bc","accessory":"cap","background":"#e3f2f0","skinShade":"#b98d63","hairShade":"#623c56","topShade":"#51a49a"} | 有图? false
+   空闲位面 s15 -> {"key":"s15","skin":"#bd8557","hair":"#7d4d6e","hairStyle":"bob","top":"#f0aa86","accessory":"cap","background":"#faf0e3","skinShade":"#9f7049","hairShade":"#623c56","topShade":"#c58b6e"} | 有图? false
+
+反例 1：合法令牌但未登记 key —— human:general 与空串渲染结果相同? true（是 ⇒ 写进库里等于什么都没做）
+反例 2：已登记的空闲位面 human:s11 与占位人形相同? false（否 ⇒ 真的换了脸）
+占位人形 PLACEHOLDER_SLOT = {"key":"placeholder","skin":"#cbd3dc","hair":"#8a95a3","hairStyle":"short","top":"#9aa7b5","accessory":"none","background":"#eef1f4","skinShade":"#abb1b9","hairShade":"#6c747f","topShade":"#7e8994"}

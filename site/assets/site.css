@@ -271,7 +271,7 @@ html[data-theme=dark] .hero:before { opacity: .6; }
 .bottom .btn { background: #edf5ec; color: #183937; border: 0; white-space: nowrap; }
 .bottom .btn:hover { filter: brightness(.94); }
 
-/* 部署 / 下载 */
+/* 开始使用（原「部署 / 下载」） */
 .deploy { padding-top: 62px; }
 .deploy h2 { font-size: 23px; font-weight: 550; }
 .deploy-intro { font-size: 12px; color: var(--muted); margin-top: 10px; }
@@ -279,39 +279,39 @@ html[data-theme=dark] .hero:before { opacity: .6; }
 .deploy-item { border-top: 1px solid var(--line); padding: 20px 0; }
 .deploy-item h3 { font-size: 14px; font-weight: 550; display: flex; justify-content: space-between; align-items: center; gap: 10px; }
 .deploy-item p { font-size: 12px; color: var(--muted); margin-top: 11px; }
-/* ★ `:not(.btn)` 是**必须**的：这张卡片里同时有"文字链接"和"下载按钮"，
-   两者都是 `<a>`。不加这个限制时，`.deploy-item a`（0,1,1）比 `.primary`（0,1,0）
-   更具体，于是把按钮的文字也染成了 `--accent` —— 而按钮底色也是 `--accent`，
-   结果**青绿字压青绿底，按钮上的字看不见**（2026-10-08 业主报的"下载按钮没有文字"）。
+/* ★ `:not(.btn)` 是**必须**的：这张卡片里同时有"文字链接"（GitHub 仓库）与
+   "按钮"（打开就能用），两者都是 `<a>`。不加这个限制时，`.deploy-item a`（0,1,1）
+   比 `.primary`（0,1,0）更具体，于是把按钮的文字也染成了 `--accent` —— 而按钮底色
+   也是 `--accent`，结果**青绿字压青绿底，按钮上的字看不见**
+   （2026-10-08 业主报的"按钮没有文字"）。
 
    > 一个"给卡片里的链接上色"的规则与一个"按钮自己上色"的规则，
    > 在它们恰好选了同一个 `a` 元素时，谁赢看的是选择器权重 —— 而这种事没有第二次机会：
-   > 用户看到的就是一个空按钮。 */
+   > 用户看到的就是一个空按钮。
+
+   ⚠️ 2026-10-12：这个 bug 当时是在**下载按钮**上报出来的。下载卡片撤掉之后，
+   这张卡片里**仍然是"一个按钮 + 一个文字链接"**（打开就能用 / GitHub 源码），
+   所以 `:not(.btn)` 照样必须 —— 它防的不是那个按钮，是**这两者共存**这件事。 */
 .deploy-item a:not(.btn) { display: inline-block; margin-top: 13px; color: var(--accent); font-size: 12px; }
 
 .label { font-size: 10px; color: var(--accent); background: var(--tint); padding: 4px 8px; border-radius: 3px; white-space: nowrap; }
-.label.human { color: var(--orange); background: var(--orange-bg); }
+/* ★ 2026-10-12：`.label.human`（橙色徽标）随下载卡片一起撤掉了 —— 三个模板
+   （`index.html` / `en/index.html` / `demo/index.html`）**都不再产出它**
+   （它当时只用在 Windows 卡片那个"内部验证 · 未签名"徽标上）。
+   留一条没有任何产出方的规则只有坏处：后来的人会以为某处在用它，于是不敢改，
+   或者照着它再加一个徽标。`.pill.human` 是**另一个** class（演示页在用），不受影响。 */
 
-/* 下载区（**动态注入**，稿子里没有这一段） —— 用稿子的语言重画：
-   小字号、等宽标签、1px 边线，不引入新的视觉词汇。 */
-/* ★ 2026-10-12：`.hub-actions` 是部署区第一张卡（Web 入口）的动作块，
-   与下载卡的 `.dl-actions` **共用同一份视觉**，但**不复用同一个 class**。
-   复用会让"这句话说的是哪一块"只能靠**文档顺序**推断 —— 而顺序是模板里一个
-   标记的位置；用例与 CSS 都该能指名道姓。（两块在语义上也确实不同：
-   一个把人带进 Web 端，一个把包装到机器上。） */
-.dl-actions, .hub-actions { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; margin-top: 16px; }
-.dl-actions .btn, .hub-actions .btn { min-height: 40px; padding: 0 18px; font-size: 13px; }
-.dl-actions .btn[aria-disabled=true] { background: var(--soft); color: var(--muted); border-color: var(--line); cursor: not-allowed; }
-.dl-meta { font: 10px var(--mono); color: var(--muted); margin-top: 12px; display: flex; flex-wrap: wrap; gap: 5px 13px; }
-.dl-meta .sep { color: var(--line); }
-/* T-196 多线路：主按钮下面那一行备选线路。
-   刻意比主按钮弱（沿用 `.dl-meta` 的等宽小字 + 强调色链接）——它是"主线路不通时的
-   第二条路"，不该与主按钮争注意力；但它必须是**可点的链接**：按地区自动选线路对
-   部分访客（VPN、企业出口、Cloudflare 给 XX/T1 的那些）本来就会选错，没有备选
-   就等于那部分人换不了线路。 */
-.dl-lines { font: 10px var(--mono); color: var(--muted); margin-top: 10px; display: flex; flex-wrap: wrap; gap: 5px 7px; align-items: baseline; }
-.dl-lines a { color: var(--accent); text-decoration: underline; text-underline-offset: 2px; }
-.dl-lines .sep { color: var(--line); }
+/* 开始区第一张卡（Web 入口）的动作块。
+   ★ 2026-10-12：它原先与下载卡的 `.dl-actions` **共用**同一份视觉，所以这里写的是
+   `.dl-actions, .hub-actions { … }` 这样的双选择器。下载卡片撤掉之后 `.dl-actions`
+   没有任何产出方了，双选择器收成单选择器。
+   （`.dl-meta` / `.dl-lines` 以及那条 `.dl-actions .btn[aria-disabled=true]`
+   —— "尚未发布"那个死按钮的样式 —— 一并删掉。）
+
+   > 一个"共用同一份视觉"的双选择器，
+   > 与一个"其中一个永远不匹配"的双选择器，在两条都在用的时候是同一个东西。 */
+.hub-actions { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; margin-top: 16px; }
+.hub-actions .btn { min-height: 40px; padding: 0 18px; font-size: 13px; }
 
 .hub-line { margin-top: 16px; font-size: 11px; color: var(--muted); line-height: 1.9; }
 .hub-line a { color: var(--accent); }

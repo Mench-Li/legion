@@ -45,10 +45,162 @@ test('Agent 节点身份独立登记；心跳报告真实 provider/能力，未�
   const revised = store.putAgentNodeConfig({ id: 'workstation-a', label: '本机 DSH', scope: 'default' })
   assert.equal(revised.version, 2)
   assert.equal(store.listAgentNodeConfigs({ scope: 'default', nowMs: 50_001 })[0].status, 'offline', '旧版节点心跳不得冒充新配置在线')
-  assert.throws(() => store.heartbeatAgentNode({
-    id: 'workstation-a', version: 1, scope: 'default', providerNames: ['codex'],
-    capabilities: { isolatedWorktree: true, externalAgent: true, structuredOutput: true, toolFilter: true, cancellation: true },
-  }), /配置不存在/)
+  // ★ 2026-10-13：这条原先是 /配置不存在/ —— 而那句话把**四种原因**挤成一句
+  //   （不存在 / 版本不符 / 空间不符 / 已停用），调用方没法据此决定下一步。
+  //   这里的情形是"节点**存在**、只是版本旧了" ⇒ 必须是 CONFIG_STALE，
+  //   而**不能**是 UNKNOWN（UNKNOWN 会让守护去自注册，等于把人的配置悄悄改写）。
+  assert.throws(
+    () => store.heartbeatAgentNode({
+      id: 'workstation-a', version: 1, scope: 'default', providerNames: ['codex'],
+      capabilities: { isolatedWorktree: true, externalAgent: true, structuredOutput: true, toolFilter: true, cancellation: true },
+    }),
+    (e) => {
+      assert.match(e.message, /配置不匹配/, '版本不符要说"配置不匹配"，不是含糊的"不存在"')
+      assert.equal(e.code, 'AGENT_NODE_CONFIG_STALE', '带 code 才能让调用方按机器可判的方式分支')
+      return true
+    },
+  )
+})
+
+test('★ Agent 节点心跳：**没登记**与**配置不符**必须是两种可判别的原因（code 分开）', () => {
+  const { store } = mk()
+
+  // ① 压根没这个节点 ⇒ AGENT_NODE_UNKNOWN（调用方可以自动处理：守护自注册）
+  assert.throws(
+    () => store.heartbeatAgentNode({ id: 'never-registered', scope: 'default', providerNames: ['spawn'], capabilities: {} }),
+    (e) => {
+      assert.equal(e.code, 'AGENT_NODE_UNKNOWN')
+      assert.match(e.message, /未登记/)
+      return true
+    },
+  )
+
+  // ② 有节点但空间不符 ⇒ CONFIG_STALE（人的配置问题，**不许**自动改写）
+  store.putAgentNodeConfig({ id: 'node-x', label: 'X', scope: 'default' })
+  assert.throws(
+    () => store.heartbeatAgentNode({ id: 'node-x', scope: 'other-scope', providerNames: ['spawn'], capabilities: {} }),
+    (e) => {
+      assert.equal(e.code, 'AGENT_NODE_CONFIG_STALE', '空间不符不是"没登记"，不该被自注册盖掉')
+      return true
+    },
+  )
+
+  // ③ 有节点但已停用 ⇒ 同样是 CONFIG_STALE（不是 UNKNOWN）
+  store.putAgentNodeConfig({ id: 'node-y', label: 'Y', scope: 'default', enabled: false })
+  assert.throws(
+    () => store.heartbeatAgentNode({ id: 'node-y', scope: 'default', providerNames: ['spawn'], capabilities: {} }),
+    (e) => {
+      assert.equal(e.code, 'AGENT_NODE_CONFIG_STALE', '停用的节点不该因为"心跳失败"被当成未登记而自注册复活')
+      return true
+    },
+  )
+
+  // ④ 两个 code 必须**真的不同** —— 否则"靠 code 分支"就是空话
+  const codeOf = (fn) => { try { fn(); return '(没抛)' } catch (e) { return e.code } }
+  const unknown = codeOf(() => store.heartbeatAgentNode({ id: 'nope', scope: 'default', providerNames: ['spawn'], capabilities: {} }))
+  const stale = codeOf(() => store.heartbeatAgentNode({ id: 'node-x', scope: 'wrong', providerNames: ['spawn'], capabilities: {} }))
+  assert.notEqual(unknown, stale)
+  assert.equal(unknown, 'AGENT_NODE_UNKNOWN')
+  assert.equal(stale, 'AGENT_NODE_CONFIG_STALE')
+})
+
+// ════════════════════════════════════════════════════════════════════════════
+// C 档（2026-10-13）：节点**忙闲**与**机器标识**
+//
+// 为什么要这两样：自动选节点的判据不是"哪个闲"，而是"**是不是同一台机器**"
+// （同机可改派 / 跨机要排队），而"哪台闲"此前**根本没有数据** ——
+// 守护的忙闲是它进程内的 `inflight.size < maxWorkers`，从不外传；
+// hub 只存了配置里的 maxWorkers（意图），没存实际在跑几个（事实）。
+// ════════════════════════════════════════════════════════════════════════════
+
+const CAPS_OK = { isolatedWorktree: true, externalAgent: false, structuredOutput: true, toolFilter: true, cancellation: true }
+
+test('★ 节点心跳可上报 busy/capacity 与 machineId，并在读面暴露', () => {
+  const { store } = mk()
+  store.putAgentNodeConfig({ id: 'n1', label: 'N1', scope: 'default' })
+  const hb = store.heartbeatAgentNode({
+    id: 'n1', scope: 'default', providerNames: ['spawn'], capabilities: CAPS_OK,
+    load: { busy: 1, capacity: 2 }, machineId: 'host-a', nowMs: 1_000,
+  })
+  assert.equal(hb.status, 'ready')
+  assert.equal(hb.busy, 1)
+  assert.equal(hb.capacity, 2)
+  assert.equal(hb.machineId, 'host-a')
+  // 读面：listAgentNodeConfigs 也要带出来（面板与选择器读的是它）
+  const [listed] = store.listAgentNodeConfigs({ scope: 'default', nowMs: 1_000 })
+  assert.equal(listed.busy, 1)
+  assert.equal(listed.capacity, 2)
+  assert.equal(listed.machineId, 'host-a')
+})
+
+test('★★★ 缺席 ⇒ null（**未知**），绝不是 0（"空闲"）', () => {
+  // 这条是这一档最要紧的判据：把"不知道"当成"空闲"，选择器就会把最不可信的节点
+  // 排在第一位，任务发过去没人认领，而界面上只说"任务不动"。
+  const { store } = mk()
+  store.putAgentNodeConfig({ id: 'n-old', label: '老守护', scope: 'default' })
+  const hb = store.heartbeatAgentNode({ id: 'n-old', scope: 'default', providerNames: ['spawn'], capabilities: CAPS_OK, nowMs: 1_000 })
+  assert.equal(hb.status, 'ready', '老守护不上报负载也必须能就绪')
+  assert.equal(hb.busy, null, '没上报 ⇒ null（未知）')
+  assert.equal(hb.capacity, null)
+  assert.equal(hb.machineId, null)
+  assert.notEqual(hb.busy, 0, '★ 绝不许把"未知"写成 0')
+})
+
+test('★★★ 负载**过期**必须变回 null（"上个月很闲"不等于"现在很闲"）', () => {
+  const { store } = mk()
+  store.putAgentNodeConfig({ id: 'n2', label: 'N2', scope: 'default' })
+  store.heartbeatAgentNode({ id: 'n2', scope: 'default', providerNames: ['spawn'], capabilities: CAPS_OK, load: { busy: 0, capacity: 4 }, machineId: 'host-b', nowMs: 1_000 })
+  const fresh = store.listAgentNodeConfigs({ scope: 'default', nowMs: 1_000 + 59_000 })[0]
+  assert.equal(fresh.busy, 0, '新鲜时 busy=0 是**真的空闲**')
+  assert.equal(fresh.status, 'ready')
+  // 超出 60s 新鲜窗：忙闲必须变成"未知"，否则一台**已失联**的机器会被当成最闲的
+  const stale = store.listAgentNodeConfigs({ scope: 'default', nowMs: 1_000 + 61_000 })[0]
+  assert.equal(stale.status, 'offline')
+  assert.equal(stale.busy, null, '★ 过期读数不许继续冒充"空闲"')
+  assert.equal(stale.capacity, null)
+  // machineId 是**身份**、不随时间衰减 ⇒ 仍然给出来（否则"同机判定"会因为心跳抖动而失效）
+  assert.equal(stale.machineId, 'host-b', '身份不随新鲜度消失')
+})
+
+test('★ 负载/机器标识的坏输入**抛错**，不静默降级成"未知"', () => {
+  const { store } = mk()
+  store.putAgentNodeConfig({ id: 'n3', label: 'N3', scope: 'default' })
+  const badLoads = [
+    [{ busy: 0, capacity: 0 }, /capacity/],
+    [{ busy: 0, capacity: 9 }, /capacity/],
+    [{ busy: 3, capacity: 2 }, /busy/],
+    [{ busy: -1, capacity: 2 }, /busy/],
+    [{ busy: 1.5, capacity: 2 }, /整数/],
+    [{ capacity: 2 }, /整数/],
+    [{ busy: 0 }, /整数/],
+    [{ busy: '0', capacity: 2 }, /整数/],
+    ['x', /对象/],
+    [[], /对象/],
+    [1, /对象/],
+  ]
+  for (const [load, re] of badLoads) {
+    assert.throws(
+      () => store.heartbeatAgentNode({ id: 'n3', scope: 'default', providerNames: ['spawn'], capabilities: CAPS_OK, load }),
+      re, `load=${JSON.stringify(load)} 应当被拒`,
+    )
+  }
+  for (const badId of [1, {}, [], true]) {
+    assert.throws(() => store.heartbeatAgentNode({ id: 'n3', scope: 'default', providerNames: ['spawn'], capabilities: CAPS_OK, machineId: badId }), /machineId/)
+  }
+  assert.throws(() => store.heartbeatAgentNode({ id: 'n3', scope: 'default', providerNames: ['spawn'], capabilities: CAPS_OK, machineId: 'x'.repeat(129) }), /过长/)
+  // ★ 坏输入被拒之后**不该**留下半条读数
+  assert.equal(store.listAgentNodeConfigs({ scope: 'default', nowMs: 1_000 })[0].status, 'unknown', '被拒的心跳不得写库')
+})
+
+test('★ machineId 空串/空白 ⇒ 视作"未知"（不是"叫空名字的机器"）；两侧空白要去掉', () => {
+  const { store } = mk()
+  store.putAgentNodeConfig({ id: 'n4', label: 'N4', scope: 'default' })
+  for (const v of ['', '   ', null, undefined]) {
+    const hb = store.heartbeatAgentNode({ id: 'n4', scope: 'default', providerNames: ['spawn'], capabilities: CAPS_OK, machineId: v })
+    assert.equal(hb.machineId, null, JSON.stringify(v) + ' ⇒ 未知')
+  }
+  // 不去空白的话 'host-a ' 与 'host-a' 会被判成两台不同的机器 ⇒ 同机策略失效
+  assert.equal(store.heartbeatAgentNode({ id: 'n4', scope: 'default', providerNames: ['spawn'], capabilities: CAPS_OK, machineId: '  host-a  ' }).machineId, 'host-a')
 })
 
 test('Agent 节点路由可创建配置并接收心跳；配置读面按空间隔离', async () => {

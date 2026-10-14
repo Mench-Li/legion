@@ -842,9 +842,63 @@ describe('官网：真实模板不漂移', () => {
     // 2026-10-08 的线上故障：`.deploy-item a { color: var(--accent) }` 权重 0,1,1，
     // 压过了 `.primary` 的 0,1,0 —— 下载按钮的文字被染成青绿，而底色也是青绿，
     // **按钮上的字整块看不见**。修法就是把它限定在非按钮链接上。
+    //
+    // ★ 2026-10-12：那次故障是在**下载按钮**上报出来的，但下载卡片撤掉之后这张卡片里
+    //   **仍然是"一个按钮 + 一个文字链接"**（打开就能用 / GitHub 源码）—— 所以这条
+    //   判据照旧有效，而且更该留着：它防的不是那个按钮，是这两者共存。
     const css = readFileSync(fileURLToPath(new URL('../site/assets/site.css', import.meta.url)), 'utf8')
     assert.match(css, /\.deploy-item a:not\(\.btn\)/, '必须限定为 :not(.btn)')
     assert.doesNotMatch(css, /^\.deploy-item a \{/m, '不该存在无限定的 .deploy-item a 规则')
+  })
+
+  test('★★★ 只服务于下载区的 CSS 已删干净，而 Web 入口那块的样式**留着**', () => {
+    // ★ 这条从**样式侧**补上"下载区真的没了"这半边。
+    //
+    //   上面那一族盯的是**产出方**（渲染层不再产出 `.dl-*`），但 CSS 里留着规则
+    //   照样能让 `dl-*` 复活 —— 而且更隐蔽：一个后来的人看到 `.dl-actions` 的样式
+    //   还在，会以为"这个 class 某处还在用"，于是照着它再加一个下载卡片。
+    //
+    //   > 一个"没有任何产出方"的 class 规则，
+    //   > 与一个"正在被使用"的 class 规则，在只读 CSS 的时候是同一个东西。
+    //
+    //   ★★ 另一半同样重要：`.hub-actions` 与 `.dl-actions` 原先**共用一条双选择器**
+    //   （`.dl-actions, .hub-actions { … }`）。删的时候如果把整条删掉，
+    //   Web 入口那个按钮就会**失去样式** —— 而页面结构、类名、文字全都在，
+    //   所以任何"看 HTML"的判据都不会红。
+    //
+    //   > 一个"按钮在页面上、也有 class"的判据，
+    //   > 与一个"按钮看起来像按钮"的判据，在 CSS 被删掉之后是同一个东西。
+    const css = readFileSync(fileURLToPath(new URL('../site/assets/site.css', import.meta.url)), 'utf8')
+    // ① 死掉的下载区规则：一条都不许再有**规则**（注释里提到它们是可以的 ——
+    //    注释解释了它们为什么被删，删掉注释会让下一个人重新问一遍）。
+    const noComments = css.replace(/\/\*[\s\S]*?\*\//g, '')
+    for (const sel of ['.dl-actions', '.dl-meta', '.dl-lines', '.label.human']) {
+      assert.doesNotMatch(noComments, new RegExp(`\\${sel}[\\s,{.:]`),
+        `CSS 里不该再有 ${sel} 的规则（没有产出方了）`)
+    }
+    // ② 而 Web 入口那一块必须有规则 —— 它的双选择器被收窄过，收窄时最容易整条删掉。
+    //
+    // ★ 正则对**空白**宽容（`\s*`）：这条判据要盯的是"这条规则还在不在、
+    //   有没有被并回一个死选择器"，不是"格式化成了几个空格"。
+    //   一个"重排一下格式就红"的判据会被当成噪音，然后被删掉。
+    assert.match(css, /^\.hub-actions\s*\{/m, 'Web 入口动作块的布局规则必须在')
+    assert.match(css, /^\.hub-actions\s+\.btn\s*\{/m, 'Web 入口那个按钮的规则必须在')
+  })
+
+  test('★ 反例守卫：上面那条"下载区 CSS 已删干净"不是恒真', () => {
+    // 把**改动前**的那几行喂给它，必须被判红；而 `.pill.human`（演示页在用，
+    // 与 `.label.human` 只差一个前缀）**不许**被误伤。
+    const oldCss = '.dl-actions, .hub-actions { display: flex; }\n'
+      + '.dl-meta { font: 10px var(--mono); }\n'
+      + '.dl-lines a { color: var(--accent); }\n'
+      + '.label.human { color: var(--orange); }\n'
+    for (const sel of ['.dl-actions', '.dl-meta', '.dl-lines', '.label.human']) {
+      assert.match(oldCss, new RegExp(`\\${sel}[\\s,{.:]`), `反例应当被 ${sel} 那条抓住`)
+    }
+    // ★ 关键的不误伤：`.pill.human` 与 `.label.human` 后缀相同，前缀不同。
+    const live = '.pill.human { color: var(--orange); border-color: red; }'
+    assert.doesNotMatch(live, /\.label\.human[\s,{.:]/, '`.pill.human` 不该被当成 `.label.human`')
+    assert.match(live, /\.pill\.human[\s,{.:]/, '而它自己应当被认出来（说明正则不是什么都不匹配）')
   })
 
   test('★ 真实模板里不含任何真实项目数据（门口那条纪律）', () => {

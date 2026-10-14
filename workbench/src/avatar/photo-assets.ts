@@ -53,6 +53,7 @@ export const AVATAR_PHOTOS: Readonly<Record<string, AvatarPhoto>> = Object.freez
   's13': { file: 'agent-avatar-23.webp', from: 'assets/agent-avatars/agent-avatar-23.png', srcSize: '1254x1254', sha256: 'ff1f9c6fa6e16924' },
   's14': { file: 'agent-avatar-24.webp', from: 'assets/agent-avatars/agent-avatar-24.png', srcSize: '1254x1254', sha256: 'eb0825fc0eff1451' },
   's15': { file: 'agent-avatar-25.webp', from: 'assets/agent-avatars/agent-avatar-25.png', srcSize: '1254x1254', sha256: '3be9f68aa25d6803' },
+  's10': { file: 'agent-avatar-26.webp', from: 'assets/agent-avatars/agent-avatar-26.png', srcSize: '1254x1254', sha256: 'e24e6b521497ff3e' },
 })
 
 /** 图片资产的公开路径前缀（相对 index.html；桌面与手机同构）。 */

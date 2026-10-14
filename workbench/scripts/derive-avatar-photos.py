@@ -65,9 +65,12 @@ MOBILE_TABLE = ROOT / 'workbench' / 'mobile' / 'avatar.mjs'
 # 顺序 = 编号（第 1 行 → agent-avatar-01）。**只许往后追加**：
 # 在中间插行会把后面所有人的文件名整体挪一位，而那意味着"每个人的脸都换了一张"。
 #
-# 现有 20 行对应 11 个内置岗位 + s01..s09。
-# ⚠ `s10` 刻意留空（ozon 的 soldier-sourcing 用它）：本次没有它的原图，
-#   给它配图时要**追加在末尾**（21 之后的第一个空位），不能插进第 21 行去顶掉 s11。
+# 现有 25 行对应 11 个内置岗位 + s01..s09 + s11..s15。
+#
+# ⚠ `s10`（ozon 的 soldier-sourcing / 寻源参谋）**排在第 26 位**，没跟 s09 挨着 ——
+#   这是有意的，别"顺手把它挪回去"。它当初没有原图，后来补图时只能**追加**：
+#   插回 s09 后面会让 s11..s15 整体挪一位 ⇒ 五张已经被人认下来的脸全部换人。
+#   代价只是编号不连续（s10 → agent-avatar-26），而编号是给文件用的、不是给人看的。
 SLOT_ORDER = [
     'requirement', 'researcher', 'breaker', 'test-designer', 'coder', 'reviewer',
     'tester', 'devops', 'assistant', 'research-assistant', 'writer',
@@ -75,6 +78,9 @@ SLOT_ORDER = [
     # 2026-10-14：外部执行者（未入编队、由 tasks.soldier 合成的那几个）也要写实照片。
     # 判据侧的两张冻结表见 team-hub/agent-avatars.mjs 与 workbench/src/avatar/external-agents.ts。
     's11', 's12', 's13', 's14', 's15',
+    # 2026-10-14（将军："寻源 Agent 还不是写实 3D 风"）：s10 是**最后一个**没有照片的
+    # 编队成员 —— 全仓四个空间的 roster 里，只有它还在走矢量。补上之后就再没有"混着矢量"的人了。
+    's10',
 ]
 
 SOURCE_EXTS = ('.png', '.jpg', '.jpeg', '.webp')

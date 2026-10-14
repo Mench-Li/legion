@@ -62,6 +62,7 @@ export const AVATAR_PHOTOS = Object.freeze({
   s13: 'agent-avatar-23.webp',
   s14: 'agent-avatar-24.webp',
   s15: 'agent-avatar-25.webp',
+  s10: 'agent-avatar-26.webp',
 })
 
 /** 该 key 有没有配图；没有返回 null（调用方回落矢量人形）。 */

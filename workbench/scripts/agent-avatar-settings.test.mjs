@@ -53,3 +53,21 @@ describe('S5 桌面展示面（二）', () => {
     assert.ok(/createAgent\(input: \{[^}]*avatar\?: string/.test(src), 'createAgent 的可选 avatar 参数必须保留（兼容）')
   })
 })
+
+// ── T-207：技能授权标签（S8）对不在 /api/agents 目录的 id 也渲染头像（D-5 纳入）──
+describe('T-207 技能授权标签（S8）', () => {
+  test('TC-S4-01/02 S8 对不在目录的 id 也渲染头像（AC-R6-3 / D-5）', () => {
+    const src = read(C('SkillsPanel.tsx'))
+    const avatars = (src.match(/<AgentAvatar/g) || []).length
+    assert.ok(avatars >= 3, '三处成员标签都要渲染 <AgentAvatar>，实测 ' + avatars)
+    assert.ok(!/\{a\s*&&\s*<AgentAvatar/.test(src), '不得再是「目录查不到 ⇒ 不渲染头像」的条件形态')
+    assert.ok(/external-agents/.test(src), '必须引用 external-agents 兜底表')
+  })
+
+  test('TC-S4-03 无第二套视觉表 / 无破图路径（AC-R4-4 / I-6）', () => {
+    const src = read(C('SkillsPanel.tsx'))
+    assert.ok(!/const AVATARS\s*=/.test(src), '不得有第二套头像表')
+    assert.ok(!src.includes('AVATAR_CHOICES'), '不得有 emoji 候选表')
+    assert.ok(!/<img[^>]*avatar/i.test(src), '头像不走 <img（防破图/裸露 alt）')
+  })
+})

@@ -1,3 +1,8 @@
+<!-- evidence-banner:start -->
+> ⚠️ **历史快照 —— 不作为当前状态依据。** 本目录文档反映 **2026-10-14**（commit `7c04b9cf`） 的基线，其中的测试数量、端口、命令与结论只代表当时状态。
+> 当前状态请看：[docs/STATUS.md](../STATUS.md)（状态与测试基线）· [README.md](../../README.md)（总览）· [docs/DEPLOY.md](../DEPLOY.md)（部署）· 最新 CI 证据 `.ci/<run>/summary.json`。
+<!-- evidence-banner:end -->
+
 # T-203 需求说明：为软件流水线空间仍未换头像的 Agent（soldier-* 与 general）选取头像
 
 > 阶段：需求澄清（requirement）｜任务：T-203（[auto-goal]，所属目标 G-mv7kzgnu-1 · software · chain）

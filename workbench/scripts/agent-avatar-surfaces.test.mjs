@@ -52,3 +52,35 @@ describe('S4 桌面展示面（一）', () => {
     }
   })
 })
+
+// ── T-207：general 的两处客户端展示面（S2 用户卡 / S3 左轨徽标）图形化 ──────────
+const GEAR_CHAR = '\u2699'
+
+describe('T-207 general 客户端展示面（S2/S3）', () => {
+  test('TC-S3-01 用户卡头像图形化，不再用齿轮字符（AC-R3-1）', () => {
+    const src = read(C('Sidebar.tsx'))
+    const m = /<div className="user-avatar">([\s\S]*?)<\/div>/.exec(src)
+    assert.ok(m, '必须仍有 .user-avatar 节点')
+    assert.ok(m[1].includes('<AgentAvatar'), '.user-avatar 内必须是 <AgentAvatar>')
+    assert.ok(!new RegExp('user-avatar">\\s*' + GEAR_CHAR).test(src), '不得再把齿轮字符当头像内容')
+  })
+
+  test('TC-S3-02 左轨管理员徽标图形化，不再用「管」文字（AC-R3-1）', () => {
+    const src = read(C('WorkspaceNavigation.tsx'))
+    assert.ok(/className="workspace-user"[\s\S]{0,160}<AgentAvatar/.test(src), '.workspace-user 内必须是 <AgentAvatar>')
+    assert.ok(!/className="workspace-user"[^>]*>管</.test(src), '不得再用「管」充当徽标')
+  })
+
+  test('TC-S3-03/04 两处同源 + general 令牌 = human:s11（AC-R3-2 / AC-R6-2）', () => {
+    for (const f of ['Sidebar.tsx', 'WorkspaceNavigation.tsx']) {
+      assert.ok(/from\s+['"][^'"]*external-agents['"]/.test(read(C(f))), f + ' 必须从 external-agents 取常量')
+    }
+    const ext = read('workbench/src/avatar/external-agents.ts')
+    assert.ok(/general['"]?\s*:\s*['"]human:s11['"]/.test(ext), 'general 必须是 human:s11')
+  })
+
+  test('TC-S3-12 界面齿轮图标不被误伤（AC-R7-3）', () => {
+    assert.ok(read(C('Sidebar.tsx')).includes(GEAR_CHAR), 'Sidebar 的界面齿轮用法仍在')
+    assert.ok(read(C('CommandBar.tsx')).includes('模型配置'), 'CommandBar 的模型配置入口仍在')
+  })
+})

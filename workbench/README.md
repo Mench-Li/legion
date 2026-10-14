@@ -80,10 +80,10 @@ node scripts/serve.mjs --port 5173   # 独立静态服务 → http://127.0.0.1:5
 - **每个工作空间（scope）有自己的智能体队伍**——任务分区 + 编队分区双管齐下，空间间智能体差异化、专业化：
   software=软件流水线 8 岗位（析言·需求 / 探微·方案 / 分略·拆解 / 构验·用例 / 衡码·编码 / 鉴微·审查 / 寻瑕·测试 / 启舟·部署）、marketing=市场部 5 岗（观市 / 谋篇 / 定投 / 拓流 / 润声）、
   product=产品部 5 岗、ops=运营部 4 岗、default=通用 3 岗。`node team-hub/scripts/seed-roster.mjs` 幂等播种/刷新，**只替换旧默认值、保留将军自定义的名称与头像**。
-- **展示名与头像**：展示名是「拟人称呼 + 职能副标题（kind）」两段式；头像为 `human:<role>` 令牌，由 `workbench/src/avatar/` 的参数化人形内联 SVG 确定性渲染（零第三方依赖、零图片资源、非 emoji），同一 role 跨空间恒定。
+- **展示名与头像**：展示名是「拟人称呼 + 职能副标题（kind）」两段式；头像为 `human:<key>` 令牌（内置岗位 = role，跨空间恒定），由 `workbench/src/avatar/` 确定性渲染——**有图用图、没图用矢量**：配了 256px WebP 的位面走 `<img>`，没配的回落参数化人形内联 SVG；零第三方依赖、非 emoji。图片来源与资产登记见 `workbench/src/avatar/photo-assets.ts`。
 - 切换左侧工作空间 → 中央 3D 场景 / 智能体总览随之换成该空间的编队（人数、职业、状态全不同）。
 - **状态实时投影**：每人按该空间任务的 `soldier` 认领聚合（进行中/待验收/受阻/待命 + 任务清单）；
-  未入编队但认领了该空间任务的执行者（含旧士兵名）以「⚙️ xxx · 执行中」合流展示——即使任务已完成也保留（标注「已完成 N」），切空间不丢信息。
+  未入编队但认领了该空间任务的执行者（含旧士兵名，如 `soldier-a` / `soldier-auto` / `general`）以「xxx · 执行中」合流展示——即使任务已完成也保留（标注「已完成 N」），切空间不丢信息。他们同样拿 `human:<key>` 人形令牌（`agent-avatars.mjs` 的 `EXTERNAL_AVATAR_TOKENS` 冻结表 + 确定性兜底，如 `general=human:s11`），不再是齿轮 emoji / 灰阶占位。
 - **「全部空间」视图**：`/api/roster` 不带 scope 时聚合全部分区（`scope=all`），每名智能体带 scope 标注，跨空间一目了然。
 - 数据流：`GET /api/roster?scope=`；v1 模式（中枢不可达）回退从看板按角色聚合。
 

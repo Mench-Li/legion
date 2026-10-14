@@ -8,11 +8,12 @@
 // ============================================================================
 import { test, after } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, rmSync } from 'node:fs'
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import { createTeamViewsRoutes } from './routes/team-views.mjs'
+import { EXTERNAL_AVATAR_TOKENS, externalAvatarFor, isAvatarToken } from './agent-avatars.mjs'
 
 const dir = mkdtempSync(join(tmpdir(), 'legion-team-views-'))
 process.env.TEAM_HUB_DB = join(dir, 'team.db')
@@ -125,6 +126,16 @@ test('⑤ ★★★ `done` 与 `total` 是两个口径：`total` 是"非 cancele
   assert.equal(a.total, 2, '★★ total = 非 canceled 的总数（done 1 + todo 1），canceled 不算')
 })
 
+// T-207：外部执行者头像的冻结令牌表与兜底口径（与 TASK_BREAKDOWN §1.1/§1.2 契约一致）。
+const FROZEN = {
+  general: 'human:s11', 'soldier-a': 'human:s12', 'soldier-b': 'human:s13',
+  'soldier-auto': 'human:s14', 'soldier-market': 'human:s15',
+}
+const FROZEN_TOKENS = Object.values(FROZEN)
+const SPARE_TOKENS = Array.from({ length: 15 }, (_, i) => 'human:s' + String(i + 1).padStart(2, '0'))
+const FREE_TOKENS = SPARE_TOKENS.filter((t) => !FROZEN_TOKENS.includes(t))
+const GEAR = '\u2699\uFE0F'
+
 test('⑥ ★★★ 未入编队但认领了该空间任务的执行者**也要出现**（`external` 标记）', async () => {
   reset()
   mkRoster('default', 'r', '正式岗位')
@@ -134,9 +145,60 @@ test('⑥ ★★★ 未入编队但认领了该空间任务的执行者**也要�
   assert.ok(ext, '★★★ 未入编队的执行者必须也返回（否则切空间后信息丢失）')
   assert.equal(ext.role, 'solo-soldier')
   assert.equal(ext.name, 'solo-soldier · 执行中', '★ 名字后缀')
-  assert.equal(ext.avatar, '⚙️')
+  // T-207 改写（E1）：旧断言把现状 '⚙️' 固化成了期望，本轮推翻它 ——
+  // 外部执行者不再产出齿轮 emoji；非空时必须是合法 human:<key> 令牌。
+  assert.notEqual(ext.avatar, GEAR, '本轮推翻旧期望：不再产出齿轮 emoji')
+  assert.ok(ext.avatar === '' || isAvatarToken(ext.avatar), '非空必须是 human:<key>：' + ext.avatar)
   assert.equal(ext.scope, 'default')
   assert.equal(agents.find((a) => a.role === 'r').external, false, '★ 编队岗位 external=false')
+})
+
+test('⑥c ★★★ 已点名的外部身份逐条拿到冻结令牌（AC-R2-1 / AC-R4-1）', async () => {
+  reset()
+  mkRoster('software', 'devops', '启舟')
+  let n = 0
+  for (const name of Object.keys(FROZEN)) {
+    n += 1
+    mkTask('ext' + n, { scope: 'software', role: name, soldier: name, status: 'in_progress' })
+  }
+  const ext = (await get('/api/roster?scope=software')).body.agents.filter((a) => a.external)
+  assert.equal(ext.length, 5, '5 个已点名外部身份都要出现')
+  for (const a of ext) assert.equal(a.avatar, FROZEN[a.role], a.role + ' 必须拿到冻结令牌')
+  assert.equal(new Set(ext.map((a) => a.avatar)).size, 5, '5 条令牌两两不同')
+})
+
+test('⑥d ★★★ 静态表 + 兜底都是纯函数（AC-R5-1 / AC-R5-3；R-8 非门槛口径）', () => {
+  assert.deepEqual(EXTERNAL_AVATAR_TOKENS, FROZEN)
+  for (const name of Object.keys(FROZEN)) {
+    assert.equal(externalAvatarFor(name, []), FROZEN[name])
+    assert.equal(externalAvatarFor(name, SPARE_TOKENS), FROZEN[name], '已点名身份不受占用集合影响')
+  }
+  assert.equal(externalAvatarFor('solo-new', []), externalAvatarFor('solo-new', []), '同 name 同集合恒同')
+  const spare = externalAvatarFor('solo-new', [])
+  assert.ok(spare === '' || isAvatarToken(spare), '只可能是合法令牌或空串：' + spare)
+  assert.ok(!FROZEN_TOKENS.includes(spare), '未登记名字不得抢占冻结令牌')
+  // 未命中分配与 usedTokens 的**传入顺序**无关（AC-R5-1）。
+  assert.equal(
+    externalAvatarFor('solo-new', ['human:s03', 'human:s05']),
+    externalAvatarFor('solo-new', ['human:s05', 'human:s03']),
+    '分配与 usedTokens 传入顺序无关',
+  )
+  // 边界：只剩一个空位 ⇒ 必须拿到它（AC-R5-1 边界）。
+  assert.equal(externalAvatarFor('solo-new', FREE_TOKENS.slice(0, 9)), 'human:s10', '只剩 s10 时必须拿到 s10')
+  assert.equal(externalAvatarFor('solo-new', FREE_TOKENS), '', '池满必须返回空串（占位语义）')
+  for (const bad of ['', null, undefined, GEAR]) {
+    const got = externalAvatarFor(bad, [])
+    assert.ok(got === '' || isAvatarToken(got), '异常入参只返回合法令牌或空串：' + String(got))
+  }
+})
+
+test('⑥e ★★ 分配路径零随机 / 零时钟 / 零网络（AC-R5-3 / I-5）', () => {
+  for (const f of ['agent-avatars.mjs', 'routes/team-views.mjs']) {
+    const src = readFileSync(new URL(f, import.meta.url), 'utf8')
+    for (const banned of ['Math.random', 'Date.now', 'fetch(', 'http://', 'https://']) {
+      assert.ok(!src.includes(banned), f + ' 不得出现 ' + banned)
+    }
+  }
 })
 
 test('⑥b ★★ `canceled` 与"已入编队"的任务都不进 external 那一组', async () => {

@@ -1,6 +1,8 @@
 import { toast } from './Toast'
 import type { BoardData, SpaceInfo } from '../types'
 import { statusCounts } from '../missions'
+import { AgentAvatar } from '../avatar'
+import { externalAvatarToken } from '../avatar/external-agents'
 
 export interface ModuleDef {
   id: string
@@ -172,7 +174,8 @@ export function Sidebar({ board, active, scope, hubMode, spaces, onNavigate, onS
       )}
 
       <div className="user-card">
-        <div className="user-avatar">⚙</div>
+        {/* T-207：将军本人的头像与 /api/roster 的 general 条目同源（external-agents 冻结表）。 */}
+        <div className="user-avatar"><AgentAvatar token={externalAvatarToken('general')} size={30} /></div>
         <div className="user-meta">
           <div className="name">general</div>
           <div className="role">空间管理员</div>

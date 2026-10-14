@@ -34,7 +34,7 @@
 // 2 条路由的函数体与 `server.mjs` 原文逐字节相同（仅缩进 +2）。
 // 依赖全部由调用方注入，本模块不 import 任何 hub 内部件。
 // ============================================================================
-import { isAvatarToken } from '../agent-avatars.mjs'
+import { externalAvatarFor, isAvatarToken } from '../agent-avatars.mjs'
 
 /**
  * 造编队投影与改动重叠审计（两条只读视图：空间里每个智能体的状态 / 改到同一文件的任务）族路由。
@@ -110,13 +110,22 @@ export function createTeamViewsRoutes({
             }
           }
           // 编队岗位优先，再追加未入编队的活跃执行者
+          const usedTokens = new Set()
           for (const r of roster) {
             const mine = tasks.filter(t => t.status !== 'canceled' && (t.role ?? t.soldier) === r.role)
             // 成员头像：只投影合法 human 令牌；旧 emoji / 空 / 非法值一律收敛为占位语义（'' → 客户端渲染占位人形）。
-            agents.push(summarize(r.role, r.name, mine, r.kind, isAvatarToken(r.avatar) ? r.avatar.trim() : '', false))
+            const avatar = isAvatarToken(r.avatar) ? r.avatar.trim() : ''
+            if (avatar) usedTokens.add(avatar)
+            agents.push(summarize(r.role, r.name, mine, r.kind, avatar, false))
           }
-          for (const [soldier, list] of bySoldier) {
-            agents.push(summarize(soldier, `${soldier} · 执行中`, list, '', '⚙️', true))
+          // 外部执行者（未入编队、由 tasks.soldier 合成的伪成员）：
+          //   头像取自 agent-avatars.mjs 的冻结表 / 确定性兜底，**不再硬编码齿轮 emoji**
+          //   （旧值 '⚙️' 不是合法令牌 ⇒ 全部渲染成同一张灰阶占位人形 —— 用户看到的就是"没换头像"）。
+          //   按身份名排序遍历，保证同一 scope 的头像分配与任务插入顺序无关（AC-R5-1）。
+          for (const soldier of [...bySoldier.keys()].sort()) {
+            const avatar = externalAvatarFor(soldier, usedTokens)
+            if (avatar) usedTokens.add(avatar)
+            agents.push(summarize(soldier, `${soldier} · 执行中`, bySoldier.get(soldier), '', avatar, true))
           }
         }
         json(res, 200, { scope: scopeParam || 'all', agents })

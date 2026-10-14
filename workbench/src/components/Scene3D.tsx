@@ -4,14 +4,12 @@ import { Grid, Html, Line, OrbitControls } from '@react-three/drei'
 import * as THREE from 'three'
 import type { ScenePreset } from '../types'
 import type { SceneAgent, SceneCue } from '../scene/sceneState'
-import type { SceneBoardVisit, SceneBoardCard, BoardStaffRow } from '../scene/sceneBoard'
-import { BOARD_COLUMNS, STATUS_BAR_COLOR, STATUS_STYLE, boardHeadline, groupTasksByColumn } from '../scene/sceneBoard'
+import type { SceneBoardVisit, BoardStaffRow } from '../scene/sceneBoard'
 import { layoutScene, framingZoom } from '../scene/sceneLayout'
 import type { SceneLayout } from '../scene/sceneLayout'
 import { SCENE_BACKGROUND, SCENE_GROUND_BOUNCE, SCENE_THEMES } from '../scene/sceneTheme'
 import { Employee3D } from './Employee3D'
 import { OfficeDressing } from './OfficeDressing'
-import { TaskBoard3D } from './TaskBoard3D'
 import { SceneAgentList } from './SceneAgentList'
 import '../scene/officeScene.css'
 
@@ -19,9 +17,7 @@ interface Scene3DProps {
   agents: SceneAgent[]; cues: SceneCue[]; preset: ScenePreset; goalLabel: string
   /** 谁现在该去走一趟看板（认领取卡 / 完结贴卡）。与 `cues` 同一次快照的产物。 */
   boardVisits?: SceneBoardVisit[]
-  /** 看板上要显示的卡片（本空间**在办**任务 + 归属人）。缺省 ⇒ 只画一块空板，不编数据。 */
-  boardTasks?: SceneBoardCard[]
-  /** 按员工汇总（顶部统计条与板底那一行）。 */
+  /** 按员工汇总，用于气泡受阻提示和看板访问动画定位。 */
   boardStaff?: BoardStaffRow[]
   motionEnabled?: boolean; onAgentClick?: (role: string) => void
 }
@@ -60,18 +56,10 @@ export function boardLaneOffset(seed: number, index = 0): number {
   return (((seed + index * 3) % 5) - 2) * 0.52
 }
 
-function OfficeWorld({ agents, cues, boardVisits = [], boardTasks = [], boardStaff = [], layout, preset, goalLabel, motion, compact, onAgentClick }: Scene3DProps & { layout: SceneLayout; motion: boolean; compact: boolean }): React.JSX.Element {
+function OfficeWorld({ agents, cues, boardVisits = [], boardStaff = [], layout, preset, goalLabel, motion, compact, onAgentClick }: Scene3DProps & { layout: SceneLayout; motion: boolean; compact: boolean }): React.JSX.Element {
   const theme = SCENE_THEMES[preset]
   const stations = new Map(layout.stations.map(station => [station.key, station]))
-  const names = useMemo(() => new Map(agents.map(agent => [agent.role, agent.name])), [agents])
   const liveCues = cues.filter(cue => cue.expiresAtMs > Date.now())
-  /**
-   * 板上高亮哪张卡：取**最早过期**的那一条（= 最早出发的那一位）。
-   * 同时有两个人来办事时板面只报一件 —— 报两件会互相盖住，
-   * 而"谁在办哪张卡"在他自己的气泡与板底那一行里仍然分别可见。
-   */
-  const activeVisit = boardVisits.filter(visit => visit.expiresAtMs > Date.now())
-    .sort((a, b) => a.expiresAtMs - b.expiresAtMs)[0] ?? null
   return <>
     {/* ★ 明亮的背景（将军："办公室场景还是需要明亮的背景色"）：见 sceneTheme 里那段明度关系 */}
     <color attach="background" args={[SCENE_BACKGROUND]} />
@@ -111,8 +99,6 @@ function OfficeWorld({ agents, cues, boardVisits = [], boardTasks = [], boardSta
         <boxGeometry args={[0.65, 0.48, 0.14]} /><meshStandardMaterial color="#bed8ec" />
       </mesh>}
     </group>)}
-    {/* 微缩任务看板：Agent 认领/完结时会走到它前面办一下 */}
-    <TaskBoard3D cards={boardTasks} staff={boardStaff} names={names} board={layout.board} activeVisit={activeVisit} />
     {agents.map(agent => {
       const station = stations.get(agent.key)
       if (!station) return null
@@ -134,7 +120,7 @@ function OfficeWorld({ agents, cues, boardVisits = [], boardTasks = [], boardSta
   </>
 }
 
-export function Scene3D({ agents, cues, preset, goalLabel, boardVisits = [], boardTasks = [], boardStaff = [], motionEnabled = true, onAgentClick }: Scene3DProps): React.JSX.Element {
+export function Scene3D({ agents, cues, preset, goalLabel, boardVisits = [], boardStaff = [], motionEnabled = true, onAgentClick }: Scene3DProps): React.JSX.Element {
   const container = useRef<HTMLDivElement>(null)
   const [width, setWidth] = useState(1000)
   const keys = agents.map(agent => agent.key).join('\n')
@@ -175,64 +161,13 @@ export function Scene3D({ agents, cues, preset, goalLabel, boardVisits = [], boa
   }, [cues, boardVisits, cueTick])
   const motion = motionEnabled && motionOn && !reduced && visible
   const fallback = <div className="scene-webgl-fallback">3D 场景暂不可用，可从下面的员工列表查看状态{onAgentClick ? '与任务' : ''}。</div>
-  /** 看板全景读数（顶部条与"悬浮看板"面板共用一份算好的数）。 */
-  const grouped = groupTasksByColumn(boardTasks)
-  const boardSnapshot = {
-    total: boardTasks.length,
-    staff: boardStaff.length,
-    blocked: boardTasks.filter(card => card.status === 'blocked').length,
-    busiest: boardStaff[0] ? { name: boardStaff[0].name, total: boardStaff[0].total } : null,
-  }
   return <div className="pixel-scene-content" ref={container}>
-    {/*
-      ★★ 2026-10-14（将军："任务看板 0项统计可以固定在场景顶部，不随场景旋转"）：
-        这一条是**屏幕空间的 DOM**（不是 3D 里的 `<Html>`）⇒ 它钉在画布顶部，转场景时纹丝不动。
-        内容按列给出"在办任务"的分布：百分比条 + 数字。
-    */}
-    <div className="scene-status-bar">
-      <span className="scene-status-title">{boardHeadline(boardSnapshot)}</span>
-      <span className="scene-status-bars">
-        {BOARD_COLUMNS.map(column => {
-          const count = grouped.get(column.key)?.length ?? 0
-          const share = boardSnapshot.total === 0 ? 0 : Math.round((count / boardSnapshot.total) * 100)
-          return <span className="scene-status-item" key={column.key} title={`${column.label} ${count} 项`}>
-            <i style={{ background: STATUS_BAR_COLOR[column.key] ?? STATUS_BAR_COLOR.todo }} />
-            {column.label} {count}
-            <b style={{ width: `${share}%` }} />
-          </span>
-        })}
-      </span>
-    </div>
     <div className="pixel-scene-canvas">
       {available ? <SceneBoundary fallback={fallback}><Canvas orthographic shadows frameloop={motion ? 'always' : 'demand'} dpr={[1, 1.5]}>
-        <OfficeWorld agents={agents} cues={cues} boardVisits={boardVisits} boardTasks={boardTasks} boardStaff={boardStaff}
+        <OfficeWorld agents={agents} cues={cues} boardVisits={boardVisits} boardStaff={boardStaff}
           preset={preset} goalLabel={goalLabel}
           motion={motion} compact={agents.length > 12 || width < 700} onAgentClick={onAgentClick} layout={layout} />
       </Canvas></SceneBoundary> : fallback}
-      {/*
-        ★ 悬停看板时把读数钉在画布上（也在屏幕空间，不随旋转）。
-          为什么另做一个而不是只靠 3D 里那些 `<Html>`：那些会随场景旋转/缩放，
-          而这正是将军要摆脱的行为。这里用 `<details>` 做"点开/收起"，不需要额外状态。
-      */}
-      {boardTasks.length > 0 && <details className="scene-board-tip">
-        <summary>📋 看板 {boardTasks.length} 项 · 悬停看明细</summary>
-        <div className="scene-board-tip-body">
-          {BOARD_COLUMNS.map(column => {
-            const columnTasks = grouped.get(column.key) ?? []
-            if (columnTasks.length === 0) return null
-            return <div className="scene-board-tip-group" key={column.key}>
-              <b style={{ color: STATUS_BAR_COLOR[column.key] ?? STATUS_BAR_COLOR.todo }}>{column.label} {columnTasks.length}</b>
-              {columnTasks.slice(0, 8).map(task => <span className="scene-board-tip-row" key={task.id}>
-                <i style={{ background: STATUS_STYLE[task.status].color }} />
-                <code>{task.id}</code>
-                <em>{task.role ? (agents.find(agent => agent.role === task.role)?.name ?? task.role) : '未认领'}</em>
-                <span title={task.title}>{task.title}</span>
-              </span>)}
-              {columnTasks.length > 8 && <span className="scene-board-tip-more">还有 {columnTasks.length - 8} 项…</span>}
-            </div>
-          })}
-        </div>
-      </details>}
     </div>
     <div className="pixel-scene-toolbar">
       <span>{SCENE_THEMES[preset].label} · {agents.length} 位员工</span>

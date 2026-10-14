@@ -300,24 +300,15 @@ export function CenterPanel({ board, labels, active, rosterAgents, scope, spaces
               <i className="dot idle" />
               待命
             </span>
-            <span className="legend-hint">🖱 拖动旋转 · 滚轮缩放 · 悬浮气泡看该员工全部任务 · 认领/完结时他会走向看板</span>
           </div>
           {hubActive && scope && !sceneFacts && rosterAgents == null ? (
             <div className="scene-loading">{sceneError ? '无法读取空间员工，请刷新重试' : '正在读取空间员工…'}</div>
           ) : <Suspense fallback={<div className="scene-loading">⏳ 正在构建 3D 办公场景…</div>}>
-            {/* ★ 该进场景的任务只由 `visibleSceneTasks` 决定（已取消与已完成都不上板），
-                不在这里另写一份状态判断 —— 那正是会与气泡/计数漂移的东西。
-                ★ 归属人用 `taskOwnerRole`（与"谁走过去"同一条规则），
-                并按它汇总出顶部统计条与板底那一行 —— 三处口径同源。 */}
             <Scene3D
               key={scope ?? 'all'}
               agents={sceneAgents}
               cues={sceneCues.filter(cue => cue.scope === scope)}
               boardVisits={sceneVisits.filter(visit => visit.scope === scope)}
-              boardTasks={visibleSceneTasks(sceneFacts?.tasks ?? []).map(task => ({
-                id: task.id, title: task.title, status: task.status,
-                role: taskOwnerRole(task, sceneFacts?.roster ?? []),
-              }))}
               boardStaff={byStaff(
                 visibleSceneTasks(sceneFacts?.tasks ?? []).map(task => ({
                   id: task.id, title: task.title, status: task.status,

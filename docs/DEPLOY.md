@@ -1757,6 +1757,128 @@ AssertionError: 新任务应真的可被认领；拿到 null，reason=write-rese
 
 ---
 
+## 19. ★★★ 手机端「任务」页签 8 天画不出任务（一次真登录的走查抓到的）
+
+### 19.1 症状：界面上说"没有任务"，而接口有 14 条
+
+2026-10-14 用一次性探针账号登录 `/mobile/`（真浏览器 + 手机仿真）走主路径，
+「任务」页签显示：
+
+    | 这个空间还没有任务。用下面输入框派一个。
+
+而同一个会话里 `/api/board?scope=default&compact=1` 返回 **200**、**14 条任务**。
+console 里躺着一条：
+
+    exception: TypeError: t is not a function
+        at taskCard (app.mjs:460:19)
+        at renderBoard (app.mjs:423:48)
+        at refreshTasks (…)
+
+### 19.2 根因：形参 `t` 遮蔽了 i18n 的翻译函数 `t`
+
+```js
+function taskCard(t) {                 // ← 形参 t = 任务对象
+  …
+  s.textContent = t(taskLine(t))       // ← 这里又把 t 当翻译函数调用
+  if (isWaitingForNode(t)) s.textContent += t('（电脑上线后自动开始）')
+  m.textContent = t(taskMeta(t))
+}
+```
+
+`t` 是这个模块从 `./i18n.mjs` 引入的翻译函数，而形参叫 `t` 把它遮蔽了 ——
+`t(...)` 于是变成**把任务对象当函数调用**，`taskCard` 每渲染一张卡就抛一次，
+`renderBoard` 整个中断，页面停在空态。
+
+★ 同一个遮蔽在 `renderBoard` 的未知状态分支里还有一次
+（`for (const t of unknown)` 里调 `t('@rawStatus', …)`）—— 只要出现一个未知状态
+的任务，整块看板也画不出来。另外 5 处（`for (const t of shown)` 等）当时**侥幸安全**，
+因为它们的作用域里恰好还没调 `t(...)`；一并改掉，免得下一行改动就踩上。
+
+**引入于 `3244deb9`（2026-10-06），在 `9c3ae86a` 那版里也在** —— 与 §17 的对齐部署无关。
+
+### 19.3 为什么 8 天没有任何判据变红（三条，缺一条都不会漏）
+
+| 这一层 | 它测什么 | 为什么漏掉 |
+| --- | --- | --- |
+| `mobile/*.test.mjs`（237 条） | **投影层**：`taskLine` / `taskMeta` / `boardColumns` / i18n 覆盖率 / 离线队列 | 没有一条真的去**渲染**一张卡 |
+| `mobile-live-check.mjs`（40 条） | 登录屏、SW、静态模块、字体 | **从不登录** ⇒ 永远走不到看板渲染 |
+| 界面本身 | —— | 不报错，只说"这个空间还没有任务" |
+
+> 一批"对着投影函数断言"的判据，与一批"真的把界面画出来"的判据，
+> 在被渲染的那一层出错时是同一个东西 ——
+> 只不过前者永远绿，而用户看到的是"这里没有任务"。
+
+### 19.4 修法与**两道**判据（形状判据 + 渲染判据）
+
+1. **改名字**：`taskCard` 的形参、以及 6 处同类绑定，全部改成 `task`。
+2. **源码形状判据**（`workbench/mobile/i18n.test.mjs`）：
+   「`t` 是翻译函数，源码里不许把 `t` 用作形参 / 循环变量 / 局部名」。
+   会列出**行号与命中片段**，并带一条恒真守卫。
+   实测：老代码 **45 通过 / 1 失败**（列出 7 处），修好后 **46/46**。
+3. **★ 渲染判据（可复用工具）**：`scripts/qa/mobile-logged-in-check.mjs`
+
+       LEGION_PROBE_USER=<用户> LEGION_PROBE_PASS=<口令> \
+         node scripts/qa/mobile-logged-in-check.mjs
+
+   核心判据是 **`/api/board` 说有 N 条 ⟺ 页面上有 N 个 `.task` 元素**：
+
+       [读数] /api/board 状态=200  任务数=14  页面上的 .task=14  当前视图=全部
+
+   这一条恰好是"接口对了、渲染死了"唯一藏不住的地方 —— 只看接口会绿，
+   只看页面会以为"本来就没任务"。
+
+   **探针账号的建与删**（用完必须删干净，它落在六处）：
+   建：`POST /api/identity/register`（`{name,password,space:'default'}`，生产 `registration=open`）；
+   删：按 userId 扫**所有表的所有文本列**再删（`hub_users` / `hub_space_roles` /
+   `hub_registrations` / `hub_user_sessions` / `hub_event_tickets` / `audit`）。
+   两次清理实测：15 行与 9 行，残留 0，读数回到基线
+   （`hub_users=1 hub_registrations=0 hub_sessions=141 tasks=14 messages=32`），
+   **且没有产生任何内容数据**。
+
+### 19.5 部署与影响面
+
+- 改的只有 `workbench/mobile/app.mjs` 一个**静态文件**（104869 字节）。
+  备份 `/srv/legion-hub/backup-mobile-fix/app.mjs.before`，
+  上线后公网回读与磁盘**逐字节一致**（`sha256 2445a4b6…`）。
+- ★ **已装的 PWA 下次打开就会拿到新代码**：`sw.js` 对
+  `.mjs|.js|html|webmanifest` 走 **network-first**（`CODE_EXT` 那一条），
+  所以**不需要**改 `CACHE = 'legion-mobile-v4'` 的版本号。
+  （如果哪天把代码文件也改成 cache-first，这个结论就不成立了 —— 那时必须递增版本。）
+- 修复后同一条走查：**14 张任务卡**（修前 0 张）、13 次接口请求全 200、
+  console 错误 **0**；登出后回到登录屏。
+  ★ 顺手纠正一个我当时的误判：登出后短暂停在 `data-screen=boot` 并说
+  「Hub 不可达」，看着像 bug —— 多等 4 秒后它落在登录屏（颜色数与登录屏完全相同），
+  那是**重载中的过渡态**，不是缺陷。
+
+### 19.6 诚实边界 + 我自己踩的两个坑
+
+- 源码形状判据只守"**遮蔽**"这一个成因，**不是**渲染测试。真正的渲染验证是
+  上面那条登录走查。两层都要有：形状判据便宜、能在 CI 跑；走查贵、但只有它能看
+  见"接口有数据而界面是空的"。
+- 这条走查**需要凭证**，所以我把它做成"没给凭证就跳（退出码 2）"，
+  与 `mobile-live-check` / `workbench-live-check` 一致 —— 它进不了普通 CI。
+- ★ 坑一：我用 PowerShell 的 `>` 把 `git show` 的输出写进文件去构造"老代码"，
+  而 **PS 5.1 的 `>` 会写成 UTF-16** ⇒ app.mjs 被写坏 ⇒ 六条**内容判据**连带变红
+  ⇒ 我一度以为"新判据红了 7 条"。改用 Node 按字节取（`execFileSync` 不传 encoding）
+  后才是对的：**老代码 45 通过 / 1 失败**，失败的正是那条新判据。
+  这是本仓第 N 次栽在"别让 PowerShell 碰文件内容"上（见 §14.3）。
+- ★ 坑二：判据里 import `scripts/lib/code-only.mjs` 时写死了 `'../../../'` ——
+  本仓的工作区建在仓库**里面**（`.legion-worktrees/<id>/`）要 4 层、建在外面要 3 层。
+  写死层数的后果不是"判据红了"，而是**整支套件 import 不到、直接跑不起来**。
+  改成从本文件往上找仓库根。
+
+> 一个"在某种工作区布局下 import 不到依赖"的判据，
+> 与一个"真的发现问题的"判据，在 CI 上都是红的 ——
+> 只不过前者在任何布局下都不该红。
+
+---
+
+## 附录 A：发布检查单（每次发布逐项打勾）
+
+> ⚠️ 这个标题曾经被我**弄丢过一次**：加 §18 时我的替换片段以 `---` 结尾，
+> 而它原本紧跟着 `## 附录 A` —— 于是那一段从文档里消失了，`check-docs` 也没
+> 因此变红（它不要求有这一节）。补回来时留个记号：**用整段替换时，别把后面
+> 紧邻的标题留在匹配范围里又没写回 new_string**。
 
 - [ ] CI 全绿：`node scripts/ci/run-ci.mjs` exit 0（evidence 归档 docs/T093-evidence/）
 - [ ] L1 三件套探活 + whiteboard /healthz（§5.2/§5.4）

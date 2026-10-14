@@ -22,7 +22,8 @@ import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 
 const root = new URL('..', import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, '$1')
-const SRC = readFileSync(join(root, 'src', 'components', 'AgentWorkflowConfigurator.tsx'), 'utf8')
+const read = (...parts) => readFileSync(join(root, ...parts), 'utf8')
+const SRC = read('src', 'components', 'AgentWorkflowConfigurator.tsx')
 
 /** 每一个 `<details>` 的正文区间（用开始/结束标记切出来）。 */
 function detailsBodies(src) {
@@ -122,5 +123,55 @@ describe('面板减法：删掉的东西不许悄悄回来', () => {
 
   test('★ 节点为空时的话术要指向"会自己登记"，而不是让用户去登记', () => {
     assert.ok(SRC.includes('会自己登记'), '要告诉用户不需要手工登记')
+  })
+})
+
+// ════════════════════════════════════════════════════════════════════════════
+// ③ 「工作流运行实例」搬出配置面板，成为设置里的独立一页（2026-10-13）
+//
+// 它不是配置：是**只读的运行历史 + 暂停/取消目标**。留在配置面板里有三个坏处：
+//   ① 让面板看起来"很复杂"，而它与"要不要配工作流"无关；
+//   ② 想看运行情况的人得先展开一个配置面板、再翻到底部；
+//   ③ 用户对复杂度的判断只看面板有多长。
+// ════════════════════════════════════════════════════════════════════════════
+describe('工作流运行：从配置面板抽成独立一页', () => {
+  const runs = read('src', 'components', 'WorkflowRunsPanel.tsx')
+  const settings = read('src', 'components', 'WorkspaceSettings.tsx')
+  const nav = read('src', 'navigation.ts')
+
+  test('★★ 配置面板里**不再**渲染运行实例（否则就只是复制了一份）', () => {
+    assert.ok(!SRC.includes('工作流运行实例'), '配置面板里不该再有这一节的标题')
+    assert.ok(!SRC.includes('fetchAgentWorkflowInstances'), '它也不该再拉实例数据')
+    assert.ok(!SRC.includes('refreshInstances'), '实例的刷新逻辑应已搬走')
+    assert.ok(!SRC.includes('workflowStatusLabel'), '状态标签函数应已搬走')
+  })
+
+  test('★★ 独立组件存在，且带齐"只读历史 + 三种操作"', () => {
+    assert.ok(runs.includes('export function WorkflowRunsPanel'), '要有这个组件')
+    assert.ok(runs.includes('工作流运行实例'), '保留原来的标题')
+    for (const [needle, why] of [
+      ['fetchAgentWorkflowInstances', '实例列表'],
+      ['fetchAgentWorkflowHistory', '历史明细'],
+      ['setGoalStatus', '暂停/恢复/取消目标'],
+      ['查看历史', '查看历史按钮'],
+      ['上一页', '分页'],
+    ]) {
+      assert.ok(runs.includes(needle), `${why}（${needle}）要跟着搬过去`)
+    }
+    // 首屏自动加载（原来靠配置面板的 load() 顺带拉，搬走后必须自己拉）
+    assert.ok(/useEffect\(/.test(runs), '★ 搬走后必须自己触发首屏加载')
+  })
+
+  test('★★ 设置页里真的有这一页，导航里真的有这个标签', () => {
+    assert.ok(settings.includes("active === 'settings-workflow-runs'"), '设置页要有这个分支')
+    assert.ok(settings.includes('<WorkflowRunsPanel scope={scope} />'), '要渲染它')
+    assert.ok(nav.includes("id: 'settings-workflow-runs'"), '导航要有这一项')
+    assert.ok(nav.includes('工作流运行'), '导航要显示中文名')
+  })
+
+  test('★ 它不该被塞进"高级设置"折叠区里（那样等于没搬）', () => {
+    // 折叠区判定只对配置面板有意义；这里确认搬走之后配置面板里连字符串都没有。
+    const outside = outsideDetails(SRC)
+    assert.ok(!outside.includes('工作流运行实例'), '配置面板的任何位置都不该再有它')
   })
 })

@@ -2,6 +2,7 @@ import { useState } from 'react'
 import { getToken, hubBase, setHubBase, setToken } from '../api'
 import type { RosterAgent, SpaceInfo } from '../types'
 import { AgentWorkflowConfigurator } from './AgentWorkflowConfigurator'
+import { WorkflowRunsPanel } from './WorkflowRunsPanel'
 import { ModelConfigModal } from './ModelConfigModal'
 import { AccountPanel } from './AccountPanel'
 import { DevicePanel } from './DevicePanel'
@@ -24,5 +25,9 @@ export function WorkspaceSettings(props: Props): React.JSX.Element {
   if (active === 'settings-models') return <div className="workspace-settings-page"><ModelConfigModal embedded scope={hubMode ? scope ?? '' : ''} roster={roster} onClose={() => undefined} /></div>
   if (!hubMode || !scope) return <div className="workspace-placeholder"><h1>{active === 'settings-workflow' ? 'Agent 工作流' : '持续执行'}</h1><p>请连接团队中枢，并选择一个具体工作空间。</p></div>
   if (active === 'settings-workflow') return <div className="workspace-settings-page"><div className="workspace-page-heading"><div><h1>Agent 工作流</h1><p>配置空间岗位、工具、节点与执行阶段。</p></div></div><AgentWorkflowConfigurator scope={scope} /></div>
+  {/* ★ 2026-10-13：「工作流运行」从配置面板里搬出来，成为独立一页。
+      它只有"看历史 + 暂停/取消目标"，不是配置 —— 放在配置面板底部既让它难找，
+      也让那个面板看起来比实际复杂。 */}
+  if (active === 'settings-workflow-runs') return <div className="workspace-settings-page"><div className="workspace-page-heading"><div><h1>工作流运行</h1><p>本空间的跨 Agent 工作流实例：进度、阶段任务、产物交接与审查返工记录；可暂停 / 恢复 / 取消目标。</p></div></div><WorkflowRunsPanel scope={scope} /></div>
   return <div className="workspace-settings-page"><div className="workspace-page-heading"><div><h1>持续执行</h1><p>控制空间编排与全局任务调度。</p></div></div><section className="panel settings-card"><h2>持续执行编排</h2><label className="settings-toggle"><input type="checkbox" checked={execEnabled} onChange={e => onToggleExec(e.target.checked)} />自动派发分析类阶段任务</label><p>需求澄清、方案设计与任务拆分可自动执行；写码阶段从任务详情派 AI 执行。</p><p className="settings-runtime-status">{execEnabled ? execDaemonOnline ? '执行守护在线' : '已开启 · 等待执行守护' : '持续执行已关闭'}</p></section></div>
 }

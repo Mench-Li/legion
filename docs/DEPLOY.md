@@ -722,7 +722,12 @@ cd /tmp/wt/workbench && npx vite build      # 不要加 --base
 而那一刻 main 的 HEAD 正是它）。**问题不是"复现不了"，而是"它落后了"**：
 `origin/main` 上改动 `workbench/src` 的提交比它多 **30 个**（截至 2026-10-14），
 其中含一条 `fix(security)`。`workbench/src/api.ts` 里 `readJson` 的那处修复
-就在这 30 个里，所以线上界面至今显示的是 `501 Not Implemented`。
+就在这 30 个里。
+
+→ **2026-10-14 已把生产对齐到 `fe637310`**，见 §17。对齐后线上 bundle 是
+`index-BFfHom0A.js`（与用 `fe637310` 构建的产物**逐字节相同**），
+所以 `readJson` 那条修复**已经上线** —— 桌面端专属面不再以英文
+`501 Not Implemented` 呈现，而是后端给的那句中文与 `hint`。
 
 ### ★★★ 6.4c 但**不能只部署 SPA** —— 它与中枢是成对的
 
@@ -1546,6 +1551,134 @@ ok  artifact-package / artifact-installer / artifact-notes(338 字节已回读�
 PowerShell 终端把它的中文注释显示成了乱码，我一度以为那个文件也坏了。
 按**原始字节**复核：589 个汉字、0 个替换字符、0 个可疑双重编码字符 —— **它是好的**。
 （同一类显示假象本轮已经踩过两次，规矩见 §14.3。）
+
+---
+
+## 17. 把生产对齐到 main（web + 移动端，2026-10-14）
+
+### 17.1 为什么要做
+
+`workbench-live-check` / `mobile-live-check` **都是全绿**的 —— 也就是说"能不能打开、
+能不能用"这层没有问题。真正的缺口是**生产比 main 旧**：
+
+| | 对齐前 | main |
+| --- | --- | --- |
+| web SPA | 钉在 `9c3ae86a`（2026-10-12 03:26） | 领先 **30 个** `workbench/src` 提交 |
+| 中枢关键文件 | `routes/model-providers.mjs` **198 行**、`publicProvider` **0 处** | **750 行**、`publicProvider` **5 处** |
+
+其中一条是 **`833546e7 fix(security)`（BUG-028）**：`GET /api/model-providers`
+原本把密钥**引用名**（`secretRef`）原文发给客户端。对齐前生产上**没有**这条修复。
+
+### 17.2 ★★★ 部署范围 = **import 闭包**，不是"顶层目录"
+
+第一次尝试失败，报：
+
+```
+ERR_MODULE_NOT_FOUND: Cannot find module '/srv/legion-hub/app/product/dsh-location.mjs'
+  imported from /srv/legion-hub/app/team-hub/server.mjs
+```
+
+原因是**我算依赖的方式错了**：我用 `join(ROOT,'X')` 与 `from '../../X/'` 这类
+**模式匹配**去找"中枢读了哪些目录"，而那条 import 是 `../product/…`（**只往上一级**），
+两个模式都没覆盖。
+
+正确做法是**从入口做 BFS**，跟着相对 import 走到底：
+
+```
+team-hub/server.mjs → 190 个可达模块
+    team-hub 125 个 + 外部 65 个
+    外部落在：runtime(31) product(12) orchestrator(8) security(7) packages(5)
+```
+
+并且要确认没有**变量式动态 import**（那才是静态分析真的看不见的）：实测 80 处动态
+import **全是字面量**、非相对的只有 `node:*` 内置 ⇒ 静态闭包就是完整依赖。
+
+> 一个"用模式匹配猜依赖"的清单，
+> 与一个"跟着 import 走到底"的清单，在**大多数**时候给出同样的答案 ——
+> 只不过前者漏掉的那一个，会让服务端起不来。
+
+### 17.3 ★★ 部署前的两道门（都真的拦下过东西）
+
+现在这套流程里有两条**在重启之前**的判据：
+
+1. **逐文件哈希核对**（278 条，**按原始字节**）；
+2. **服务端 import 图预检**：在**磁盘上**从 `team-hub/server.mjs` 走一遍，
+   缺任何一个文件就拒绝重启（`node /tmp/legion-226/preflight2.mjs`）。
+
+第 2 条拦下过一次**误报**，而那次误报本身又是一课：预检 v1 没剥注释，
+于是把文档注释里的示例 `import('../server.mjs')` 当成了真依赖，
+报"缺 2 个文件"⇒ **拒绝重启并回滚**。v2 先剥注释（与仓库 `scripts/lib/code-only.mjs`
+同一件事）后：190 个模块、图闭合。
+
+> 一个"把注释里的示例当成真 import"的预检，
+> 与一个"真的缺文件"的预检，在输出上都写着"缺 N 个"——
+> 只不过前者会**误拦**一次本来成功的部署。
+
+### 17.4 ★★ 行尾归一化是个陷阱：改成**按原始字节**比
+
+第一次核对时 `workbench/dist/index.html` 报"不同"，而包里的字节与清单**完全一致**。
+根因是两边的"归一化"规则不一样：
+
+| 一侧 | 规则 |
+| --- | --- |
+| 我生成清单时 | 只把 `\r\n` 换成 `\n`（`replace(/\r\n/g,'\n')`）|
+| 服务器核对时 | `tr -d '\r'`（删掉**所有** `\r`）|
+
+那份 `index.html` 是 **CRLF**（vite 读的是 Windows 检出、带 CRLF 的源模板），
+一旦有**孤立 `\r`** 两个规则就分家。
+
+**修法是取消归一化**：既然部署的是**文件**，就按**文件字节**算、按**文件字节**比。
+（这一条同时把 §17.3 第 1 条门变成了纯字节比较，不再需要"猜行尾"。）
+
+### 17.5 结果（全部在生产上实测）
+
+| 检查 | 结果 |
+| --- | --- |
+| 278 条逐文件哈希（原始字节） | **278/278 一致**，0 不同 0 缺失 |
+| `node --check` 中枢全部非测试模块 | 145 个 OK / 0 错 |
+| 服务端 import 图预检 | 190 个模块，**闭合** |
+| 重启 | 第 2 次探测就绪；`active`、**`NRestarts=0`** |
+| `workbench-live-check` | **ALL PASSED**（6 条）|
+| `mobile-live-check` | **40 PASS / 0 FAIL** |
+| `site-live-check` | **ALL PASSED**（15 条）|
+| `verify-host`（更新链 11 项） | **全 ok，退出码 0** |
+| 公网入口 | `/` `/en` `/workbench/` `/mobile/` `/site/assets/site.css` `/api/config` 全 200 |
+| 安全修复上线 | `routes/model-providers.mjs` **750 行**、`publicProvider` **5 处**；实测响应里 `secretRef` **0 次** |
+| 旧端点 | `/api/model-migration/plan`、`/api/config-bundle` → **404**（已拆）|
+| 新端点 | `POST /api/rework` → **400「缺少操作者身份 by」**（路由在、在校验）|
+| 表格端点冒烟（15 个） | **无 5xx**；501 全是刻意的 `DESKTOP_ONLY`（带中文 `error` + `hint`），与真不存在的 404 **可区分** |
+
+### 17.6 ★ 两个刻意的选择
+
+- **不删旧 SPA 产物**：`workbench/dist/assets/` 里留着上一版
+  `index-BjYkts4m.js` / `Scene3D-C8hVyUWg.js` / `index-DhBSBG1s.css`。
+  理由是**缓存**：手里还拿着旧 `index.html` 的浏览器会去要旧 bundle，
+  删掉它们等于把那些用户当场打断。多余的静态文件不产生行为。
+- **只覆盖、不删除**：main 已拆掉的 `routes/model-migration.mjs` /
+  `routes/config-bundle.mjs` 仍留在磁盘上，但 `server.mjs`（main 版）不挂载它们，
+  于是它们是**惰性**的。`--delete` 会连带删掉历次部署留下的 `.bak-*`，
+  而那些是前几轮补丁的安全网。新端点的行为已在 §17.5 实测过。
+
+### 17.7 回滚手段（现在还留着）
+
+    /srv/legion-hub/backup-align-20261014-061439/
+      app-tree.tar.gz        整树（25 MB）
+      team.db                VACUUM INTO 一致性快照（97 张表、行数逐表核对过）
+      workbench-dist.tar.gz  部署前的 SPA 产物
+
+回滚 = 停服务 → 换目录 → 解 tarball → 起服务（脚本里那两处 `rollback()` 就是它，
+本轮**真的执行过两次**并都恢复到 `active` + `/api/config=200`）。
+
+### 17.8 诚实边界
+
+- **`workbench/src/**` 是源码、不参与运行**：它编译进 `dist`。所以生产上那 9 个
+  "源码比产物新/旧"的文件不影响行为 —— 但为了不留含糊状态，本轮把整棵树
+  钉到**同一个提交** `fe637310` 再构建，做到"源码 == 产物 == 中枢"。
+- 对齐**没有**动 `product/release/`（生产上只有 `.example.json`，没有部署专属配置）。
+- 对齐**没有**修 OSS 欠费（桌面端已降级、出范围），见 §16.4 与
+  [UPDATE-HOST-RUNBOOK.md](UPDATE-HOST-RUNBOOK.md) §4.1。
+- 本轮**没有**做"桌面端内嵌 UI 指向远程中枢"那种配置的兼容验证（没有这种部署）；
+  如果将来有，那两个已拆端点会 404。
 
 ---
 

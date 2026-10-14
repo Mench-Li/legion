@@ -148,6 +148,8 @@ export function CenterPanel({ board, labels, active, rosterAgents, scope, spaces
   // 点击智能体查看其任务（进行中/待办/待验收/完成），任务可再点进详情
   const [agentView, setAgentView] = useState<RosterAgent | null>(null)
   const [detailTaskId, setDetailTaskId] = useState<string | null>(null)
+  // 与场景底部员工列表一样，任务统计可收起；切换空间时仍保留当前选择。
+  const [taskSummaryOpen, setTaskSummaryOpen] = useState(true)
   const rosterById = new Map(currentRoster.map(a => [a.role, a]))
   const openAgent = (role: string, targetScope?: string): void => {
     const hit = targetScope ? currentRoster.find(a => a.scope === targetScope && a.role === role) : rosterById.get(role)
@@ -292,13 +294,20 @@ export function CenterPanel({ board, labels, active, rosterAgents, scope, spaces
       ) : (
         <div className="scene-3d">
           {sceneError && <div className="scene-error">状态更新中断：{sceneError}</div>}
-          <div className="scene-legend scene-task-summary" aria-label="团队场景任务统计">
-            <span className="legend-title">⚔ {scope ?? '全局'}编队 · {agents.length} 岗 · 在办任务 {sceneTasks.length} 项</span>
-            <span><i className="dot busy" />进行中 {sceneTaskCounts.busy}</span>
-            <span><i className="dot review" />待验收 {sceneTaskCounts.review}</span>
-            <span><i className="dot blocked" />受阻 {sceneTaskCounts.blocked}</span>
-            <span><i className="dot idle" />待办 {sceneTaskCounts.todo}</span>
-          </div>
+          {taskSummaryOpen ? (
+            <div className="scene-legend scene-task-summary" aria-label="团队场景任务统计">
+              <span className="legend-title">⚔ {scope ?? '全局'}编队 · {agents.length} 岗 · 在办任务 {sceneTasks.length} 项</span>
+              <span><i className="dot busy" />进行中 {sceneTaskCounts.busy}</span>
+              <span><i className="dot review" />待验收 {sceneTaskCounts.review}</span>
+              <span><i className="dot blocked" />受阻 {sceneTaskCounts.blocked}</span>
+              <span><i className="dot idle" />待办 {sceneTaskCounts.todo}</span>
+              <button type="button" className="scene-task-summary-toggle" onClick={() => setTaskSummaryOpen(false)} aria-expanded="true">收起</button>
+            </div>
+          ) : (
+            <button type="button" className="scene-task-summary-collapsed" onClick={() => setTaskSummaryOpen(true)} aria-expanded="false">
+              展开任务统计 · {sceneTasks.length} 项
+            </button>
+          )}
           {hubActive && scope && !sceneFacts && rosterAgents == null ? (
             <div className="scene-loading">{sceneError ? '无法读取空间员工，请刷新重试' : '正在读取空间员工…'}</div>
           ) : <Suspense fallback={<div className="scene-loading">⏳ 正在构建 3D 办公场景…</div>}>

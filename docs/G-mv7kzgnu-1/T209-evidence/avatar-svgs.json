@@ -1,0 +1,164 @@
+{
+  "cells": [
+    {
+      "key": "s11",
+      "svg": "<svg class=\"agent-avatar-svg\" width=\"120\" height=\"120\" viewBox=\"0 0 32 32\" role=\"img\" aria-label=\"成员头像\"><defs><radialGradient id=\"av-s11-face\" cx=\"0.36\" cy=\"0.30\" r=\"0.85\"><stop offset=\"0%\" stop-color=\"#bd8557\" /><stop offset=\"62%\" stop-color=\"#bd8557\" /><stop offset=\"100%\" stop-color=\"#9f7049\" /></radialGradient><linearGradient id=\"av-s11-hair\" x1=\"0.25\" y1=\"0\" x2=\"0.7\" y2=\"1\"><stop offset=\"0%\" stop-color=\"#3a3a44\" /><stop offset=\"100%\" stop-color=\"#2d2d35\" /></linearGradient><linearGradient id=\"av-s11-top\" x1=\"0\" y1=\"0\" x2=\"1\" y2=\"0.55\"><stop offset=\"0%\" stop-color=\"#e6a0bd\" /><stop offset=\"100%\" stop-color=\"#bd839b\" /></linearGradient><linearGradient id=\"av-s11-bg\" x1=\"0\" y1=\"0\" x2=\"0.8\" y2=\"1\"><stop offset=\"0%\" stop-color=\"#ffffff\" /><stop offset=\"42%\" stop-color=\"#f8e9f1\" /><stop offset=\"100%\" stop-color=\"#f8e9f1\" /></linearGradient><radialGradient id=\"av-s11-blush\" cx=\"0.5\" cy=\"0.5\" r=\"0.5\"><stop offset=\"0%\" stop-color=\"#ff8fa6\" stop-opacity=\"0.55\" /><stop offset=\"100%\" stop-color=\"#ff8fa6\" stop-opacity=\"0\" /></radialGradient></defs><rect x=\"0\" y=\"0\" width=\"32\" height=\"32\" rx=\"9\" fill=\"url(#av-s11-bg)\" /><circle cx=\"9\" cy=\"6.5\" r=\"12.5\" fill=\"#ffffff\" fill-opacity=\"0.30\" /><path d=\"M4.2 32c0-6.4 5.3-9.8 11.8-9.8s11.8 3.4 11.8 9.8z\" fill=\"url(#av-s11-top)\" /><ellipse cx=\"16\" cy=\"14.3\" rx=\"10.6\" ry=\"10.2\" fill=\"url(#av-s11-face)\" /><path d=\"M9.2 20.4c1.2 2.6 3.7 4 6.8 4s5.6-1.4 6.8-4c-2 1.5-4.2 2.2-6.8 2.2s-4.8-.7-6.8-2.2z\" fill=\"#9f7049\" fill-opacity=\"0.55\" /><ellipse cx=\"12.6\" cy=\"8.4\" rx=\"3.6\" ry=\"2.2\" fill=\"#ffffff\" fill-opacity=\"0.22\" transform=\"rotate(-18 12.6 8.4)\" /><g fill=\"url(#av-s11-hair)\"><path d=\"M5.5 13.6C5.5 7.3 10.1 3.8 16 3.8s10.5 3.5 10.5 9.8c-1.9-3-5.7-4.5-10.5-4.5s-8.6 1.5-10.5 4.5z\" /><path d=\"M5.4 13.2c-1.3 4.4-1.1 8.1.5 10.6 1-3.4 1.4-7 1.1-10.6z\" /><path d=\"M26.6 13.2c1.3 4.4 1.1 8.1-.5 10.6-1-3.4-1.4-7-1.1-10.6z\" /></g><ellipse cx=\"9.3\" cy=\"17.9\" rx=\"2.8\" ry=\"2.0\" fill=\"url(#av-s11-blush)\" /><ellipse cx=\"22.7\" cy=\"17.9\" rx=\"2.8\" ry=\"2.0\" fill=\"url(#av-s11-blush)\" /><ellipse cx=\"12.1\" cy=\"15.3\" rx=\"1.85\" ry=\"2.3\" fill=\"#2b3445\" /><ellipse cx=\"19.9\" cy=\"15.3\" rx=\"1.85\" ry=\"2.3\" fill=\"#2b3445\" /><circle cx=\"11.5\" cy=\"14.450000000000001\" r=\"0.78\" fill=\"#ffffff\" /><circle cx=\"19.299999999999997\" cy=\"14.450000000000001\" r=\"0.78\" fill=\"#ffffff\" /><circle cx=\"12.799999999999999\" cy=\"16.3\" r=\"0.4\" fill=\"#ffffff\" fill-opacity=\"0.6\" /><circle cx=\"20.599999999999998\" cy=\"16.3\" r=\"0.4\" fill=\"#ffffff\" fill-opacity=\"0.6\" /><path d=\"M14.6 19.4c.85.8 2.35.8 3.2 0\" stroke=\"#a4553f\" stroke-width=\"0.85\" fill=\"none\" stroke-linecap=\"round\" /><path d=\"M5.6 12.8C5.6 6.8 10.2 3.7 16 3.7s10.4 3.1 10.4 9.1l-.3 1.5H5.9z\" fill=\"url(#av-s11-top)\" /><path d=\"M18.6 13.4h7.2c.9 0 1.5.8 1.2 1.6l-.5 1.3h-7.9z\" fill=\"#bd839b\" /></svg>",
+      "resolved": {
+        "key": "s11",
+        "skin": "#bd8557",
+        "hair": "#3a3a44",
+        "hairStyle": "bob",
+        "top": "#e6a0bd",
+        "accessory": "cap",
+        "background": "#f8e9f1",
+        "skinShade": "#9f7049",
+        "hairShade": "#2d2d35",
+        "topShade": "#bd839b"
+      }
+    },
+    {
+      "key": "s12",
+      "svg": "<svg class=\"agent-avatar-svg\" width=\"120\" height=\"120\" viewBox=\"0 0 32 32\" role=\"img\" aria-label=\"成员头像\"><defs><radialGradient id=\"av-s12-face\" cx=\"0.36\" cy=\"0.30\" r=\"0.85\"><stop offset=\"0%\" stop-color=\"#f7d9bd\" /><stop offset=\"62%\" stop-color=\"#f7d9bd\" /><stop offset=\"100%\" stop-color=\"#cfb69f\" /></radialGradient><linearGradient id=\"av-s12-hair\" x1=\"0.25\" y1=\"0\" x2=\"0.7\" y2=\"1\"><stop offset=\"0%\" stop-color=\"#7d4d6e\" /><stop offset=\"100%\" stop-color=\"#623c56\" /></linearGradient><linearGradient id=\"av-s12-top\" x1=\"0\" y1=\"0\" x2=\"1\" y2=\"0.55\"><stop offset=\"0%\" stop-color=\"#84b6e8\" /><stop offset=\"100%\" stop-color=\"#6c95be\" /></linearGradient><linearGradient id=\"av-s12-bg\" x1=\"0\" y1=\"0\" x2=\"0.8\" y2=\"1\"><stop offset=\"0%\" stop-color=\"#ffffff\" /><stop offset=\"42%\" stop-color=\"#e8eff8\" /><stop offset=\"100%\" stop-color=\"#e8eff8\" /></linearGradient><radialGradient id=\"av-s12-blush\" cx=\"0.5\" cy=\"0.5\" r=\"0.5\"><stop offset=\"0%\" stop-color=\"#ff8fa6\" stop-opacity=\"0.55\" /><stop offset=\"100%\" stop-color=\"#ff8fa6\" stop-opacity=\"0\" /></radialGradient></defs><rect x=\"0\" y=\"0\" width=\"32\" height=\"32\" rx=\"9\" fill=\"url(#av-s12-bg)\" /><circle cx=\"9\" cy=\"6.5\" r=\"12.5\" fill=\"#ffffff\" fill-opacity=\"0.30\" /><path d=\"M4.2 32c0-6.4 5.3-9.8 11.8-9.8s11.8 3.4 11.8 9.8z\" fill=\"url(#av-s12-top)\" /><ellipse cx=\"16\" cy=\"14.3\" rx=\"10.6\" ry=\"10.2\" fill=\"url(#av-s12-face)\" /><path d=\"M9.2 20.4c1.2 2.6 3.7 4 6.8 4s5.6-1.4 6.8-4c-2 1.5-4.2 2.2-6.8 2.2s-4.8-.7-6.8-2.2z\" fill=\"#cfb69f\" fill-opacity=\"0.55\" /><ellipse cx=\"12.6\" cy=\"8.4\" rx=\"3.6\" ry=\"2.2\" fill=\"#ffffff\" fill-opacity=\"0.22\" transform=\"rotate(-18 12.6 8.4)\" /><g fill=\"url(#av-s12-hair)\"><path d=\"M5.5 13.6C5.5 7.3 10.1 3.8 16 3.8s10.5 3.5 10.5 9.8c-1.9-3-5.7-4.5-10.5-4.5s-8.6 1.5-10.5 4.5z\" /><path d=\"M5.4 13.2c-1.3 4.4-1.1 8.1.5 10.6 1-3.4 1.4-7 1.1-10.6z\" /><path d=\"M26.6 13.2c1.3 4.4 1.1 8.1-.5 10.6-1-3.4-1.4-7-1.1-10.6z\" /></g><ellipse cx=\"9.3\" cy=\"17.9\" rx=\"2.8\" ry=\"2.0\" fill=\"url(#av-s12-blush)\" /><ellipse cx=\"22.7\" cy=\"17.9\" rx=\"2.8\" ry=\"2.0\" fill=\"url(#av-s12-blush)\" /><ellipse cx=\"12.1\" cy=\"15.3\" rx=\"1.85\" ry=\"2.3\" fill=\"#2b3445\" /><ellipse cx=\"19.9\" cy=\"15.3\" rx=\"1.85\" ry=\"2.3\" fill=\"#2b3445\" /><circle cx=\"11.5\" cy=\"14.450000000000001\" r=\"0.78\" fill=\"#ffffff\" /><circle cx=\"19.299999999999997\" cy=\"14.450000000000001\" r=\"0.78\" fill=\"#ffffff\" /><circle cx=\"12.799999999999999\" cy=\"16.3\" r=\"0.4\" fill=\"#ffffff\" fill-opacity=\"0.6\" /><circle cx=\"20.599999999999998\" cy=\"16.3\" r=\"0.4\" fill=\"#ffffff\" fill-opacity=\"0.6\" /><path d=\"M14.6 19.4c.85.8 2.35.8 3.2 0\" stroke=\"#a4553f\" stroke-width=\"0.85\" fill=\"none\" stroke-linecap=\"round\" /><path d=\"M5.6 12.8C5.6 6.8 10.2 3.7 16 3.7s10.4 3.1 10.4 9.1l-.3 1.5H5.9z\" fill=\"url(#av-s12-top)\" /><path d=\"M18.6 13.4h7.2c.9 0 1.5.8 1.2 1.6l-.5 1.3h-7.9z\" fill=\"#6c95be\" /></svg>",
+      "resolved": {
+        "key": "s12",
+        "skin": "#f7d9bd",
+        "hair": "#7d4d6e",
+        "hairStyle": "bob",
+        "top": "#84b6e8",
+        "accessory": "cap",
+        "background": "#e8eff8",
+        "skinShade": "#cfb69f",
+        "hairShade": "#623c56",
+        "topShade": "#6c95be"
+      }
+    },
+    {
+      "key": "s13",
+      "svg": "<svg class=\"agent-avatar-svg\" width=\"120\" height=\"120\" viewBox=\"0 0 32 32\" role=\"img\" aria-label=\"成员头像\"><defs><radialGradient id=\"av-s13-face\" cx=\"0.36\" cy=\"0.30\" r=\"0.85\"><stop offset=\"0%\" stop-color=\"#efc49c\" /><stop offset=\"62%\" stop-color=\"#efc49c\" /><stop offset=\"100%\" stop-color=\"#c9a583\" /></radialGradient><linearGradient id=\"av-s13-hair\" x1=\"0.25\" y1=\"0\" x2=\"0.7\" y2=\"1\"><stop offset=\"0%\" stop-color=\"#7d4d6e\" /><stop offset=\"100%\" stop-color=\"#623c56\" /></linearGradient><linearGradient id=\"av-s13-top\" x1=\"0\" y1=\"0\" x2=\"1\" y2=\"0.55\"><stop offset=\"0%\" stop-color=\"#b6a0e2\" /><stop offset=\"100%\" stop-color=\"#9583b9\" /></linearGradient><linearGradient id=\"av-s13-bg\" x1=\"0\" y1=\"0\" x2=\"0.8\" y2=\"1\"><stop offset=\"0%\" stop-color=\"#ffffff\" /><stop offset=\"42%\" stop-color=\"#f1eaf8\" /><stop offset=\"100%\" stop-color=\"#f1eaf8\" /></linearGradient><radialGradient id=\"av-s13-blush\" cx=\"0.5\" cy=\"0.5\" r=\"0.5\"><stop offset=\"0%\" stop-color=\"#ff8fa6\" stop-opacity=\"0.55\" /><stop offset=\"100%\" stop-color=\"#ff8fa6\" stop-opacity=\"0\" /></radialGradient></defs><rect x=\"0\" y=\"0\" width=\"32\" height=\"32\" rx=\"9\" fill=\"url(#av-s13-bg)\" /><circle cx=\"9\" cy=\"6.5\" r=\"12.5\" fill=\"#ffffff\" fill-opacity=\"0.30\" /><path d=\"M4.2 32c0-6.4 5.3-9.8 11.8-9.8s11.8 3.4 11.8 9.8z\" fill=\"url(#av-s13-top)\" /><ellipse cx=\"16\" cy=\"14.3\" rx=\"10.6\" ry=\"10.2\" fill=\"url(#av-s13-face)\" /><path d=\"M9.2 20.4c1.2 2.6 3.7 4 6.8 4s5.6-1.4 6.8-4c-2 1.5-4.2 2.2-6.8 2.2s-4.8-.7-6.8-2.2z\" fill=\"#c9a583\" fill-opacity=\"0.55\" /><ellipse cx=\"12.6\" cy=\"8.4\" rx=\"3.6\" ry=\"2.2\" fill=\"#ffffff\" fill-opacity=\"0.22\" transform=\"rotate(-18 12.6 8.4)\" /><g fill=\"url(#av-s13-hair)\"><path d=\"M5.5 13.6C5.5 7.3 10.1 3.8 16 3.8s10.5 3.5 10.5 9.8c-1.9-3-5.7-4.5-10.5-4.5s-8.6 1.5-10.5 4.5z\" /><path d=\"M5.4 13.2c-1.3 4.4-1.1 8.1.5 10.6 1-3.4 1.4-7 1.1-10.6z\" /><path d=\"M26.6 13.2c1.3 4.4 1.1 8.1-.5 10.6-1-3.4-1.4-7-1.1-10.6z\" /></g><ellipse cx=\"9.3\" cy=\"17.9\" rx=\"2.8\" ry=\"2.0\" fill=\"url(#av-s13-blush)\" /><ellipse cx=\"22.7\" cy=\"17.9\" rx=\"2.8\" ry=\"2.0\" fill=\"url(#av-s13-blush)\" /><ellipse cx=\"12.1\" cy=\"15.3\" rx=\"1.85\" ry=\"2.3\" fill=\"#2b3445\" /><ellipse cx=\"19.9\" cy=\"15.3\" rx=\"1.85\" ry=\"2.3\" fill=\"#2b3445\" /><circle cx=\"11.5\" cy=\"14.450000000000001\" r=\"0.78\" fill=\"#ffffff\" /><circle cx=\"19.299999999999997\" cy=\"14.450000000000001\" r=\"0.78\" fill=\"#ffffff\" /><circle cx=\"12.799999999999999\" cy=\"16.3\" r=\"0.4\" fill=\"#ffffff\" fill-opacity=\"0.6\" /><circle cx=\"20.599999999999998\" cy=\"16.3\" r=\"0.4\" fill=\"#ffffff\" fill-opacity=\"0.6\" /><path d=\"M14.6 19.4c.85.8 2.35.8 3.2 0\" stroke=\"#a4553f\" stroke-width=\"0.85\" fill=\"none\" stroke-linecap=\"round\" /><path d=\"M5.6 12.8C5.6 6.8 10.2 3.7 16 3.7s10.4 3.1 10.4 9.1l-.3 1.5H5.9z\" fill=\"url(#av-s13-top)\" /><path d=\"M18.6 13.4h7.2c.9 0 1.5.8 1.2 1.6l-.5 1.3h-7.9z\" fill=\"#9583b9\" /></svg>",
+      "resolved": {
+        "key": "s13",
+        "skin": "#efc49c",
+        "hair": "#7d4d6e",
+        "hairStyle": "bob",
+        "top": "#b6a0e2",
+        "accessory": "cap",
+        "background": "#f1eaf8",
+        "skinShade": "#c9a583",
+        "hairShade": "#623c56",
+        "topShade": "#9583b9"
+      }
+    },
+    {
+      "key": "s14",
+      "svg": "<svg class=\"agent-avatar-svg\" width=\"120\" height=\"120\" viewBox=\"0 0 32 32\" role=\"img\" aria-label=\"成员头像\"><defs><radialGradient id=\"av-s14-face\" cx=\"0.36\" cy=\"0.30\" r=\"0.85\"><stop offset=\"0%\" stop-color=\"#dca876\" /><stop offset=\"62%\" stop-color=\"#dca876\" /><stop offset=\"100%\" stop-color=\"#b98d63\" /></radialGradient><linearGradient id=\"av-s14-hair\" x1=\"0.25\" y1=\"0\" x2=\"0.7\" y2=\"1\"><stop offset=\"0%\" stop-color=\"#7d4d6e\" /><stop offset=\"100%\" stop-color=\"#623c56\" /></linearGradient><linearGradient id=\"av-s14-top\" x1=\"0\" y1=\"0\" x2=\"1\" y2=\"0.55\"><stop offset=\"0%\" stop-color=\"#63c8bc\" /><stop offset=\"100%\" stop-color=\"#51a49a\" /></linearGradient><linearGradient id=\"av-s14-bg\" x1=\"0\" y1=\"0\" x2=\"0.8\" y2=\"1\"><stop offset=\"0%\" stop-color=\"#ffffff\" /><stop offset=\"42%\" stop-color=\"#e3f2f0\" /><stop offset=\"100%\" stop-color=\"#e3f2f0\" /></linearGradient><radialGradient id=\"av-s14-blush\" cx=\"0.5\" cy=\"0.5\" r=\"0.5\"><stop offset=\"0%\" stop-color=\"#ff8fa6\" stop-opacity=\"0.55\" /><stop offset=\"100%\" stop-color=\"#ff8fa6\" stop-opacity=\"0\" /></radialGradient></defs><rect x=\"0\" y=\"0\" width=\"32\" height=\"32\" rx=\"9\" fill=\"url(#av-s14-bg)\" /><circle cx=\"9\" cy=\"6.5\" r=\"12.5\" fill=\"#ffffff\" fill-opacity=\"0.30\" /><path d=\"M4.2 32c0-6.4 5.3-9.8 11.8-9.8s11.8 3.4 11.8 9.8z\" fill=\"url(#av-s14-top)\" /><ellipse cx=\"16\" cy=\"14.3\" rx=\"10.6\" ry=\"10.2\" fill=\"url(#av-s14-face)\" /><path d=\"M9.2 20.4c1.2 2.6 3.7 4 6.8 4s5.6-1.4 6.8-4c-2 1.5-4.2 2.2-6.8 2.2s-4.8-.7-6.8-2.2z\" fill=\"#b98d63\" fill-opacity=\"0.55\" /><ellipse cx=\"12.6\" cy=\"8.4\" rx=\"3.6\" ry=\"2.2\" fill=\"#ffffff\" fill-opacity=\"0.22\" transform=\"rotate(-18 12.6 8.4)\" /><g fill=\"url(#av-s14-hair)\"><path d=\"M5.5 13.6C5.5 7.3 10.1 3.8 16 3.8s10.5 3.5 10.5 9.8c-1.9-3-5.7-4.5-10.5-4.5s-8.6 1.5-10.5 4.5z\" /><path d=\"M5.4 13.2c-1.3 4.4-1.1 8.1.5 10.6 1-3.4 1.4-7 1.1-10.6z\" /><path d=\"M26.6 13.2c1.3 4.4 1.1 8.1-.5 10.6-1-3.4-1.4-7-1.1-10.6z\" /></g><ellipse cx=\"9.3\" cy=\"17.9\" rx=\"2.8\" ry=\"2.0\" fill=\"url(#av-s14-blush)\" /><ellipse cx=\"22.7\" cy=\"17.9\" rx=\"2.8\" ry=\"2.0\" fill=\"url(#av-s14-blush)\" /><ellipse cx=\"12.1\" cy=\"15.3\" rx=\"1.85\" ry=\"2.3\" fill=\"#2b3445\" /><ellipse cx=\"19.9\" cy=\"15.3\" rx=\"1.85\" ry=\"2.3\" fill=\"#2b3445\" /><circle cx=\"11.5\" cy=\"14.450000000000001\" r=\"0.78\" fill=\"#ffffff\" /><circle cx=\"19.299999999999997\" cy=\"14.450000000000001\" r=\"0.78\" fill=\"#ffffff\" /><circle cx=\"12.799999999999999\" cy=\"16.3\" r=\"0.4\" fill=\"#ffffff\" fill-opacity=\"0.6\" /><circle cx=\"20.599999999999998\" cy=\"16.3\" r=\"0.4\" fill=\"#ffffff\" fill-opacity=\"0.6\" /><path d=\"M14.6 19.4c.85.8 2.35.8 3.2 0\" stroke=\"#a4553f\" stroke-width=\"0.85\" fill=\"none\" stroke-linecap=\"round\" /><path d=\"M5.6 12.8C5.6 6.8 10.2 3.7 16 3.7s10.4 3.1 10.4 9.1l-.3 1.5H5.9z\" fill=\"url(#av-s14-top)\" /><path d=\"M18.6 13.4h7.2c.9 0 1.5.8 1.2 1.6l-.5 1.3h-7.9z\" fill=\"#51a49a\" /></svg>",
+      "resolved": {
+        "key": "s14",
+        "skin": "#dca876",
+        "hair": "#7d4d6e",
+        "hairStyle": "bob",
+        "top": "#63c8bc",
+        "accessory": "cap",
+        "background": "#e3f2f0",
+        "skinShade": "#b98d63",
+        "hairShade": "#623c56",
+        "topShade": "#51a49a"
+      }
+    },
+    {
+      "key": "s15",
+      "svg": "<svg class=\"agent-avatar-svg\" width=\"120\" height=\"120\" viewBox=\"0 0 32 32\" role=\"img\" aria-label=\"成员头像\"><defs><radialGradient id=\"av-s15-face\" cx=\"0.36\" cy=\"0.30\" r=\"0.85\"><stop offset=\"0%\" stop-color=\"#bd8557\" /><stop offset=\"62%\" stop-color=\"#bd8557\" /><stop offset=\"100%\" stop-color=\"#9f7049\" /></radialGradient><linearGradient id=\"av-s15-hair\" x1=\"0.25\" y1=\"0\" x2=\"0.7\" y2=\"1\"><stop offset=\"0%\" stop-color=\"#7d4d6e\" /><stop offset=\"100%\" stop-color=\"#623c56\" /></linearGradient><linearGradient id=\"av-s15-top\" x1=\"0\" y1=\"0\" x2=\"1\" y2=\"0.55\"><stop offset=\"0%\" stop-color=\"#f0aa86\" /><stop offset=\"100%\" stop-color=\"#c58b6e\" /></linearGradient><linearGradient id=\"av-s15-bg\" x1=\"0\" y1=\"0\" x2=\"0.8\" y2=\"1\"><stop offset=\"0%\" stop-color=\"#ffffff\" /><stop offset=\"42%\" stop-color=\"#faf0e3\" /><stop offset=\"100%\" stop-color=\"#faf0e3\" /></linearGradient><radialGradient id=\"av-s15-blush\" cx=\"0.5\" cy=\"0.5\" r=\"0.5\"><stop offset=\"0%\" stop-color=\"#ff8fa6\" stop-opacity=\"0.55\" /><stop offset=\"100%\" stop-color=\"#ff8fa6\" stop-opacity=\"0\" /></radialGradient></defs><rect x=\"0\" y=\"0\" width=\"32\" height=\"32\" rx=\"9\" fill=\"url(#av-s15-bg)\" /><circle cx=\"9\" cy=\"6.5\" r=\"12.5\" fill=\"#ffffff\" fill-opacity=\"0.30\" /><path d=\"M4.2 32c0-6.4 5.3-9.8 11.8-9.8s11.8 3.4 11.8 9.8z\" fill=\"url(#av-s15-top)\" /><ellipse cx=\"16\" cy=\"14.3\" rx=\"10.6\" ry=\"10.2\" fill=\"url(#av-s15-face)\" /><path d=\"M9.2 20.4c1.2 2.6 3.7 4 6.8 4s5.6-1.4 6.8-4c-2 1.5-4.2 2.2-6.8 2.2s-4.8-.7-6.8-2.2z\" fill=\"#9f7049\" fill-opacity=\"0.55\" /><ellipse cx=\"12.6\" cy=\"8.4\" rx=\"3.6\" ry=\"2.2\" fill=\"#ffffff\" fill-opacity=\"0.22\" transform=\"rotate(-18 12.6 8.4)\" /><g fill=\"url(#av-s15-hair)\"><path d=\"M5.5 13.6C5.5 7.3 10.1 3.8 16 3.8s10.5 3.5 10.5 9.8c-1.9-3-5.7-4.5-10.5-4.5s-8.6 1.5-10.5 4.5z\" /><path d=\"M5.4 13.2c-1.3 4.4-1.1 8.1.5 10.6 1-3.4 1.4-7 1.1-10.6z\" /><path d=\"M26.6 13.2c1.3 4.4 1.1 8.1-.5 10.6-1-3.4-1.4-7-1.1-10.6z\" /></g><ellipse cx=\"9.3\" cy=\"17.9\" rx=\"2.8\" ry=\"2.0\" fill=\"url(#av-s15-blush)\" /><ellipse cx=\"22.7\" cy=\"17.9\" rx=\"2.8\" ry=\"2.0\" fill=\"url(#av-s15-blush)\" /><ellipse cx=\"12.1\" cy=\"15.3\" rx=\"1.85\" ry=\"2.3\" fill=\"#2b3445\" /><ellipse cx=\"19.9\" cy=\"15.3\" rx=\"1.85\" ry=\"2.3\" fill=\"#2b3445\" /><circle cx=\"11.5\" cy=\"14.450000000000001\" r=\"0.78\" fill=\"#ffffff\" /><circle cx=\"19.299999999999997\" cy=\"14.450000000000001\" r=\"0.78\" fill=\"#ffffff\" /><circle cx=\"12.799999999999999\" cy=\"16.3\" r=\"0.4\" fill=\"#ffffff\" fill-opacity=\"0.6\" /><circle cx=\"20.599999999999998\" cy=\"16.3\" r=\"0.4\" fill=\"#ffffff\" fill-opacity=\"0.6\" /><path d=\"M14.6 19.4c.85.8 2.35.8 3.2 0\" stroke=\"#a4553f\" stroke-width=\"0.85\" fill=\"none\" stroke-linecap=\"round\" /><path d=\"M5.6 12.8C5.6 6.8 10.2 3.7 16 3.7s10.4 3.1 10.4 9.1l-.3 1.5H5.9z\" fill=\"url(#av-s15-top)\" /><path d=\"M18.6 13.4h7.2c.9 0 1.5.8 1.2 1.6l-.5 1.3h-7.9z\" fill=\"#c58b6e\" /></svg>",
+      "resolved": {
+        "key": "s15",
+        "skin": "#bd8557",
+        "hair": "#7d4d6e",
+        "hairStyle": "bob",
+        "top": "#f0aa86",
+        "accessory": "cap",
+        "background": "#faf0e3",
+        "skinShade": "#9f7049",
+        "hairShade": "#623c56",
+        "topShade": "#c58b6e"
+      }
+    }
+  ],
+  "fallback": [
+    {
+      "token": "",
+      "svg": "<svg class=\"agent-avatar-svg\" width=\"120\" height=\"120\" viewBox=\"0 0 32 32\" role=\"img\" aria-label=\"成员头像\"><defs><radialGradient id=\"av-placeholder-face\" cx=\"0.36\" cy=\"0.30\" r=\"0.85\"><stop offset=\"0%\" stop-color=\"#cbd3dc\" /><stop offset=\"62%\" stop-color=\"#cbd3dc\" /><stop offset=\"100%\" stop-color=\"#abb1b9\" /></radialGradient><linearGradient id=\"av-placeholder-hair\" x1=\"0.25\" y1=\"0\" x2=\"0.7\" y2=\"1\"><stop offset=\"0%\" stop-color=\"#8a95a3\" /><stop offset=\"100%\" stop-color=\"#6c747f\" /></linearGradient><linearGradient id=\"av-placeholder-top\" x1=\"0\" y1=\"0\" x2=\"1\" y2=\"0.55\"><stop offset=\"0%\" stop-color=\"#9aa7b5\" /><stop offset=\"100%\" stop-color=\"#7e8994\" /></linearGradient><linearGradient id=\"av-placeholder-bg\" x1=\"0\" y1=\"0\" x2=\"0.8\" y2=\"1\"><stop offset=\"0%\" stop-color=\"#ffffff\" /><stop offset=\"42%\" stop-color=\"#eef1f4\" /><stop offset=\"100%\" stop-color=\"#eef1f4\" /></linearGradient><radialGradient id=\"av-placeholder-blush\" cx=\"0.5\" cy=\"0.5\" r=\"0.5\"><stop offset=\"0%\" stop-color=\"#ff8fa6\" stop-opacity=\"0.55\" /><stop offset=\"100%\" stop-color=\"#ff8fa6\" stop-opacity=\"0\" /></radialGradient></defs><rect x=\"0\" y=\"0\" width=\"32\" height=\"32\" rx=\"9\" fill=\"url(#av-placeholder-bg)\" /><circle cx=\"9\" cy=\"6.5\" r=\"12.5\" fill=\"#ffffff\" fill-opacity=\"0.30\" /><path d=\"M4.2 32c0-6.4 5.3-9.8 11.8-9.8s11.8 3.4 11.8 9.8z\" fill=\"url(#av-placeholder-top)\" /><ellipse cx=\"16\" cy=\"14.3\" rx=\"10.6\" ry=\"10.2\" fill=\"url(#av-placeholder-face)\" /><path d=\"M9.2 20.4c1.2 2.6 3.7 4 6.8 4s5.6-1.4 6.8-4c-2 1.5-4.2 2.2-6.8 2.2s-4.8-.7-6.8-2.2z\" fill=\"#abb1b9\" fill-opacity=\"0.55\" /><ellipse cx=\"12.6\" cy=\"8.4\" rx=\"3.6\" ry=\"2.2\" fill=\"#ffffff\" fill-opacity=\"0.22\" transform=\"rotate(-18 12.6 8.4)\" /><path d=\"M5.5 13.6C5.5 7.3 10.1 3.8 16 3.8s10.5 3.5 10.5 9.8c-1.9-3-5.7-4.5-10.5-4.5s-8.6 1.5-10.5 4.5z\" fill=\"url(#av-placeholder-hair)\" /><ellipse cx=\"9.3\" cy=\"17.9\" rx=\"2.8\" ry=\"2.0\" fill=\"url(#av-placeholder-blush)\" /><ellipse cx=\"22.7\" cy=\"17.9\" rx=\"2.8\" ry=\"2.0\" fill=\"url(#av-placeholder-blush)\" /><ellipse cx=\"12.1\" cy=\"15.3\" rx=\"1.85\" ry=\"2.3\" fill=\"#2b3445\" /><ellipse cx=\"19.9\" cy=\"15.3\" rx=\"1.85\" ry=\"2.3\" fill=\"#2b3445\" /><circle cx=\"11.5\" cy=\"14.450000000000001\" r=\"0.78\" fill=\"#ffffff\" /><circle cx=\"19.299999999999997\" cy=\"14.450000000000001\" r=\"0.78\" fill=\"#ffffff\" /><circle cx=\"12.799999999999999\" cy=\"16.3\" r=\"0.4\" fill=\"#ffffff\" fill-opacity=\"0.6\" /><circle cx=\"20.599999999999998\" cy=\"16.3\" r=\"0.4\" fill=\"#ffffff\" fill-opacity=\"0.6\" /><path d=\"M14.6 19.4c.85.8 2.35.8 3.2 0\" stroke=\"#a4553f\" stroke-width=\"0.85\" fill=\"none\" stroke-linecap=\"round\" /></svg>"
+    },
+    {
+      "token": "human:general",
+      "svg": "<svg class=\"agent-avatar-svg\" width=\"120\" height=\"120\" viewBox=\"0 0 32 32\" role=\"img\" aria-label=\"成员头像\"><defs><radialGradient id=\"av-placeholder-face\" cx=\"0.36\" cy=\"0.30\" r=\"0.85\"><stop offset=\"0%\" stop-color=\"#cbd3dc\" /><stop offset=\"62%\" stop-color=\"#cbd3dc\" /><stop offset=\"100%\" stop-color=\"#abb1b9\" /></radialGradient><linearGradient id=\"av-placeholder-hair\" x1=\"0.25\" y1=\"0\" x2=\"0.7\" y2=\"1\"><stop offset=\"0%\" stop-color=\"#8a95a3\" /><stop offset=\"100%\" stop-color=\"#6c747f\" /></linearGradient><linearGradient id=\"av-placeholder-top\" x1=\"0\" y1=\"0\" x2=\"1\" y2=\"0.55\"><stop offset=\"0%\" stop-color=\"#9aa7b5\" /><stop offset=\"100%\" stop-color=\"#7e8994\" /></linearGradient><linearGradient id=\"av-placeholder-bg\" x1=\"0\" y1=\"0\" x2=\"0.8\" y2=\"1\"><stop offset=\"0%\" stop-color=\"#ffffff\" /><stop offset=\"42%\" stop-color=\"#eef1f4\" /><stop offset=\"100%\" stop-color=\"#eef1f4\" /></linearGradient><radialGradient id=\"av-placeholder-blush\" cx=\"0.5\" cy=\"0.5\" r=\"0.5\"><stop offset=\"0%\" stop-color=\"#ff8fa6\" stop-opacity=\"0.55\" /><stop offset=\"100%\" stop-color=\"#ff8fa6\" stop-opacity=\"0\" /></radialGradient></defs><rect x=\"0\" y=\"0\" width=\"32\" height=\"32\" rx=\"9\" fill=\"url(#av-placeholder-bg)\" /><circle cx=\"9\" cy=\"6.5\" r=\"12.5\" fill=\"#ffffff\" fill-opacity=\"0.30\" /><path d=\"M4.2 32c0-6.4 5.3-9.8 11.8-9.8s11.8 3.4 11.8 9.8z\" fill=\"url(#av-placeholder-top)\" /><ellipse cx=\"16\" cy=\"14.3\" rx=\"10.6\" ry=\"10.2\" fill=\"url(#av-placeholder-face)\" /><path d=\"M9.2 20.4c1.2 2.6 3.7 4 6.8 4s5.6-1.4 6.8-4c-2 1.5-4.2 2.2-6.8 2.2s-4.8-.7-6.8-2.2z\" fill=\"#abb1b9\" fill-opacity=\"0.55\" /><ellipse cx=\"12.6\" cy=\"8.4\" rx=\"3.6\" ry=\"2.2\" fill=\"#ffffff\" fill-opacity=\"0.22\" transform=\"rotate(-18 12.6 8.4)\" /><path d=\"M5.5 13.6C5.5 7.3 10.1 3.8 16 3.8s10.5 3.5 10.5 9.8c-1.9-3-5.7-4.5-10.5-4.5s-8.6 1.5-10.5 4.5z\" fill=\"url(#av-placeholder-hair)\" /><ellipse cx=\"9.3\" cy=\"17.9\" rx=\"2.8\" ry=\"2.0\" fill=\"url(#av-placeholder-blush)\" /><ellipse cx=\"22.7\" cy=\"17.9\" rx=\"2.8\" ry=\"2.0\" fill=\"url(#av-placeholder-blush)\" /><ellipse cx=\"12.1\" cy=\"15.3\" rx=\"1.85\" ry=\"2.3\" fill=\"#2b3445\" /><ellipse cx=\"19.9\" cy=\"15.3\" rx=\"1.85\" ry=\"2.3\" fill=\"#2b3445\" /><circle cx=\"11.5\" cy=\"14.450000000000001\" r=\"0.78\" fill=\"#ffffff\" /><circle cx=\"19.299999999999997\" cy=\"14.450000000000001\" r=\"0.78\" fill=\"#ffffff\" /><circle cx=\"12.799999999999999\" cy=\"16.3\" r=\"0.4\" fill=\"#ffffff\" fill-opacity=\"0.6\" /><circle cx=\"20.599999999999998\" cy=\"16.3\" r=\"0.4\" fill=\"#ffffff\" fill-opacity=\"0.6\" /><path d=\"M14.6 19.4c.85.8 2.35.8 3.2 0\" stroke=\"#a4553f\" stroke-width=\"0.85\" fill=\"none\" stroke-linecap=\"round\" /></svg>"
+    },
+    {
+      "token": "human:UNKNOWN",
+      "svg": "<svg class=\"agent-avatar-svg\" width=\"120\" height=\"120\" viewBox=\"0 0 32 32\" role=\"img\" aria-label=\"成员头像\"><defs><radialGradient id=\"av-placeholder-face\" cx=\"0.36\" cy=\"0.30\" r=\"0.85\"><stop offset=\"0%\" stop-color=\"#cbd3dc\" /><stop offset=\"62%\" stop-color=\"#cbd3dc\" /><stop offset=\"100%\" stop-color=\"#abb1b9\" /></radialGradient><linearGradient id=\"av-placeholder-hair\" x1=\"0.25\" y1=\"0\" x2=\"0.7\" y2=\"1\"><stop offset=\"0%\" stop-color=\"#8a95a3\" /><stop offset=\"100%\" stop-color=\"#6c747f\" /></linearGradient><linearGradient id=\"av-placeholder-top\" x1=\"0\" y1=\"0\" x2=\"1\" y2=\"0.55\"><stop offset=\"0%\" stop-color=\"#9aa7b5\" /><stop offset=\"100%\" stop-color=\"#7e8994\" /></linearGradient><linearGradient id=\"av-placeholder-bg\" x1=\"0\" y1=\"0\" x2=\"0.8\" y2=\"1\"><stop offset=\"0%\" stop-color=\"#ffffff\" /><stop offset=\"42%\" stop-color=\"#eef1f4\" /><stop offset=\"100%\" stop-color=\"#eef1f4\" /></linearGradient><radialGradient id=\"av-placeholder-blush\" cx=\"0.5\" cy=\"0.5\" r=\"0.5\"><stop offset=\"0%\" stop-color=\"#ff8fa6\" stop-opacity=\"0.55\" /><stop offset=\"100%\" stop-color=\"#ff8fa6\" stop-opacity=\"0\" /></radialGradient></defs><rect x=\"0\" y=\"0\" width=\"32\" height=\"32\" rx=\"9\" fill=\"url(#av-placeholder-bg)\" /><circle cx=\"9\" cy=\"6.5\" r=\"12.5\" fill=\"#ffffff\" fill-opacity=\"0.30\" /><path d=\"M4.2 32c0-6.4 5.3-9.8 11.8-9.8s11.8 3.4 11.8 9.8z\" fill=\"url(#av-placeholder-top)\" /><ellipse cx=\"16\" cy=\"14.3\" rx=\"10.6\" ry=\"10.2\" fill=\"url(#av-placeholder-face)\" /><path d=\"M9.2 20.4c1.2 2.6 3.7 4 6.8 4s5.6-1.4 6.8-4c-2 1.5-4.2 2.2-6.8 2.2s-4.8-.7-6.8-2.2z\" fill=\"#abb1b9\" fill-opacity=\"0.55\" /><ellipse cx=\"12.6\" cy=\"8.4\" rx=\"3.6\" ry=\"2.2\" fill=\"#ffffff\" fill-opacity=\"0.22\" transform=\"rotate(-18 12.6 8.4)\" /><path d=\"M5.5 13.6C5.5 7.3 10.1 3.8 16 3.8s10.5 3.5 10.5 9.8c-1.9-3-5.7-4.5-10.5-4.5s-8.6 1.5-10.5 4.5z\" fill=\"url(#av-placeholder-hair)\" /><ellipse cx=\"9.3\" cy=\"17.9\" rx=\"2.8\" ry=\"2.0\" fill=\"url(#av-placeholder-blush)\" /><ellipse cx=\"22.7\" cy=\"17.9\" rx=\"2.8\" ry=\"2.0\" fill=\"url(#av-placeholder-blush)\" /><ellipse cx=\"12.1\" cy=\"15.3\" rx=\"1.85\" ry=\"2.3\" fill=\"#2b3445\" /><ellipse cx=\"19.9\" cy=\"15.3\" rx=\"1.85\" ry=\"2.3\" fill=\"#2b3445\" /><circle cx=\"11.5\" cy=\"14.450000000000001\" r=\"0.78\" fill=\"#ffffff\" /><circle cx=\"19.299999999999997\" cy=\"14.450000000000001\" r=\"0.78\" fill=\"#ffffff\" /><circle cx=\"12.799999999999999\" cy=\"16.3\" r=\"0.4\" fill=\"#ffffff\" fill-opacity=\"0.6\" /><circle cx=\"20.599999999999998\" cy=\"16.3\" r=\"0.4\" fill=\"#ffffff\" fill-opacity=\"0.6\" /><path d=\"M14.6 19.4c.85.8 2.35.8 3.2 0\" stroke=\"#a4553f\" stroke-width=\"0.85\" fill=\"none\" stroke-linecap=\"round\" /></svg>"
+    },
+    {
+      "token": "⚙️",
+      "svg": "<svg class=\"agent-avatar-svg\" width=\"120\" height=\"120\" viewBox=\"0 0 32 32\" role=\"img\" aria-label=\"成员头像\"><defs><radialGradient id=\"av-placeholder-face\" cx=\"0.36\" cy=\"0.30\" r=\"0.85\"><stop offset=\"0%\" stop-color=\"#cbd3dc\" /><stop offset=\"62%\" stop-color=\"#cbd3dc\" /><stop offset=\"100%\" stop-color=\"#abb1b9\" /></radialGradient><linearGradient id=\"av-placeholder-hair\" x1=\"0.25\" y1=\"0\" x2=\"0.7\" y2=\"1\"><stop offset=\"0%\" stop-color=\"#8a95a3\" /><stop offset=\"100%\" stop-color=\"#6c747f\" /></linearGradient><linearGradient id=\"av-placeholder-top\" x1=\"0\" y1=\"0\" x2=\"1\" y2=\"0.55\"><stop offset=\"0%\" stop-color=\"#9aa7b5\" /><stop offset=\"100%\" stop-color=\"#7e8994\" /></linearGradient><linearGradient id=\"av-placeholder-bg\" x1=\"0\" y1=\"0\" x2=\"0.8\" y2=\"1\"><stop offset=\"0%\" stop-color=\"#ffffff\" /><stop offset=\"42%\" stop-color=\"#eef1f4\" /><stop offset=\"100%\" stop-color=\"#eef1f4\" /></linearGradient><radialGradient id=\"av-placeholder-blush\" cx=\"0.5\" cy=\"0.5\" r=\"0.5\"><stop offset=\"0%\" stop-color=\"#ff8fa6\" stop-opacity=\"0.55\" /><stop offset=\"100%\" stop-color=\"#ff8fa6\" stop-opacity=\"0\" /></radialGradient></defs><rect x=\"0\" y=\"0\" width=\"32\" height=\"32\" rx=\"9\" fill=\"url(#av-placeholder-bg)\" /><circle cx=\"9\" cy=\"6.5\" r=\"12.5\" fill=\"#ffffff\" fill-opacity=\"0.30\" /><path d=\"M4.2 32c0-6.4 5.3-9.8 11.8-9.8s11.8 3.4 11.8 9.8z\" fill=\"url(#av-placeholder-top)\" /><ellipse cx=\"16\" cy=\"14.3\" rx=\"10.6\" ry=\"10.2\" fill=\"url(#av-placeholder-face)\" /><path d=\"M9.2 20.4c1.2 2.6 3.7 4 6.8 4s5.6-1.4 6.8-4c-2 1.5-4.2 2.2-6.8 2.2s-4.8-.7-6.8-2.2z\" fill=\"#abb1b9\" fill-opacity=\"0.55\" /><ellipse cx=\"12.6\" cy=\"8.4\" rx=\"3.6\" ry=\"2.2\" fill=\"#ffffff\" fill-opacity=\"0.22\" transform=\"rotate(-18 12.6 8.4)\" /><path d=\"M5.5 13.6C5.5 7.3 10.1 3.8 16 3.8s10.5 3.5 10.5 9.8c-1.9-3-5.7-4.5-10.5-4.5s-8.6 1.5-10.5 4.5z\" fill=\"url(#av-placeholder-hair)\" /><ellipse cx=\"9.3\" cy=\"17.9\" rx=\"2.8\" ry=\"2.0\" fill=\"url(#av-placeholder-blush)\" /><ellipse cx=\"22.7\" cy=\"17.9\" rx=\"2.8\" ry=\"2.0\" fill=\"url(#av-placeholder-blush)\" /><ellipse cx=\"12.1\" cy=\"15.3\" rx=\"1.85\" ry=\"2.3\" fill=\"#2b3445\" /><ellipse cx=\"19.9\" cy=\"15.3\" rx=\"1.85\" ry=\"2.3\" fill=\"#2b3445\" /><circle cx=\"11.5\" cy=\"14.450000000000001\" r=\"0.78\" fill=\"#ffffff\" /><circle cx=\"19.299999999999997\" cy=\"14.450000000000001\" r=\"0.78\" fill=\"#ffffff\" /><circle cx=\"12.799999999999999\" cy=\"16.3\" r=\"0.4\" fill=\"#ffffff\" fill-opacity=\"0.6\" /><circle cx=\"20.599999999999998\" cy=\"16.3\" r=\"0.4\" fill=\"#ffffff\" fill-opacity=\"0.6\" /><path d=\"M14.6 19.4c.85.8 2.35.8 3.2 0\" stroke=\"#a4553f\" stroke-width=\"0.85\" fill=\"none\" stroke-linecap=\"round\" /></svg>"
+    }
+  ],
+  "report": {
+    "keys": [
+      "s11",
+      "s12",
+      "s13",
+      "s14",
+      "s15"
+    ],
+    "slotKeysHas": [
+      true,
+      true,
+      true,
+      true,
+      true
+    ],
+    "distinctSvg": 5,
+    "distinctFields": 5,
+    "resolved": [
+      {
+        "key": "s11",
+        "skin": "#bd8557",
+        "hair": "#3a3a44",
+        "top": "#e6a0bd",
+        "background": "#f8e9f1"
+      },
+      {
+        "key": "s12",
+        "skin": "#f7d9bd",
+        "hair": "#7d4d6e",
+        "top": "#84b6e8",
+        "background": "#e8eff8"
+      },
+      {
+        "key": "s13",
+        "skin": "#efc49c",
+        "hair": "#7d4d6e",
+        "top": "#b6a0e2",
+        "background": "#f1eaf8"
+      },
+      {
+        "key": "s14",
+        "skin": "#dca876",
+        "hair": "#7d4d6e",
+        "top": "#63c8bc",
+        "background": "#e3f2f0"
+      },
+      {
+        "key": "s15",
+        "skin": "#bd8557",
+        "hair": "#7d4d6e",
+        "top": "#f0aa86",
+        "background": "#faf0e3"
+      }
+    ],
+    "fallbackDistinctSvg": 1,
+    "fallbackTokens": [
+      "",
+      "human:general",
+      "human:UNKNOWN",
+      "⚙️"
+    ]
+  }
+}

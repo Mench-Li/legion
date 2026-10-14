@@ -24,6 +24,72 @@ export function builtinAvatarFor(role) {
   return BUILTIN_ROLE_KEYS.includes(role) ? 'human:' + role : null
 }
 
+/**
+ * **外部执行者**（未入编队、由 `tasks.soldier` 合成的伪成员）的冻结令牌表。
+ *
+ * 为什么是一张**静态表**而不是哈希派生：这张表可以**逐条断言**（构造性唯一，
+ * AC-R4-1/AC-R4-2），而哈希只能给"大概率不撞"；静态表还让同一个名字跨请求、
+ * 跨重启、跨两端恒定（AC-R5-1），不受"当前占用集合"变化影响。
+ * 未登记的名字才走确定性兜底（见 `externalAvatarFor`）。
+ *
+ * 位面 key 取空闲备用池 s11..s15：不与 25 个内置岗位 key 撞，也不与 software
+ * 8 个内编岗位当前使用的 key 撞（AC-R3-3/AC-R4-2）。本表与 workbench 端
+ * `workbench/src/avatar/external-agents.ts` 由 parity 套件逐项 deepEqual 锁死。
+ */
+export const EXTERNAL_AVATAR_TOKENS = {
+  general: 'human:s11',
+  'soldier-a': 'human:s12',
+  'soldier-b': 'human:s13',
+  'soldier-auto': 'human:s14',
+  'soldier-market': 'human:s15',
+}
+
+/** 冻结令牌占用的备用 key：兜底分配必须避开它们（已点名身份永不漂移）。 */
+const EXTERNAL_FROZEN_TOKENS = new Set(Object.values(EXTERNAL_AVATAR_TOKENS))
+
+/** FNV-1a 32 位（零依赖、确定性；与 workbench/src/scene/sceneState.ts 同一算法）。 */
+function fnv1a(text) {
+  let hash = 0x811c9dc5
+  for (let i = 0; i < text.length; i += 1) {
+    hash ^= text.charCodeAt(i)
+    hash = Math.imul(hash, 0x01000193) >>> 0
+  }
+  return hash >>> 0
+}
+
+/**
+ * **纯函数**：外部执行者身份名 → 头像令牌（RESEARCH §6.5）。
+ *
+ *   ① 冻结表命中 ⇒ 恒返回表里的令牌（与 usedTokens / 传入顺序无关，AC-R5-1）；
+ *   ② 未命中 ⇒ 在**未被占用的空闲备用位面**（s01..s10，s11..s15 被冻结表保留）
+ *      里按 `FNV-1a(name) % candidates.length` 确定性选一个；
+ *   ③ 池满 / 空名 / 非字符串 ⇒ 返回空串 `''`（占位语义；**绝不**返回 emoji
+ *      或非法字符串，AC-R7-1/AC-R7-2）。
+ *
+ * ★ 分配路径不含随机数 / 时钟 / 网络（纯函数，AC-R5-3）。
+ *
+ * @param {unknown} name 外部执行者身份名（`tasks.soldier`）
+ * @param {Iterable<string>|null|undefined} usedTokens 已占用的令牌（roster 头像 + 本次已分配）
+ * @returns {string} `human:<key>` 或 `''`
+ */
+export function externalAvatarFor(name, usedTokens = []) {
+  if (typeof name !== 'string') return ''
+  const key = name.trim()
+  if (!key) return ''
+  const frozen = EXTERNAL_AVATAR_TOKENS[key]
+  if (frozen) return frozen
+  const used = new Set()
+  if (usedTokens) for (const token of usedTokens) if (isAvatarToken(token)) used.add(token.trim())
+  const candidates = []
+  for (let i = 1; i <= 15; i += 1) {
+    const token = 'human:s' + String(i).padStart(2, '0')
+    if (EXTERNAL_FROZEN_TOKENS.has(token) || used.has(token)) continue
+    candidates.push(token)
+  }
+  if (candidates.length === 0) return ''
+  return candidates[fnv1a(key) % candidates.length]
+}
+
 /** 该 scope 内未被占用的最小备用 key sNN（s01..s99）；池满时确定性地退回 human:<role>。 */
 export function allocateAvatarToken(db, scope, role) {
   const builtin = builtinAvatarFor(role)

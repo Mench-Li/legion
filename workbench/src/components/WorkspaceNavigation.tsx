@@ -5,6 +5,7 @@ import type { TaskViewId } from '../navigation'
 import type { RosterAgent, SpaceInfo } from '../types'
 import { UiIcon } from './UiIcon'
 import { AgentAvatar } from '../avatar'
+import { externalAvatarToken } from '../avatar/external-agents'
 
 interface Props {
   active: string; scope: string | null; hubMode: boolean; spaces: SpaceInfo[]
@@ -42,7 +43,7 @@ export function WorkspaceNavigation(props: Props): React.JSX.Element {
     <nav className="app-rail" aria-label="主导航">
       <button className="workspace-brand" title="Legion 协作台" onClick={() => navigate('home')} aria-label="Legion 协作台首页"><img src={`${import.meta.env.BASE_URL}legion-icon.png`} alt="" /></button>
       {NAV_GROUPS.filter(g => g.id !== 'settings').map(g => <button key={g.id} className={`rail-button${group === g.id ? ' selected' : ''}`} title={g.name} aria-label={g.name} aria-current={group === g.id ? 'page' : undefined} onClick={() => navigate(g.target)}><UiIcon name={g.icon} />{g.id === 'activity' && notifyUnread > 0 && <span className="rail-notification" aria-label={`${notifyUnread} 条未读通知`}>{notifyUnread > 99 ? '99+' : notifyUnread}</span>}</button>)}
-      <div className="rail-end"><button className={`rail-button${group === 'settings' ? ' selected' : ''}`} title="设置" aria-label="设置" aria-current={group === 'settings' ? 'page' : undefined} onClick={() => navigate('settings-spaces')}><UiIcon name="settings" /></button><span className="workspace-user" title="空间管理员">管</span></div>
+      <div className="rail-end"><button className={`rail-button${group === 'settings' ? ' selected' : ''}`} title="设置" aria-label="设置" aria-current={group === 'settings' ? 'page' : undefined} onClick={() => navigate('settings-spaces')}><UiIcon name="settings" /></button><span className="workspace-user" title="空间管理员"><AgentAvatar token={externalAvatarToken('general')} size={30} /></span></div>
     </nav>
     {open && <button className="sidebar-backdrop" aria-label="关闭导航" onClick={onClose} />}
     <aside className={`workspace-sidebar${open ? ' mobile-open' : ''}`} aria-label={`${NAV_GROUPS.find(g => g.id === group)?.name}导航`}>

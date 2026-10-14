@@ -2037,6 +2037,9 @@ async function stageTest() {
     { label: 'agent-avatar-surfaces（S4 桌面展示面一：单一来源 / 无首字回退 / 无破图）', files: ['workbench/scripts/agent-avatar-surfaces.test.mjs'], cwd: ROOT },
     { label: 'agent-avatar-settings（S5 桌面展示面二：新建不配置头像 / 三处成员头像接入）', files: ['workbench/scripts/agent-avatar-settings.test.mjs'], cwd: ROOT },
     { label: 'avatar-parity（S6 移动端与桌面位面表逐项同轴 + 内联人形渲染）', files: ['workbench/mobile/avatar-parity.test.mjs'], cwd: ROOT },
+    // 2026-10-14 T-207：外部执行者（soldier-*/general）此前 avatar 硬编码为齿轮 emoji ⇒ 全部落到
+    // 同一张灰阶占位人形。这一条守两端「名字→令牌」表逐项同轴（只改一端即红）。
+    { label: 'external-avatar-parity（S2 外部执行者「名字→令牌」两端镜像：逐项 deepEqual / 命中位面 / 与内编不撞）', files: ['workbench/scripts/external-avatar-parity.test.mjs'], cwd: ROOT },
     { label: 'skill-importer（技能导入契约）', files: ['workbench/scripts/skill-importer.test.mjs'], cwd: ROOT },
     { label: 'hub-board（v2 看板投影）', files: ['workbench/scripts/hub-board.test.mjs'], cwd: ROOT, nodeArgs: ['--experimental-strip-types'] },
     // 2026-10-13：任务卡**展示顺序**（最新在最上）。原来按任务号排，而任务号不等于时间 ——

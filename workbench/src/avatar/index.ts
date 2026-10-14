@@ -3,6 +3,7 @@
 export { default as AgentAvatar } from './AgentAvatar'
 export type { AgentAvatarProps } from './AgentAvatar'
 export { resolveSlot, slotKeys, assertSlotTable, BUILTIN_ROLE_KEYS, SPARE_KEYS, SLOT_KEYS, PLACEHOLDER_SLOT } from './slots'
+export { EXTERNAL_AGENT_AVATARS, externalAvatarToken } from './external-agents'
 export { AVATAR_PHOTOS, AVATAR_PHOTO_BASE, photoFileFor, photoKeys } from './photo-assets'
 export type { AvatarSlot, AvatarPhoto } from './types'
 import './avatar.css'

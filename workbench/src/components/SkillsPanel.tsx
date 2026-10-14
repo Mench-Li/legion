@@ -3,6 +3,7 @@ import { fetchAgents, fetchSkills, getSkillSource, grantSkill, hubBase, importSk
 import type { AgentCatalogItem, SkillBundle, SkillInfo, SkillPart, SpaceInfo } from '../types'
 import { toast } from './Toast'
 import { AgentAvatar } from '../avatar'
+import { externalAvatarToken } from '../avatar/external-agents'
 
 const STATUS_TEXT: Record<SkillInfo['status'], string> = {
   published: '已发布',
@@ -543,7 +544,8 @@ export function SkillsPanel({ scope, hubMode, spaces = [] }: SkillsPanelProps): 
                               const a = agentOf(m)
                               return (
                               <span key={m} className="skill-grant-tag member" title={`成员授权：${m}`}>
-                                {a && <AgentAvatar token={a.avatar} />} {memberLabel(m)}
+                                {/* T-207（D-5）：不在 /api/agents 目录的 id（general/soldier-*）也渲染头像（external-agents 兜底）。 */}
+                                <AgentAvatar token={a?.avatar || externalAvatarToken(m)} /> {memberLabel(m)}
                                 {isOwn(s) && s.status === 'published' && (
                                   <button
                                     className="chip-x"
@@ -678,7 +680,7 @@ export function SkillsPanel({ scope, hubMode, spaces = [] }: SkillsPanelProps): 
                         {already.member.map(m => {
                           const a = agentOf(m)
                           return (
-                          <span key={m} className="skill-grant-tag member" title={`成员授权：${m}`}>{a && <AgentAvatar token={a.avatar} />} {memberLabel(m)}</span>
+                          <span key={m} className="skill-grant-tag member" title={`成员授权：${m}`}><AgentAvatar token={a?.avatar || externalAvatarToken(m)} /> {memberLabel(m)}</span>
                           )
                         })}
                       </div>
@@ -790,7 +792,7 @@ export function SkillsPanel({ scope, hubMode, spaces = [] }: SkillsPanelProps): 
                           const a = agentOf(r)
                           return (
                             <span key={r} className="skill-grant-tag member">
-                              {a && <AgentAvatar token={a.avatar} />} {a ? a.name : r}
+                              <AgentAvatar token={a?.avatar || externalAvatarToken(r)} /> {a ? a.name : r}
                               {a && <code style={{ fontSize: 9, opacity: 0.75 }}>{r}</code>}
                               <button
                                 className="chip-x"

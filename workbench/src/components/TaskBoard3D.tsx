@@ -97,6 +97,17 @@ export function TaskBoard3D({ tasks, board, activeVisit }: {
                 <meshStandardMaterial color={style.color} emissive={style.color}
                   emissiveIntensity={active ? 0.9 : 0.22} roughness={0.7} />
               </mesh>
+              {/*
+                ★ 2026-10-14（将军："显示任务编号即可，悬停时展示完整任务内容"）：
+                  卡片上只写**编号**，完整标题留给悬浮提示。
+                  编号是像素文字（DOM 覆盖层），所以它不随卡片缩放而糊掉；
+                  `pointerEvents: 'none'` 让悬浮事件仍然落在卡片网格上（不然文字会挡住自己的提示）。
+                  一列最多 10 张（见 `maxCards`），于是这块板上最多 40 个这样的文字节点 ——
+                  这是"看得见编号"能接受的上限；再多就该改成按列折叠而不是继续加字。
+              */}
+              <Html position={[0, 0, 0.02]} center zIndexRange={[23, 0]} style={{ pointerEvents: 'none' }}>
+                <span className="task-board-card-id" style={{ color: style.color }}>{task.id}</span>
+              </Html>
               {/* 高亮框：只有"正被认领/完结"的那张卡才挂，且挂在同一个 group 里跟着走 */}
               {active && <mesh ref={highlight} position={[0, 0, -0.01]}>
                 <planeGeometry args={[columnWidth - 0.24, 0.25]} />
@@ -104,7 +115,8 @@ export function TaskBoard3D({ tasks, board, activeVisit }: {
               </mesh>}
               {tip?.id === task.id && <Html position={[0, 0.22, 0.1]} center zIndexRange={[26, 0]} style={{ pointerEvents: 'none' }}>
                 <div className="task-board-tip">
-                  <b style={{ color: style.color }}>{style.label}</b> {task.id}<br />{task.title}
+                  <b style={{ color: style.color }}>{style.label}</b> {task.id}
+                  <div className="task-board-tip-title">{task.title}</div>
                 </div>
               </Html>}
             </group>

@@ -4,8 +4,8 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import {
-  BOARD_COLUMNS, BOARD_VISIT_MS, MOOD_STYLE, STATUS_STYLE,
-  boardColumnFor, columnCounter, deriveBoardVisits, groupTasksByColumn, moodFor,
+  BOARD_COLUMNS, BOARD_VISIT_MS, MOOD_STYLE, SCENE_HIDDEN_STATUSES, STATUS_STYLE,
+  boardColumnFor, columnCounter, deriveBoardVisits, groupTasksByColumn, isTaskVisibleInScene, moodFor, visibleSceneTasks,
 } from '../src/scene/sceneBoard.ts'
 
 const ALL_STATUSES = ['backlog', 'todo', 'in_progress', 'in_review', 'blocked', 'done', 'canceled']
@@ -21,7 +21,7 @@ test('① 每个任务状态都有颜色与中文名（新增状态时这条先�
   assert.deepEqual(Object.keys(STATUS_STYLE).sort(), [...ALL_STATUSES].sort())
 })
 
-test('② 除 canceled 外，每个状态**恰好**落在一列里（不漏、不重）', () => {
+test('② 要显示的状态**恰好**落在一列里；隐藏状态一个都不落（不漏、不重）', () => {
   const seen = new Map()
   for (const column of BOARD_COLUMNS) {
     for (const status of column.statuses) {
@@ -31,17 +31,41 @@ test('② 除 canceled 外，每个状态**恰好**落在一列里（不漏、�
     }
   }
   for (const status of ALL_STATUSES) {
-    if (status === 'canceled') {
-      assert.equal(boardColumnFor(status), null, '已取消不进任何一列（办公室看板上不该有它的位置）')
+    if (SCENE_HIDDEN_STATUSES.includes(status)) {
+      assert.equal(boardColumnFor(status), null, `${status} 被隐藏了，就不该有任何列收它`)
       continue
     }
     assert.ok(seen.has(status), `${status} 没有归属的列 —— 这类任务的卡片会凭空消失`)
   }
-  // 列的 key 唯一，且顺序稳定（从左到右就是任务推进顺序）
-  assert.deepEqual(BOARD_COLUMNS.map(column => column.key), ['todo', 'in_progress', 'in_review', 'blocked', 'done'])
+  // ★ 这份名单 + 各列状态 = 全部状态，不多不少：新增状态时这条会先红，
+  //   逼你明确决定"它进不进场景"（而不是让它静默消失）
+  const covered = [...new Set([...seen.keys(), ...SCENE_HIDDEN_STATUSES])].sort()
+  assert.deepEqual(covered, [...ALL_STATUSES].sort(), '有状态既不在列里、也不在隐藏名单里（或反之）')
+  // 列的 key 与顺序稳定（从左到右就是任务推进顺序）——**完成列已按需求移除**
+  assert.deepEqual(BOARD_COLUMNS.map(column => column.key), ['todo', 'in_progress', 'in_review', 'blocked'])
+  assert.ok(!BOARD_COLUMNS.some(column => column.key === 'done'), '已完成不再单独占一列')
 })
 
-test('③ 分列：取消的不上板、同列内按 id 稳定排序（刷新不许让卡片换位置）', () => {
+test('★★★ 已完成与已取消都**不进场景**（将军：已完成的就不要显示了）', () => {
+  // 这条是需求（2026-10-14），不是实现细节：场景显示的是"现在有什么要办"，
+  // 完成的任务是历史 —— 它会平白占掉一排位置，把真正在动的列挤窄。
+  assert.deepEqual([...SCENE_HIDDEN_STATUSES].sort(), ['canceled', 'done'])
+  assert.equal(isTaskVisibleInScene('done'), false)
+  assert.equal(isTaskVisibleInScene('canceled'), false)
+  for (const status of ['backlog', 'todo', 'in_progress', 'in_review', 'blocked']) {
+    assert.equal(isTaskVisibleInScene(status), true, `${status} 是在办的任务，必须显示`)
+  }
+  // 过滤函数对"任何带 status 的东西"都成立（HubTask 与 chip 共用一条路）
+  const tasks = [
+    { id: 'T-1', title: 'a', status: 'todo' },
+    { id: 'T-2', title: 'b', status: 'done' },
+    { id: 'T-3', title: 'c', status: 'canceled' },
+    { id: 'T-4', title: 'd', status: 'in_progress' },
+  ]
+  assert.deepEqual(visibleSceneTasks(tasks).map(task => task.id), ['T-1', 'T-4'])
+})
+
+test('③ 分列：已完成与已取消都不上板、同列内按 id 稳定排序（刷新不许让卡片换位置）', () => {
   const tasks = [
     { id: 'T-3', title: 'c', status: 'done' },
     { id: 'T-1', title: 'a', status: 'todo' },
@@ -51,9 +75,9 @@ test('③ 分列：取消的不上板、同列内按 id 稳定排序（刷新不
   ]
   const grouped = groupTasksByColumn(tasks)
   assert.deepEqual(grouped.get('todo').map(task => task.id), ['T-1', 'T-2'], 'backlog 与 todo 合成"待办"列，且按 id 排')
-  assert.deepEqual(grouped.get('done').map(task => task.id), ['T-3'])
   assert.deepEqual(grouped.get('blocked').map(task => task.id), ['T-4'])
-  assert.equal([...grouped.values()].flat().length, 4, 'canceled 不许出现在任何列里')
+  assert.equal(grouped.has('done'), false, '完成列已被移除（将军：已完成的就不要显示了）')
+  assert.equal([...grouped.values()].flat().length, 3, 'done 与 canceled 都不许出现在任何列里')
   assert.deepEqual(groupTasksByColumn(tasks).get('todo').map(t => t.id), ['T-1', 'T-2'], '两次分组结果一致（稳定）')
 })
 

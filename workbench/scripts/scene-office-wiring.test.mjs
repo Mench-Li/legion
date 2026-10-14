@@ -65,8 +65,9 @@ test('④ 面板与 App 把两样数据一路送到场景（少一环 = 那一�
   const panel = read('components/CenterPanel.tsx')
   assert.match(panel, /sceneVisits\?: SceneBoardVisit\[\]/, '面板要收 sceneVisits')
   assert.match(panel, /boardVisits=\{sceneVisits\.filter\(visit => visit\.scope === scope\)\}/, '要按当前空间过滤后传给场景')
-  assert.match(panel, /boardTasks=\{\(sceneFacts\?\.tasks \?\? \[\]\)/, '看板卡片来自本空间任务')
-  assert.match(panel, /\.filter\(task => task\.status !== 'canceled'\)/, '取消的任务不上板')
+  assert.match(panel, /boardTasks=\{visibleSceneTasks\(sceneFacts\?\.tasks \?\? \[\]\)/, '看板卡片来自本空间任务，且过**同一份**可见性过滤')
+  assert.match(panel, /import \{ visibleSceneTasks \} from '\.\.\/scene\/sceneBoard'/, '过滤函数必须取自 sceneBoard（不许在这里另写一份状态判断）')
+  assert.doesNotMatch(panel, /task\.status !== 'canceled'/, '面板里不许再留一份"取消不上板"的判断 —— 那是同一规则的第二份副本')
   const app = read('App.tsx')
   assert.match(app, /const \[sceneVisits, setSceneVisits\] = useState<SceneBoardVisit\[\]>\(\[\]\)/, 'App 要有这一份状态')
   assert.match(app, /onSnapshot: \(facts, cues, visits\) =>/, '回调要收第三个产物')
@@ -121,4 +122,40 @@ test('⑧ 四面墙必须"剖视"：相机背后的那一面要隐去（否则�
   assert.match(dressing, /walls\.right, camera\.position\.x < /, '相机在左侧 ⇒ 显示右墙')
   // 阈值必须与房间尺寸成比例：写死成 0 会让俯视时来回闪
   assert.match(dressing, /half\.z \* 0\.12/, '阈值按房间深度取，不能写成常数')
+})
+
+// ══════════════════════════════════════════════════════════════════════════
+// ⑨ 将军 2026-10-14 的两条改口：
+//    · 「已完成的就不要显示了」
+//    · 「显示任务编号即可，悬停时展示完整任务内容」
+//    这两条都不是实现细节而是**需求**，所以要有判据守着它们不会被改回去。
+// ══════════════════════════════════════════════════════════════════════════
+
+test('⑨★ 看板不列"完成"列，且卡片上只写编号、悬浮才出完整内容', () => {
+  const board = read('scene/sceneBoard.ts')
+  assert.match(board, /SCENE_HIDDEN_STATUSES: readonly CardStatus\[\] = \['canceled', 'done'\]/,
+    '已完成与已取消必须都在隐藏名单里（唯一一份）')
+  assert.match(board, /export function visibleSceneTasks/, '要有一个公开的过滤函数给调用方复用')
+  assert.doesNotMatch(board, /\{ key: 'done'/, '看板不许再有"完成"列')
+  const tip = read('components/TaskBoard3D.tsx')
+  assert.match(tip, /className="task-board-card-id"/, '卡片上要显示任务编号')
+  assert.match(tip, /\{task\.id\}<\/span>/, '卡片上写的是任务编号')
+  assert.match(tip, /className="task-board-tip-title"/, '悬浮提示里要出完整标题（单独一行，可换行）')
+  // 卡片文字不许挡住它自己的悬浮事件（否则鼠标一放上去提示就没了）
+  assert.match(tip, /zIndexRange=\{\[23, 0\]\} style=\{\{ pointerEvents: 'none' \}\}/, '编号文字要 pointerEvents:none')
+})
+
+test('⑨★ 气泡每行只写编号、鼠标停在该行才展开完整标题；已完成同样不出现', () => {
+  const bubble = read('components/AgentBubble.tsx')
+  assert.match(bubble, /const \[hoverTask, setHoverTask\] = useState<string \| null>\(null\)/, '要记下鼠标停在哪一行')
+  assert.match(bubble, /onPointerEnter=\{event => \{ event\.stopPropagation\(\); setHoverTask\(task\.id\) \}\}/, '停到某行 ⇒ 展开它')
+  assert.match(bubble, /\{open && <span className="agent-bubble-task-title">\{task\.title\}<\/span>\}/,
+    '完整标题只在悬浮那一行时出现（平时只有编号）')
+  assert.match(bubble, /<b style=\{\{ color: taskStyle\.color \}\}>\{task\.id\}<\/b>/, '行里显示的是任务编号')
+  // 常驻形态也改成显示编号（原来显示的是最要紧那条的标题）
+  assert.match(bubble, /<div className="agent-bubble-focus">\{agent\.tasks\[0\]\.id\}<\/div>/, '常驻形态显示最要紧那条的编号')
+  assert.match(bubble, /暂无进行中的任务/, '空状态要说明是"进行中"，与"不显示已完成"一致')
+  const css = read('scene/officeScene.css')
+  assert.match(css, /\.agent-bubble-task-title \{[\s\S]{0,120}flex-basis: 100%/, '标题要独占一行（换行显示，不挤在编号旁）')
+  assert.match(css, /\.task-board-card-id \{/, '看板编号要有自己的样式（否则与卡片色块糊在一起看不清）')
 })

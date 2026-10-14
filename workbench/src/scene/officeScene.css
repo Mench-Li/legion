@@ -44,13 +44,25 @@
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
   font-size: 10px; color: #c6d4e6;
 }
-/* 悬浮展开后的任务清单：**全部**列出来，但面板限高可滚（气泡不许长到盖住半个办公室） */
-.agent-bubble-panel { margin-top: 6px; width: 208px; max-height: 168px; overflow-y: auto; border-top: 1px solid rgba(255, 255, 255, 0.14); padding-top: 5px }
+/* 悬浮展开后的任务清单：**全部**列出来，但面板限高可滚（气泡不许长到盖住半个办公室）
+   ★ 每一行只写**任务编号**；鼠标停到哪一行，那一行的完整标题才顶出来（将军 2026-10-14）。 */
+.agent-bubble-panel { margin-top: 6px; width: 226px; max-height: 168px; overflow-y: auto; border-top: 1px solid rgba(255, 255, 255, 0.14); padding-top: 5px }
 .agent-bubble-panel::-webkit-scrollbar { width: 6px }
 .agent-bubble-panel::-webkit-scrollbar-thumb { background: rgba(255, 255, 255, 0.22); border-radius: 3px }
-.agent-bubble-task { display: flex; align-items: flex-start; gap: 5px; padding: 2px 0; font-size: 10.5px; line-height: 1.3 }
-.agent-bubble-task b { color: #8fa3bd; font-weight: 500; flex: none }
-.agent-bubble-task span { color: #dbe6f2; overflow: hidden; text-overflow: ellipsis; white-space: nowrap }
+.agent-bubble-task {
+  display: flex; align-items: center; flex-wrap: wrap; gap: 5px;
+  padding: 2px 4px; border-radius: 4px;
+  font-size: 10.5px; line-height: 1.3;
+}
+.agent-bubble-task.open { background: rgba(255, 255, 255, 0.08) }
+.agent-bubble-task b { font-weight: 600; flex: none }              /* 任务编号 */
+.agent-bubble-task-state { color: #9fb2c8; font-size: 10px; flex: none }
+/* 完整标题：占满整行（`flex-basis: 100%`），一行放不下就省略号 —— 不撑破气泡宽度 */
+.agent-bubble-task-title {
+  flex-basis: 100%; margin-left: 12px;
+  color: #dbe6f2; font-size: 10.5px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
 .agent-bubble-more { font-size: 10px; color: #8fa3bd; padding-top: 3px }
 .agent-bubble-empty { font-size: 10.5px; color: #8fa3bd }
 
@@ -71,6 +83,13 @@
   border: 1px solid rgba(255, 255, 255, 0.16);
 }
 .task-board-tip b { color: #8fa3bd; font-weight: 500 }
+/* 完整任务标题：可以换行（气泡里的那一份是单行省略，因为它要贴着一行编号走） */
+.task-board-tip-title { margin-top: 2px; white-space: normal; word-break: break-word }
+/* 卡片上的任务编号：卡片本身是色块，编号是叠在上面的像素文字 */
+.task-board-card-id {
+  font-size: 9.5px; font-weight: 600; letter-spacing: 0.2px;
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.85);
+}
 .task-board-footer {
   padding: 2px 8px; border-radius: 5px;
   background: rgba(10, 16, 25, 0.82);

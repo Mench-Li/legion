@@ -31,15 +31,41 @@ export const STATUS_STYLE: Record<CardStatus, { color: string; label: string }> 
  * 这样"待办"下能把 `backlog` 与 `todo` 合成一列（办公室里那块板只有这么宽）。
  *
  * 顺序就是看板从左到右的顺序，也是"任务走到哪一步"的顺序。
- * 判据钉住：除 `canceled` 外**每个状态恰好落在一列**里（不多不少）。
+ * 判据钉住：**每个"要显示"的状态恰好落在一列**里（不多不少）——见 `isTaskVisibleInScene`。
+ *
+ * ★ 2026-10-14（将军："已完成的就不要显示了"）：**去掉了"完成"列**。
+ *   一块看板的意义是"现在有什么要办"，而完成的任务是历史 —— 它会平白占掉一排位置，
+ *   把真正在动的列挤窄。历史要看，去任务中心（那里有筛选与详情）。
  */
 export const BOARD_COLUMNS: ReadonlyArray<{ key: string; label: string; statuses: readonly CardStatus[] }> = [
   { key: 'todo', label: '待办', statuses: ['backlog', 'todo'] },
   { key: 'in_progress', label: '进行中', statuses: ['in_progress'] },
   { key: 'in_review', label: '待验收', statuses: ['in_review'] },
   { key: 'blocked', label: '受阻', statuses: ['blocked'] },
-  { key: 'done', label: '完成', statuses: ['done'] },
 ]
+
+/**
+ * ★★ 哪些状态**不进场景**（看板不列、气泡不显示、也不计进任务数）。
+ *
+ * 只有这一份名单：`CenterPanel` 传卡片、`groupTasksByColumn` 分列、
+ * `projectSceneAgents` 算气色与计数，四处都问它。
+ * 分成多份的后果是"看板上不显示但气泡里还在"这类**不一致**：
+ * 不报错，只是同一个东西在两个地方一个有、一个没有。
+ *
+ * ⚠ 与 `BOARD_COLUMNS` 的关系由判据钉住：这份名单 + 各列状态 = 全部 `CardStatus`，
+ *   不多不少（新增状态时那条判据会先红，提醒你决定它该不该进场景）。
+ */
+export const SCENE_HIDDEN_STATUSES: readonly CardStatus[] = ['canceled', 'done']
+
+/** 这件任务要不要出现在场景里（看板列 + 气泡清单 + 计数，都用这一个判断）。 */
+export function isTaskVisibleInScene(status: CardStatus): boolean {
+  return !SCENE_HIDDEN_STATUSES.includes(status)
+}
+
+/** 过滤出该进场景的任务（`HubTask` 或任何带 `status` 的东西，保持调用方的类型）。 */
+export function visibleSceneTasks<T extends { status: CardStatus }>(tasks: readonly T[]): T[] {
+  return tasks.filter(task => isTaskVisibleInScene(task.status))
+}
 
 /** 卡片/气泡上用的最小任务形状：只带"显示得出来"的三样，不把整个 HubTask 拖进 3D。 */
 export interface SceneTaskChip {
@@ -67,8 +93,11 @@ export const MOOD_STYLE: Record<AgentMood, { color: string; label: string }> = {
  * 一个 Agent 该显示什么气色 —— 取他手上**最要紧**的那件事：
  * 受阻 > 待验收 > 进行中 > 待命。
  *
- * 这条顺序与看板从右往左的"需要人管"程度一致：一块红牌比一堆绿牌更该被看见。
+ * 这条顺序与看板从左到右的"需要人管"程度一致：一块红牌比一堆绿牌更该被看见。
  * `projectSceneAgents` 的 `mode` 与气泡颜色**都调这一个函数**（一次判定，两处使用）。
+ *
+ * ⚠ 传进来的任务**应当已经过 `visibleSceneTasks`**（气泡与计数用的是同一批）。
+ *   不然会出现"气泡写着 2 项、列出的却是 0 条"这种自相矛盾 —— 不报错，但没人数得对。
  */
 export function moodFor(tasks: readonly Pick<SceneTaskChip, 'status'>[]): AgentMood {
   if (tasks.some(task => task.status === 'blocked')) return 'blocked'
@@ -77,7 +106,7 @@ export function moodFor(tasks: readonly Pick<SceneTaskChip, 'status'>[]): AgentM
   return 'idle'
 }
 
-/** 某个状态属于哪一列（找不到 ⇒ `null`；`canceled` 刻意没有列）。 */
+/** 某个状态属于哪一列（找不到 ⇒ `null`：被隐藏的状态刻意没有列）。 */
 export function boardColumnFor(status: CardStatus): string | null {
   return BOARD_COLUMNS.find(column => column.statuses.includes(status))?.key ?? null
 }
@@ -85,13 +114,14 @@ export function boardColumnFor(status: CardStatus): string | null {
 /**
  * 把任务按列分好，供看板渲染。
  *
- * ★ `canceled` **不进任何列**：一块办公室看板上不该有"已取消"的卡片占位，
- *   而那批任务本来也不出现在任何 Agent 名下（见 `agentOwnership`）。
+ * ★ 隐藏状态（`canceled` / `done`）**不进任何列** —— 统一由 `isTaskVisibleInScene` 决定，
+ *   不在这里另写一份判断（那份判断正是会与别处漂移的东西）。
  * ★ 每列内按 `id` 稳定排序：刷新一次卡片就换位置的话，人眼会以为"任务变了"。
  */
 export function groupTasksByColumn(tasks: readonly SceneTaskChip[]): Map<string, SceneTaskChip[]> {
   const grouped = new Map<string, SceneTaskChip[]>(BOARD_COLUMNS.map(column => [column.key, []]))
   for (const task of [...tasks].sort((a, b) => a.id.localeCompare(b.id))) {
+    if (!isTaskVisibleInScene(task.status)) continue
     const key = boardColumnFor(task.status)
     if (key !== null) grouped.get(key)?.push(task)
   }

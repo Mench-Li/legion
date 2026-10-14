@@ -1,4 +1,6 @@
-import { useMemo } from 'react'
+import { useMemo, useRef } from 'react'
+import type { RefObject } from 'react'
+import { useFrame } from '@react-three/fiber'
 import * as THREE from 'three'
 import type { SceneLayout } from '../scene/sceneLayout'
 import type { SceneTheme } from '../scene/sceneTheme'
@@ -69,17 +71,43 @@ export function OfficeDressing({ layout, theme }: { layout: SceneLayout; theme: 
 
   const wallX = half.x + dressing.wallThickness / 2
   const wallZ = half.z + dressing.wallThickness / 2
+  const walls = {
+    back: useRef<THREE.Mesh>(null), front: useRef<THREE.Mesh>(null),
+    left: useRef<THREE.Mesh>(null), right: useRef<THREE.Mesh>(null),
+  }
+  useFrame(({ camera }) => {
+    const show = (ref: RefObject<THREE.Mesh | null>, visible: boolean): void => {
+      if (ref.current && ref.current.visible !== visible) ref.current.visible = visible
+    }
+    // 相机在墙的哪一侧，就隐去哪一面（阈值 12% 房间尺寸，避免俯视时反复闪）
+    show(walls.back, camera.position.z > -half.z * 0.12)
+    show(walls.front, camera.position.z < half.z * 0.12)
+    show(walls.left, camera.position.x > -half.x * 0.12)
+    show(walls.right, camera.position.x < half.x * 0.12)
+  })
 
   return <group>
-    {/* ── 墙与踢脚 ───────────────────────────────────────────────────────── */}
-    <mesh position={[0, dressing.wallHeight / 2, -wallZ]} receiveShadow>
+    {/* ── 墙与踢脚 ─────────────────────────────────────────────────────────
+        ★ 剖视（cutaway）：相机背后的墙**自动隐去**。这不是偷懒 —— 相机在 +x/+z 一侧
+        俯视，若四面墙都实心，靠相机那两面就会把整个房间挡在外面（画面上只剩一堵墙）。
+        做法是每帧看相机在墙的哪一侧：站错边的墙隐去，于是绕到任何角度都能看进房间。
+        （只调 `visible`，不重建几何体；阈值取房间尺寸的 12%，避免正上方时来回闪。） */}
+    <mesh ref={walls.back} position={[0, dressing.wallHeight / 2, -wallZ]} receiveShadow>
       <boxGeometry args={[floorWidth + dressing.wallThickness * 2, dressing.wallHeight, dressing.wallThickness]} />
       <meshStandardMaterial color={wall} roughness={1} />
     </mesh>
-    {[-wallX, wallX].map(x => <mesh key={x} position={[x, dressing.wallHeight / 2, 0]} receiveShadow>
+    <mesh ref={walls.front} position={[0, dressing.wallHeight / 2, wallZ]} receiveShadow>
+      <boxGeometry args={[floorWidth + dressing.wallThickness * 2, dressing.wallHeight, dressing.wallThickness]} />
+      <meshStandardMaterial color={wall} roughness={1} />
+    </mesh>
+    <mesh ref={walls.left} position={[-wallX, dressing.wallHeight / 2, 0]} receiveShadow>
       <boxGeometry args={[dressing.wallThickness, dressing.wallHeight, floorDepth]} />
       <meshStandardMaterial color={wall} roughness={1} />
-    </mesh>)}
+    </mesh>
+    <mesh ref={walls.right} position={[wallX, dressing.wallHeight / 2, 0]} receiveShadow>
+      <boxGeometry args={[dressing.wallThickness, dressing.wallHeight, floorDepth]} />
+      <meshStandardMaterial color={wall} roughness={1} />
+    </mesh>
     <mesh position={[0, 0.14, -half.z + 0.04]}><boxGeometry args={[floorWidth, 0.28, 0.08]} /><meshStandardMaterial color={wallTrim} /></mesh>
 
     {/* ── 后墙装饰：挂钟、门、两侧标语（都不许压到看板） ───────────────────── */}

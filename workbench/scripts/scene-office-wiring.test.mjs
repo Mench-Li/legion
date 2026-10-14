@@ -107,3 +107,18 @@ test('⑦ 新套件已登记进 CI（没登记的判据等于不存在）', () =
     assert.ok(runCi.includes(suite), `run-ci.mjs 未登记 ${suite}`)
   }
 })
+
+test('⑧ 四面墙必须"剖视"：相机背后的那一面要隐去（否则房间只剩一堵墙）', () => {
+  const dressing = read('components/OfficeDressing.tsx')
+  // 四面墙都要有（少一面就不是房间了）
+  for (const wall of ['back', 'front', 'left', 'right']) {
+    assert.match(dressing, new RegExp(`ref=\\{walls\\.${wall}\\}`), `${wall} 墙没挂 ref（剖视就管不到它）`)
+  }
+  assert.match(dressing, /useFrame\(\(\{ camera \}\)/, '剖视必须每帧按相机位置决定')
+  assert.match(dressing, /walls\.back, camera\.position\.z > /, '相机在房间前方 ⇒ 显示后墙')
+  assert.match(dressing, /walls\.front, camera\.position\.z < /, '相机在后 ⇒ 显示前墙')
+  assert.match(dressing, /walls\.left, camera\.position\.x > /, '相机在右侧 ⇒ 显示左墙')
+  assert.match(dressing, /walls\.right, camera\.position\.x < /, '相机在左侧 ⇒ 显示右墙')
+  // 阈值必须与房间尺寸成比例：写死成 0 会让俯视时来回闪
+  assert.match(dressing, /half\.z \* 0\.12/, '阈值按房间深度取，不能写成常数')
+})

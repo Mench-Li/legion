@@ -38,11 +38,16 @@ import { MOOD_STYLE, STATUS_STYLE } from '../scene/sceneBoard'
  * ★ 传进来的 `agent.tasks` **已经滤掉了已完成/已取消**（见 `sceneBoard.SCENE_HIDDEN_STATUSES`），
  *   所以这里的"全部"= 全部**还没结束**的任务。历史去任务中心看。
  */
-export function AgentBubble({ agent, expanded, minimal = false, onHoverChange, onSelect }: {
+export function AgentBubble({ agent, expanded, minimal = false, blocked = 0, onHoverChange, onSelect }: {
   agent: SceneAgent
   expanded: boolean
-  /** 人多的时候只留"名字 + 气色 + 条数"，减少 DOM 节点；悬浮时照常展开。 */
+  /**
+   * 人多时收缩成"名字 + 条数"的小片（将军 2026-10-14：「下方的提示可以随员工固定并收缩」）。
+   * 收缩的只是**未悬浮**时的形态；鼠标移上去照样展开完整清单。
+   */
   minimal?: boolean
+  /** 他手上受阻的件数（>0 时点一个红标 —— 最需要人管的那一类要能量出来）。 */
+  blocked?: number
   onHoverChange: (hovered: boolean) => void
   onSelect: () => void
 }): React.JSX.Element {
@@ -53,18 +58,19 @@ export function AgentBubble({ agent, expanded, minimal = false, onHoverChange, o
   const [hoverTask, setHoverTask] = useState<string | null>(null)
   return (
     <div
-      className="agent-bubble"
+      className={`agent-bubble ${minimal && !expanded ? 'slim' : ''}`}
       style={style}
       onPointerEnter={event => { event.stopPropagation(); onHoverChange(true) }}
       onPointerLeave={event => { event.stopPropagation(); setHoverTask(null); onHoverChange(false) }}
       onClick={event => { event.stopPropagation(); onSelect() }}
-      title={`${agent.name} · ${mood.label} · ${agent.taskCount} 项进行中任务`}
+      title={`${agent.name} · ${mood.label} · ${agent.taskCount} 项在办`}
     >
       <div className="agent-bubble-head">
         <i className="agent-bubble-dot" style={{ background: mood.color }} />
         <span>{name}</span>
-        <span className="agent-bubble-mood">{mood.label}</span>
-        <span className="agent-bubble-count">{agent.taskCount} 项</span>
+        {(!minimal || expanded) && <span className="agent-bubble-mood">{mood.label}</span>}
+        <span className="agent-bubble-count">{agent.taskCount}</span>
+        {blocked > 0 && <span className="agent-bubble-blocked" title={`受阻 ${blocked} 项`}>⚠{blocked}</span>}
       </div>
       {/*
         ★ 2026-10-14（将军："直接不显示暂无进行中任务，没有就不显示"）：

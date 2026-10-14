@@ -4,7 +4,8 @@ import type { StatusCard } from '../missions'
 import { currentGoalProgress, identitySeed, projectSceneAgents } from '../scene/sceneState'
 import type { SceneAgent, SceneCue, SceneFacts } from '../scene/sceneState'
 import type { SceneBoardVisit } from '../scene/sceneBoard'
-import { visibleSceneTasks } from '../scene/sceneBoard'
+import { byStaff, visibleSceneTasks } from '../scene/sceneBoard'
+import { taskOwnerRole } from '../scene/agentOwnership'
 import { AgentTasksModal } from './AgentTasksModal'
 import { TaskDetailModal } from './TaskDetailModal'
 import { GoalsBoard } from './GoalsBoard'
@@ -305,13 +306,25 @@ export function CenterPanel({ board, labels, active, rosterAgents, scope, spaces
             <div className="scene-loading">{sceneError ? '无法读取空间员工，请刷新重试' : '正在读取空间员工…'}</div>
           ) : <Suspense fallback={<div className="scene-loading">⏳ 正在构建 3D 办公场景…</div>}>
             {/* ★ 该进场景的任务只由 `visibleSceneTasks` 决定（已取消与已完成都不上板），
-                不在这里另写一份状态判断 —— 那正是会与气泡/计数漂移的东西。 */}
+                不在这里另写一份状态判断 —— 那正是会与气泡/计数漂移的东西。
+                ★ 归属人用 `taskOwnerRole`（与"谁走过去"同一条规则），
+                并按它汇总出顶部统计条与板底那一行 —— 三处口径同源。 */}
             <Scene3D
               key={scope ?? 'all'}
               agents={sceneAgents}
               cues={sceneCues.filter(cue => cue.scope === scope)}
               boardVisits={sceneVisits.filter(visit => visit.scope === scope)}
-              boardTasks={visibleSceneTasks(sceneFacts?.tasks ?? []).map(task => ({ id: task.id, title: task.title, status: task.status }))}
+              boardTasks={visibleSceneTasks(sceneFacts?.tasks ?? []).map(task => ({
+                id: task.id, title: task.title, status: task.status,
+                role: taskOwnerRole(task, sceneFacts?.roster ?? []),
+              }))}
+              boardStaff={byStaff(
+                visibleSceneTasks(sceneFacts?.tasks ?? []).map(task => ({
+                  id: task.id, title: task.title, status: task.status,
+                  role: taskOwnerRole(task, sceneFacts?.roster ?? []),
+                })),
+                (sceneFacts?.roster ?? []).map(member => ({ role: member.role, name: member.name })),
+              )}
               preset={spaces?.find(space => space.id === scope)?.scenePreset ?? 'office'}
               goalLabel={sceneGoalLabel}
               onAgentClick={isRoster ? openAgent : undefined}

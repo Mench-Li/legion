@@ -58,8 +58,17 @@ export function layoutScene(agentKeys: readonly string[], preset: ScenePreset): 
    *   ③ 板面高度让最下面一排卡片在 1.2 左右 —— 站着的人的视线高度，
    *      而不是贴在天花板上（那样在这个俯视机位里会被裁掉一半）。
    */
-  const boardWidth = Math.min(8.6, Math.max(5.4, floorWidth * 0.52))
-  const boardHeight = 2.6
+  /**
+   * ★ 2026-10-14（将军："看板放大，可以标注具体的任务编号"）：板子从 5.4–8.6 放大到 **6.6–10.4**、
+   *   高 2.6 → **3.0**、板面抬到 2.25；渲染侧每列也从 10 张放到 12 张。
+   *
+   * 放大是"能标出编号"的前提：列宽从约 2.15 变到约 2.6，卡片上写 `T-123` 才不挤。
+   * 两条约束仍不许破（`scene-layout.test.mjs` 钉着）：板面连边框要在地板内、
+   * 要在最后一排工位之后 ≥1.5。所以板宽**随房间宽**取（房间上一轮已从 12 加宽到 18），
+   * 而不是写死一个大数 —— 写死会在"人少、房间小"时把板子伸出墙外。
+   */
+  const boardWidth = Math.min(10.4, Math.max(6.6, floorWidth * 0.58))
+  const boardHeight = 3.0
   const backWallZ = -floorDepth / 2
   const boardZ = backWallZ + 0.42
   return {
@@ -67,7 +76,7 @@ export function layoutScene(agentKeys: readonly string[], preset: ScenePreset): 
     goal: { x: 0, z: 0 },
     review: { x: -floorWidth / 2 + 1, z: -floorDepth / 2 + 1 },
     help: { x: floorWidth / 2 - 1, z: -floorDepth / 2 + 1 },
-    board: { x: 0, z: boardZ, y: 2.02, width: boardWidth, height: boardHeight, standZ: boardZ + 1.15 },
+    board: { x: 0, z: boardZ, y: 2.25, width: boardWidth, height: boardHeight, standZ: boardZ + 1.15 },
     dressing: { wallHeight: 4.4, wallThickness: 0.3 },
     camera: { distance: span * 1.25, targetY: 1.0, zoom: Math.max(20, 440 / span) },
   }

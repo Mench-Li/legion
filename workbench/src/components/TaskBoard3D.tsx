@@ -3,8 +3,8 @@ import { Html } from '@react-three/drei'
 import { useFrame } from '@react-three/fiber'
 import * as THREE from 'three'
 import type { SceneBoard } from '../scene/sceneLayout'
-import { BOARD_COLUMNS, STATUS_STYLE, columnCounter, groupTasksByColumn } from '../scene/sceneBoard'
-import type { SceneBoardVisit, SceneTaskChip } from '../scene/sceneBoard'
+import { BOARD_COLUMNS, MOOD_STYLE, STATUS_STYLE, columnCounter, groupTasksByColumn } from '../scene/sceneBoard'
+import type { BoardStaffRow, SceneBoardCard, SceneBoardVisit } from '../scene/sceneBoard'
 
 /**
  * 微缩任务看板 —— 挂在后墙上的那块板，与办公室里那块真板子同构：
@@ -26,17 +26,23 @@ import type { SceneBoardVisit, SceneTaskChip } from '../scene/sceneBoard'
  * 取卡时它闪着出现，贴卡时它闪着落到"完成"列。颜色就是它所在列的颜色 ——
  * 于是"他做了什么"不需要读文字也看得出来。
  */
-export function TaskBoard3D({ tasks, board, activeVisit }: {
-  tasks: readonly SceneTaskChip[]
+export function TaskBoard3D({ cards, staff = [], names, board, activeVisit }: {
+  /** 看板上的卡片（在办任务 + 归属人）。 */
+  cards: readonly SceneBoardCard[]
+  /** 按员工汇总（板底那一行）；缺省 ⇒ 只报"暂无/待认领"。 */
+  staff?: readonly BoardStaffRow[]
+  /** 岗位名 → 显示名（悬浮提示里把 `coder` 写成"编码工程师"）。 */
+  names: ReadonlyMap<string, string>
   board: SceneBoard
   activeVisit?: SceneBoardVisit | null
 }): React.JSX.Element {
+  const tasks = cards
   const grouped = useMemo(() => groupTasksByColumn(tasks), [tasks])
-  const [tip, setTip] = useState<{ id: string; title: string; status: SceneTaskChip['status'] } | null>(null)
+  const [tip, setTip] = useState<{ id: string; title: string; status: SceneBoardCard['status']; role: string | null } | null>(null)
   const highlight = useRef<THREE.Mesh>(null)
   const columnWidth = board.width / BOARD_COLUMNS.length
-  /** 一列最多画几张：再多就折成"+N"。10 张已足够看出这列的密度。 */
-  const maxCards = 10
+  /** 一列最多画几张：再多就折成"+N"。★ 板子加高到 3.0 后放到 12 张。 */
+  const maxCards = 12
 
   useFrame(({ clock }) => {
     if (!highlight.current) return
@@ -87,51 +93,61 @@ export function TaskBoard3D({ tasks, board, activeVisit }: {
           </Html>
           {shown.map((task, cardIndex) => {
             const style = STATUS_STYLE[task.status]
-            const y = top - cardIndex * 0.19
+            const y = top - cardIndex * 0.2
             const active = activeVisit?.taskId === task.id
+            const who = task.role ? (names.get(task.role) ?? task.role) : null
             return <group key={task.id} position={[0, y, 0.05]}>
               <mesh
-                onPointerOver={event => { event.stopPropagation(); setTip({ id: task.id, title: task.title, status: task.status }) }}
+                onPointerOver={event => { event.stopPropagation(); setTip({ id: task.id, title: task.title, status: task.status, role: task.role }) }}
                 onPointerOut={() => setTip(current => (current?.id === task.id ? null : current))}>
-                <planeGeometry args={[columnWidth - 0.34, 0.15]} />
+                <planeGeometry args={[columnWidth - 0.3, 0.16]} />
                 <meshStandardMaterial color={style.color} emissive={style.color}
                   emissiveIntensity={active ? 0.9 : 0.22} roughness={0.7} />
               </mesh>
               {/*
-                ★ 2026-10-14（将军："显示任务编号即可，悬停时展示完整任务内容"）：
-                  卡片上只写**编号**，完整标题留给悬浮提示。
-                  编号是像素文字（DOM 覆盖层），所以它不随卡片缩放而糊掉；
-                  `pointerEvents: 'none'` 让悬浮事件仍然落在卡片网格上（不然文字会挡住自己的提示）。
-                  一列最多 10 张（见 `maxCards`），于是这块板上最多 40 个这样的文字节点 ——
-                  这是"看得见编号"能接受的上限；再多就该改成按列折叠而不是继续加字。
+                ★ 2026-10-14（"显示任务编号即可，悬停看完整内容" + "看板放大，可以标注具体编号"）：
+                  卡片上只写**编号**；板子放大后列宽约 2.6，`T-123` 一眼可读。
+                  编号是 DOM 覆盖层里的像素文字，`pointerEvents: 'none'` 让悬浮事件仍落在卡片网格上
+                  （否则文字会挡住它自己的提示）。一列最多 12 张（`maxCards`）⇒ 全板最多 48 个文字节点，
+                  这是"看得见编号"能接受的上限；再多应改成按列折叠，而不是继续加字。
               */}
               <Html position={[0, 0, 0.02]} center zIndexRange={[23, 0]} style={{ pointerEvents: 'none' }}>
                 <span className="task-board-card-id" style={{ color: style.color }}>{task.id}</span>
               </Html>
               {/* 高亮框：只有"正被认领/完结"的那张卡才挂，且挂在同一个 group 里跟着走 */}
               {active && <mesh ref={highlight} position={[0, 0, -0.01]}>
-                <planeGeometry args={[columnWidth - 0.24, 0.25]} />
+                <planeGeometry args={[columnWidth - 0.2, 0.26]} />
                 <meshStandardMaterial color={style.color} emissive={style.color} emissiveIntensity={0.8} transparent opacity={0.5} />
               </mesh>}
-              {tip?.id === task.id && <Html position={[0, 0.22, 0.1]} center zIndexRange={[26, 0]} style={{ pointerEvents: 'none' }}>
+              {tip?.id === task.id && <Html position={[0, 0.24, 0.1]} center zIndexRange={[26, 0]} style={{ pointerEvents: 'none' }}>
                 <div className="task-board-tip">
                   <b style={{ color: style.color }}>{style.label}</b> {task.id}
+                  {/* 归属人：板子放大之后，"这张编号是谁的活"要能一眼看到 */}
+                  <span className="task-board-tip-role">{who ?? '未认领'}</span>
                   <div className="task-board-tip-title">{task.title}</div>
                 </div>
               </Html>}
             </group>
           })}
-          {columnTasks.length > shown.length && <Html position={[0, top - shown.length * 0.19 - 0.06, 0.06]} center zIndexRange={[24, 0]} style={{ pointerEvents: 'none' }}>
+          {columnTasks.length > shown.length && <Html position={[0, top - shown.length * 0.2 - 0.06, 0.06]} center zIndexRange={[24, 0]} style={{ pointerEvents: 'none' }}>
             <div className="task-board-column"><i>+{columnTasks.length - shown.length}</i></div>
           </Html>}
         </group>
       })}
-      {/* 底部一行：平时报总数，有人来办事时报"谁在取/贴哪张卡" —— 一行字回答"现在发生了什么" */}
-      <Html position={[0, board.y - board.height / 2 - 0.28, 0.12]} center zIndexRange={[24, 0]} style={{ pointerEvents: 'none' }}>
+      {/*
+        ★ 2026-10-14（"任务看板 0项统计可以固定在场景顶部，不随场景旋转"）：
+          板底这一行从"每列计数"改成**按员工汇总**（谁身上几件）——列计数已经写在每列抬头里，
+          同一份数字写两遍、改一处就会不一致。屏幕上那条不随旋转的读数在 `BoardStatusBar`。
+      */}
+      <Html position={[0, board.y - board.height / 2 - 0.3, 0.12]} center zIndexRange={[24, 0]} style={{ pointerEvents: 'none' }}>
         <div className="task-board-footer">
           {activeVisit
             ? `${activeVisit.kind === 'claim' ? '🫳 取卡' : '✅ 贴卡'} · ${activeVisit.taskId} · ${activeVisit.title}`
-            : tasks.length === 0 ? '这个空间还没有任务' : `待办 ${grouped.get('todo')?.length ?? 0} · 进行中 ${grouped.get('in_progress')?.length ?? 0} · 待验收 ${grouped.get('in_review')?.length ?? 0}`}
+            : staff.length === 0
+              ? (tasks.length === 0 ? '暂无在办任务' : `${tasks.length} 项待认领`)
+              : staff.slice(0, 4).map(row => <span className="task-board-footer-staff" key={row.role}>
+                <i style={{ background: MOOD_STYLE[row.mood].color }} />{row.name} {row.total}
+              </span>)}
         </div>
       </Html>
     </group>

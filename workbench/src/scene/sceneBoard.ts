@@ -83,7 +83,7 @@ export type AgentMood = 'idle' | 'busy' | 'review' | 'blocked'
  * 这样看板上的卡片色与头顶的气泡色天然一致，不需要第二套心智模型。
  */
 export const MOOD_STYLE: Record<AgentMood, { color: string; label: string }> = {
-  idle: STATUS_STYLE.todo,
+  idle: { ...STATUS_STYLE.todo, label: '待命' },
   busy: STATUS_STYLE.in_progress,
   review: STATUS_STYLE.in_review,
   blocked: STATUS_STYLE.blocked,
@@ -118,8 +118,18 @@ export function boardColumnFor(status: CardStatus): string | null {
  *   不在这里另写一份判断（那份判断正是会与别处漂移的东西）。
  * ★ 每列内按 `id` 稳定排序：刷新一次卡片就换位置的话，人眼会以为"任务变了"。
  */
-export function groupTasksByColumn(tasks: readonly SceneTaskChip[]): Map<string, SceneTaskChip[]> {
-  const grouped = new Map<string, SceneTaskChip[]>(BOARD_COLUMNS.map(column => [column.key, []]))
+/**
+ * 把任务按列分好，供看板渲染。
+ *
+ * ★ 隐藏状态（`canceled` / `done`）**不进任何列** —— 统一由 `isTaskVisibleInScene` 决定，
+ *   不在这里另写一份判断（那份判断正是会与别处漂移的东西）。
+ * ★ 每列内按 `id` 稳定排序：刷新一次卡片就换位置的话，人眼会以为"任务变了"。
+ * ★ 泛型 `<T extends SceneTaskChip>`：看板卡片是 `SceneBoardCard`（多一个 `role`），
+ *   分组**必须把那个字段带出去** —— 写成 `SceneTaskChip` 会把归属人削掉，
+ *   而 TypeScript 只会在读取处报错（那一处离原因很远）。
+ */
+export function groupTasksByColumn<T extends SceneTaskChip>(tasks: readonly T[]): Map<string, T[]> {
+  const grouped = new Map<string, T[]>(BOARD_COLUMNS.map(column => [column.key, []]))
   for (const task of [...tasks].sort((a, b) => a.id.localeCompare(b.id))) {
     if (!isTaskVisibleInScene(task.status)) continue
     const key = boardColumnFor(task.status)
@@ -132,6 +142,96 @@ export function groupTasksByColumn(tasks: readonly SceneTaskChip[]): Map<string,
 export function columnCounter(columnTasks: readonly SceneTaskChip[], total: number): string {
   if (total === 0) return '空'
   return `${columnTasks.length}/${total}`
+}
+
+// ══════════════════════════════════════════════════════════════════════════
+// 看板抬头、按员工汇总、全景统计（将军 2026-10-14）
+//
+//   > 「任务看板 0项统计可以固定在场景顶部，不随场景旋转」
+//   > 「看板放大，可以标注具体的任务编号」
+//
+// 两件事各有一个**数据上的前提**：
+//   · 顶部那条统计要"按员工看得懂" ⇒ 需要 `byStaff` 汇总（谁身上几件、几件受阻）；
+//   · 板子放大之后"这个编号归谁"要一眼可见 ⇒ 卡片要带 `role`。
+// ══════════════════════════════════════════════════════════════════════════
+
+/**
+ * 看板卡片：最小任务形状 + **归属人**。
+ * 归属人是渲染侧用 `taskOwnerRole` 算好传进来的（同一条规则不能算两遍 ——
+ * 否则会出现"卡片上写的名字"与"走过去的那个人"不是同一个，且不报错）。
+ */
+export interface SceneBoardCard extends SceneTaskChip {
+  /** 归属岗位名；`null` = 还没有人认领。 */
+  role: string | null
+}
+
+/** 按员工汇总一行：顶部统计条、板底那一行、气泡抬头共用同一份口径。 */
+export interface BoardStaffRow {
+  role: string
+  name: string
+  /** 他手上**在办**的任务数（已完成/已取消不算 —— 与 `visibleSceneTasks` 同源）。 */
+  total: number
+  /** 其中受阻的件数（>0 时那一行要显眼：这是最需要人管的一类）。 */
+  blocked: number
+  /** 他最要紧那件事的状态（配色用它）。 */
+  mood: AgentMood
+}
+
+/**
+ * 把"在办任务"按员工汇总。
+ *
+ * ★ 口径必须与看板列、气泡清单**完全一致**：同一批 `visibleSceneTasks` 输入、
+ *   同一份 `moodFor` 判定。三处各算一次的话，会出现"顶部说 5 件、板上一共 4 张卡"
+ *   —— 这种不一致不报错，只会让人开始不信这些数字。
+ *
+ * ⚠ 未认领的任务（`role === null`）**不进任何员工行**：它们在看板的"待办"列里等着，
+ *   但不是任何人的活。硬塞给某个人会让"他在干什么"变成假话。
+ */
+export function byStaff(
+  cards: readonly SceneBoardCard[],
+  roster: readonly { role: string; name: string }[],
+): BoardStaffRow[] {
+  const names = new Map(roster.map(member => [member.role, member.name]))
+  const rows = new Map<string, BoardStaffRow>()
+  for (const card of cards) {
+    if (card.role === null) continue
+    const row = rows.get(card.role) ?? {
+      role: card.role, name: names.get(card.role) ?? card.role,
+      total: 0, blocked: 0, mood: 'idle' as AgentMood,
+    }
+    row.total += 1
+    if (card.status === 'blocked') row.blocked += 1
+    rows.set(card.role, row)
+  }
+  // 气色复用**同一个** moodFor：把这一行的卡片交给它，别再写一份优先级
+  for (const row of rows.values()) row.mood = moodFor(cards.filter(card => card.role === row.role))
+  // 排序：受阻优先（最需要人管），其次件数多，最后按岗位名稳定
+  return [...rows.values()].sort((a, b) => b.blocked - a.blocked || b.total - a.total || a.role.localeCompare(b.role))
+}
+
+/**
+ * 顶部统计条那行字的**唯一**来源（顶部条与板面抬头共用，避免两处口径不同）。
+ * 没有在办任务时给一句明确的"暂无"，而不是一串 0。
+ */
+export function boardHeadline(snapshot: {
+  total: number
+  staff: number
+  blocked: number
+  busiest?: { name: string; total: number } | null
+}): string {
+  if (snapshot.total === 0) return '任务看板 · 暂无在办任务'
+  const parts = [`任务看板 · 在办 ${snapshot.total} 项`, `员工 ${snapshot.staff} 人`]
+  if (snapshot.blocked > 0) parts.push(`受阻 ${snapshot.blocked}`)
+  if (snapshot.busiest) parts.push(`最多 ${snapshot.busiest.name} ${snapshot.busiest.total} 项`)
+  return parts.join(' · ')
+}
+
+/** 顶部统计条里每类的**条色**：复用 `STATUS_STYLE`（同一份颜色契约），只取会进场景的四类。 */
+export const STATUS_BAR_COLOR: Record<string, string> = {
+  todo: STATUS_STYLE.todo.color,
+  in_progress: STATUS_STYLE.in_progress.color,
+  in_review: STATUS_STYLE.in_review.color,
+  blocked: STATUS_STYLE.blocked.color,
 }
 
 /**

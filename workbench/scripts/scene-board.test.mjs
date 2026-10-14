@@ -4,8 +4,9 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import {
-  BOARD_COLUMNS, BOARD_VISIT_MS, MOOD_STYLE, SCENE_HIDDEN_STATUSES, STATUS_STYLE,
-  boardColumnFor, columnCounter, deriveBoardVisits, groupTasksByColumn, isTaskVisibleInScene, moodFor, visibleSceneTasks,
+  BOARD_COLUMNS, BOARD_VISIT_MS, MOOD_STYLE, SCENE_HIDDEN_STATUSES, STATUS_BAR_COLOR, STATUS_STYLE,
+  boardColumnFor, boardHeadline, byStaff, columnCounter, deriveBoardVisits, groupTasksByColumn,
+  isTaskVisibleInScene, moodFor, visibleSceneTasks,
 } from '../src/scene/sceneBoard.ts'
 
 const ALL_STATUSES = ['backlog', 'todo', 'in_progress', 'in_review', 'blocked', 'done', 'canceled']
@@ -176,4 +177,54 @@ test('⑩ 归属算不出来 ⇒ 没人去；未入编执行者按 soldier 去�
   const ext = deriveBoardVisits(extBefore, extAfter, [ev(11, 'T-2', 'claim', { soldier: 'runner' })], 1500, true)
   assert.equal(ext.length, 1)
   assert.equal(ext[0].role, 'runner', '未入编执行者按 soldier 归属')
+})
+
+// ══════════════════════════════════════════════════════════════════════════
+// ⑪ 将军 2026-10-14 的三条：
+//    · 「任务看板 0项统计可以固定在场景顶部，不随场景旋转」
+//    · 「看板放大，可以标注具体的任务编号」
+//    · 「下方编队，进行中的提示可以随员工固定并收缩」
+// ══════════════════════════════════════════════════════════════════════════
+
+test('⑪★ 按员工汇总：口径与看板/气泡同源，未认领的不进任何员工行', () => {
+  const staffRoster = [{ role: 'dev', name: '开发' }, { role: 'qa', name: '测试' }]
+  const cards = [
+    { id: 'T-1', title: 'a', status: 'in_progress', role: 'dev' },
+    { id: 'T-2', title: 'b', status: 'blocked', role: 'dev' },
+    { id: 'T-3', title: 'c', status: 'in_review', role: 'qa' },
+    { id: 'T-4', title: 'd', status: 'todo', role: null },   // 未认领
+  ]
+  const rows = byStaff(cards, staffRoster)
+  assert.deepEqual(rows.map(row => row.role), ['dev', 'qa'], '受阻的排前面（最需要人管）')
+  const dev = rows.find(row => row.role === 'dev')
+  assert.equal(dev.name, '开发', '显示名取自 roster，不显示岗位 key')
+  assert.equal(dev.total, 2)
+  assert.equal(dev.blocked, 1)
+  assert.equal(dev.mood, 'blocked', '气色用同一个 moodFor')
+  const qa = rows.find(row => row.role === 'qa')
+  assert.equal(qa.total, 1)
+  assert.equal(qa.blocked, 0)
+  assert.equal(qa.mood, 'review', '待验收 ⇒ 蓝色之外的那一档')
+  assert.equal(rows.reduce((sum, row) => sum + row.total, 0), 3, '未认领的那件不许被塞给任何人')
+  // 计数总和必须等于"看板上的卡片数减去未认领"
+  assert.equal(rows.reduce((sum, row) => sum + row.total, 0), cards.filter(card => card.role !== null).length)
+  assert.deepEqual(byStaff([], staffRoster), [], '没有在办任务 ⇒ 没有任何员工行')
+})
+
+test('⑪★ 顶部统计条的口径：没有任务时给一句"暂无"，而不是一串 0', () => {
+  assert.equal(boardHeadline({ total: 0, staff: 0, blocked: 0, busiest: null }), '任务看板 · 暂无在办任务')
+  assert.equal(boardHeadline({ total: 3, staff: 2, blocked: 0, busiest: { name: '开发', total: 2 } }),
+    '任务看板 · 在办 3 项 · 员工 2 人 · 最多 开发 2 项', '没有受阻就不提受阻')
+  assert.equal(boardHeadline({ total: 3, staff: 2, blocked: 1, busiest: null }),
+    '任务看板 · 在办 3 项 · 员工 2 人 · 受阻 1', '有受阻必须报出来')
+  // 条色必须与状态色同源（同一份颜色契约，不许另起一套）
+  assert.equal(STATUS_BAR_COLOR.in_progress, STATUS_STYLE.in_progress.color)
+  assert.equal(STATUS_BAR_COLOR.blocked, STATUS_STYLE.blocked.color)
+  assert.deepEqual(Object.keys(STATUS_BAR_COLOR).sort(), ['blocked', 'in_progress', 'in_review', 'todo'])
+})
+
+test('⑪★ 分组要把归属人带出去（泛型不许把 role 削掉）', () => {
+  const cards = [{ id: 'T-9', title: 'x', status: 'todo', role: 'coder' }]
+  const grouped = groupTasksByColumn(cards)
+  assert.equal(grouped.get('todo')[0].role, 'coder', '看板卡片上的归属人不能被分组丢在半路')
 })

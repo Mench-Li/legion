@@ -30,8 +30,8 @@ test('① Scene3D 真的挂上了布景与看板，并把两样数据传下去',
   assert.match(scene, /import \{ OfficeDressing \} from '\.\/OfficeDressing'/, '布景要 import 进来')
   assert.match(scene, /<OfficeDressing layout=\{layout\} theme=\{theme\}/, '布景必须拿到 layout 与主题（位置全靠 layout 推导，见其文件头）')
   assert.match(scene, /import \{ TaskBoard3D \} from '\.\/TaskBoard3D'/, '看板要 import 进来')
-  assert.match(scene, /<TaskBoard3D tasks=\{boardTasks\} board=\{layout\.board\} activeVisit=\{activeVisit\}/,
-    '看板必须收到任务、位置、"正被办的那张卡"三样')
+  assert.match(scene, /<TaskBoard3D cards=\{boardTasks\} staff=\{boardStaff\} names=\{names\} board=\{layout\.board\} activeVisit=\{activeVisit\} \/>/,
+    '看板必须收到卡片、按员工汇总、显示名、位置、"正被办的那张卡"五样')
   assert.match(scene, /boardVisits=\{boardVisits\}/, 'Scene3D 要把 boardVisits 接进 OfficeWorld')
   assert.match(scene, /boardStandX=\{layout\.board\.x \+ lane\}/, '走过去要站到板前（按 lane 错位，不叠在一点）')
   assert.match(scene, /const liveCues = cues\.filter/, '提示仍要按有效期过滤')
@@ -65,8 +65,10 @@ test('④ 面板与 App 把两样数据一路送到场景（少一环 = 那一�
   const panel = read('components/CenterPanel.tsx')
   assert.match(panel, /sceneVisits\?: SceneBoardVisit\[\]/, '面板要收 sceneVisits')
   assert.match(panel, /boardVisits=\{sceneVisits\.filter\(visit => visit\.scope === scope\)\}/, '要按当前空间过滤后传给场景')
-  assert.match(panel, /boardTasks=\{visibleSceneTasks\(sceneFacts\?\.tasks \?\? \[\]\)/, '看板卡片来自本空间任务，且过**同一份**可见性过滤')
-  assert.match(panel, /import \{ visibleSceneTasks \} from '\.\.\/scene\/sceneBoard'/, '过滤函数必须取自 sceneBoard（不许在这里另写一份状态判断）')
+  assert.match(panel, /boardTasks=\{visibleSceneTasks\(sceneFacts\?\.tasks \?\? \[\]\)\.map\(task => \(\{/, '看板卡片来自本空间任务，且过**同一份**可见性过滤')
+  assert.match(panel, /import \{ byStaff, visibleSceneTasks \} from '\.\.\/scene\/sceneBoard'/, '过滤与汇总函数必须取自 sceneBoard（不许在这里另写一份）')
+  assert.match(panel, /import \{ taskOwnerRole \} from '\.\.\/scene\/agentOwnership'/, '归属人也要走唯一那份规则（与"谁走过去"同源）')
+  assert.match(panel, /boardStaff=\{byStaff\(/, '按员工汇总要在面板算好（顶部条与板底共用一份）')
   assert.doesNotMatch(panel, /task\.status !== 'canceled'/, '面板里不许再留一份"取消不上板"的判断 —— 那是同一规则的第二份副本')
   const app = read('App.tsx')
   assert.match(app, /const \[sceneVisits, setSceneVisits\] = useState<SceneBoardVisit\[\]>\(\[\]\)/, 'App 要有这一份状态')
@@ -201,4 +203,54 @@ test('⑩★ 背景是亮的，且取景来自可测的纯函数（接线不许�
   const theme = read('scene/sceneTheme.ts')
   assert.match(theme, /export const SCENE_BACKGROUND = '#/, '主题模块要导出背景常量')
   assert.match(theme, /地板 < 背景 < 墙/, '明度关系要写在注释里（下一个人改色号时才知道约束是什么）')
+})
+
+// ══════════════════════════════════════════════════════════════════════════
+// ⑫ 将军 2026-10-14 的三条：
+//    · 「任务看板 0项统计可以固定在场景顶部，不随场景旋转」
+//    · 「看板放大，可以标注具体的任务编号」
+//    · 「下方编队，进行中的提示可以随员工固定并收缩」
+// ══════════════════════════════════════════════════════════════════════════
+
+test('⑫★ 顶部统计条是**屏幕空间**的 DOM（所以不随场景旋转），且不重复渲染 3D 抬头', () => {
+  const scene = read('components/Scene3D.tsx')
+  assert.match(scene, /<div className="scene-status-bar">/, '顶部要有一条固定的统计条')
+  assert.match(scene, /<span className="scene-status-title">\{boardHeadline\(boardSnapshot\)\}<\/span>/, '抬头文案来自唯一那一个纯函数')
+  assert.match(scene, /const boardSnapshot = \{/, '读数要先算好一份（条与面板共用，不许各算一次）')
+  // 屏幕空间 = 它不在 Canvas 里：位置必须在 <Canvas> 之后、且在 canvas 容器之外
+  const barIndex = scene.indexOf('className="scene-status-bar"')
+  const canvasIndex = scene.indexOf('<Canvas ')
+  assert.ok(barIndex > 0 && barIndex < canvasIndex, '统计条要排在 Canvas **之前**（屏幕层，不在 3D 里）')
+  assert.match(scene, /<i style=\{\{ background: STATUS_BAR_COLOR\[column\.key\]/, '每一条的条色取自同一份颜色契约')
+  assert.match(scene, /<b style=\{\{ width: `\$\{share\}%` \}\} \/>/, '要有比例条（一眼看出分布）')
+  const css = read('scene/officeScene.css')
+  assert.match(css, /\.scene-status-bar \{[\s\S]{0,160}background: #101b2a/, '统计条要自成一层底色（压在画布上）')
+})
+
+test('⑫★ 悬停看板时给一份**固定**的明细面板（编号 + 归属人 + 标题）', () => {
+  const scene = read('components/Scene3D.tsx')
+  assert.match(scene, /<details className="scene-board-tip">/, '用 details 做点开/收起（不需要额外状态）')
+  assert.match(scene, /<summary>📋 看板 \{boardTasks\.length\} 项 · 悬停看明细<\/summary>/, '摘要要报总数')
+  assert.match(scene, /<code>\{task\.id\}<\/code>/, '明细里要有任务编号')
+  assert.match(scene, /<em>\{task\.role \? \(agents\.find\(agent => agent\.role === task\.role\)\?\.name \?\? task\.role\) : '未认领'\}<\/em>/,
+    '明细里要有归属人（认不出来就写"未认领"，不编名字）')
+  assert.match(scene, /<span title=\{task\.title\}>\{task\.title\}<\/span>/, '明细里要有完整标题')
+  assert.match(scene, /columnTasks\.length > 8 && <span className="scene-board-tip-more">/, '一列超过 8 项要说明"还有 N 项"，不许静默截断')
+})
+
+test('⑫★ 气泡可收缩（slim）且受阻有红标；看板放大后卡片带归属人', () => {
+  const bubble = read('components/AgentBubble.tsx')
+  assert.match(bubble, /className=\{`agent-bubble \$\{minimal && !expanded \? 'slim' : ''\}`\}/, '未悬浮时收缩成 slim')
+  assert.match(bubble, /\{\(!minimal \|\| expanded\) && <span className="agent-bubble-mood">/, '收缩时省掉"进行中"三个字，只留件数')
+  assert.match(bubble, /<span className="agent-bubble-blocked" title=\{`受阻 \$\{blocked\} 项`\}>⚠\{blocked\}<\/span>/, '受阻件数要有红标')
+  const employee = read('components/Employee3D.tsx')
+  assert.match(employee, /blocked=\{blockedCount\}/, '员工要把受阻数透给气泡')
+  assert.match(employee, /minimal=\{compact && !hovered\}/, '人多时默认收缩（悬浮即展开）')
+  const board = read('components/TaskBoard3D.tsx')
+  assert.match(board, /className="task-board-tip-role">\{who \?\? '未认领'\}/, '看板悬浮提示要带归属人')
+  assert.match(board, /staff\.slice\(0, 4\)\.map\(row =>/, '板底那一行改成按员工汇总')
+  assert.match(board, /const maxCards = 12/, '板子加高后每列放到 12 张')
+  const css = read('scene/officeScene.css')
+  assert.match(css, /\.agent-bubble\.slim \{/, '收缩形态要有样式')
+  assert.match(css, /\.task-board-tip-role \{/, '归属人要有个位置（右浮）')
 })

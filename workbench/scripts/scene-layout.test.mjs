@@ -111,3 +111,15 @@ test('★ 取景是单调的：画布越大越近（缩小或放大都不会突�
   const many = framingZoom({ width: 1200, height: 420 }, layoutScene(Array.from({ length: 24 }, (_, i) => String(i)), 'office'))
   assert.ok(many <= few, '房间变大 ⇒ 取景不能更近')
 })
+
+test('★ 看板放大之后列宽要放得下 `T-123` 这类编号（将军：看板放大，可以标注具体编号）', () => {
+  for (const count of [0, 8, 12, 24]) {
+    const keys = Array.from({ length: count }, (_, i) => String(i))
+    const layout = layoutScene(keys, 'office')
+    const columnWidth = layout.board.width / 4
+    // 卡片本体宽度 = 列宽 - 0.3（见 TaskBoard3D）；编号要落在这张卡的中间
+    assert.ok(columnWidth - 0.3 >= 1.5, `${count} 人：列宽 ${columnWidth.toFixed(2)} 太窄，放不下"T-123"`)
+    assert.ok(layout.board.width >= 6.6, `${count} 人：板面没有放大（${layout.board.width.toFixed(2)}）`)
+    assert.ok(layout.board.height >= 2.8, '板面要加高，否则每列放不下 12 张卡')
+  }
+})

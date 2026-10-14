@@ -31,10 +31,12 @@ const PALETTES = ['#4e84be', '#9472bd', '#44a99c', '#cf8764', '#7d9b60', '#b4719
  * 三处都从 `sceneBoard.ts` 取色。此前 `Employee3D` 自己写了一份 `STATUS`/`LABEL`，
  * 与看板那份迟早会漂移 —— 症状是**同一件任务在同一画面里两种颜色**，不报错。
  */
-export function Employee3D({ agent, x, z, motion, celebrate, compact, onSelect, boardVisit, boardStandX, boardStandZ }: {
+export function Employee3D({ agent, x, z, motion, celebrate, compact, onSelect, boardVisit, blockedCount = 0, boardStandX, boardStandZ }: {
   agent: SceneAgent; x: number; z: number; motion: boolean; celebrate: boolean; compact: boolean; onSelect: () => void
   /** 现在该不该去走一趟看板（认领取卡 / 完结贴卡）；过期后为 null。 */
   boardVisit?: SceneBoardVisit | null
+  /** 他手上受阻的件数（气泡上的红标用它）。 */
+  blockedCount?: number
   /** 看板前他该站的位置（含"别跟别人挤同一点"的横向错位，由 Scene3D 按种子算好）。 */
   boardStandX?: number
   boardStandZ?: number
@@ -180,7 +182,7 @@ export function Employee3D({ agent, x, z, motion, celebrate, compact, onSelect, 
       </group>
       {/* 头顶气泡：常驻（人多时压成最小样式），悬浮展开他的全部任务 */}
       <Html position={[0, 2.62, 0]} center zIndexRange={[30, 0]}>
-        <AgentBubble agent={agent} expanded={hovered} minimal={compact && !hovered}
+        <AgentBubble agent={agent} expanded={hovered} minimal={compact && !hovered} blocked={blockedCount}
           onHoverChange={value => { setHovered(value); document.body.style.cursor = value ? 'pointer' : '' }}
           onSelect={onSelect} />
       </Html>

@@ -65,6 +65,52 @@
 }
 .agent-bubble-more { font-size: 10px; color: #8fa3bd; padding-top: 3px }
 
+/* ── 气泡的"收缩"形态（将军：下方的提示可以随员工固定并收缩） ──────────────────
+   收缩的是未悬浮时的形态：只剩气色点 + 名字 + 件数，厚度也压薄一档。
+   鼠标一放上去就回到完整形态（`expanded` 会把 `slim` 摘掉）。 */
+.agent-bubble.slim { min-width: 0; padding: 2px 6px 3px; border-radius: 9px }
+.agent-bubble.slim .agent-bubble-head { gap: 4px; font-size: 10px }
+.agent-bubble.slim .agent-bubble-dot { width: 6px; height: 6px }
+/* 受阻红标：件数旁边一个小警示（最需要人管的那一类要能量出来） */
+.agent-bubble-blocked { color: #ff5c5c; font-weight: 700; font-size: 10px }
+
+/* ── 场景顶部固定统计条（将军：0项统计固定在场景顶部，不随场景旋转） ───────────
+   它是**屏幕空间**的 DOM，不是 3D 里的 <Html> ⇒ 转场景时纹丝不动。 */
+.scene-status-bar {
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  padding: 4px 12px; border-bottom: 1px solid #31445a; background: #101b2a;
+  font-size: 11px; color: #cfdcea;
+}
+.scene-status-title { font-weight: 600; color: #e7eef8 }
+.scene-status-bars { display: flex; align-items: center; gap: 10px; flex-wrap: wrap }
+.scene-status-item { position: relative; display: inline-flex; align-items: center; gap: 4px; padding-bottom: 3px }
+.scene-status-item i { width: 7px; height: 7px; border-radius: 50%; flex: none }
+/* 比例条：贴在每一项的下沿，宽度就是它在全部在办任务里的占比 */
+.scene-status-item b { position: absolute; left: 0; bottom: 0; height: 2px; border-radius: 1px; background: currentColor; opacity: 0.5 }
+
+/* ── 悬停看板时的固定读数面板（也在屏幕空间，不随旋转） ─────────────────────── */
+.scene-board-tip { position: absolute; top: 8px; right: 10px; z-index: 6; max-width: 300px; font-size: 11px }
+.scene-board-tip > summary {
+  cursor: pointer; padding: 3px 9px; border-radius: 6px;
+  background: rgba(16, 27, 42, 0.92); color: #e7eef8;
+  border: 1px solid #35506a; list-style: none;
+}
+.scene-board-tip > summary::-webkit-details-marker { display: none }
+.scene-board-tip[open] > summary { border-color: #8abce5 }
+.scene-board-tip-body {
+  margin-top: 5px; max-height: 60vh; overflow-y: auto;
+  padding: 7px 9px; border-radius: 7px;
+  background: rgba(12, 20, 32, 0.95); border: 1px solid #35506a; color: #dbe6f2;
+}
+.scene-board-tip-group { margin-bottom: 6px }
+.scene-board-tip-group b { display: block; font-size: 11px; margin-bottom: 2px }
+.scene-board-tip-row { display: flex; align-items: center; gap: 5px; padding: 1px 0; line-height: 1.3 }
+.scene-board-tip-row i { width: 6px; height: 6px; border-radius: 50%; flex: none }
+.scene-board-tip-row code { color: #9fd0ff; font-size: 10.5px; flex: none }
+.scene-board-tip-row em { font-style: normal; color: #9fb2c8; font-size: 10px; flex: none; max-width: 72px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap }
+.scene-board-tip-row span { color: #c6d4e6; font-size: 10.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap }
+.scene-board-tip-more { color: #8fa3bd; font-size: 10px }
+
 /* ── 场景工具条：右侧按钮成组（收起员工列表 + 动画开关） ───────────────────── */
 .pixel-scene-toolbar-actions { display: flex; align-items: center; gap: 6px }
 
@@ -85,6 +131,11 @@
   border: 1px solid rgba(255, 255, 255, 0.16);
 }
 .task-board-tip b { color: #8fa3bd; font-weight: 500 }
+/* 归属人：板子放大之后，"这张编号是谁的活"要能一眼看到 */
+.task-board-tip-role { float: right; margin-left: 6px; color: #9fb2c8; font-size: 10px }
+/* 板底那一行：按员工汇总（谁身上几件） */
+.task-board-footer-staff { display: inline-flex; align-items: center; gap: 3px; margin-right: 8px }
+.task-board-footer-staff i { width: 6px; height: 6px; border-radius: 50% }
 /* 完整任务标题：可以换行（气泡里的那一份是单行省略，因为它要贴着一行编号走） */
 .task-board-tip-title { margin-top: 2px; white-space: normal; word-break: break-word }
 /* 卡片上的任务编号：卡片本身是色块，编号是叠在上面的像素文字 */

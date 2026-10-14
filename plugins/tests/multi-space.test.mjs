@@ -2,7 +2,7 @@ import assert from 'node:assert/strict'
 import { join } from 'node:path'
 import test from 'node:test'
 
-import { childLogFile, fetchSpaceViews, isSupervisor, planSpaceRunners, resolveAgentNodeId, statusFileNames } from '../lib/index.js'
+import { childLogFile, errorCodeOf, fetchSpaceViews, isSupervisor, planSpaceRunners, resolveAgentNodeId, statusFileNames } from '../lib/index.js'
 
 /**
  * SP-P1 多空间编排：监督者的**决策**是纯函数，这里逐条钉住它的边界。
@@ -299,4 +299,68 @@ test('TC-SP-P1-22 ★★★ 认领**只许**用门控版节点 id（源码级，
   // 心跳成功才放行、失败要翻回去（否则一次成功后永久放行）
   assert.match(src, /nodeReportedReady = true/, '心跳成功后要放行')
   assert.match(src, /nodeReportedReady = false/, '心跳失败要翻回去')
+})
+
+// ════════════════════════════════════════════════════════════════════════════
+// 节点**自注册** + 首次心跳失败**不许静默**（2026-10-13）
+//
+// 起因：节点此前必须**人工登记**才能心跳成功。忘了登记的话，守护每 30s 安静失败一次、
+// 节点永不出现，用户只看到"界面上什么都没有" —— 而那条 catch 只在
+// `nodeReportedReady` 已经为真时才打日志 ⇒ **首次**失败（最常见的那种）完全静默。
+//
+//   > 一个"会失败的检查"与一个"会安静失败的检查"，
+//   > 在**它成功的时候**是同一个东西。
+// ════════════════════════════════════════════════════════════════════════════
+
+test('TC-SP-P1-23 errorCodeOf：只认字符串 code，取不到一律空串', () => {
+  assert.equal(errorCodeOf({ code: 'AGENT_NODE_UNKNOWN' }), 'AGENT_NODE_UNKNOWN')
+  assert.equal(errorCodeOf(new Error('x')), '', '普通 Error 没有 code ⇒ 空串（不是 undefined）')
+  const withCode = Object.assign(new Error('x'), { code: 'AGENT_NODE_CONFIG_STALE' })
+  assert.equal(errorCodeOf(withCode), 'AGENT_NODE_CONFIG_STALE', 'Object.assign 挂上的 code 要取得到')
+  // 取不到 / 形状不对 ⇒ 空串（明确空值，别让 truthy 判断漏过去）
+  for (const bad of [null, undefined, 'x', 1, true, [], {}, { code: 1 }, { code: null }, { code: undefined }]) {
+    assert.equal(errorCodeOf(bad), '', JSON.stringify(bad) + ' 应当得到空串')
+  }
+  // 空串 code 也是"取不到"
+  assert.equal(errorCodeOf({ code: '' }), '')
+})
+
+test('TC-SP-P1-24 ★★★ 自注册只认 `AGENT_NODE_UNKNOWN`，且只在真能承担绑定任务时登记（源码级）', async () => {
+  const { readFileSync } = await import('node:fs')
+  const root = new URL('..', import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, '$1')
+  const src = readFileSync(join(root, 'src', 'index.ts'), 'utf8')
+
+  // ① 分支判定必须靠 code，不靠中文文本 —— 文本一改，自注册就会静默失效
+  assert.match(src, /errorCodeOf\(e\) === 'AGENT_NODE_UNKNOWN'/,
+    '自注册的触发条件必须是机器可判的 code')
+  assert.ok(!/data\.error[^\n]*AGENT_NODE_UNKNOWN/.test(src), '不许靠错误文本判断')
+
+  // ② hubPost 必须把 code 带出来，否则上面那句永远拿不到值
+  assert.match(src, /err\.code = data\.code/, 'hubPost 要把 hub 的 code 挂到 Error 上')
+
+  // ③ ★ 只在**真能承担绑定任务**时才登记：绑定认领路径无条件要求 isolatedWorktree === true
+  //    （team-hub/server.mjs 里 AGENT_NODE_WORKSPACE_UNAVAILABLE 那一段）。
+  //    否则会登记出一个"永远领不走绑定任务"的节点 —— 又一个"发布成功、派工必失败"。
+  assert.match(src, /AGENT_NODE_UNKNOWN' && nodeCapabilities\.isolatedWorktree/,
+    'isolate 关着 / 不是 git worktree 时不许登记节点')
+
+  // ④ 幂等：登记成功后要有闸门，别每 30s 重复登记把 version 刷高
+  assert.match(src, /nodeRegistered = true/, '登记成功要置位')
+  assert.ok(!/await hubPost\('\/api\/agent-nodes\/configs'[\s\S]{0,400}nodeRegistered = true[\s\S]{0,200}nodeRegistered = true/.test(src),
+    '不该出现重复置位（说明有两条登记路径）')
+})
+
+test('TC-SP-P1-25 ★★★ 首次心跳失败**不许静默**（源码级：日志条件不能只看"曾经就绪"）', async () => {
+  const { readFileSync } = await import('node:fs')
+  const root = new URL('..', import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, '$1')
+  const src = readFileSync(join(root, 'src', 'index.ts'), 'utf8')
+
+  // 旧写法（错的）：if (nodeReportedReady) log(...) —— 首次失败一行都没有
+  assert.ok(!/if \(nodeReportedReady\) log\(`执行节点/.test(src),
+    '不许再出现"只有曾经就绪过才打日志"这种写法')
+  // 新写法：错误内容变了也一定喊（首次必然不同 ⇒ 必然喊），同一错误不刷屏
+  assert.match(src, /msg !== lastNodeHeartbeatError/, '要按"错误内容变化"决定是否再喊一次')
+  assert.match(src, /lastNodeHeartbeatError = msg/, '要记住上一次的错误内容')
+  assert.match(src, /nodeReportedReady \|\| msg !== lastNodeHeartbeatError/,
+    '两个条件都要：曾经就绪过 ⇒ 每次失败都值得喊；否则内容变化就喊')
 })

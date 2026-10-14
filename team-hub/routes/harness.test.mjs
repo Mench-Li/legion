@@ -45,10 +45,63 @@ test('Agent 节点身份独立登记；心跳报告真实 provider/能力，未�
   const revised = store.putAgentNodeConfig({ id: 'workstation-a', label: '本机 DSH', scope: 'default' })
   assert.equal(revised.version, 2)
   assert.equal(store.listAgentNodeConfigs({ scope: 'default', nowMs: 50_001 })[0].status, 'offline', '旧版节点心跳不得冒充新配置在线')
-  assert.throws(() => store.heartbeatAgentNode({
-    id: 'workstation-a', version: 1, scope: 'default', providerNames: ['codex'],
-    capabilities: { isolatedWorktree: true, externalAgent: true, structuredOutput: true, toolFilter: true, cancellation: true },
-  }), /配置不存在/)
+  // ★ 2026-10-13：这条原先是 /配置不存在/ —— 而那句话把**四种原因**挤成一句
+  //   （不存在 / 版本不符 / 空间不符 / 已停用），调用方没法据此决定下一步。
+  //   这里的情形是"节点**存在**、只是版本旧了" ⇒ 必须是 CONFIG_STALE，
+  //   而**不能**是 UNKNOWN（UNKNOWN 会让守护去自注册，等于把人的配置悄悄改写）。
+  assert.throws(
+    () => store.heartbeatAgentNode({
+      id: 'workstation-a', version: 1, scope: 'default', providerNames: ['codex'],
+      capabilities: { isolatedWorktree: true, externalAgent: true, structuredOutput: true, toolFilter: true, cancellation: true },
+    }),
+    (e) => {
+      assert.match(e.message, /配置不匹配/, '版本不符要说"配置不匹配"，不是含糊的"不存在"')
+      assert.equal(e.code, 'AGENT_NODE_CONFIG_STALE', '带 code 才能让调用方按机器可判的方式分支')
+      return true
+    },
+  )
+})
+
+test('★ Agent 节点心跳：**没登记**与**配置不符**必须是两种可判别的原因（code 分开）', () => {
+  const { store } = mk()
+
+  // ① 压根没这个节点 ⇒ AGENT_NODE_UNKNOWN（调用方可以自动处理：守护自注册）
+  assert.throws(
+    () => store.heartbeatAgentNode({ id: 'never-registered', scope: 'default', providerNames: ['spawn'], capabilities: {} }),
+    (e) => {
+      assert.equal(e.code, 'AGENT_NODE_UNKNOWN')
+      assert.match(e.message, /未登记/)
+      return true
+    },
+  )
+
+  // ② 有节点但空间不符 ⇒ CONFIG_STALE（人的配置问题，**不许**自动改写）
+  store.putAgentNodeConfig({ id: 'node-x', label: 'X', scope: 'default' })
+  assert.throws(
+    () => store.heartbeatAgentNode({ id: 'node-x', scope: 'other-scope', providerNames: ['spawn'], capabilities: {} }),
+    (e) => {
+      assert.equal(e.code, 'AGENT_NODE_CONFIG_STALE', '空间不符不是"没登记"，不该被自注册盖掉')
+      return true
+    },
+  )
+
+  // ③ 有节点但已停用 ⇒ 同样是 CONFIG_STALE（不是 UNKNOWN）
+  store.putAgentNodeConfig({ id: 'node-y', label: 'Y', scope: 'default', enabled: false })
+  assert.throws(
+    () => store.heartbeatAgentNode({ id: 'node-y', scope: 'default', providerNames: ['spawn'], capabilities: {} }),
+    (e) => {
+      assert.equal(e.code, 'AGENT_NODE_CONFIG_STALE', '停用的节点不该因为"心跳失败"被当成未登记而自注册复活')
+      return true
+    },
+  )
+
+  // ④ 两个 code 必须**真的不同** —— 否则"靠 code 分支"就是空话
+  const codeOf = (fn) => { try { fn(); return '(没抛)' } catch (e) { return e.code } }
+  const unknown = codeOf(() => store.heartbeatAgentNode({ id: 'nope', scope: 'default', providerNames: ['spawn'], capabilities: {} }))
+  const stale = codeOf(() => store.heartbeatAgentNode({ id: 'node-x', scope: 'wrong', providerNames: ['spawn'], capabilities: {} }))
+  assert.notEqual(unknown, stale)
+  assert.equal(unknown, 'AGENT_NODE_UNKNOWN')
+  assert.equal(stale, 'AGENT_NODE_CONFIG_STALE')
 })
 
 test('Agent 节点路由可创建配置并接收心跳；配置读面按空间隔离', async () => {

@@ -108,6 +108,19 @@ export const SCHEMA = defineSchema({
     //     透传给将军/值班人看（plugins/src/index.ts），与上面 S5/S6 那批同族。
     'PATHEXT', 'WINDIR', 'TMPDIR', 'SIGKILL',
     'EXTERNAL_AGENT_START_FAILED',
+
+    // ── 执行节点自注册的分支判据（2026-10-13，plugins/src/index.ts）──
+    //
+    // 这一条**特别值得登记**，因为它不是给人看的错误码，而是**分支条件**：
+    //   守护节点心跳失败时，只有当 hub 回的 `code === 'AGENT_NODE_UNKNOWN'`
+    //   （= 本空间压根没登记这个节点）才去自注册。
+    //
+    // 为什么必须靠 code 而不是错误文本：那句中文一旦被改写，自注册就会**静默失效** ——
+    // 而症状仍然是"节点不出现、界面上空着"，和它从来没被实现时一模一样。
+    // （`AGENT_NODE_CONFIG_STALE` = 有节点但版本/空间不符或已停用，属**人的配置问题**，
+    //   刻意**不**自注册 —— 自动改写它等于把人的意图悄悄盖掉。）
+    'AGENT_NODE_UNKNOWN',
+    'AGENT_NODE_CONFIG_STALE',
   ],
   rules: [normsAndCtxRules],
   notes: [

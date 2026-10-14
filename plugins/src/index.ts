@@ -754,7 +754,15 @@ function spaceWorker(ctx: AppContext, config: Config): void {
       body: JSON.stringify(body),
     })
     const data = await res.json().catch(() => ({})) as Record<string, unknown>
-    if (!res.ok) throw new Error(String(data.error ?? `hub ${path} 失败（${res.status}）`))
+    if (!res.ok) {
+      const err = new Error(String(data.error ?? `hub ${path} 失败（${res.status}）`)) as Error & { code?: string }
+      // ★ 把 hub 的 **error code** 一起带上（2026-10-13）。
+      //   为什么要这个：判断"该不该自注册节点"必须靠**机器可判的标识**，
+      //   不能靠中文错误文本 —— 那句话一旦被改写，自注册就会静默失效，
+      //   而症状仍然是"节点不出现、日志没有"。
+      if (typeof data.code === 'string' && data.code !== '') err.code = data.code
+      throw err
+    }
     return data.task ?? data
   }
 
@@ -960,6 +968,12 @@ function spaceWorker(ctx: AppContext, config: Config): void {
    * 而绑定了节点的任务本来就必须等这台机器就绪才该被领走。
    */
   let nodeReportedReady = false
+
+  /** 本空间的节点是否已经由本守护**自注册**过（幂等闸门，避免每轮重复登记把 version 刷高）。 */
+  let nodeRegistered = false
+
+  /** 上一次节点心跳失败的**错误内容**（用来"同一错误只喊一次"，同时保证首次失败不静默）。 */
+  let lastNodeHeartbeatError: string | null = null
 
   /** 认领 / 回执里携带的节点 id：只有本空间节点心跳成功过之后才携带。 */
   const agentNodeIdForScope = (): string => (nodeReportedReady ? configuredAgentNodeId() : '')
@@ -3854,28 +3868,81 @@ function spaceWorker(ctx: AppContext, config: Config): void {
             ? await runGit(workspace.repoRootFor(), ['rev-parse', '--is-inside-work-tree'])
             : { code: 1 }
           const providers = Object.fromEntries(providerNames.map((name) => [name, subagentProviderCapabilities(ctx, name)]))
-          await hubPost('/api/agent-nodes/heartbeat', {
-            id: nodeIdForHeartbeat,
-            scope,
-            by: `${config.role}@${scope}`,
-          providerNames,
-          capabilities: {
+          const nodeCapabilities = {
             isolatedWorktree: config.isolate && worktreeProbe.code === 0,
             externalAgent: providerNames.some((name) => name === 'codex' || name === 'claude-code'),
             structuredOutput: Object.values(providers).some((caps) => caps.outputSchema),
             toolFilter: Object.values(providers).some((caps) => caps.toolFilter),
             cancellation: Object.values(providers).some((caps) => caps.cancellation),
             providers,
-          },
+          }
+          const sendNodeHeartbeat = () => hubPost('/api/agent-nodes/heartbeat', {
+            id: nodeIdForHeartbeat,
+            scope,
+            by: `${config.role}@${scope}`,
+            providerNames,
+            capabilities: nodeCapabilities,
           })
+
+          try {
+            await sendNodeHeartbeat()
+          } catch (e) {
+            // ── 自注册（2026-10-13）────────────────────────────────────────
+            //
+            // 此前这个节点必须**人工登记**（面板或 API）才能心跳成功；忘了登记的话，
+            // 守护每 30s 安静地失败一次、节点永不出现 —— 用户只看到"界面上什么都没有"。
+            //
+            //   > 一个"要人手工登记"的节点身份，
+            //   > 与一个"守护自己声明自己"的节点身份，
+            //   > 在**人记得登记**的时候是同一个东西 ——
+            //   > 区别只在忘掉的那次，而那时所有报错都是零。
+            //
+            // ★ 只在**明确"未登记"**这一种错误上自注册（code=AGENT_NODE_UNKNOWN）。
+            //   版本/空间不符或已停用（AGENT_NODE_CONFIG_STALE）**不该**被自注册盖掉 ——
+            //   那会悄悄把人的配置改写成守护自己想要的样子。
+            // ★ 且只在**真能承担绑定任务**时登记：绑定节点的认领路径无条件要求
+            //   `observedCapabilities.isolatedWorktree === true`（server.mjs:6237）。
+            //   若 isolate 关着或仓库不是 git worktree，登记出来的节点**永远领不走绑定任务** ——
+            //   那正是这一整轮在消灭的"发布成功、派工必失败"。宁可不登记（退化成任一节点认领）。
+            if (errorCodeOf(e) === 'AGENT_NODE_UNKNOWN' && nodeCapabilities.isolatedWorktree) {
+              await hubPost('/api/agent-nodes/configs', {
+                id: nodeIdForHeartbeat,
+                label: `${config.role}@${scope}（守护自注册）`,
+                scope,
+                by: `${config.role}@${scope}`,
+                providerNames,
+                capabilities: nodeCapabilities,
+              })
+              nodeRegistered = true
+              await sendNodeHeartbeat()
+              log(`执行节点 ${nodeIdForHeartbeat} 此前未登记 ⇒ 已自注册并心跳成功（provider=[${providerNames.join(',')}]，独立 worktree=${nodeCapabilities.isolatedWorktree}）`)
+            } else {
+              throw e
+            }
+          }
           // ★ 到这里才算"本空间的节点身份可用" ⇒ 之后认领才开始携带它。
           if (!nodeReportedReady) {
             nodeReportedReady = true
             log(`执行节点 ${nodeIdForHeartbeat} 已就绪上报，后续认领将携带该节点身份`)
           }
+          lastNodeHeartbeatError = null
         } catch (e) {
           // 退回"不携带节点身份"：未绑定的任务照常能领；绑定了的任务本来就要等这台机器就绪。
-          if (nodeReportedReady) log(`执行节点 ${nodeIdForHeartbeat} 心跳失败，认领暂不携带节点身份：${String(e)}`)
+          //
+          // ★★ 2026-10-13 修：这里原来只在 `nodeReportedReady` 为真时打日志 ——
+          //   于是**首次**心跳失败（最常见的就是"节点没登记"）**一行日志都没有**：
+          //   守护每 30s 安静失败一次，节点永不出现，而界面上只是空着。
+          //   这正是本次在别处消灭的那种形状，只是它出现在我自己加的这段里。
+          //
+          //   > 一个"会失败的检查"与一个"会安静失败的检查"，
+          //   > 在**它成功的时候**是同一个东西。
+          //
+          // 现在：只要错误**内容变了**就一定喊一次（同一错误不重复刷屏，30s 一轮不会淹日志）。
+          const msg = String(e)
+          if (nodeReportedReady || msg !== lastNodeHeartbeatError) {
+            log(`执行节点 ${nodeIdForHeartbeat} 心跳失败，认领暂不携带节点身份：${msg}`)
+          }
+          lastNodeHeartbeatError = msg
           nodeReportedReady = false
         }
       }
@@ -4178,6 +4245,19 @@ export interface SpaceRuntimeView {
  * 「主 scope」归属：优先给父配置自己声明的 scope；父 scope 不在接管集合里时**交给第一个空间**——
  * 否则当父 scope 未开通时没人再维护 `daemon.json`，看板/健康页的守护卡片会永久停留在旧数据。
  */
+/**
+ * 取出一个错误的 **hub error code**（`AGENT_NODE_UNKNOWN` 之类）；取不到返回 `''`。
+ *
+ * ★ 为什么必须有一个专门函数、而不是就地 `(e as {code?:string}).code`：
+ *   调用点（节点自注册）靠它做**分支判定**，而"取不到 code"必须是一个**明确的空值**
+ *   而不是 undefined 顺着 truthy 判断漏过去。这里把它收敛成一个可单测的纯函数。
+ */
+export function errorCodeOf(e: unknown): string {
+  if (e === null || typeof e !== 'object') return ''
+  const code = (e as { code?: unknown }).code
+  return typeof code === 'string' ? code : ''
+}
+
 /**
  * 解析**本空间**的执行节点 id —— 支持 `{scope}` 占位符（2026-10-13）。
  *

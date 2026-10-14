@@ -354,7 +354,25 @@ export function createHarnessStore({ db } = {}) {
 
     heartbeatAgentNode({ id, version, scope, providerNames, capabilities, nowMs = Date.now() } = {}) {
       const node = this.getAgentNodeConfig({ id, version, scope })
-      if (node === null) throw new Error('节点配置不存在、版本不匹配、空间不匹配或已停用')
+      if (node === null) {
+        // ★ 2026-10-13：把原来的**一句含糊话**拆成两种可判别的原因。
+        //
+        //   原文是「节点配置不存在、版本不匹配、空间不匹配或已停用」—— 四种原因挤一句，
+        //   调用方**没法据此决定下一步**：其中"压根没这个节点"是**可以自动处理**的
+        //   （守护自注册即可），而"有节点但版本/空间不符或已停用"是**人的配置问题**，
+        //   自动改写它只会把人的意图悄悄盖掉。
+        //
+        //   > 一句"四种原因都可能"的错误，
+        //   > 与一句"就是没登记"的错误，
+        //   > 在**读日志的人**眼里差别不大 —— 但对**要自动修它的代码**是天壤之别。
+        //
+        //   所以：带上 code，让调用方靠 **code** 分支，不靠中文文本。
+        const row = db.prepare('SELECT * FROM agent_node_configs WHERE id=?').get(id)
+        if (row === undefined) {
+          throw Object.assign(new Error(`执行节点未登记：${id}（本空间还没有这个节点）`), { code: 'AGENT_NODE_UNKNOWN' })
+        }
+        throw Object.assign(new Error(`执行节点配置不匹配：${id}（版本/空间不符或已停用）`), { code: 'AGENT_NODE_CONFIG_STALE' })
+      }
       if (!Array.isArray(providerNames) || providerNames.some((name) => typeof name !== 'string' || name.trim() === '')) throw new Error('observed providerNames 必须是字符串数组')
       const providers = [...new Set(providerNames.map((name) => name.trim()))]
       const caps = parseNodeCapabilities(capabilities)

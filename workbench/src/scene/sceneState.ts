@@ -1,6 +1,6 @@
 import type { HubAuditEvent, HubGoal, HubTask, RosterAgent } from '../types'
 import { tasksForRosterAgent, taskOwnerRole } from './agentOwnership.ts'
-import { moodFor } from './sceneBoard.ts'
+import { moodFor, visibleSceneTasks } from './sceneBoard.ts'
 import type { AgentMood, SceneTaskChip } from './sceneBoard.ts'
 
 /** Agent 的气色。★ 定义在 `sceneBoard.ts`（气泡与看板共用一份颜色契约），这里只是别名。 */
@@ -70,8 +70,16 @@ export function identitySeed(key: string): number {
  * 把一个 Agent 名下的任务排成"最要紧优先"，并投影成气泡/看板直接能用的最小形状。
  * 排序用 `rank`，气色判定用 `moodFor`（两条顺序是**同一条**，见 `sceneBoard.ts`）。
  */
+/**
+ * 把一个 Agent 名下的任务排成"最要紧优先"，并投影成气泡/看板直接能用的最小形状。
+ * 排序用 `rank`，气色判定用 `moodFor`（两条顺序是**同一条**，见 `sceneBoard.ts`）。
+ *
+ * ★ 2026-10-14（将军："已完成的就不要显示了"）：**先过 `visibleSceneTasks`**，
+ *   于是气泡清单、`taskCount`、气色三者天然同源 ——
+ *   不会出现"写着 3 项、只列出 2 条"（那不会报错，但没人数得对）。
+ */
 function chipsOf(tasks: readonly HubTask[]): SceneTaskChip[] {
-  return [...tasks]
+  return [...visibleSceneTasks(tasks)]
     .sort((a, b) => (rank[a.status] ?? 3) - (rank[b.status] ?? 3) || a.id.localeCompare(b.id))
     .map(task => ({ id: task.id, title: task.title, status: task.status }))
 }

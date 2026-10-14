@@ -64,8 +64,9 @@ test('交接要求同目标、明确双人归属及真实依赖认领', () => {
   assert.equal(deriveSceneCues(before, after, [{ ...e, payload: { soldier: 'other' } }], 1500, true).length, 0)
 })
 
-// ── 气泡要显示"他的所有任务"，所以投影里必须带全量清单 ──────────────────────
-test('★ 投影带上全量任务 chips：标题、状态、按"最要紧优先"排序、取消的不出现', () => {
+// ── 气泡要显示"他的所有在办任务"，所以投影里必须带清单 ──────────────────────
+// ★ 2026-10-14（将军："已完成的就不要显示了"）：这份清单只含**还没结束**的任务。
+test('★ 投影带上全部**在办**任务的 chips：编号、状态、按"最要紧优先"排序，已完成与已取消都不出现', () => {
   const roster = [agent('dev')]
   const titled = (id, status, title, extra = {}) => ({ ...task(id, 'dev', status, extra), title })
   const tasks = [
@@ -76,13 +77,15 @@ test('★ 投影带上全量任务 chips：标题、状态、按"最要紧优先
     titled('T-2', 'in_review', '等验收的'),
     titled('T-4', 'in_progress', '在做的'),
     titled('T-6', 'other', '别人的', { role: 'other' }),
+    titled('T-7', 'done', '也做完了的'),
   ]
   const [dev] = projectSceneAgents('lab', roster, tasks)
-  assert.deepEqual(dev.tasks.map(t => t.id), ['T-1', 'T-2', 'T-4', 'T-3', 'T-5'],
-    '受阻 → 待验收 → 进行中 → 待办 → 完成：气泡里最要紧的排最前')
-  assert.deepEqual(dev.tasks.map(t => t.title), ['卡住的', '等验收的', '在做的', '还没开始的', '做完了的'], '标题要带出来（气泡上显示的就是它）')
+  assert.deepEqual(dev.tasks.map(t => t.id), ['T-1', 'T-2', 'T-4', 'T-3'],
+    '受阻 → 待验收 → 进行中 → 待办；已完成与已取消都不进场景')
+  assert.deepEqual(dev.tasks.map(t => t.title), ['卡住的', '等验收的', '在做的', '还没开始的'],
+    '标题要带出来 —— 气泡平时只显示编号，悬浮时才展示它')
   assert.equal(dev.tasks.find(t => t.id === 'T-1').status, 'blocked')
-  assert.equal(dev.taskCount, 5, '计数与 chips 必须同源（否则气泡里"5 项"却只列出 4 条）')
+  assert.equal(dev.taskCount, 4, '计数与 chips 必须同源（否则气泡里"4 项"却只列出 3 条）')
   assert.deepEqual(dev.taskIds, dev.tasks.map(t => t.id))
   assert.equal(dev.focusTaskId, 'T-1')
   assert.equal(dev.focusTitle, '卡住的')
@@ -91,14 +94,18 @@ test('★ 投影带上全量任务 chips：标题、状态、按"最要紧优先
   assert.deepEqual(projectSceneAgents('lab', roster, tasks)[0].tasks, dev.tasks)
 })
 
-test('★ 空任务与只有已完成任务：气泡仍要有话说（不是空白）', () => {
-  const roster = [agent('dev')]
-  const none = projectSceneAgents('lab', roster, [])[0]
+test('★ 只剩已完成 ⇒ 场景当"没有任务"（气色回待命、计数归零）', () => {
+  const done = projectSceneAgents('lab', [agent('dev')], [{ ...task('T-1', 'dev', 'done'), title: '收尾' }])[0]
+  assert.deepEqual(done.tasks, [], '已完成的按需求不显示')
+  assert.equal(done.taskCount, 0, '计数跟着归零（否则气泡写"1 项"却一条都列不出来）')
+  assert.equal(done.focusTaskId, null)
+  assert.equal(done.mode, 'idle', '没有在办的任务 ⇒ 气色回待命')
+})
+
+test('★ 空任务：气泡仍要有话说（不是空白）', () => {
+  const [none] = projectSceneAgents('lab', [agent('dev')], [])
   assert.deepEqual(none.tasks, [])
   assert.equal(none.taskCount, 0)
   assert.equal(none.focusTitle, null, '没有任务就是没有，不编一句假的')
   assert.equal(none.mode, 'idle')
-  const done = projectSceneAgents('lab', roster, [{ ...task('T-1', 'dev', 'done'), title: '收尾' }])[0]
-  assert.deepEqual(done.tasks.map(t => t.id), ['T-1'], '做完的任务也要留在气泡里（否则人会突然"没有历史"）')
-  assert.equal(done.mode, 'idle', '只剩已完成 ⇒ 气色回待命')
 })

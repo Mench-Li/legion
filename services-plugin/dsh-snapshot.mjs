@@ -63,6 +63,64 @@ export async function readDshProviderSnapshot(ctx) {
     return node !== null && typeof node === 'object' ? node : {}
   }
 
+  /**
+   * ★★★ 2026-10-14（第三次修这条判据 —— 前两版都错在**同一件事**上）：
+   * **这条供应商在 DSH 的配置里到底有没有一块属于它自己的声明？**
+   *
+   * ## 两版错判据，与它们各自踩到的坑
+   *
+   * ```js
+   * // 首版：引擎登记了自己 ⇒ 当作"用户声明了"
+   * declared.some((d) => d?.provider === p.id)
+   *
+   * // 第二版：那一节里有受管字段的真值 ⇒ 当作"用户声明了"
+   * ['api','baseURL','apiKeyEnv'].some((k) => typeof profile[k] === 'string' && profile[k] !== '')
+   * ```
+   *
+   * **首版的坑**：`llm.listConfigurableProviders()` 会列出**每一条内置路线**
+   * （它们都登记自己、带 `settingsNs`）⇒ `deepseek-official` 被判成"有声明"。
+   *
+   * **第二版的坑（从 DSH 源码读出的真原因）**：`settings.describe()` 每个命名空间返回
+   * **三层**（`packages/settings/settings/src/index.ts:302-331`）：
+   *
+   * ```ts
+   * value = projectForm(form, plainConfig(entry.fiber.config))  // ← 生效值，**含引擎默认**
+   * base  = 继承来的
+   * user  = projectForm(form, override)                          // ← **用户真正写的那一份**
+   * ```
+   *
+   * 而快照读的是 `value`。于是对 `deepseek-official`（`settingsNs = llm-deepseek`）来说，
+   * `value` 里有引擎默认的 `baseURL`（非空字符串）⇒ 第二版判据命中的是**引擎默认值**，
+   * 而不是任何"用户声明"。（另有一种同样能骗过它的形状：某个**别人的**命名空间里
+   * 出现了这个名字 —— 这台机器上 `web` 节的 `searchProvider: deepseek-official` 就是。）
+   *
+   * 两种形状合起来说明：**"那一节里有真值"与"这一节里有它的声明"是两件事**。
+   *
+   *   > 引擎把默认值投影进 `value` 之后，
+   *   > "用户写了这一块"与"引擎替它补了这一块"在**值**上再也分不出来 ——
+   *   > 它们只在**结构**上还分得开。
+   *
+   * ## 现在的判据：问**结构**，不问"有没有值"
+   *
+   *   ① 它的 `settingsPath` 指向**它自己**（末段等于供应商 id）⇒ 有声明；
+   *   ② 否则看下钻出来的那一节里，**有没有一个键就是这条供应商的 id**
+   *      且那个值是对象（`{ providers: { 'fjd-ds': {...} } }` 那种形状）⇒ 有声明；
+   *   ③ 再否则 ⇒ `false`：它的 api/baseURL 来自引擎默认值 ⇒ 下游按"不接管"处置
+   *      （`materialize-plan.mjs` 的 `engineInternal`）：不比较、不写、也不进删除候选。
+   *
+   * ⚠ 这条规则**只**对 DSH 侧成立（它是"我读到了什么"），Legion 侧的同名字段没有这个含义。
+   * ⚠ 将来若要更精确，可以用 `descriptor.user`（引擎自己的"用户写了什么"那一层）——
+   *   但那是**另一条**路（它依赖 `projectForm` 的投影语义），不要与这条混着改。
+   */
+  const hasOwnDeclaration = (providerId, entry, profile) => {
+    const path = Array.isArray(entry?.settingsPath) ? entry.settingsPath : []
+    // ① 路径直接指向它自己（`['providers', 'fjd-ds']` 这种）
+    if (path.length > 0 && path[path.length - 1] === providerId) return true
+    // ② 下钻出来的那一节里，有一个以它命名的**对象**（`{ providers: { 'fjd-ds': {...} } }`）
+    const own = profile?.[providerId]
+    return own !== null && typeof own === 'object' && !Array.isArray(own)
+  }
+
   const providers = []
   for (const p of llm.listProviders()) {
     if (!p || typeof p.id !== 'string') continue
@@ -82,35 +140,12 @@ export async function readDshProviderSnapshot(ctx) {
       secretRef: apiKeyEnv,
       credentialConfigured,
       /**
-       * ★★ 2026-10-12 首版 / 2026-10-13 收紧：这条供应商的 `api`/`baseURL`
-       * **是不是用户真的写在配置里的**。
-       *
-       * ## 首版为什么不够（实测抓到的）
-       *
-       * 首版判据是"`llm.listConfigurableProviders()` 有没有列出它"。
-       * 而实测：**`deepseek-official` 也被列出来了**（每一条内置路线都会登记自己，
-       * 带 `settingsNs`），于是它被判成"有声明" ⇒ 进正常的"要改/未变"比较。
-       * 可它的 `api`/`baseURL` 在 `llm-deepseek` 里是**内置默认值**（`PUBLIC_BASE_URL`），
-       * 快照读到的是 `null`，而**Legion 一旦把真实端点记下来**（为了让「测试连接」能用），
-       * 两边就**永远不等** ⇒ 每轮报一处 `update`、门永远 clean 不了。
-       *
-       * 换句话说首版把"引擎登记了自己"当成了"用户声明了字段"。
-       *
-       *   > 一处"我在配置里没写、端点由引擎内置"的条目，
-       *   > 与一处"我写了、只是字段恰好为空"的条目，
-       *   > 在快照里的区别只有**那一节到底有没有内容** ——
-       *   > 而它们的处置必须相反：后者要用户去补，前者**任何东西都不许写**。
-       *
-       * ## 收紧后的判据
-       *
-       * 先拿到它那一节的**内容**（`declaredProfile`），只有当那一节里
-       * **至少有一个受管字段是真值**（`api` / `baseURL` / `apiKeyEnv`）时，才算"用户声明过"。
-       * 空节（`{}`，或几个字段全是 undefined/空串）⇒ `false` ⇒ 下游按"不接管"处置
-       * （`materialize-plan.mjs` 的 `engineInternal`）：不比较、不写、也不进删除候选。
-       *
-       * ⚠ 这条规则**只**对 DSH 侧成立（它是"我读到了什么"），Legion 侧的同名字段没有这个含义。
+       * 见上面 `hasOwnDeclaration` 的长注释：判据是"**这一节里有没有一块属于它的配置**"，
+       * 不是"引擎有没有登记它"，也不是"这一节里有没有真值"——
+       * 后两者都实测踩过（`deepseek-official` 的 `settingsNs` 是 `web`，
+       * 那一节里只有一个 `searchProvider: deepseek-official`）。
        */
-      declaredInSettings: ['api', 'baseURL', 'apiKeyEnv'].some((k) => typeof profile[k] === 'string' && profile[k] !== ''),
+      declaredInSettings: hasOwnDeclaration(p.id, declared.find((d) => d?.provider === p.id), profile),
       models: models.map((m) => ({
         id: m?.id,
         ...(typeof m?.name === 'string' && m.name !== '' ? { name: m.name } : {}),

@@ -157,33 +157,114 @@ test('③b ★★★ 引擎登记了但那一节是空的 ⇒ `declaredInSetting
     + '否则 Legion 记下真实端点后会与它的 null 永久不等')
 })
 
-test('③b ★★ 有**任何一个**受管字段是真值 ⇒ `declaredInSettings: true`（用户真的写了）', async () => {
-  // 先钉住"空节 = false"的反面：只要有一个字段有值，就算声明过。
-  const withOne = (field, value) => {
-    const services = {
-      llm: {
+test('③b ★★ 有**它自己**的声明块 ⇒ `declaredInSettings: true`（用户真的写了）', async () => {
+  // 正面：`settingsPath` 直接指向它自己（`['providers', 'p']` 的形状）
+  const ownPath = {
+    get: (k) => (k === 'llm'
+      ? {
         listProviders: () => [{ id: 'p', name: 'P' }],
         listConfigurableProviders: () => [{ provider: 'p', displayName: 'P', settingsNs: 'llm-pi-ai', settingsPath: ['providers', 'p'] }],
         listModels: async () => [],
-      },
-      settings: { describe: () => [{ ns: 'llm-pi-ai', revision: 1, value: { providers: { p: { [field]: value } } } }] },
-      credentials: { describe: async () => ({ configured: false }) },
-    }
-    return { get: (k) => services[k] ?? null }
+      }
+      : k === 'settings'
+        ? { describe: () => [{ ns: 'llm-pi-ai', revision: 1, value: { providers: { p: { api: 'openai-responses' } } } }] }
+        : k === 'credentials' ? { describe: async () => ({ configured: false }) } : null),
   }
-  for (const [field, value] of [['api', 'openai-responses'], ['baseURL', 'https://a.example/v1'], ['apiKeyEnv', 'A_KEY']]) {
-    const { providers } = await readDshProviderSnapshot(withOne(field, value))
-    assert.equal(providers[0].declaredInSettings, true, `只有 ${field} 有值也必须算"声明过"`)
+  const r1 = await readDshProviderSnapshot(ownPath)
+  assert.equal(r1.providers[0].declaredInSettings, true, '路径指向它自己 ⇒ 算声明过')
+
+  // 另一条路：路径没到底，但那一节里有**以它命名的对象** —— 即使那个对象是空的也算
+  //（"我写了这块、只是还没填字段"与"我没写这块"是两件事）
+  const ownBlock = {
+    get: (k) => (k === 'llm'
+      ? {
+        listProviders: () => [{ id: 'p', name: 'P' }],
+        listConfigurableProviders: () => [{ provider: 'p', settingsNs: 'x', settingsPath: [] }],
+        listModels: async () => [],
+      }
+      : k === 'settings'
+        ? { describe: () => [{ ns: 'x', revision: 1, value: { p: {} } }] }
+        : k === 'credentials' ? { describe: async () => ({ configured: false }) } : null),
   }
-  // 空串**不算**有值（"我写了空串"与"我没写"在配置里是同一件事）
-  const { providers } = await readDshProviderSnapshot(withOne('api', ''))
-  assert.equal(providers[0].declaredInSettings, false, '空串不算声明')
+  const r2 = await readDshProviderSnapshot(ownBlock)
+  assert.equal(r2.providers[0].declaredInSettings, true, '有自己的（空）块 ⇒ 仍然算"它有自己的条目"')
 })
 
-test('③b ★★★ 端到端：Legion 记了真端点、引擎那边是内置默认 ⇒ 对账仍是 clean（不接管那一类）', async () => {
-  const { readDshProviderSnapshot, default: _ } = await import('./index.js')
-  const { planMaterialization, describeMaterializationPlan } = await import('./materialize-plan.mjs')
-  const snap = await readDshProviderSnapshot(engineRegisteredCtx())
+test('③b ★★★ 第三次修的坑（真原因）：那一节是**引擎默认值的投影** ⇒ `false`', async () => {
+  // ★ 2026-10-14 从 DSH 源码读出的真原因（`packages/settings/settings/src/index.ts:302-331`）：
+  //   `settings.describe()` 每个命名空间返回**三层**：
+  //     value = projectForm(form, plainConfig(entry.fiber.config))  ← 生效值，**含引擎默认**
+  //     base  = 继承来的
+  //     user  = projectForm(form, override)                          ← **用户真正写的那一份**
+  //   而 `deepseek-official` 报的 `settingsNs` 是 `llm-deepseek` —— 那一节的 `value` 里
+  //   有引擎默认的 `baseURL`（非空字符串）⇒ 第二版判据（"有没有受管字段的真值"）
+  //   命中的是**引擎默认值**，而不是任何"用户声明"。
+  const services = {
+    llm: {
+      listProviders: () => [{ id: 'deepseek-official', name: 'DeepSeek' }],
+      listConfigurableProviders: () => [{ provider: 'deepseek-official', displayName: 'DeepSeek', settingsNs: 'llm-deepseek', settingsPath: [] }],
+      listModels: async () => [{ id: 'deepseek-flash' }],
+    },
+    settings: {
+      // 这就是 `value` 的形状：端点是**引擎默认**（含 baseURL），而 user 是空的
+      describe: () => [{
+        ns: 'llm-deepseek', revision: 5,
+        value: { baseURL: 'https://api.deepseek.com/anthropic', maxTokens: 128000, models: [] },
+        user: {},
+      }],
+    },
+    credentials: { describe: async () => ({ configured: false }) },
+  }
+  const { providers } = await readDshProviderSnapshot({ get: (k) => services[k] ?? null })
+  const p = providers.find((x) => x.id === 'deepseek-official')
+  assert.equal(p.declaredInSettings, false,
+    '★`value` 里的 baseURL 是**引擎默认值**，不是用户声明 —— '
+    + '把它判成 true 会让 Legion 记下的真端点与 DSH 的默认值永久不等')
+})
+
+test('③b ★★★ 第三次修的坑（另一种形状）：那一节是**别人的节**、只是提到了这个名字 ⇒ `false`', async () => {
+  // 第二种能骗过"有没有真值"的形状：某个**别人的**命名空间里出现了这个名字。
+  // 实测这台机器上 `web` 节的形状就是：
+  //     - id: web
+  //       config:
+  //         searchProvider: deepseek-official      ← 非空字符串，但**不是**它的声明块
+  const services = {
+    llm: {
+      listProviders: () => [{ id: 'deepseek-official', name: 'DeepSeek' }],
+      listConfigurableProviders: () => [{ provider: 'deepseek-official', displayName: 'DeepSeek', settingsNs: 'web', settingsPath: [] }],
+      listModels: async () => [{ id: 'deepseek-flash' }],
+    },
+    settings: {
+      describe: () => [{ ns: 'web', revision: 3, value: { searchProvider: 'deepseek-official', timeoutMs: 5000 } }],
+    },
+    credentials: { describe: async () => ({ configured: false }) },
+  }
+  const { providers } = await readDshProviderSnapshot({ get: (k) => services[k] ?? null })
+  const p = providers.find((x) => x.id === 'deepseek-official')
+  assert.equal(p.declaredInSettings, false,
+    '★"别人那一节里提到了它"不是"它有自己的声明"')
+})
+
+test('③b ★★★ 端到端（真实形状）：Legion 记了真端点、引擎那边是内置默认 ⇒ 对账仍 clean', async () => {
+  const { readDshProviderSnapshot: readSnap } = await import('./index.js')
+  const { planMaterialization, describeMaterializationPlan: describe } = await import('./materialize-plan.mjs')
+  // 用**真原因那个形状**：ns=llm-deepseek、value 里是引擎默认端点、user 空
+  const services = {
+    llm: {
+      listProviders: () => [{ id: 'deepseek-official', name: 'DeepSeek' }],
+      listConfigurableProviders: () => [{ provider: 'deepseek-official', settingsNs: 'llm-deepseek', settingsPath: [] }],
+      listModels: async () => [{ id: 'deepseek-flash', name: 'DeepSeek-V41-Flash', inputModalities: ['text', 'image'] }],
+    },
+    settings: {
+      describe: () => [{
+        ns: 'llm-deepseek', revision: 1,
+        value: { baseURL: 'https://api.deepseek.com/anthropic' },
+        user: {},
+      }],
+    },
+    credentials: { describe: async () => ({ configured: true }) },
+  }
+  const snap = await readSnap({ get: (k) => services[k] ?? null })
   // Legion 侧：为了「测试连接」能用，我们把真实端点记下来了
   const desired = [{
     id: 'deepseek-official', displayName: 'DeepSeek',
@@ -192,10 +273,10 @@ test('③b ★★★ 端到端：Legion 记了真端点、引擎那边是内置�
   }]
   const plan = planMaterialization({ desired, actual: snap.providers })
   assert.deepEqual(plan.engineInternal, ['deepseek-official'], '归入"不接管"')
-  assert.equal(plan.clean, true, '★ 必须是 clean —— 否则门永远开不了（这正是首版判据的后果）')
+  assert.equal(plan.clean, true, '★ 必须是 clean —— 否则门永远开不了')
   assert.deepEqual(plan.update, [])
   assert.deepEqual(plan.delete, [])
-  assert.match(describeMaterializationPlan(plan), /不接管/)
+  assert.match(describe(plan), /不接管/)
 })
 
 test('④ 服务缺席或抛错 ⇒ 返回空 + 原因，**绝不抛**（软取）', async () => {

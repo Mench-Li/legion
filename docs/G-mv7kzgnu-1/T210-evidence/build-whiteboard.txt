@@ -1,0 +1,5 @@
+﻿# whiteboard: node scripts/build.mjs
+# EXIT=0
+# output:
+[build] copied 12 shared modules -> apps/web/public/shared/
+[build] excluded (node-only): hash.mjs, index.mjs, config.mjs

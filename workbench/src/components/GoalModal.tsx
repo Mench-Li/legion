@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
 import { fetchAgentNodes, fetchAgentWorkflowDefinitions, type AgentNodeRecord, type AgentWorkflowDefinition, type AgentWorkflowDefinitionRef } from '../api'
-import { bindingWarning, crossNodeConflict, describeCrossNodeConflict, scanNodes } from '../goalNodeChoice'
+import { bindingWarning, crossNodeConflict, decideAutoNode, describeCrossNodeConflict, effectiveNodeId, scanNodes } from '../goalNodeChoice'
 import { toast } from './Toast'
 
 interface GoalModalProps {
@@ -51,7 +51,14 @@ export function GoalModal({ scope, spaceName, activeCount = 0, onClose, onPublis
     (selectedDefinitionRecord?.stages ?? []).map(stage => stage.nodeId),
     chosenNode,
   )), [selectedDefinitionRecord, chosenNode])
-  const nodeWarning = useMemo(() => bindingWarning(chosenNode), [chosenNode])
+  /**
+   * ★ 自动决定（B 档）：用户没指定时，按"同机改派 / 跨机排队"自动判该不该绑、绑哪台。
+   * 判据全在 `goalNodeChoice.ts` 的纯函数里（已带 26 条判据）。
+   */
+  const autoDecision = useMemo(() => decideAutoNode(nodes), [nodes])
+  /** 真正要发出去的节点 id：**手动优先，否则自动**。 */
+  const finalNodeId = useMemo(() => effectiveNodeId(chosenNode, autoDecision), [chosenNode, autoDecision])
+  const nodeWarning = useMemo(() => bindingWarning(finalNodeId), [finalNodeId])
 
   const submit = async (): Promise<void> => {
     const text = objective.trim()
@@ -60,7 +67,7 @@ export function GoalModal({ scope, spaceName, activeCount = 0, onClose, onPublis
     const reference = selected ? { id: selected.id, version: selected.version } : undefined
     setBusy(true)
     try {
-      await onPublish(scope, text, reference, chosenNode.trim() === '' ? undefined : chosenNode.trim())
+      await onPublish(scope, text, reference, finalNodeId ?? undefined)
       onClose()
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e)
@@ -105,24 +112,41 @@ export function GoalModal({ scope, spaceName, activeCount = 0, onClose, onPublis
             </span>
           </div>
           <div className="field">
-            <label>执行节点（可选）</label>
-            {/* ★★ 2026-10-13：「创建后自动扫描 → 推用户确认用哪个节点」。
-                扫描结果分四种情形，**每一档说的话不同**（判据在 goalNodeChoice.ts）：
-                  ① 没登记节点 / ② 有节点但都没就绪 ⇒ **不绑定**（并与今天语义一致），不弹选择；
-                  ③ 唯一就绪 ⇒ 作为**建议**列出，但仍需你确认；
-                  ④ 多个就绪 ⇒ 这才是真正的选择。
-                ★ 默认始终是「不绑定」—— 绑定是硬绑定，会让没配 agentNodeId 的守护一件都领不走。 */}
-            <select value={chosenNode} onChange={event => setChosenNode(event.target.value)} disabled={busy || nodes === null}>
-              <option value="">不绑定（任一在线执行服务可认领 —— 默认）</option>
-              {(scan.readyNodes.length > 0 ? scan.readyNodes : (nodes ?? [])).map(node => (
-                <option key={String(node.id)} value={String(node.id)}>
-                  {node.label ?? node.id} · {node.id}{node.status === 'ready' ? '' : `（${node.status ?? 'unknown'}）`}
-                </option>
-              ))}
-            </select>
-            <span style={{ color: 'var(--muted-2)', fontSize: 10 }}>
-              {nodes === null ? '正在扫描本空间的执行节点…' : scan.headline}
-            </span>
+            <label>执行节点</label>
+            {/* ★★ 2026-10-13（B 档）：**自动选择**，不再要用户先做一次假选择。
+                判据在 goalNodeChoice.ts 的 `decideAutoNode`（纯函数，五档）：
+                  · 没有就绪节点 / 恰好一个 / 判不清 ⇒ **不绑定**（任一在线执行服务认领）
+                  · 全在同一台机器 ⇒ **不绑定**（同机可改派，保持"谁空闲谁认领"）
+                  · 跨机器 ⇒ **绑定**到最闲的那台（跨机必须排队，一条链不能横跨两台）
+                用户仍可**手动覆盖** —— 自动是为了省事，不是为了夺走控制权。 */}
+            <div style={{ color: 'var(--muted-2)', fontSize: 11 }}>
+              {nodes === null ? '正在扫描本空间的执行节点…' : `🤖 ${autoDecision.reason}`}
+            </div>
+            <details style={{ marginTop: 4 }}>
+              <summary style={{ color: 'var(--muted-2)', fontSize: 10, cursor: 'pointer' }}>
+                手动指定节点（可选 · 覆盖上面的自动决定）
+              </summary>
+              <select
+                aria-label="手动指定执行节点"
+                value={chosenNode}
+                onChange={event => setChosenNode(event.target.value)}
+                disabled={busy || nodes === null}
+                style={{ marginTop: 4 }}
+              >
+                <option value="">跟随自动决定{autoDecision.nodeId === null ? '（不绑定）' : `（${autoDecision.nodeId}）`}</option>
+                {(scan.readyNodes.length > 0 ? scan.readyNodes : (nodes ?? [])).map(node => (
+                  <option key={String(node.id)} value={String(node.id)}>
+                    {node.label ?? node.id} · {node.id}
+                    {node.status === 'ready' ? '' : `（${node.status ?? 'unknown'}）`}
+                    {typeof node.busy === 'number' && typeof node.capacity === 'number' ? ` · 忙 ${node.busy}/${node.capacity}` : ''}
+                  </option>
+                ))}
+              </select>
+              <div style={{ color: 'var(--muted-2)', fontSize: 10, marginTop: 2 }}>
+                {scan.headline}
+                {finalNodeId === null ? ' 本条链**不绑定**节点。' : ` 本条链将绑定到 ${finalNodeId}。`}
+              </div>
+            </details>
             {nodeWarning !== null && <span style={{ color: 'var(--yellow)', fontSize: 10 }}>{nodeWarning}</span>}
             {conflictText !== null && <span style={{ color: 'var(--red)', fontSize: 10 }}>⛔ {conflictText}</span>}
           </div>

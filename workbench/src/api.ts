@@ -437,6 +437,19 @@ export interface AgentNodeRecord {
   status: 'unknown' | 'offline' | 'ready' | 'incompatible' | 'disabled'
   lastSeenAtMs: number | null; observedProviders: string[]
   observedCapabilities: Record<string, unknown> | null
+  /**
+   * 节点**此刻**在跑几个任务 / 上限几个（2026-10-13，C 档）。
+   * ★ **`null` = 未知**（老守护不上报，或心跳已过期）—— 与 `0`（确实空闲）是两件事。
+   *   选择器必须区分它们，否则会把"不知道忙不忙"的节点排在"确实空闲"的前面。
+   */
+  busy?: number | null
+  capacity?: number | null
+  /**
+   * 机器标识（2026-10-13，C 档）：用来判"两个节点是不是同一台机器"。
+   * 同机 ⇒ 可以改派（抢占式均衡）；跨机 ⇒ 必须排队（一条链不能跨机，交接尚未实现）。
+   * `null` = 未知（老守护不上报）⇒ 策略退化成"不绑定"，**绝不**当成同一台。
+   */
+  machineId?: string | null
 }
 
 /** 读取某空间阶段链及跨 Agent 工作流配置。 */

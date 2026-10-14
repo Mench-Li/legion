@@ -1,6 +1,6 @@
-import { useRef, useState } from 'react'
-import { fetchAgentNodes, fetchAgentToolConfigs, fetchAgentWorkflowDefinitions, fetchAgentWorkflowHistory, fetchAgentWorkflowInstances, fetchMemberReadiness, fetchModelProfiles, fetchSpacePipeline, registerAgentNode, registerAgentToolConfig, registerAgentWorkflowDefinition, saveSpacePipeline, setGoalStatus } from '../api'
-import type { AgentNodeRecord, AgentToolConfigRecord, AgentWorkflowDefinition, AgentWorkflowHistory, AgentWorkflowInstanceSummary, HubModelProfile, SpacePipelineConfig } from '../api'
+import { useState } from 'react'
+import { fetchAgentNodes, fetchAgentToolConfigs, fetchAgentWorkflowDefinitions, fetchMemberReadiness, fetchModelProfiles, fetchSpacePipeline, registerAgentToolConfig, registerAgentWorkflowDefinition, saveSpacePipeline, } from '../api'
+import type { AgentNodeRecord, AgentToolConfigRecord, AgentWorkflowDefinition, HubModelProfile, SpacePipelineConfig } from '../api'
 import { formatCodexSystemProxyMode } from '../agentWorkflowView'
 import {
   DEFAULT_NATIVE_PROVIDER,
@@ -23,7 +23,6 @@ import {
 } from '../nativeCapabilities'
 import { bundleInstallRemedy } from '../dshRemedy'
 import { toast } from './Toast'
-import type { GoalStatus } from '../types'
 
 interface Props { scope: string }
 interface GraphStageDraft {
@@ -49,13 +48,16 @@ const EXTERNAL_CAPABILITIES: AgentToolConfigRecord['capabilities'] = {
   textInput: true, textOutput: true, outputSchema: false, toolFilter: false,
   localAgent: false, sessionResume: false, cancellation: true,
 }
-/** 能力位的中文标签（界面与推导结果共用一套词，避免两处措辞漂移）。 */
+/** 能力位的中文标签（界面与推导结果共用一套词，避免两处措辞漂移）。
+ *
+ * ★ 这里**没有 `sessionResume`** —— 它在 2026-10-13 之后不再由用户设置，
+ *   而一份"有标签、却没有对应复选框"的映射，只会让下一个人去找那个不存在的开关。
+ *   该字段本身仍在数据模型里（hub 的 schema 要求显式布尔），见 `nativeCapabilities.ts`。 */
 const ABILITY_LABEL: Record<string, string> = {
   outputSchema: '支持结构化输出（outputSchema）',
   toolFilter: '支持工具过滤',
   cancellation: '支持取消执行',
   localAgent: '提供本地 Agent 拦截能力',
-  sessionResume: '支持会话续接',
 }
 
 function observedPermissionModes(node: AgentNodeRecord): string {
@@ -85,7 +87,6 @@ function observedCodexSystemProxyMode(node: AgentNodeRecord): string | null {
 export function AgentWorkflowConfigurator({ scope }: Props): React.JSX.Element {
   const [open, setOpen] = useState(false)
   const [loading, setLoading] = useState(false)
-  const [instancesLoading, setInstancesLoading] = useState(false)
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState('')
   const [pipeline, setPipeline] = useState<SpacePipelineConfig | null>(null)
@@ -100,19 +101,8 @@ export function AgentWorkflowConfigurator({ scope }: Props): React.JSX.Element {
    */
   const [readiness, setReadiness] = useState<{ member: string; providers: Record<string, ProviderReadinessLike>; profile: string | null } | null>(null)
   const [definitions, setDefinitions] = useState<AgentWorkflowDefinition[]>([])
-  const [instances, setInstances] = useState<AgentWorkflowInstanceSummary[]>([])
-  const [instanceTotal, setInstanceTotal] = useState(0)
-  const [instanceOffset, setInstanceOffset] = useState(0)
-  const [instanceStatus, setInstanceStatus] = useState('all')
-  const [instanceSearch, setInstanceSearch] = useState('')
-  const [selectedHistory, setSelectedHistory] = useState<AgentWorkflowHistory | null>(null)
-  const [historyLoading, setHistoryLoading] = useState(false)
-  const [instanceActionId, setInstanceActionId] = useState<string | null>(null)
-  const [cancelConfirmId, setCancelConfirmId] = useState<string | null>(null)
   const [nodes, setNodes] = useState<AgentNodeRecord[]>([])
   const [nodeIds, setNodeIds] = useState<Record<RoleKey, string>>({ designRole: '', implementationRole: '', reviewRole: '' })
-  const [newNodeId, setNewNodeId] = useState('')
-  const [newNodeLabel, setNewNodeLabel] = useState('')
   const [roles, setRoles] = useState<Record<RoleKey, string>>({ designRole: '', implementationRole: '', reviewRole: '' })
   // ★ 默认值 = **DSH 执行服务**（不是 Claude Code / Codex）。理由见 agentWorkflowDefaults.ts：
   //   原来的硬编码默认值预设了"这台机器装了三个外部产品"，而实测本环境一个都没有 ——
@@ -131,33 +121,11 @@ export function AgentWorkflowConfigurator({ scope }: Props): React.JSX.Element {
   const [reviewImplementationRoute, setReviewImplementationRoute] = useState('implement')
   const [nativeToolFilter, setNativeToolFilter] = useState(true)
   const [nativeLocalAgent, setNativeLocalAgent] = useState(true)
-  const [nativeSessionResume, setNativeSessionResume] = useState(false)
   const [nativeCancellation, setNativeCancellation] = useState(true)
-  const instanceRequestId = useRef(0)
 
-  const refreshInstances = async (offset = instanceOffset, status = instanceStatus, search = instanceSearch): Promise<void> => {
-    const requestId = ++instanceRequestId.current
-    setInstancesLoading(true)
-    setError('')
-    try {
-      const page = await fetchAgentWorkflowInstances(scope, { limit: 20, offset, status, search })
-      if (requestId !== instanceRequestId.current) return
-      setInstances(page.instances)
-      setInstanceTotal(page.total)
-      setInstanceOffset(page.offset)
-      setSelectedHistory(null)
-      setCancelConfirmId(null)
-    } catch (e) {
-      if (requestId === instanceRequestId.current) setError(e instanceof Error ? e.message : String(e))
-    } finally {
-      if (requestId === instanceRequestId.current) setInstancesLoading(false)
-    }
-  }
 
   const load = async (): Promise<void> => {
-    const instanceRequest = ++instanceRequestId.current
     setLoading(true)
-    setInstancesLoading(true)
     setError('')
     try {
       // ★ 成员名册与就绪度**单独拉、单独失败**：它是诊断信息，读不到不该让整个面板打不开。
@@ -166,9 +134,8 @@ export function AgentWorkflowConfigurator({ scope }: Props): React.JSX.Element {
       const membersPromise: Promise<MemberReadinessLike[]> = fetchMemberReadiness()
         .then((rows) => rows as MemberReadinessLike[])
         .catch(() => [])
-      const [nextPipeline, nextConfigs, nextNodes, nextDefinitions, nextModelProfiles, instancePage, members] = await Promise.all([
+      const [nextPipeline, nextConfigs, nextNodes, nextDefinitions, nextModelProfiles, members] = await Promise.all([
         fetchSpacePipeline(scope), fetchAgentToolConfigs(), fetchAgentNodes(scope), fetchAgentWorkflowDefinitions(scope), fetchModelProfiles(),
-        fetchAgentWorkflowInstances(scope, { limit: 20, offset: 0, status: instanceStatus, search: instanceSearch }),
         membersPromise,
       ])
       setPipeline(nextPipeline)
@@ -177,13 +144,6 @@ export function AgentWorkflowConfigurator({ scope }: Props): React.JSX.Element {
       setDefinitions(nextDefinitions)
       setModelProfiles(nextModelProfiles)
       setReadiness(scopeReadiness(members, scope))
-      if (instanceRequest === instanceRequestId.current) {
-        setInstances(instancePage.instances)
-        setInstanceTotal(instancePage.total)
-        setInstanceOffset(instancePage.offset)
-        setSelectedHistory(null)
-        setCancelConfirmId(null)
-      }
       const workflow = nextPipeline.workflow
       setRoles({
         designRole: workflow?.designRole ?? defaultRoleFor(nextPipeline.stages, 'designRole'),
@@ -215,7 +175,6 @@ export function AgentWorkflowConfigurator({ scope }: Props): React.JSX.Element {
           setDshProvider(config.providerName)
           setNativeToolFilter(config.capabilities.toolFilter)
           setNativeLocalAgent(config.capabilities.localAgent)
-          setNativeSessionResume(config.capabilities.sessionResume)
           setNativeCancellation(config.capabilities.cancellation)
         }
       }
@@ -233,7 +192,6 @@ export function AgentWorkflowConfigurator({ scope }: Props): React.JSX.Element {
       setPipeline(null)
       setError(e instanceof Error ? e.message : String(e))
     } finally {
-      if (instanceRequest === instanceRequestId.current) setInstancesLoading(false)
       setLoading(false)
     }
   }
@@ -244,37 +202,7 @@ export function AgentWorkflowConfigurator({ scope }: Props): React.JSX.Element {
     if (next && pipeline === null) void load()
   }
 
-  const inspectInstance = async (instance: AgentWorkflowInstanceSummary): Promise<void> => {
-    if (!instance.anchorTaskId) { setError('该工作流实例暂无可读取的阶段任务。'); return }
-    setHistoryLoading(true)
-    setError('')
-    try { setSelectedHistory(await fetchAgentWorkflowHistory(instance.anchorTaskId, scope)) }
-    catch (e) { setError(e instanceof Error ? e.message : String(e)); setSelectedHistory(null) }
-    finally { setHistoryLoading(false) }
-  }
 
-  const changeInstanceStatus = async (instance: AgentWorkflowInstanceSummary, status: GoalStatus): Promise<void> => {
-    if (status === 'canceled' && cancelConfirmId !== instance.id) {
-      setCancelConfirmId(instance.id)
-      return
-    }
-    setInstanceActionId(instance.id)
-    setError('')
-    try {
-      const result = await setGoalStatus(scope, instance.goalId, status)
-      setCancelConfirmId(null)
-      const stranded = result.task?.strandedTasks ?? []
-      await refreshInstances(instanceOffset)
-      const label = status === 'paused' ? '目标已暂停' : status === 'active' ? '目标已恢复' : '目标已取消'
-      toast('ok', stranded.length > 0
-        ? `${label}；${stranded.length} 个在办任务已留痕并挂起：${stranded.join('、')}`
-        : label)
-    } catch (e) {
-      const message = e instanceof Error ? e.message : String(e)
-      setError(message)
-      toast('err', message)
-    } finally { setInstanceActionId(null) }
-  }
 
   const createOrReuseConfig = async (choice: ToolChoice): Promise<{ id: string; version: number }> => {
     const providerName = choice === 'dsh-native' ? dshProvider.trim() : choice
@@ -291,7 +219,7 @@ export function AgentWorkflowConfigurator({ scope }: Props): React.JSX.Element {
     const capabilities = choice === 'dsh-native'
       ? deriveNativeCapabilities(declaredFor(readiness, providerName), {
         toolFilter: nativeToolFilter, localAgent: nativeLocalAgent,
-        sessionResume: nativeSessionResume, cancellation: nativeCancellation,
+        cancellation: nativeCancellation,
       }).capabilities
       : EXTERNAL_CAPABILITIES
     const compatible = configs.filter(item => item.enabled && item.providerName === providerName
@@ -314,24 +242,6 @@ export function AgentWorkflowConfigurator({ scope }: Props): React.JSX.Element {
     return { id, version }
   }
 
-  const createNode = async (): Promise<void> => {
-    const id = newNodeId.trim()
-    const label = newNodeLabel.trim()
-    if (!id || !label) { setError('请填写节点 ID 和显示名称。'); return }
-    setSaving(true)
-    setError('')
-    try {
-      await registerAgentNode({ id, label, scope })
-      setNodes(await fetchAgentNodes(scope))
-      setNewNodeId('')
-      setNewNodeLabel('')
-      toast('ok', `节点 ${label} 已登记；请在对应 执行服务 配置相同 agentNodeId 并重启以开始心跳。`)
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e))
-    } finally {
-      setSaving(false)
-    }
-  }
 
   const save = async (): Promise<void> => {
     if (!pipeline) return
@@ -466,7 +376,6 @@ export function AgentWorkflowConfigurator({ scope }: Props): React.JSX.Element {
         setDshProvider(config.providerName)
         setNativeToolFilter(config.capabilities.toolFilter)
         setNativeLocalAgent(config.capabilities.localAgent)
-        setNativeSessionResume(config.capabilities.sessionResume)
         setNativeCancellation(config.capabilities.cancellation)
       }
       const tool: ToolChoice = config?.adapter === 'dsh-subagent' && config.providerName === 'codex' ? 'codex'
@@ -520,7 +429,7 @@ export function AgentWorkflowConfigurator({ scope }: Props): React.JSX.Element {
    */
   const nativeDerivation = deriveNativeCapabilities(declaredFor(readiness, dshProvider.trim()), {
     toolFilter: nativeToolFilter, localAgent: nativeLocalAgent,
-    sessionResume: nativeSessionResume, cancellation: nativeCancellation,
+    cancellation: nativeCancellation,
   })
   /** 这套配置里有没有用到 DSH（决定能力位推导的结果是否真的会被用到）。 */
   const usesNativeTool = (): boolean =>
@@ -595,12 +504,8 @@ export function AgentWorkflowConfigurator({ scope }: Props): React.JSX.Element {
               <div style={{ marginTop: 4 }}>· 只有想要下面三件事之一时才需要它：① 把某个阶段**换成别的 Agent 工具**跑（Claude Code / Codex）；
                 ② 固定一条**自定义交接链**（阶段可并行或汇合，不按流水线顺序）；
                 ③ 把一条链**冻结成版本**，以后发布目标时点名复用。</div>
-              <div style={{ marginTop: 4 }}>· 最短路径：三行各选一个岗位（已按你的流水线预填）→ 工具保持「DSH」→ 点「发布为可复用工作流版本」。</div>
+              <div style={{ marginTop: 4 }}>· 最短路径：三行各选一个岗位（已按你的流水线预填）→ 工具保持「DSH」→ 点「保存闭环配置」。要把某条链**冻结成版本**、以后按名字复用，再到下面的「高级设置」里发布。</div>
               <div style={{ marginTop: 4 }}>· 想让任务**自动开跑**：设置 → <b>持续执行</b>。想让**写码阶段**动起来：任务详情 → <b>🤖 派 AI 执行</b>。这两件事都**不**在本页。</div>
-            </div>
-            <div style={{ color: 'var(--muted-2)', marginTop: 8 }}>
-            本页只定义**交接链**，不会自动开启空间执行守护。发布目标时冻结工作流与工具版本；后续改动不改写已有目标。
-            Claude Code 与 Codex 需要各自的 外部执行服务；DSH 执行服务 的注册名与能力必须与运行环境一致。
             </div>
             {/* ★★ 2026-10-13：本机 provider **就绪度**（只读）。
                 这是"相当茫然"那个问题的正面回答：不再要求用户知道并提供 provider 名，
@@ -681,6 +586,15 @@ export function AgentWorkflowConfigurator({ scope }: Props): React.JSX.Element {
               : <div style={{ color: 'var(--muted-2)', marginTop: 8 }}>
                 已从就绪节点心跳确认 provider 注册：{readyProviderNames.join('、')}。心跳不代表账号已认证，也不证明原生权限模式生效。
               </div>}
+            {/* ★ 2026-10-13（②）：能力位的 blocker/warning **必须留在折叠区之外**。
+                其中一条会**拦下发布**（读数说 outputSchema=false）；跟着"高级"一起收起来的话，
+                用户看到的就是"一切正常"，而真正的问题藏在一次点击之后。 */}
+            {nativeDerivation.blockers.map((blocker, index) => <div key={index} style={{ color: 'var(--red)', marginTop: 6 }}>
+            ⛔ {blocker}
+            </div>)}
+            {nativeDerivation.warnings.map((warning, index) => <div key={index} style={{ color: 'var(--yellow)', marginTop: 6 }}>
+            {warning}
+            </div>)}
           {rolesForSelect.length < 3 ? <div style={{ color: 'var(--yellow)', marginTop: 8 }}>当前空间不足三个已启用阶段，请先配置三个可执行岗位。</div> : <>
             {(Object.keys(ROLE_LABEL) as RoleKey[]).map(key => <div key={key} style={rowStyle}>
               <b>{ROLE_LABEL[key]}</b>
@@ -697,15 +611,32 @@ export function AgentWorkflowConfigurator({ scope }: Props): React.JSX.Element {
                 {nodes.map(node => <option key={node.id} value={node.id}>{node.label} · {node.status}</option>)}
               </select>
             </div>)}
+            {/* ★★ 2026-10-13（② 常用/高级分层）：平时只看到"就绪度 + 三行岗位/工具 + 按钮"。
+                下面这些**不常用但有用**（改 DSH provider 名、能力声明、审查路由、自定义 DAG、
+                冻结版本）收进折叠区 —— 它们的复杂度不该挡在最短路径前面。
+                ★ 折叠区里**不含**任何会拦下发布的错误：那些在折叠区外（见上面那处注释）。 */}
+            <details style={{ marginTop: 10 }}>
+              <summary style={{ cursor: 'pointer', color: 'var(--muted-2)', fontSize: 11 }}>
+                ⚙ 高级设置：执行节点说明 · DSH 执行服务注册名 · 能力声明 · 审查路由与返工上限 · 自定义交接链 DAG · 发布为可复用工作流版本
+              </summary>
+              <div style={{ marginTop: 8 }}>
+            <div style={{ color: 'var(--muted-2)', marginTop: 8 }}>
+            本页只定义**交接链**，不会自动开启空间执行守护。发布目标时冻结工作流与工具版本；后续改动不改写已有目标。
+            Claude Code 与 Codex 需要各自的 外部执行服务；DSH 执行服务 的注册名与能力必须与运行环境一致。
+            </div>
             <div style={{ marginTop: 10, padding: 8, border: '1px solid var(--line)', borderRadius: 6 }}>
               <b>执行节点</b>
-              {nodes.length === 0 ? <div style={{ color: 'var(--muted-2)' }}>尚未登记节点。留空时由任一在线 执行节点 认领。</div> : nodes.map(node => <div key={node.id} style={{ color: 'var(--muted-2)' }}>{node.label} · {node.id} · {node.status}{node.observedProviders.length ? ` · ${node.observedProviders.join(', ')}` : ''} · {observedPermissionModes(node)}</div>)}
-              <div style={{ display: 'flex', gap: 8, marginTop: 8, flexWrap: 'wrap' }}>
-                <input value={newNodeId} onChange={e => setNewNodeId(e.target.value)} placeholder="节点 ID，如 workstation-a" />
-                <input value={newNodeLabel} onChange={e => setNewNodeLabel(e.target.value)} placeholder="显示名称" />
-                <button type="button" className="btn ghost" disabled={saving} onClick={() => void createNode()}>登记节点</button>
-              </div>
-              <div style={{ color: 'var(--muted-2)' }}>节点是运行 Legion worker 的 执行服务实例，不是 Claude/Codex 产品。Provider、能力和 生效权限模式由 daemon 心跳报告；外部阶段只有匹配冻结权限模式时才会派工。登记不会复制登录凭据。随后需在 daemon 配置中设置相同的 agentNodeId。</div>
+              {/* ★ 2026-10-13：**删掉了手工「登记节点」输入框**。
+                  理由：A 档之后守护会**自己登记**（首次心跳发现本空间没有这个节点就注册一次，
+                  新空间同理）⇒ 这里原来要求用户先知道一个节点 ID 与显示名称，
+                  而那两个值他既无从查、也不该关心 —— 那正是"相当茫然"的一部分。
+                  ★ 代价（如实记下）：不能再"为还没启动的机器预留节点"。但那个能力价值有限 ——
+                  节点不就绪时绑定本来就会被发布校验拒绝。
+                  见 `plugins/src/index.ts` 的自注册分支与 `docs/FEATURES.md` §3.21。 */}
+              {nodes.length === 0
+                ? <div style={{ color: 'var(--muted-2)' }}>本空间还没有节点。执行服务启动后**会自己登记**（不需要你填任何东西）；留空时由任一在线节点认领。</div>
+                : nodes.map(node => <div key={node.id} style={{ color: 'var(--muted-2)' }}>{node.label} · {node.id} · {node.status}{node.observedProviders.length ? ` · ${node.observedProviders.join(', ')}` : ''} · {observedPermissionModes(node)}</div>)}
+              <div style={{ color: 'var(--muted-2)' }}>节点是运行 Legion worker 的 执行服务实例，不是 Claude/Codex 产品。Provider、能力和 生效权限模式由 daemon 心跳报告；外部阶段只有匹配冻结权限模式时才会派工。节点身份由守护按 `agentNodeId`（支持 `{'{scope}'}` 占位符）自行上报，不会复制登录凭据。</div>
               {nodes.some(node => node.providerNames.includes('codex')) && <div style={{ color: 'var(--muted-2)', marginTop: 6 }}>
                 Codex 网络代理状态（逐节点）：{nodes.filter(node => node.providerNames.includes('codex')).map(node => `${node.label}：${formatCodexSystemProxyMode(observedCodexSystemProxyMode(node))}`).join('；')}。
               </div>}
@@ -759,22 +690,16 @@ export function AgentWorkflowConfigurator({ scope }: Props): React.JSX.Element {
                   {nativeDerivation.derived.length > 0 ? '（读数）' : '（声明）'}
                 </label>)}
                 <div style={{ color: 'var(--muted-2)', marginTop: 6 }}>
-                  下列两项**本机读不出来**，需要你确认：
+                  {ASSUMED_KEYS.length === 1 ? '下列这一项**本机读不出来**，需要你确认：' : `下列 ${ASSUMED_KEYS.length} 项**本机读不出来**，需要你确认：`}
                 </div>
                 {ASSUMED_KEYS.map(key => <label key={key} style={{ display: 'block' }}>
                   <input type="checkbox"
-                    checked={key === 'localAgent' ? nativeLocalAgent : nativeSessionResume}
-                    onChange={e => { if (key === 'localAgent') setNativeLocalAgent(e.target.checked); else setNativeSessionResume(e.target.checked) }} />
+                    checked={nativeLocalAgent}
+                    onChange={e => setNativeLocalAgent(e.target.checked)} />
                   {' '}{ABILITY_LABEL[key]}
                   <div style={{ marginLeft: 18, color: 'var(--muted-2)' }}>{ASSUMED_REASONS[key]}</div>
                 </label>)}
               </div>
-              {nativeDerivation.blockers.map((blocker, index) => <div key={index} style={{ color: 'var(--red)', marginTop: 6 }}>
-                ⛔ {blocker}
-              </div>)}
-              {nativeDerivation.warnings.map((warning, index) => <div key={index} style={{ color: 'var(--yellow)', marginTop: 6 }}>
-                {warning}
-              </div>)}
             </div>}
             <div style={{ marginTop: 10 }}>
               <label>审查返工上限 <input type="number" min={0} max={20} value={maxReworkRounds} onChange={e => setMaxReworkRounds(Number(e.target.value))} style={{ width: 70 }} /> 轮</label>
@@ -880,53 +805,10 @@ export function AgentWorkflowConfigurator({ scope }: Props): React.JSX.Element {
                 <span style={{ color: 'var(--muted-2)' }}>{definitions.length} 个已登记版本 · 阶段与依赖由服务端校验</span>
               </div>
             </section>
+              </div>
+            </details>
           </>}
           {error && <div style={{ color: 'var(--red)', marginTop: 8 }}>{error}</div>}
-          <section style={{ marginTop: 14, padding: 10, border: '1px solid var(--line)', borderRadius: 6 }}>
-            <b>工作流运行实例</b>
-            <div style={{ color: 'var(--muted-2)', margin: '4px 0 8px' }}>按目标保存的独立运行快照。选择实例可查看阶段任务、产物交接与审查返工记录。</div>
-            <div style={{ display: 'flex', gap: 7, flexWrap: 'wrap', marginBottom: 8 }}>
-              <input aria-label="搜索工作流实例" value={instanceSearch} onChange={event => setInstanceSearch(event.target.value)} onKeyDown={event => { if (event.key === 'Enter') void refreshInstances(0) }} placeholder="按目标、定义 ID 或实例 ID 搜索" />
-              <select aria-label="按状态筛选工作流实例" value={instanceStatus} onChange={event => { setInstanceStatus(event.target.value); void refreshInstances(0, event.target.value) }}>
-                <option value="all">全部状态</option><option value="active">进行中</option><option value="done">已完成</option><option value="paused">已暂停</option><option value="canceled">已取消</option>
-              </select>
-              <button type="button" className="btn ghost" disabled={loading || instancesLoading} onClick={() => void refreshInstances(0)}>搜索</button>
-            </div>
-            {instances.length === 0 ? <div style={{ color: 'var(--muted-2)' }}>该空间还没有创建跨 Agent 工作流实例。</div> : <div style={{ display: 'grid', gap: 6 }}>
-              {instances.map(instance => <div key={instance.id} style={{ display: 'grid', gridTemplateColumns: 'minmax(130px,1fr) auto auto auto', gap: 8, alignItems: 'center', padding: 6, background: 'var(--surface-2)', borderRadius: 5 }}>
-                <div><b>{instance.objective || instance.definitionName || instance.id}</b><div style={{ color: 'var(--muted-2)', fontSize: 10 }}>{instance.definitionId ? `${instance.definitionId} · v${instance.definitionVersion}` : '空间默认工作流'} · {instance.id}</div></div>
-                <span>{workflowStatusLabel(instance.status)} · {instance.counts.done}/{instance.counts.total} 完成</span>
-                <button type="button" className="btn ghost" disabled={historyLoading || !instance.anchorTaskId} onClick={() => void inspectInstance(instance)}>查看历史</button>
-                {(instance.status === 'active' || instance.status === 'paused') && <div style={{ display: 'flex', gap: 5 }}>
-                  {cancelConfirmId === instance.id ? <>
-                    <button type="button" className="btn ghost danger confirming" disabled={instanceActionId !== null} onClick={() => void changeInstanceStatus(instance, 'canceled')}>{instanceActionId === instance.id ? '处理中…' : '确认取消'}</button>
-                    <button type="button" className="btn ghost" disabled={instanceActionId !== null} onClick={() => setCancelConfirmId(null)}>保留</button>
-                  </> : <>
-                    <button type="button" className="btn ghost" disabled={instanceActionId !== null} onClick={() => void changeInstanceStatus(instance, instance.status === 'active' ? 'paused' : 'active')}>
-                      {instanceActionId === instance.id ? '处理中…' : instance.status === 'active' ? '暂停' : '恢复'}
-                    </button>
-                    <button type="button" className="btn ghost" disabled={instanceActionId !== null} title="取消目标会取消未开工任务，并将在办任务留痕挂起" onClick={() => void changeInstanceStatus(instance, 'canceled')}>取消</button>
-                  </>}
-                </div>}
-              </div>)}
-            </div>}
-            <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end', alignItems: 'center', marginTop: 8 }}>
-              <span style={{ color: 'var(--muted-2)' }}>{instanceTotal ? `${instanceOffset + 1}–${Math.min(instanceOffset + instances.length, instanceTotal)} / ${instanceTotal}` : '0 项'}</span>
-              <button type="button" className="btn ghost" disabled={loading || instancesLoading || instanceOffset <= 0} onClick={() => void refreshInstances(Math.max(0, instanceOffset - 20))}>上一页</button>
-              <button type="button" className="btn ghost" disabled={loading || instancesLoading || instanceOffset + instances.length >= instanceTotal} onClick={() => void refreshInstances(instanceOffset + 20)}>下一页</button>
-            </div>
-            {historyLoading && <div style={{ marginTop: 8, color: 'var(--muted-2)' }}>正在读取工作流历史…</div>}
-            {selectedHistory && <div style={{ marginTop: 10, borderTop: '1px solid var(--line)', paddingTop: 8 }}>
-              <div><b>{selectedHistory.workflowId}</b> · {selectedHistory.instance?.status ? workflowStatusLabel(selectedHistory.instance.status) : '状态未知'} · {selectedHistory.reviews.length} 条审查/返工记录</div>
-              <div style={{ display: 'grid', gap: 5, marginTop: 6 }}>
-                {selectedHistory.tasks.map(task => <div key={task.id} style={{ padding: 6, background: 'var(--surface-2)', borderRadius: 4 }}>
-                  <b>{task.workflowStageId ?? task.agentSelectionSnapshot?.workflowStageId ?? task.role ?? '阶段'}</b> · {task.title} · {task.status}
-                  <div style={{ color: 'var(--muted-2)', fontSize: 10 }}>任务 {task.id} · 工具 {task.agentSelectionSnapshot?.agentToolConfig?.id ?? '未记录'} · 上游 {task.agentSelectionSnapshot?.workflowContext?.upstreamStages?.length ?? task.agentSelectionSnapshot?.workflowContext?.designArtifacts?.length ?? 0} 项</div>
-                </div>)}
-              </div>
-              {selectedHistory.reviews.map((review, index) => <div key={`${review.sourceReviewTaskId}:${index}`} style={{ marginTop: 5, color: 'var(--muted-2)' }}>第 {review.round} 轮 · {review.kind} · 审查任务 {review.sourceReviewTaskId}{review.nextTaskId ? ` → ${review.nextTaskId}` : ''}</div>)}
-            </div>}
-          </section>
           <div style={{ display: 'flex', gap: 8, marginTop: 10 }}>
             <button type="button" className="btn primary" disabled={saving || loading || rolesForSelect.length < 3} onClick={() => void save()}>{saving ? '保存中…' : '保存闭环配置'}</button>
             {pipeline.workflow && <button type="button" className="btn ghost" disabled={saving} onClick={() => void disable()}>关闭自动交接</button>}
@@ -937,8 +819,4 @@ export function AgentWorkflowConfigurator({ scope }: Props): React.JSX.Element {
       </div>}
     </div>
   )
-}
-
-function workflowStatusLabel(status: string): string {
-  return ({ active: '进行中', done: '已完成', paused: '已暂停', canceled: '已取消' } as Record<string, string>)[status] ?? status
 }

@@ -928,6 +928,12 @@ async function stageTest() {
         // 而派工与认领都真的按声明逐位拒收。核心分歧是
         // **读数缺席（不拦）** vs **读数说 false（必须拦）**。
         'workbench/scripts/native-capabilities.test.mjs',
+        // 2026-10-13：「Agent 工作流」面板的**分层**与**减法**（源码级）。
+        // 守两条下次很容易加错的：① 能力位的 blocker/warning **不许**被折进高级区
+        // （那里面有一条能拦下发布；折起来就等于"出问题时显示一切正常"）；
+        // ② 已删的手工登记节点与 sessionResume 复选框**不许悄悄回来**
+        // （前者已被守护自注册取代，后者零消费方）。
+        'workbench/scripts/workflow-panel-layering.test.mjs',
         // 2026-10-13：「装上缺的 bundle」那条修法的**可粘贴性**。
         // 原来打印的是 `dsh plugin --profile <profile-name> add …` —— 看着能跑、其实跑不了
         // （占位符 + Desktop 独占 profile 被 DSH 直接拒绝）。守"什么时候必须**不给**命令"。

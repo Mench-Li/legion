@@ -52,8 +52,60 @@ import { buildZip } from '../../product/update/zip.mjs'
 import { EMPTY_MIGRATION_PLAN_DIGEST, migrationPlanDigest } from '../../product/upgrade/migration.mjs'
 import { RELEASE_CHANNELS } from '../../product/upgrade/channels.mjs'
 import { validateManifest } from '../../product/upgrade/manifest.mjs'
+// ★ 发布说明要按**客户端读得下去**的判据来验，所以直接用客户端那一份实现。
+//   两份判据会在某一天分家：一份接受、另一份拒收时，页面上的表现是"说明是空的"
+//   而发布日志全绿 —— 那正是这道门要防的形状。
+import { decodePlainText, MAX_NOTES_BYTES } from '../../product/update/client.mjs'
 
 export const PUBLISH_FORMAT = 'legion/update-publish@1'
+
+/**
+ * 发布说明必须能被客户端读成纯文本 —— 不合格就**在签名之前**拒收。
+ *
+ * ## 为什么这道门必须有（两次真实事故，都发生在生产上）
+ *
+ * ① `rel-0.1.3` / `rel-0.1.4` 的 notes 是 **GBK**（在中文 Windows 上用 `>`
+ *    或 `Set-Content` 写文件，默认就是 ANSI/GBK）。客户端 `decodePlainText`
+ *    要求**合法 UTF-8**，于是**整份说明被静默丢掉** —— 用户在"检查更新"里
+ *    看不到任何说明，而发布侧一切正常。
+ *
+ * ② `rel-0.1.1` 的 notes 是**发布当时就已经损坏**的（合法 UTF-8，但内容是乱码）。
+ *    客户端接受它，于是把乱码**显示给用户**。
+ *
+ * 两次的共同点是同一条：**发布这一步不校验，客户端静默处理**。
+ *
+ *   > 一个"发布成功、客户端悄悄丢掉"的说明，
+ *   > 与一个"根本没写说明"的发布，在发布日志里长得一模一样。
+ *
+ * ## 为什么是硬失败而不是警告
+ *
+ * 警告会被忽略（这是它之所以是警告的原因）。这里拒收的代价只是"重存一次文件"，
+ * 而放过去的代价是"用户看不到更新说明，且没人会知道"。
+ *
+ * @param {string} notesPath 运营者给的发布说明文件
+ * @returns {string} 通过校验的正文（调用方可以据此顺带打一行摘要）
+ */
+function assertPublishableNotes(notesPath) {
+  const bytes = readFileSync(notesPath)
+  const problems = []
+  if (bytes.length === 0) problems.push('是空文件')
+  if (bytes.length > MAX_NOTES_BYTES) {
+    problems.push(`有 ${bytes.length} 字节，超过上限 ${MAX_NOTES_BYTES}`)
+  }
+  const text = decodePlainText(bytes)
+  if (text === null) {
+    problems.push('不是合法 UTF-8 纯文本（含非法字节、NUL 或控制字符）')
+  }
+  if (problems.length > 0) {
+    throw new Error(
+      `发布说明不合格：${notesPath} ${problems.join('；')}\n`
+      + '  客户端只接受合法 UTF-8 纯文本（`product/update/client.mjs` 的 `decodePlainText`）；\n'
+      + '  不合格的说明会被它**静默丢掉** —— 用户在"检查更新"里看不到任何说明，而发布侧毫无异常。\n'
+      + '  修法：把说明**另存为 UTF-8**（Windows 上不要用 `>` 或 `Set-Content` 的默认编码）。',
+    )
+  }
+  return text
+}
 
 function parseArgs(argv) {
   const args = new Map()
@@ -228,6 +280,10 @@ export function buildPublish({
     pkg = artifactOfFile(packageRelative, packageZipPath)
   }
   const installer = artifactOfFile(`${releasePrefix}/${basename(installerPath)}`, installerPath)
+  // ★★ 先验**客户端读不读得下去**，再算哈希、再签名。
+  //   放在这里（而不是产出文件之后）是为了"不合格就什么都不产出"：
+  //   一个已经签好名单、只是说明读不出来的发布，会让人以为"只差一步"。
+  const notesText = assertPublishableNotes(notesPath)
   const notes = artifactOfFile(`${releasePrefix}/${basename(notesPath)}`, notesPath)
 
   const release = buildRelease({
@@ -290,6 +346,22 @@ export function buildPublish({
       closurePath: pkg.closurePath ?? null,
       closureSha256: pkg.closureSha256 ?? null,
       closureFileCount: packed?.fileCount ?? null,
+      /**
+       * 用户在"检查更新"里会看到的**正文开头**（空行压掉、截断）。
+       *
+       * 它是这道门抓不到那一类的兜底：编码不对（GBK、UTF-16、含控制字符）
+       * 由 `assertPublishableNotes` 机械拒收；而**合法 UTF-8 但内容是乱码**
+       * （`rel-0.1.1` 就是）在字节层面完全合法，没有判据能可靠地认出它。
+       *
+       * 第一版这里只放了首行，而那**看不见**问题：0.1.1 的首行是 `Legion 0.1.1`
+       * （版本头），乱码在下面几行。所以放的是**正文开头**而不是标题
+       * —— 发布者扫一眼就能看出"这不是中文"。
+       *
+       *   > 一个"把版本号当标题报出来"的预览，
+       *   > 与一个"把用户真会看到的那几个字报出来"的预览，在发布日志里都像一行摘要。
+       */
+      notesPreview: notesText.replace(/\s+/g, ' ').trim().slice(0, 120),
+      notesChars: notesText.length,
     }),
   })
 }

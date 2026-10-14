@@ -32,7 +32,7 @@ const READING = Object.freeze({ outputSchema: true, toolFilter: true, cancellati
 /** 读数说"不支持结构化输出"。 */
 const NO_STRUCTURED = Object.freeze({ outputSchema: false, toolFilter: true, cancellation: true })
 
-const USER = Object.freeze({ toolFilter: true, localAgent: true, sessionResume: false, cancellation: true })
+const USER = Object.freeze({ toolFilter: true, localAgent: true, cancellation: true })
 
 describe('能力位推导', () => {
   test('★ 有读数 ⇒ 三项**取自读数**，两位留给用户声明', () => {
@@ -43,7 +43,7 @@ describe('能力位推导', () => {
     assert.equal(d.capabilities.toolFilter, true)
     assert.equal(d.capabilities.cancellation, true)
     assert.equal(d.capabilities.localAgent, USER.localAgent)
-    assert.equal(d.capabilities.sessionResume, USER.sessionResume)
+    assert.equal(d.capabilities.sessionResume, false, '不再由用户设置 ⇒ 恒 false')
     // 完整声明必须含 hub 要求的全部 7 个键（缺一个 hub 会拒）
     assert.deepEqual(Object.keys(d.capabilities).sort(),
       ['cancellation', 'localAgent', 'outputSchema', 'sessionResume', 'textInput', 'textOutput', 'toolFilter'])
@@ -72,7 +72,7 @@ describe('能力位推导', () => {
   })
 
   test('★ 读数缺席 ⇒ 三项退回用户声明（保持既有行为，不悄悄改语义）', () => {
-    const d = deriveNativeCapabilities(null, { toolFilter: false, localAgent: false, sessionResume: true, cancellation: false })
+    const d = deriveNativeCapabilities(null, { toolFilter: false, localAgent: false, cancellation: false })
     assert.equal(d.capabilities.toolFilter, false, '用户声明的 false 要生效（旧行为）')
     assert.equal(d.capabilities.cancellation, false)
     assert.equal(d.capabilities.outputSchema, true, '读数缺席时维持此前的默认 true')
@@ -112,13 +112,40 @@ describe('能力位推导', () => {
     }
   })
 
-  test('两位"推不出来"的必须带**原因**（界面直接显示，不许留空）', () => {
+  test('"推不出来"的那一位必须带**原因**（界面直接显示，不许留空）', () => {
     for (const key of ASSUMED_KEYS) {
       assert.ok(typeof ASSUMED_REASONS[key] === 'string' && ASSUMED_REASONS[key].length > 10,
         key + ' 必须说明为什么本机读不出来')
     }
     assert.match(ASSUMED_REASONS.localAgent, /本地 Agent/)
-    assert.match(ASSUMED_REASONS.sessionResume, /没有任何消费方/)
+  })
+
+  test('★★★ `sessionResume` 不再问用户 —— 写死 false，且传什么都一样', () => {
+    // 2026-10-13：它**没有消费方**（全仓检索只有声明点），于是不再放进 ASSUMED_KEYS。
+    //
+    //   > 一个"问了但没人用"的选项，与一个"根本没问"的选项，
+    //   > 在**用户点它的时候**看起来一样 —— 区别只在他以为自己的选择起了作用。
+    //
+    // ★ 但它在**数据模型里仍然存在**：`team-hub/harness-store.mjs` 的 allowed 要求
+    //   每个键都被显式声明成布尔，所以派生结果里必须有这个键。
+    assert.ok(!ASSUMED_KEYS.includes('sessionResume'), 'sessionResume 不该再出现在"需用户确认"的名单里')
+    assert.equal(ASSUMED_REASONS.sessionResume, undefined, '它不该再有界面原因文案')
+
+    for (const declared of [null, READING]) {
+      const d = deriveNativeCapabilities(declared, { toolFilter: true, localAgent: true, cancellation: true })
+      assert.equal(d.capabilities.sessionResume, false, '无论读数在不在，都是写死的 false')
+      assert.ok('sessionResume' in d.capabilities, '★ 键必须仍在（否则 hub 的 schema 会拒）')
+    }
+  })
+
+  test('★★ `localAgent` **不许**一起删掉 —— 它在集成模式下真的会拦人', () => {
+    // 这条是防止"顺手把两个都删了"：`plugins/src/index.ts` 里有真实分支读它
+    // （集成模式要求本地 Agent 拦截）。sessionResume 可以删，它不行。
+    assert.ok(ASSUMED_KEYS.includes('localAgent'))
+    const off = deriveNativeCapabilities(READING, { toolFilter: true, localAgent: false, cancellation: true })
+    assert.equal(off.capabilities.localAgent, false, '用户声明的值必须生效')
+    const on = deriveNativeCapabilities(READING, { toolFilter: true, localAgent: true, cancellation: true })
+    assert.equal(on.capabilities.localAgent, true)
   })
 })
 

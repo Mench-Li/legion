@@ -188,6 +188,35 @@ node scripts/update/publish.mjs `
   --target production --out .\dist\update
 ```
 
+#### ★★ 发布说明必须是 **UTF-8 纯文本**（`--notes`）
+
+`publish.mjs` 现在会**在签名之前**校验说明，不合格就拒收并说清怎么修。
+
+为什么这道门存在（两次真实事故，都在生产上）：
+
+| 版本 | 当时那份 notes 的编码 | 客户端（`decodePlainText`）|
+| --- | --- | --- |
+| `rel-0.1.1` | 合法 UTF-8，但内容是**乱码** | 接受 → 把乱码**显示给用户** |
+| `rel-0.1.3` | **GBK** | **拒收** |
+| `rel-0.1.4` | **GBK** | **拒收** |
+
+> 一个"发布成功、客户端悄悄丢掉"的说明，
+> 与一个"根本没写说明"的发布，在发布日志里长得一模一样。
+
+**GBK 的来源很具体**：在中文 Windows 上用 `>` 或 `Set-Content` 写文件，
+默认就是 ANSI（GBK）。写这类文件请显式指定编码，例如：
+
+```powershell
+# ✓ 显式 UTF-8（无 BOM）
+[IO.File]::WriteAllText('<notes.txt>', $text, [Text.UTF8Encoding]::new($false))
+```
+
+**已知边界（刻意不假装能判）**：这道门管的是**编码**。
+"合法 UTF-8 但内容是乱码"（`rel-0.1.1` 就是）在字节层面完全合法，
+没有机械判据能可靠地认出它。所以发布摘要里会印一行 `notesPreview`
+（用户会看到的那段正文的开头）—— 发布者扫一眼就能看出不对。
+
+
   ★ **为什么去掉 vendor**：`update-payload.mjs` 按设计**禁止** `node_modules`。
     升级载荷解到 `resources/legion/versions/<版本>/`，而 vendor 属于**安装包提供的
     共享部分** `resources/legion/vendor/archive`（`bundled-runtime.mjs` 从

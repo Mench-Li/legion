@@ -21,6 +21,8 @@ import { test } from 'node:test'
 
 import { buildPublish, migrationPlanDigestFromArgs, packDirectory, parsePatchBindings, renderUploadPlan, resolveMigrationPlanDigest, writePublish } from './publish.mjs'
 import { EMPTY_MIGRATION_PLAN_DIGEST, migrationPlanDigest, sampleMigrations } from '../../product/upgrade/migration.mjs'
+// 上限取自**客户端那一份**（发布端与客户端必须同一个数，否则门放过去、客户端丢掉）。
+import { MAX_NOTES_BYTES } from '../../product/update/client.mjs'
 import { verifyHost } from './verify-host.mjs'
 import { buildTrustTable } from './trust-file.mjs'
 import { createTrustStore, generateReleaseKeyPair, verifyEnvelope } from '../../product/update/envelope.mjs'
@@ -284,6 +286,114 @@ test('发布：产品清单版本与 --product-version 不一致 → 拒绝', (t
     () => buildPublish(publishArgs(ctx, { productVersion: '2.0.0' })),
     /不一致/,
   )
+})
+
+// ══════════════════════════════════════════════════════════════════════════
+// ★★★ 发布说明必须能被客户端读成纯文本 —— 这一族是两次生产事故的直接产物
+//
+//   · `rel-0.1.3` / `rel-0.1.4` 的 notes 是 **GBK**（中文 Windows 上 `>` /
+//     `Set-Content` 的默认编码），客户端 `decodePlainText` 要求合法 UTF-8，
+//     于是整份说明被**静默丢掉** —— 用户看不到任何更新说明，而发布侧全绿。
+//   · `rel-0.1.1` 的 notes 是发布**当时就损坏**的合法 UTF-8，客户端接受它，
+//     把乱码**显示给用户**。
+//
+//   共同点：发布这一步不校验，客户端静默处理。
+// ══════════════════════════════════════════════════════════════════════════
+
+/** 真·GBK 字节（`安`=B0B2 `装`=D7B0 `包`=B0FC），照 `rel-0.1.3` 那份线上文件。 */
+const GBK_NOTES = Buffer.concat([
+  Buffer.from('Legion 0.1.3\n\n- ', 'ascii'),
+  Buffer.from([0xb0, 0xb2, 0xd7, 0xb0, 0xb0, 0xfc, 0xc3, 0xfb]),
+  Buffer.from('\n', 'ascii'),
+])
+
+test('★★★ 发布说明是 GBK → **拒绝发布**，并说清客户端会静默丢掉它', (t) => {
+  const ctx = setup(t)
+  writeFileSync(ctx.notesPath, GBK_NOTES)
+  assert.throws(
+    () => buildPublish(publishArgs(ctx)),
+    (e) => {
+      assert.match(e.message, /发布说明不合格/)
+      assert.match(e.message, /UTF-8/, '要说清该用什么编码')
+      assert.match(e.message, /静默丢掉/, '要说清后果 —— 否则看起来只是"一个格式问题"')
+      // ★ 这一句是**防复发**的那半句：GBK 的真实来源就是中文 Windows 上
+      //   `>` / `Set-Content` 的默认编码。只说"要 UTF-8"而不点名这个坑，
+      //   下一个人还会用同一个方式写文件、再撞一次。
+      //   （破坏性验证里"删掉这半句"原本**没人抓**，所以补了这条判据。）
+      assert.match(e.message, /Set-Content|不要用 `>`/, '要点名那个真实的坑（Windows 默认 ANSI）')
+      return true
+    },
+  )
+})
+
+test('★★★ 发布说明不是 UTF-8（UTF-16LE 带 BOM）→ 拒绝', (t) => {
+  const ctx = setup(t)
+  writeFileSync(ctx.notesPath, Buffer.from('\ufeff- 修复若干问题\n', 'utf16le'))
+  assert.throws(() => buildPublish(publishArgs(ctx)), /发布说明不合格/)
+})
+
+test('★★★ 拒收发生在**产出任何文件之前**（不合格就不该留下半个发布）', (t) => {
+  const ctx = setup(t)
+  writeFileSync(ctx.notesPath, GBK_NOTES)
+  const outDir = join(ctx.root, 'out-should-stay-empty')
+  // `buildPublish` 先抛（门在签名与产出之前），所以 `writePublish` 根本不会跑 ——
+  // outDir 不该被创建。这条盯的是"不合格时不留下半个发布"。
+  assert.throws(() => writePublish(buildPublish(publishArgs(ctx)), outDir), /发布说明不合格/)
+  assert.equal(existsSync(outDir), false, '不合格时不该创建输出目录')
+})
+
+test('★★ 空说明 / 含 NUL / 含控制字符 → 拒绝（空说明等于没写，且看起来像"写了"）', (t) => {
+  const ctx = setup(t)
+  for (const [label, bytes] of [
+    ['空文件', Buffer.alloc(0)],
+    ['含 NUL', Buffer.from('- 修复\u0000若干问题\n', 'utf8')],
+    ['含控制字符', Buffer.from('- 修复\u0007问题\n', 'utf8')],
+  ]) {
+    writeFileSync(ctx.notesPath, bytes)
+    assert.throws(() => buildPublish(publishArgs(ctx)), /发布说明不合格/, `${label} 应当被拒`)
+  }
+})
+
+test('★★ 超过 MAX_NOTES_BYTES → 拒绝（它是一段说明，不是文档库）', (t) => {
+  const ctx = setup(t)
+  writeFileSync(ctx.notesPath, Buffer.from(`- ${'x'.repeat(MAX_NOTES_BYTES)}\n`, 'utf8'))
+  assert.throws(() => buildPublish(publishArgs(ctx)), /超过上限/)
+})
+
+test('★★★ 反例守卫：合法的 UTF-8 说明**照旧通过**（门不是恒拒）', (t) => {
+  const ctx = setup(t)
+  const built = buildPublish(publishArgs(ctx))
+  assert.equal(built.release.notes.sizeBytes, readFileSync(ctx.notesPath).length)
+  assert.match(built.summary.notesPreview, /修复若干问题/, '正文预览要带出来给发布者看')
+})
+
+test('★★★ 已知边界：**合法 UTF-8 的乱码**这门抓不到 —— 靠 notesPreview 兜底', (t) => {
+  const ctx = setup(t)
+  // 这正是 `rel-0.1.1` 那份文件的形状：合法 UTF-8，但内容是"UTF-8 被当成 GBK 读"的产物。
+  // 字节层面完全合法，所以没有任何机械判据能可靠地认出它。
+  writeFileSync(ctx.notesPath, Buffer.from('Legion 0.1.1\n\n- 妗岄潰绔嚜鍔ㄦ洿鏂帮細\n', 'utf8'))
+  const built = buildPublish(publishArgs(ctx))
+  // ① 门**放过**它 —— 这是**已知且刻意**的边界，不是遗漏。
+  assert.equal(built.release.notes.sizeBytes, readFileSync(ctx.notesPath).length)
+  // ② 所以判据钉住"乱码必须出现在发布摘要里" —— 那是人唯一会看到的信号。
+  //
+  //   ★ 第一版这里放的是**首行**（`notesTitle`），而 0.1.1 的首行是版本头
+  //     `Legion 0.1.1` —— 乱码在下面几行，**看不见**。这一条判据当场把它抓出来了。
+  assert.match(built.summary.notesPreview, /妗岄潰绔/, '乱码必须出现在预览里（否则等于没有兜底）')
+  assert.match(built.summary.notesPreview, /^Legion 0\.1\.1/, '预览从正文开头起')
+})
+
+test('★★★ 那个预览必须**真的印出来**（"在对象里"与"人看得到"是两件事）', (t) => {
+  const ctx = setup(t)
+  writeFileSync(ctx.notesPath, Buffer.from('Legion 0.1.1\n\n- 妗岄潰绔嚜鍔ㄦ洿鏂帮細\n', 'utf8'))
+  const built = buildPublish(publishArgs(ctx))
+  const outDir = join(ctx.root, 'out')
+  writePublish(built, outDir, { target: 'production', log: () => {} })
+  const plan = readFileSync(join(outDir, 'upload-plan.txt'), 'utf8')
+  // ★ 这条是上面那条的**真正判据**：`summary` 只有被渲染出来才有意义。
+  //   一个"字段在对象里、但没有任何渲染路径"的兜底，与没有兜底是同一个东西。
+  assert.match(plan, /notesPreview/, '上传计划里必须出现 notesPreview 这个字段名')
+  assert.match(plan, /妗岄潰绔/, '乱码正文必须真的印在计划里（发布者扫一眼就能看出不对）')
 })
 
 test('发布：产品清单本身不合法 → 拒绝', (t) => {

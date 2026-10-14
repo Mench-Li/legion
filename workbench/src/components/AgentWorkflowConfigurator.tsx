@@ -575,12 +575,8 @@ export function AgentWorkflowConfigurator({ scope }: Props): React.JSX.Element {
               <div style={{ marginTop: 4 }}>· 只有想要下面三件事之一时才需要它：① 把某个阶段**换成别的 Agent 工具**跑（Claude Code / Codex）；
                 ② 固定一条**自定义交接链**（阶段可并行或汇合，不按流水线顺序）；
                 ③ 把一条链**冻结成版本**，以后发布目标时点名复用。</div>
-              <div style={{ marginTop: 4 }}>· 最短路径：三行各选一个岗位（已按你的流水线预填）→ 工具保持「DSH」→ 点「发布为可复用工作流版本」。</div>
+              <div style={{ marginTop: 4 }}>· 最短路径：三行各选一个岗位（已按你的流水线预填）→ 工具保持「DSH」→ 点「保存闭环配置」。要把某条链**冻结成版本**、以后按名字复用，再到下面的「高级设置」里发布。</div>
               <div style={{ marginTop: 4 }}>· 想让任务**自动开跑**：设置 → <b>持续执行</b>。想让**写码阶段**动起来：任务详情 → <b>🤖 派 AI 执行</b>。这两件事都**不**在本页。</div>
-            </div>
-            <div style={{ color: 'var(--muted-2)', marginTop: 8 }}>
-            本页只定义**交接链**，不会自动开启空间执行守护。发布目标时冻结工作流与工具版本；后续改动不改写已有目标。
-            Claude Code 与 Codex 需要各自的 外部执行服务；DSH 执行服务 的注册名与能力必须与运行环境一致。
             </div>
             {/* ★★ 2026-10-13：本机 provider **就绪度**（只读）。
                 这是"相当茫然"那个问题的正面回答：不再要求用户知道并提供 provider 名，
@@ -661,6 +657,15 @@ export function AgentWorkflowConfigurator({ scope }: Props): React.JSX.Element {
               : <div style={{ color: 'var(--muted-2)', marginTop: 8 }}>
                 已从就绪节点心跳确认 provider 注册：{readyProviderNames.join('、')}。心跳不代表账号已认证，也不证明原生权限模式生效。
               </div>}
+            {/* ★ 2026-10-13（②）：能力位的 blocker/warning **必须留在折叠区之外**。
+                其中一条会**拦下发布**（读数说 outputSchema=false）；跟着"高级"一起收起来的话，
+                用户看到的就是"一切正常"，而真正的问题藏在一次点击之后。 */}
+            {nativeDerivation.blockers.map((blocker, index) => <div key={index} style={{ color: 'var(--red)', marginTop: 6 }}>
+            ⛔ {blocker}
+            </div>)}
+            {nativeDerivation.warnings.map((warning, index) => <div key={index} style={{ color: 'var(--yellow)', marginTop: 6 }}>
+            {warning}
+            </div>)}
           {rolesForSelect.length < 3 ? <div style={{ color: 'var(--yellow)', marginTop: 8 }}>当前空间不足三个已启用阶段，请先配置三个可执行岗位。</div> : <>
             {(Object.keys(ROLE_LABEL) as RoleKey[]).map(key => <div key={key} style={rowStyle}>
               <b>{ROLE_LABEL[key]}</b>
@@ -677,6 +682,19 @@ export function AgentWorkflowConfigurator({ scope }: Props): React.JSX.Element {
                 {nodes.map(node => <option key={node.id} value={node.id}>{node.label} · {node.status}</option>)}
               </select>
             </div>)}
+            {/* ★★ 2026-10-13（② 常用/高级分层）：平时只看到"就绪度 + 三行岗位/工具 + 按钮"。
+                下面这些**不常用但有用**（改 DSH provider 名、能力声明、审查路由、自定义 DAG、
+                冻结版本）收进折叠区 —— 它们的复杂度不该挡在最短路径前面。
+                ★ 折叠区里**不含**任何会拦下发布的错误：那些在折叠区外（见上面那处注释）。 */}
+            <details style={{ marginTop: 10 }}>
+              <summary style={{ cursor: 'pointer', color: 'var(--muted-2)', fontSize: 11 }}>
+                ⚙ 高级设置：执行节点说明 · DSH 执行服务注册名 · 能力声明 · 审查路由与返工上限 · 自定义交接链 DAG · 发布为可复用工作流版本
+              </summary>
+              <div style={{ marginTop: 8 }}>
+            <div style={{ color: 'var(--muted-2)', marginTop: 8 }}>
+            本页只定义**交接链**，不会自动开启空间执行守护。发布目标时冻结工作流与工具版本；后续改动不改写已有目标。
+            Claude Code 与 Codex 需要各自的 外部执行服务；DSH 执行服务 的注册名与能力必须与运行环境一致。
+            </div>
             <div style={{ marginTop: 10, padding: 8, border: '1px solid var(--line)', borderRadius: 6 }}>
               <b>执行节点</b>
               {/* ★ 2026-10-13：**删掉了手工「登记节点」输入框**。
@@ -753,12 +771,6 @@ export function AgentWorkflowConfigurator({ scope }: Props): React.JSX.Element {
                   <div style={{ marginLeft: 18, color: 'var(--muted-2)' }}>{ASSUMED_REASONS[key]}</div>
                 </label>)}
               </div>
-              {nativeDerivation.blockers.map((blocker, index) => <div key={index} style={{ color: 'var(--red)', marginTop: 6 }}>
-                ⛔ {blocker}
-              </div>)}
-              {nativeDerivation.warnings.map((warning, index) => <div key={index} style={{ color: 'var(--yellow)', marginTop: 6 }}>
-                {warning}
-              </div>)}
             </div>}
             <div style={{ marginTop: 10 }}>
               <label>审查返工上限 <input type="number" min={0} max={20} value={maxReworkRounds} onChange={e => setMaxReworkRounds(Number(e.target.value))} style={{ width: 70 }} /> 轮</label>
@@ -864,6 +876,8 @@ export function AgentWorkflowConfigurator({ scope }: Props): React.JSX.Element {
                 <span style={{ color: 'var(--muted-2)' }}>{definitions.length} 个已登记版本 · 阶段与依赖由服务端校验</span>
               </div>
             </section>
+              </div>
+            </details>
           </>}
           {error && <div style={{ color: 'var(--red)', marginTop: 8 }}>{error}</div>}
           <section style={{ marginTop: 14, padding: 10, border: '1px solid var(--line)', borderRadius: 6 }}>

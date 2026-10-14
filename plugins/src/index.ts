@@ -34,6 +34,7 @@ import type AgentPresets from '@deepseek-ai/dsh-agent-preset-registry'
 import type {} from '@deepseek-ai/dsh-agent-default-model'
 import { formatSkill, skillsChanged, type SkillRef } from './skillsCache.js'
 import { runWorkflowTestCommand, type WorkflowTestRunReceipt } from './workflowTestRunner.js'
+import { artifactFailureComment, rebuildMergedArtifacts, type ArtifactBuildReceipt } from './artifactDelivery.js'
 import { buildNormSections, type NormFile } from './norms.js'
 import { buildChatAnswerPrompt, chatIdentityFor, type ChatCtxMsg } from './chatResponder.js'
 import { classifyChatError } from './chatErrorClassifier.js'
@@ -532,6 +533,20 @@ function runGit(repoRoot: string, args: string[]): Promise<{ code: number; out: 
 // `resolveStageDocPathsWithDocSync` / `fileDigest` / `resolveDiscussion` / `stagesFromHubPayload`）
 // 由上面的 `from './docContract.js'` **原样再导出** ⇒ `lib/index.js` 的公开面对消费者零差异。
 // 为什么第一刀挑它们、以及"行为零变化"怎么证明，写在 `plugins/src/docContract.ts` 的文件头。
+
+/**
+ * `autoPromote` 的结果：**三种**，不是两种（BUG-037）。
+ *
+ * 加这一维的理由是"合入成功"与"交付完成"之间那次分叉：
+ *   · `merge` 失败 → 源码还在 `w/<id>`，改动没丢；
+ *   · `artifact` 失败 → **源码已经在 main**，但主工作区的产物还是旧的 ⇒ 用户看不到本次改动。
+ * 两者都要停在 in_review，但**要人做的事完全不同**（前者解冲突，后者重建产物），
+ * 所以不能合并成一个 `false` —— 合成一个的话，评论会把"构建失败"说成"可能冲突"。
+ */
+type PromoteOutcome =
+  | { ok: true }
+  | { ok: false; kind: 'merge'; detail: string }
+  | { ok: false; kind: 'artifact'; detail: string; receipt: ArtifactBuildReceipt }
 
 export function apply(ctx: AppContext, config: Config): void {
   // SP-P1：`scopes` 非 'off' → 本实例是**多空间监督者**（自己不做派工，只为每个空间挂一个子实例）；
@@ -1832,34 +1847,49 @@ function spaceWorker(ctx: AppContext, config: Config): void {
 
   /**
    * 流水线中间阶段自动合入：merge w/<id> → 当前分支并清理 worktree，让下一角色基于最新主分支工作。
-   * 成功返回 true；失败返回 false 且保留 worktree 与分支（改动不丢，供人工合入或重试）。
+   *
+   * ★★ BUG-037：合入成功之后**还有一步交付** —— 在**主工作区**重建受本次合入影响的构建产物
+   *   （判据见 `./artifactDelivery.js` 的文件头）。`dist/` 是 gitignored 的，`git merge`
+   *   一个字节都带不过去，而运行中的指挥台读的正是主工作区的 dist ⇒ 少了这一步，
+   *   "源码已合入"与"用户看到的东西变了"分叉，而**每一层读数都是绿的**：
+   *   合并成功、任务 done、目标 done、套件全绿（2026-10-14 G-mv7kzgnu-1 现场）。
+   *
+   * ★ 产物重建**失败**不算成功：源码已在 main 这件事改不了，但绝不能顺手把任务推进 done
+   *   —— 那正是上一次的形态（部署阶段 `vite build` 报了 `spawn EPERM`，
+   *   而它用"排除 build 阶段的 CI + 只打服务端 HTTP 的冒烟"收尾，照样 done）。
+   *
+   * 返回：成功 / 合入失败（改动留在分支）/ 产物重建失败（源码进 main 了但界面还是旧的）。
    */
-  async function autoPromote(taskId: string, dir: string): Promise<boolean> {
+  async function autoPromote(taskId: string, dir: string): Promise<PromoteOutcome> {
     try {
+      // 记下交付前的 HEAD（两条通道都要）：产物要不要重建，取决于**这次交付到底带来了哪些路径**。
+      const headBefore = await runGit(workspace.repoRootFor(), ['rev-parse', 'HEAD'])
+      const beforeHead = headBefore.code === 0 ? headBefore.out.trim() : null
       // S6/R-6：集成阶段启用后，旧的 direct merge 通道必须拒绝，改走唯一集成 worker。
       const integrationDecision = decideIntegrationPath({ mode: resolveIntegrationMode(process.env), source: 'autoPromote', taskId })
       if (integrationDecision.action === 'refuse-legacy') {
         if (!useHub) {
           log(`${taskId} 集成服务不可用：请连接 team-hub 后重试交付`)
-          return false
+          return { ok: false, kind: 'merge', detail: '集成服务不可用（未连接 team-hub）' }
         }
         const source = await runGit(workspace.repoRootFor(), ['rev-parse', '--verify', `w/${taskId}`])
         if (source.code !== 0 || !/^[0-9a-f]{40,64}$/i.test(source.out.trim())) {
           log(`${taskId} 任务分支没有可交付提交：${source.err || source.out}`)
-          return false
+          return { ok: false, kind: 'merge', detail: `任务分支没有可交付提交：${(source.err || source.out).trim()}` }
         }
         const result = await hubPost('/api/deliveries/submit', {
           by: config.role, scope, taskId, sourceCommit: source.out.trim(),
         }) as { ok?: boolean, delivery?: { state?: string }, code?: string }
         if (result.ok !== true || result.delivery?.state !== 'integrated') {
           log(`${taskId} 集成未完成：${result.code ?? result.delivery?.state ?? 'unknown'}`)
-          return false
+          return { ok: false, kind: 'merge', detail: `集成未完成：${result.code ?? result.delivery?.state ?? 'unknown'}` }
         }
         const removed = await runGit(workspace.repoRootFor(), ['worktree', 'remove', '--force', dir])
         if (removed.code !== 0) log(`${taskId} 已交付，工作区清理稍后重试：${removed.err || removed.out}`)
         else await runGit(workspace.repoRootFor(), ['branch', '-D', `w/${taskId}`])
         log(`${taskId} 已通过集成验证并合入目标分支`)
-        return true
+        // 集成 worker 落到目标分支的同样是**源码**；产物一样要在主工作区重建（否则"交付了"而界面没变）
+        return (await deliverArtifacts(taskId, beforeHead)) ?? { ok: true }
       }
       // 防御：上一次合入失败可能遗留冲突态（MERGE_HEAD/未合并文件），会挡住后续所有 merge —— 先清一次
       const staleAbort = await runGit(workspace.repoRootFor(), ['merge', '--abort'])
@@ -1869,17 +1899,62 @@ function spaceWorker(ctx: AppContext, config: Config): void {
         log(`${taskId} 自动合入失败：${(merge.err || merge.out).trim()}`)
         // 关键：失败立即 abort，绝不让主仓库停在冲突态毒化后续合入；改动仍在 w/<taskId> 分支与 worktree，可人工合入或后续重试
         await runGit(workspace.repoRootFor(), ['merge', '--abort'])
-        return false
+        return { ok: false, kind: 'merge', detail: `git merge 失败：${(merge.err || merge.out).trim()}` }
       }
+      // 合入已经成功了 ⇒ worktree/分支的使命结束，先清理（源码在 main，产物重建不依赖 worktree）。
+      // ★ 顺序是有意的：产物重建失败时**不**把 worktree 留着 —— 那会让人以为"改动还在分支上"，
+      //   而真相是"源码已经在 main、只是用户看不到"，两者要人做的事完全不同。
       await runGit(workspace.repoRootFor(), ['worktree', 'remove', '--force', dir])
       await runGit(workspace.repoRootFor(), ['branch', '-D', `w/${taskId}`])
       log(`${taskId} 已自动合入主分支并清理 worktree`)
-      return true
+      // ★ 交付的最后一步：把合进 main 的源码变成用户看得见的产物（失败 → 不算交付完成）
+      return (await deliverArtifacts(taskId, beforeHead)) ?? { ok: true }
     } catch (e) {
       log(`${taskId} 自动合入异常：${String(e)}`)
-      return false
+      return { ok: false, kind: 'merge', detail: `自动合入异常：${String(e)}` }
     }
   }
+
+  /**
+   * 合入之后的**产物交付**：主工作区里重建受影响的构建产物（BUG-037）。
+   *
+   * 返回 `null` = 交付成功（或本次合入没有任何产物需要重建）；返回 `PromoteOutcome` = 失败，
+   * 由调用方停在 in_review 并写清"源码在 main、界面还是旧的、怎么复现"。
+   *
+   * ⚠ 这一步**故意不吞异常、也不"尽力而为"**：产物旧 = 用户看不到改动 = 本次交付没完成。
+   *   把它降级成一条日志，就是上一次的形态（`spawn EPERM` 只进了证据，谁都没红）。
+   *
+   * ⚠ 谁读这些产物：运行中的指挥台（`workbench/scripts/serve.mjs`）读**主工作区的 dist**。
+   *   所以构建必须落在 `workspace.repoRootFor()` 里，不能在 worktree 里构建。
+   */
+  async function deliverArtifacts(taskId: string, beforeHead: string | null): Promise<PromoteOutcome | null> {
+    const repoRoot = workspace.repoRootFor()
+    let changed: string[] = []
+    if (beforeHead) {
+      const diff = await runGit(repoRoot, ['diff', '--name-only', beforeHead, 'HEAD'])
+      if (diff.code !== 0) {
+        // 读不出改动清单 ⇒ 无法判断要不要重建。**不许当成"不用重建"**：那正好是静默的旧产物。
+        const detail = `无法列出本次合入的改动路径（git diff --name-only ${beforeHead.slice(0, 8)} HEAD 失败）：${(diff.err || diff.out).trim()}`
+        log(`${taskId} ${detail}`)
+        return { ok: false, kind: 'artifact', detail, receipt: { ok: false, rebuilt: [], summary: '读不出改动清单，无法确认产物是否要重建', detail } }
+      }
+      changed = diff.out.split('\n').map(s => s.trim()).filter(Boolean)
+    }
+    const receipt = await rebuildMergedArtifacts({
+      repoRoot,
+      // 读不到交付前的 HEAD（极端情况）⇒ **保守重建 workbench**：多花一次构建时间，
+      // 换"绝不发旧界面"。反过来（当成不用重建）正是本 BUG 的形态。
+      changedPaths: beforeHead ? changed : ['workbench/'],
+      log: (m) => log(`${taskId} ${m}`),
+    })
+    if (receipt.ok) {
+      if (receipt.rebuilt.length > 0) log(`${taskId} ${receipt.summary}`)
+      return null
+    }
+    log(`${taskId} 产物重建失败（交付未完成）：${receipt.summary}`)
+    return { ok: false, kind: 'artifact', detail: receipt.detail, receipt }
+  }
+
 
   // 流水线阶段交接（`advancePipeline`）已拆到 ./handoff.ts（交接边界）；原始注释（切片/fix/
   // 分析前缀尾为何不走 next 流转、"后继已存在"的两条识别口径）随代码搬入该模块。D7' 机器闸门
@@ -3113,15 +3188,20 @@ function spaceWorker(ctx: AppContext, config: Config): void {
           activity('gate', t.id, docOk ? `${stage.label}待人工验收` : `${stage.label}缺少产物文档`)
           return
         }
-        // 流水线中间阶段：自动合入主分支 → done → 流转下一角色；合入失败转 in_review 等人工，不静默丢产出
-        const merged = worktreeDir !== null ? await autoPromote(t.id, worktreeDir) : true
-        if (!merged) {
-          await safeComment(t.id, resolveIntegrationMode(process.env) === 'integration'
-            ? `⚠ ${stage.label}已完成执行，但集成验证未通过或仍在等待。改动保留在分支 w/${t.id}；请在任务交付详情查看失败原因并重试或裁决。`
-            : `⚠ ${stage.label}完成，但自动合入主分支失败（可能冲突），改动保留在分支 w/${t.id}。请人工合入并推进：git -C ${workspace.repoRootFor()} merge --no-ff w/${t.id} 解决冲突 → git -C ${workspace.repoRootFor()} worktree remove --force ${worktreeDir} → git -C ${workspace.repoRootFor()} branch -D w/${t.id} → 将军把任务 transition 到 done`)
+        // 流水线中间阶段：自动合入主分支 → **重建产物** → done → 流转下一角色；
+        // 合入失败或产物重建失败都转 in_review 等人工，不静默丢产出、也不静默算成功（BUG-037）。
+        const promoted: PromoteOutcome = worktreeDir !== null ? await autoPromote(t.id, worktreeDir) : { ok: true }
+        if (!promoted.ok) {
+          await safeComment(t.id, promoted.kind === 'artifact'
+            ? artifactFailureComment(promoted.receipt, workspace.repoRootFor())
+            : resolveIntegrationMode(process.env) === 'integration'
+              ? `⚠ ${stage.label}已完成执行，但集成验证未通过或仍在等待。改动保留在分支 w/${t.id}；请在任务交付详情查看失败原因并重试或裁决。`
+              : `⚠ ${stage.label}完成，但自动合入主分支失败（可能冲突），改动保留在分支 w/${t.id}。请人工合入并推进：git -C ${workspace.repoRootFor()} merge --no-ff w/${t.id} 解决冲突 → git -C ${workspace.repoRootFor()} worktree remove --force ${worktreeDir} → git -C ${workspace.repoRootFor()} branch -D w/${t.id} → 将军把任务 transition 到 done`)
           await transitionTo(t.id, 'in_review')
-          activity('blocked', t.id, `${stage.label}完成但自动合入失败，转 in_review 等待人工合入`)
-          log(`${t.id} → in_review（中间阶段自动合入失败，等待人工处理）`)
+          activity('blocked', t.id, promoted.kind === 'artifact'
+            ? `${stage.label}已合入主分支，但产物重建失败（用户看不到本次改动），转 in_review`
+            : `${stage.label}完成但自动合入失败，转 in_review 等待人工合入`)
+          log(`${t.id} → in_review（${promoted.kind === 'artifact' ? '产物重建失败' : '中间阶段自动合入失败'}，等待人工处理）`)
           return
         }
         if (stage.gate) {
@@ -3158,14 +3238,22 @@ function spaceWorker(ctx: AppContext, config: Config): void {
         // 验收 + promote；将军裁决「部署不需要验收，直接部署」——将军职责收敛为 gate 岗（requirement
         // 需求澄清 / researcher 方案确认）与目标发布。目标是否收尾由 hub /api/advance 的
         // settleGoalsOfScope 判定（链全部 done → 目标自动 done）。
-        const mergedFinal = worktreeDir !== null ? await autoPromote(t.id, worktreeDir) : true
-        if (!mergedFinal) {
-          await safeComment(t.id, resolveIntegrationMode(process.env) === 'integration'
-            ? `⚠ ${stage.label}已完成执行，但集成验证未通过或仍在等待。改动保留在分支 w/${t.id}；请在任务交付详情查看失败原因并重试或裁决。`
-            : `⚠ ${stage.label}完成，但自动合入主分支失败（可能冲突），改动保留在分支 w/${t.id}。请人工合入并推进：git -C ${workspace.repoRootFor()} merge --no-ff w/${t.id} 解决冲突 → git -C ${workspace.repoRootFor()} worktree remove --force ${worktreeDir} → git -C ${workspace.repoRootFor()} branch -D w/${t.id} → 任务 transition 到 done`)
+        // ★★ BUG-037：部署类终态"免将军验收"的前提是**产物真的交付了**。
+        //   合入成功但产物重建失败 ⇒ 源码在 main、用户界面还是旧的 —— 那正是"目标 done 而将军
+        //   看不到变化"的现场（2026-10-14 G-mv7kzgnu-1）。所以这里**照样**停在 in_review，
+        //   等人工把产物重建出来再推进 done；绝不"自动收官"一个用户看不见的交付。
+        const promotedFinal: PromoteOutcome = worktreeDir !== null ? await autoPromote(t.id, worktreeDir) : { ok: true }
+        if (!promotedFinal.ok) {
+          await safeComment(t.id, promotedFinal.kind === 'artifact'
+            ? artifactFailureComment(promotedFinal.receipt, workspace.repoRootFor())
+            : resolveIntegrationMode(process.env) === 'integration'
+              ? `⚠ ${stage.label}已完成执行，但集成验证未通过或仍在等待。改动保留在分支 w/${t.id}；请在任务交付详情查看失败原因并重试或裁决。`
+              : `⚠ ${stage.label}完成，但自动合入主分支失败（可能冲突），改动保留在分支 w/${t.id}。请人工合入并推进：git -C ${workspace.repoRootFor()} merge --no-ff w/${t.id} 解决冲突 → git -C ${workspace.repoRootFor()} worktree remove --force ${worktreeDir} → git -C ${workspace.repoRootFor()} branch -D w/${t.id} → 任务 transition 到 done`)
           await transitionTo(t.id, 'in_review')
-          activity('blocked', t.id, `${stage.label}完成但自动合入失败，转 in_review 等待人工合入`)
-          log(`${t.id} → in_review（最终阶段自动合入失败，等待人工处理）`)
+          activity('blocked', t.id, promotedFinal.kind === 'artifact'
+            ? `${stage.label}已合入主分支，但产物重建失败（用户看不到本次改动），转 in_review 不做自动收官`
+            : `${stage.label}完成但自动合入失败，转 in_review 等待人工合入`)
+          log(`${t.id} → in_review（${promotedFinal.kind === 'artifact' ? '产物重建失败，不做自动收官' : '最终阶段自动合入失败'}，等待人工处理）`)
           return
         }
         await advanceTo(t.id, stage.role ?? config.role)

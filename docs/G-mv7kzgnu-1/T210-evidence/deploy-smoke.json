@@ -1,0 +1,56 @@
+{
+  "tool": "T-210 deploy-smoke",
+  "at": "2026-10-14T05:19:33.309Z",
+  "env": {
+    "node": "v24.19.0",
+    "cwd": "D:\\project\\DSH\\legion\\.legion-worktrees\\T-210",
+    "liveDb": "D:/project/DSH/legion/team-hub/team.db",
+    "liveDbBytes": 64991232,
+    "liveDbMtime": "2026-10-14T05:12:37.433Z"
+  },
+  "http": {
+    "status": 200,
+    "endpoint": "http://127.0.0.1:51263/api/roster?scope=software"
+  },
+  "software": {
+    "agents": 12,
+    "external": 4,
+    "invalidCount": 0,
+    "invalid": []
+  },
+  "externalNamed": {
+    "general": "human:s11",
+    "soldier-a": "human:s12",
+    "soldier-auto": "human:s14",
+    "soldier-b": "human:s13"
+  },
+  "externalNamedOk": true,
+  "distinctAvatarsInSoftware": 12,
+  "external": [
+    {
+      "role": "general",
+      "avatar": "human:s11",
+      "key": "s11",
+      "external": true
+    },
+    {
+      "role": "soldier-a",
+      "avatar": "human:s12",
+      "key": "s12",
+      "external": true
+    },
+    {
+      "role": "soldier-auto",
+      "avatar": "human:s14",
+      "key": "s14",
+      "external": true
+    },
+    {
+      "role": "soldier-b",
+      "avatar": "human:s13",
+      "key": "s13",
+      "external": true
+    }
+  ],
+  "verdict": "PASS"
+}

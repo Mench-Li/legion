@@ -1,0 +1,16 @@
+﻿README.md
+docs/FEATURES.md
+docs/G-mv7kzgnu-1/REQUIREMENTS.md
+scripts/ci/run-ci.mjs
+team-hub/agent-avatars.mjs
+team-hub/routes/team-views.mjs
+team-hub/team-views-routes.test.mjs
+workbench/README.md
+workbench/scripts/agent-avatar-settings.test.mjs
+workbench/scripts/agent-avatar-surfaces.test.mjs
+workbench/scripts/external-avatar-parity.test.mjs
+workbench/src/avatar/external-agents.ts
+workbench/src/avatar/index.ts
+workbench/src/components/Sidebar.tsx
+workbench/src/components/SkillsPanel.tsx
+workbench/src/components/WorkspaceNavigation.tsx

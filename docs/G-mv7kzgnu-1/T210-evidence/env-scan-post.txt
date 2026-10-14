@@ -1,0 +1,7 @@
+﻿# scripts/config/scan.mjs --check  @ .legion-worktrees/T-210 (w/T-210)
+# EXIT=1
+# 关键行:
+✖ 未声明 env 键（6）：DSH_PROFILE, DSH_PROFILE_DIR, HOME, P, PATH, USERPROFILE
+✖ 未处理字面量（4）：ANTHROPIC_API_KEY, ANTHROPIC_AUTH_TOKEN, ANTHROPIC_BASE_URL, OPENAI_API_KEY
+✖ [runtime] 未声明动态读取（3）：runtime/adapters/dsh/provider-readiness.mjs → env[baseUrlKey]；runtime/adapters/dsh/provider-readiness.mjs → env[k]；runtime/adapters/dsh/provider-readiness.mjs → env[key]
+scan: FAIL —— 13 项未在 schema 中处理：读取点补进对应进程的 config-schema（fields / nonEnvLiterals / dynamicEnvReads）并写明理由；命中了动态规则但**不是** env 读取的位置，登记进 scan.mjs 的 FOREIGN_DYNAMIC_SUBSCRIPTS（要写 kind / reason / occurrences）

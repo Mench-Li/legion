@@ -1,0 +1,23 @@
+{
+  "root": "D:\\project\\DSH\\legion\\.legion-worktrees\\T-210",
+  "outDir": "D:\\project\\DSH\\legion\\.legion-worktrees\\T-210\\docs\\G-mv7kzgnu-1\\T210-evidence\\ci-run-build",
+  "finishedAt": "2026-10-14T05:19:02.524Z",
+  "stages": [
+    {
+      "name": "build",
+      "status": "FAIL",
+      "ms": 12905,
+      "skipped": 0
+    }
+  ],
+  "failed": 1,
+  "skippedTotal": 0,
+  "tree": {
+    "known": true,
+    "head": "f6f1f412",
+    "dirty": true,
+    "modifiedCount": 0,
+    "untrackedCount": 1,
+    "fingerprint": "3746609fe64f1e9f"
+  }
+}

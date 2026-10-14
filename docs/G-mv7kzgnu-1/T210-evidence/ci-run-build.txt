@@ -1,0 +1,29 @@
+﻿Legion CI run: root=D:\project\DSH\legion\.legion-worktrees\T-210 node=24.19.0
+all stages: syntax,env,boundary,deps,build,test,smoke,stage,doc | out=D:\project\DSH\legion\.legion-worktrees\T-210\docs\G-mv7kzgnu-1\T210-evidence\ci-run-build
+selected: build
+
+===== [build] 构建（whiteboard + workbench dist） =====
+build: workbench FAIL(exit=1)
+failed to load config from D:\project\DSH\legion\.legion-worktrees\T-210\workbench\vite.config.ts
+error during build:
+Error: spawn EPERM
+    at ChildProcess.spawn (node:internal/child_process:458:11)
+    at spawn (node:child_process:813:9)
+    at Object.patchedSpawn [as spawn] (D:\project\DSH\legion\.legion-worktrees\T-210\docs\G-mv7kzgnu-1\T210-evidence\ci-sandbox-patch.cjs:64:21)
+    at ensureServiceIsRunning (D:\project\DSH\legion\workbench\node_modules\.pnpm\esbuild@0.28.2\node_modules\esbuild\lib\main.js:2272:29)
+    at build (D:\project\DSH\legion\workbench\node_modules\.pnpm\esbuild@0.28.2\node_modules\esbuild\lib\main.js:2170:26)
+    at bundleConfigFile (file:///D:/project/DSH/legion/workbench/node_modules/.pnpm/vite@7.3.6/node_modules/vite/dist/node/chunks/config.js:35895:23)
+    at bundleAndLoadConfigFile (file:///D:/project/DSH/legion/workbench/node_modules/.pnpm/vite@7.3.6/node_modules/vite/dist/node/chunks/config.js:35882:24)
+    at loadConfigFromFile (file:///D:/project/DSH/legion/workbench/node_modules/.pnpm/vite@7.3.6/node_modules/vite/dist/node/chunks/config.js:35851:179)
+    at resolveConfig (file:///D:/project/DSH/legion/workbench/node_modules/.pnpm/vite@7.3.6/node_modules/vite/dist/node/chunks/config.js:35500:28)
+    at resolveConfigToBuild (file:///D:/project/DSH/legion/workbench/node_modules/.pnpm/vite@7.3.6/node_modules/vite/dist/node/chunks/config.js:33523:9)
+
+[build] -> FAIL (12906ms)
+
+===== SUMMARY =====
+  build  FAIL (12905ms)
+
+  ⚠⚠ 本次 CI 跑在一棵**脏树**上：已改 0 个文件 + 未跟踪 1 个（指纹 3746609fe64f1e9f）。
+     ⇒ 这次读数证明的是「**这棵树**是绿的」，**不是**「提交 f6f1f412 是绿的」。
+     引用它时请连树一起引用；`git head=` 回答的是"哪个提交"，不是"跑的哪棵树"。
+summary.json -> D:\project\DSH\legion\.legion-worktrees\T-210\docs\G-mv7kzgnu-1\T210-evidence\ci-run-build\summary.json

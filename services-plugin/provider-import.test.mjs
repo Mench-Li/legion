@@ -110,6 +110,94 @@ test('③ 活着但没声明的供应商也要收进来（"引擎认得它"才�
   assert.deepEqual(undeclared.models.map((m) => m.id), ['m-1'], '它的型号也要收（模型来自 llm，不来自配置）')
 })
 
+// ══════════════════════════════════════════════════════════════════════════
+// ③b ★★★ `declaredInSettings` 的判据是**那一节有没有内容**，不是"引擎有没有登记它"
+//
+// 首版写的是 `declared.some(d => d.provider === p.id)`，而实测：
+// **`deepseek-official` 也被 `llm.listConfigurableProviders()` 列了出来**
+// （每条内置路线都会登记自己，带 settingsNs）⇒ 被判成"有声明" ⇒ 进正常比较。
+// 可它的 `api`/`baseURL` 是 `llm-deepseek` 的**内置默认值**（快照读到 null），
+// 于是 **Legion 一旦把真实端点记下来**（为了让「测试连接」能用），两边就永远不等
+// ⇒ 每轮报一处 `update`、门永远 clean 不了。
+//
+//   > 一处"我在配置里没写、端点由引擎内置"的条目，
+//   > 与一处"我写了、只是字段恰好为空"的条目，
+//   > 在快照里的区别只有**那一节到底有没有内容** ——
+//   > 而它们的处置必须相反：后者要用户去补，前者**任何东西都不许写**。
+// ══════════════════════════════════════════════════════════════════════════
+
+/** 造一个"引擎登记了它、但那一节是空的"上下文（= 内置路线的真实形状）。 */
+function engineRegisteredCtx() {
+  const services = {
+    llm: {
+      listProviders: () => [{ id: 'deepseek-official', name: 'DeepSeek' }],
+      // ★ 关键：**登记了**，settingsNs/settingsPath 都在，看起来像"有声明"
+      listConfigurableProviders: () => [
+        { provider: 'deepseek-official', displayName: 'DeepSeek', settingsNs: 'llm-deepseek', settingsPath: [] },
+      ],
+      listModels: async () => [{ id: 'deepseek-flash', name: 'DeepSeek-V41-Flash', inputModalities: ['text', 'image'] }],
+    },
+    settings: {
+      // 那一节是**空的**：api/baseURL/apiKeyEnv 一个都没有（值在插件默认里）
+      describe: () => [{ ns: 'llm-deepseek', revision: 1, value: {} }],
+    },
+    credentials: { describe: async () => ({ configured: false }) },
+  }
+  return { get: (k) => services[k] ?? null }
+}
+
+test('③b ★★★ 引擎登记了但那一节是空的 ⇒ `declaredInSettings: false`（不是"有声明"）', async () => {
+  const { providers } = await readDshProviderSnapshot(engineRegisteredCtx())
+  const p = providers.find((x) => x.id === 'deepseek-official')
+  assert.ok(p, '它必须在快照里（"引擎认得它"）')
+  assert.equal(p.api, null)
+  assert.equal(p.baseURL, null)
+  assert.equal(p.declaredInSettings, false,
+    '★ 那一节没有任何受管字段 ⇒ 它的端点来自引擎内置 ⇒ 必须标成"没声明"，'
+    + '否则 Legion 记下真实端点后会与它的 null 永久不等')
+})
+
+test('③b ★★ 有**任何一个**受管字段是真值 ⇒ `declaredInSettings: true`（用户真的写了）', async () => {
+  // 先钉住"空节 = false"的反面：只要有一个字段有值，就算声明过。
+  const withOne = (field, value) => {
+    const services = {
+      llm: {
+        listProviders: () => [{ id: 'p', name: 'P' }],
+        listConfigurableProviders: () => [{ provider: 'p', displayName: 'P', settingsNs: 'llm-pi-ai', settingsPath: ['providers', 'p'] }],
+        listModels: async () => [],
+      },
+      settings: { describe: () => [{ ns: 'llm-pi-ai', revision: 1, value: { providers: { p: { [field]: value } } } }] },
+      credentials: { describe: async () => ({ configured: false }) },
+    }
+    return { get: (k) => services[k] ?? null }
+  }
+  for (const [field, value] of [['api', 'openai-responses'], ['baseURL', 'https://a.example/v1'], ['apiKeyEnv', 'A_KEY']]) {
+    const { providers } = await readDshProviderSnapshot(withOne(field, value))
+    assert.equal(providers[0].declaredInSettings, true, `只有 ${field} 有值也必须算"声明过"`)
+  }
+  // 空串**不算**有值（"我写了空串"与"我没写"在配置里是同一件事）
+  const { providers } = await readDshProviderSnapshot(withOne('api', ''))
+  assert.equal(providers[0].declaredInSettings, false, '空串不算声明')
+})
+
+test('③b ★★★ 端到端：Legion 记了真端点、引擎那边是内置默认 ⇒ 对账仍是 clean（不接管那一类）', async () => {
+  const { readDshProviderSnapshot, default: _ } = await import('./index.js')
+  const { planMaterialization, describeMaterializationPlan } = await import('./materialize-plan.mjs')
+  const snap = await readDshProviderSnapshot(engineRegisteredCtx())
+  // Legion 侧：为了「测试连接」能用，我们把真实端点记下来了
+  const desired = [{
+    id: 'deepseek-official', displayName: 'DeepSeek',
+    api: 'openai-completions', baseURL: 'https://api.deepseek.com',
+    secretRef: 'DEEPSEEK_API_KEY', models: [{ id: 'deepseek-flash', name: 'DeepSeek-V41-Flash' }],
+  }]
+  const plan = planMaterialization({ desired, actual: snap.providers })
+  assert.deepEqual(plan.engineInternal, ['deepseek-official'], '归入"不接管"')
+  assert.equal(plan.clean, true, '★ 必须是 clean —— 否则门永远开不了（这正是首版判据的后果）')
+  assert.deepEqual(plan.update, [])
+  assert.deepEqual(plan.delete, [])
+  assert.match(describeMaterializationPlan(plan), /不接管/)
+})
+
 test('④ 服务缺席或抛错 ⇒ 返回空 + 原因，**绝不抛**（软取）', async () => {
   const none = await readDshProviderSnapshot({ get: () => null })
   assert.deepEqual(none.providers, [])

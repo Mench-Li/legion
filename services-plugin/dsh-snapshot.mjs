@@ -82,20 +82,35 @@ export async function readDshProviderSnapshot(ctx) {
       secretRef: apiKeyEnv,
       credentialConfigured,
       /**
-       * ★★ 2026-10-12：这条供应商在 DSH 的**配置里有没有一节点名它**。
+       * ★★ 2026-10-12 首版 / 2026-10-13 收紧：这条供应商的 `api`/`baseURL`
+       * **是不是用户真的写在配置里的**。
        *
-       * `false` 的含义很具体：它的 `api`/`baseURL` **来自某个内置插件的默认值**
-       * （实测：`deepseek-official` 来自 `llm-deepseek`、`deepseek-account` 来自账号平台插件），
-       * 而不是用户写在 `cordis.patch.yml` 里的声明。于是上面那两个字段读到的是 `null`
-       * —— 而 `null` 在这里**同时**意味着"确实没配"与"端点由引擎内置、我读不到"。
+       * ## 首版为什么不够（实测抓到的）
        *
-       *   > 一个"确实没配地址"的供应商，与一个"地址在引擎里、我没读到"的供应商，
-       *   > 在快照里长得一模一样 —— 而下游对它们的处置必须相反：
-       *   > 前者要用户去补，后者**任何东西都不该去写**（写进去就是把内置默认值改成空）。
+       * 首版判据是"`llm.listConfigurableProviders()` 有没有列出它"。
+       * 而实测：**`deepseek-official` 也被列出来了**（每一条内置路线都会登记自己，
+       * 带 `settingsNs`），于是它被判成"有声明" ⇒ 进正常的"要改/未变"比较。
+       * 可它的 `api`/`baseURL` 在 `llm-deepseek` 里是**内置默认值**（`PUBLIC_BASE_URL`），
+       * 快照读到的是 `null`，而**Legion 一旦把真实端点记下来**（为了让「测试连接」能用），
+       * 两边就**永远不等** ⇒ 每轮报一处 `update`、门永远 clean 不了。
        *
-       * 消费它的是 `materialize-plan.mjs` 的"不接管"那一类。
+       * 换句话说首版把"引擎登记了自己"当成了"用户声明了字段"。
+       *
+       *   > 一处"我在配置里没写、端点由引擎内置"的条目，
+       *   > 与一处"我写了、只是字段恰好为空"的条目，
+       *   > 在快照里的区别只有**那一节到底有没有内容** ——
+       *   > 而它们的处置必须相反：后者要用户去补，前者**任何东西都不许写**。
+       *
+       * ## 收紧后的判据
+       *
+       * 先拿到它那一节的**内容**（`declaredProfile`），只有当那一节里
+       * **至少有一个受管字段是真值**（`api` / `baseURL` / `apiKeyEnv`）时，才算"用户声明过"。
+       * 空节（`{}`，或几个字段全是 undefined/空串）⇒ `false` ⇒ 下游按"不接管"处置
+       * （`materialize-plan.mjs` 的 `engineInternal`）：不比较、不写、也不进删除候选。
+       *
+       * ⚠ 这条规则**只**对 DSH 侧成立（它是"我读到了什么"），Legion 侧的同名字段没有这个含义。
        */
-      declaredInSettings: declared.some((d) => d?.provider === p.id),
+      declaredInSettings: ['api', 'baseURL', 'apiKeyEnv'].some((k) => typeof profile[k] === 'string' && profile[k] !== ''),
       models: models.map((m) => ({
         id: m?.id,
         ...(typeof m?.name === 'string' && m.name !== '' ? { name: m.name } : {}),

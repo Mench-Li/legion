@@ -13,7 +13,11 @@ export const SUB_NAV: Record<WorkspaceGroup, Array<{ id: string; name: string }>
   tasks: [{ id: 'tasks', name: '任务中心' }, { id: 'calendar', name: '日程日历' }],
   resources: [{ id: 'files', name: '文件中心' }, { id: 'skills', name: '技能中心' }, { id: 'rules', name: '规范' }],
   activity: [{ id: 'notify', name: '通知中心' }, { id: 'activity-feed', name: '实时动态' }, { id: 'snapshots', name: '上下文快照' }],
-  settings: [{ id: 'settings-spaces', name: '空间管理' }, { id: 'settings-execution', name: '持续执行' }, { id: 'settings-workflow', name: 'Agent 工作流' }, { id: 'settings-models', name: '模型与凭证' }, { id: 'settings-connections', name: '连接与令牌' }, { id: 'browser', name: '浏览器助手' }],
+  // ★ 2026-10-13：新增 `settings-workflow-runs`（工作流运行）。它原来是「Agent 工作流」
+  //   配置面板最底部的一块，但那块是**只读的运行历史 + 暂停/取消目标** ——
+  //   与"我要不要配工作流"无关，却让配置面板看起来更复杂。
+  //   单独成页后：想看运行情况的人不必先展开一个配置面板。
+  settings: [{ id: 'settings-spaces', name: '空间管理' }, { id: 'settings-execution', name: '持续执行' }, { id: 'settings-workflow', name: 'Agent 工作流' }, { id: 'settings-workflow-runs', name: '工作流运行' }, { id: 'settings-models', name: '模型与凭证' }, { id: 'settings-connections', name: '连接与令牌' }, { id: 'browser', name: '浏览器助手' }],
 }
 export function groupFor(active: string): WorkspaceGroup {
   if (active === 'chat') return 'agents'

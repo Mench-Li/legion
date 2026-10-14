@@ -703,6 +703,7 @@ export default function App(): React.JSX.Element {
               scope={scope}
               hubMode={hubMode}
               spaces={hubSpaces}
+              goals={hubMode ? (goalInfo?.goals ?? []) : []}
               onSelectScope={selectScope}
               onDataChanged={() => void loadMissions(scope)}
               selectedView={taskView}

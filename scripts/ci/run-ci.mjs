@@ -2037,6 +2037,11 @@ async function stageTest() {
     //   重做过的老任务（T-199，10-12 才完成）号小却被压在更早完成的 T-200..T-202 上面，
     //   于是"最新完成的沉在最底下"。含桌面/手机两端 parity 与 boardColumns 分列顺序。
     { label: 'task-order（任务中心顺序：最新在前 / 两端一致 / 各列内排序）', files: ['workbench/scripts/task-order.test.mjs'], cwd: ROOT, nodeArgs: ['--experimental-strip-types'] },
+    // 2026-10-13：任务中心**按目标筛选**（🎯 胶囊 + 「未挂目标」）。这一条守的是
+    //   "筛没了"与"数字会跳"这两类不报错的错：没有目标的任务必须在筛选器里
+    //   有名有姓（否则点任意一个目标，手工任务就从看板上消失），计数必须是全量口径
+    //   （否则点一下，其余胶囊的数字一起变）。判据只有一处：workbench/src/taskGoalFilter.ts。
+    { label: 'task-goal-filter（任务中心按目标筛选：未挂目标不许丢 / 计数与顺序不跳 / 接线判据）', files: ['workbench/scripts/task-goal-filter.test.mjs'], cwd: ROOT, nodeArgs: ['--experimental-strip-types'] },
     { label: 'artifact-policy（共享路径策略）', files: ['packages/shared/test/artifact-policy.test.mjs'], cwd: ROOT },
     { label: 'config（P3-2 统一配置：引擎语义/跨进程规则/夹具端到端/默认值漂移）', files: ['scripts/config/config.test.mjs'], cwd: ROOT },
     { label: 'scrum（任务生命周期与产物）', files: ['scrum/artifact-detail.test.mjs', 'scrum/taskctl.ttl.test.mjs'], cwd: ROOT },

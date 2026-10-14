@@ -3375,6 +3375,10 @@ body {
 
 .tc-pill.on { color: var(--accent); border-color: rgba(91, 140, 255, 0.5); }
 
+/* 🎯 目标胶囊：与卡片上的「🎯 目标」徽标同色（同一条轴在两处要能认出来） */
+.tc-pill-goal { max-width: 320px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tc-pill-goal.on { color: var(--purple); border-color: rgba(167, 139, 250, 0.5); }
+
 .tc-pill-cnt { opacity: 0.6; margin-left: 2px; font-size: 10px; }
 
 .tc-filter-clear {

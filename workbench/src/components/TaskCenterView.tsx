@@ -4,11 +4,12 @@ import {
   hubTransition,
   subscribeHubAudit,
 } from '../api'
-import type { CardComment, CardStatus, HubTask, SpaceInfo } from '../types'
+import type { CardComment, CardStatus, HubGoal, HubTask, SpaceInfo } from '../types'
 import { toast } from './Toast'
 import { deliveryBadgeOf, schedulingBadgeOf } from '../deliveryBadge.ts'
 import { planDrop } from '../reworkPlan.ts'
 import { sortByMostRecent } from '../taskOrder.ts'
+import { buildGoalFilter, goalFilterLabel, matchesGoalFilter } from '../taskGoalFilter.ts'
 import { ReworkModal } from './ReworkModal'
 import { TaskDetailModal } from './TaskDetailModal'
 
@@ -28,6 +29,10 @@ import { TaskDetailModal } from './TaskDetailModal'
  *  - 按工作空间（scope）查看 scrum 任务：拉 team-hub v2 `/api/board?scope=`（真分区；
  *    scope=null = 全部空间聚合，卡片带空间名）。**唯一数据源就是中枢** ——
  *    从前还有一条"文件模式只读"的回退，随那条被取消的旧看板一起删掉了。
+ *  - 过滤轴（面板内三条，叠加生效）：**🎯 目标**（胶囊，含「未挂目标」）· 👥 岗位/执行者 ·
+ *    🔍 id/标题搜索。目标那条轴收在 `../taskGoalFilter.ts`（纯函数）：胶囊计数取全量口径
+ *    （不含已取消），顺序固定，点选前后位置不跳；目标文案来自上层传入的 `goals`
+ *    （「全部空间」模式读不到目标记录 ⇒ 如实退化成显示目标 id，不猜文案）。
  *  - 点击卡片 → 打开既有任务详情（TaskDetailModal：验收/打回/评论/转派/拦截/派 AI），状态变更后联动刷新。
  *
  * 实时性：hub 审计 SSE（/api/events）按 action 过滤任务类事件即时刷新 + 20s 轮询兜底。
@@ -43,6 +48,13 @@ interface TaskCenterViewProps {
   hubMode: boolean
   /** 全部工作空间列表（面板内 workspace 下拉用；缺省时退化为文本）。 */
   spaces?: SpaceInfo[]
+  /**
+   * 当前空间的目标记录（只用来把卡片上的 `goalId` 说成人能读的目标文案）。
+   *
+   * 缺省 = 读不到目标记录（如「全部空间」聚合模式：`/api/goal` 不给 scope 就是空列表），
+   * 那时目标胶囊**只显示 id**，不猜文案。
+   */
+  goals?: HubGoal[]
   /** 面板内切换工作空间（null = 全部空间；中枢模式下回写左侧栏）。 */
   onSelectScope?: (scope: string | null) => void
   /** 任务状态变更后通知外层刷新（右侧任务集等）。 */
@@ -187,7 +199,7 @@ function askOpen(r: TcRow): boolean {
 
 // ★ 原来这里有个 `normId(a,b)`，只服务于「按任务号升序」那一行（已换成 sortByMostRecent）。
 //   删掉而不是留着，是因为留着它会让下一个人以为"号序"仍然是某种被判定的东西。
-export function TaskCenterView({ scope, hubMode, spaces = [], onSelectScope, onDataChanged, selectedView, onViewChange, onContactAgent }: TaskCenterViewProps): React.JSX.Element {
+export function TaskCenterView({ scope, hubMode, spaces = [], goals = [], onSelectScope, onDataChanged, selectedView, onViewChange, onContactAgent }: TaskCenterViewProps): React.JSX.Element {
   /** 将军视角过滤（原「指挥总览」分组语义并入看板；默认「全部」= 经典泳道全貌）。 */
   const [view, setView] = useState<TcView>(() => {
     const saved = localStorage.getItem('legion.taskcenter.view')
@@ -198,6 +210,8 @@ export function TaskCenterView({ scope, hubMode, spaces = [], onSelectScope, onD
   const [detailId, setDetailId] = useState<string | null>(null)
   const [query, setQuery] = useState('')
   const [roleFilter, setRoleFilter] = useState<string | null>(null)
+  /** 🎯 目标过滤（键 = goalId 或「未挂目标」哨兵；null = 全部目标）。 */
+  const [goalFilter, setGoalFilter] = useState<string | null>(null)
   const [dragId, setDragId] = useState<string | null>(null)
   const [dropCol, setDropCol] = useState<CardStatus | null>(null)
   const [busyDrop, setBusyDrop] = useState(false)
@@ -274,16 +288,32 @@ export function TaskCenterView({ scope, hubMode, spaces = [], onSelectScope, onD
     return [...set].sort((a, b) => a.localeCompare(b, 'zh-CN'))
   }, [rows])
 
-  /** 搜索 + 岗位过滤后的任务（不含将军视角过滤）。 */
+  /**
+   * 🎯 目标胶囊（口径与顺序收在 `../taskGoalFilter.ts`）。
+   *
+   * ★ 计数取自**全量 rows**（不含已取消），不是 `filtered`：胶囊上的数字要能当"这个目标
+   *   还剩多少活"来读，而且点选后其余胶囊的数字与位置都不许跳——跳了就像任务被筛丢了。
+   */
+  const goalOptions = useMemo(() => buildGoalFilter(rows ?? [], goals), [rows, goals])
+
+  /** goalId → 目标文案（卡片徽标的悬停说明用；读不到就没有这条说明，不猜）。 */
+  const goalObjectiveById = useMemo(() => {
+    const m = new Map<string, string>()
+    for (const g of goals) if (g.id && g.objective) m.set(g.id, g.objective)
+    return m
+  }, [goals])
+
+  /** 搜索 + 岗位 + 目标过滤后的任务（不含将军视角过滤）。 */
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase()
     return (rows ?? []).filter(r => {
       if (r.status === 'canceled') return false
       if (roleFilter && (r.soldier ?? r.role) !== roleFilter) return false
+      if (!matchesGoalFilter(r, goalFilter)) return false
       if (q && !r.id.toLowerCase().includes(q) && !r.title.toLowerCase().includes(q)) return false
       return true
     })
-  }, [rows, roleFilter, query])
+  }, [rows, roleFilter, goalFilter, query])
 
   const viewStatuses = useMemo(
     () => TC_VIEWS.find(v => v.id === view)?.statuses ?? [],
@@ -429,7 +459,11 @@ export function TaskCenterView({ scope, hubMode, spaces = [], onSelectScope, onD
       )
     }
     if (actor !== '未指派') chips.push(<span key="who" className="tc-chip">{actor}</span>)
-    if (r.goalId) chips.push(<span key="goal" className="tc-chip tc-chip-goal">🎯 {r.goalId}</span>)
+    if (r.goalId) {
+      // 徽标仍是 id（短、可复制、与目标看板一致）；目标文案放悬停里，够看清又不撑卡片
+      const obj = goalObjectiveById.get(r.goalId)
+      chips.push(<span key="goal" className="tc-chip tc-chip-goal" title={obj ? `目标 ${r.goalId}：${obj}` : `目标 ${r.goalId}`}>🎯 {r.goalId}</span>)
+    }
     if (r.blockedBy.length > 0) chips.push(<span key="dep" className="tc-chip tc-chip-dep">🔗 {r.blockedBy.join(',')}</span>)
     if (r.priority !== 'medium') chips.push(<span key="prio" className={`tc-chip tc-prio-${r.priority}`}>{r.priority === 'high' ? 'P0' : 'P2'}</span>)
     if (r.hold) chips.push(<span key="hold" className="tc-chip tc-chip-hold">🖐 拦截</span>)
@@ -501,6 +535,23 @@ export function TaskCenterView({ scope, hubMode, spaces = [], onSelectScope, onD
     </button>
   ))
 
+  /** 有任一过滤生效时才给的「清除过滤」；渲染位置见下面两条过滤条（谁在就挂在谁末尾）。 */
+  const clearLink = query !== '' || roleFilter !== null || goalFilter !== null
+    ? (
+      <span
+        className="tc-filter-clear"
+        onClick={() => { setQuery(''); setRoleFilter(null); setGoalFilter(null) }}
+        title="清空搜索 / 岗位 / 目标过滤，恢复完整泳道"
+      >
+        ✕ 清除过滤
+      </span>
+    )
+    : null
+
+  /** 已选中的目标在过滤条标题上**显示 id**（卡片上的 🎯 徽标就是 id，两边要能对上）。 */
+  const goalFilterId = goalOptions.find(o => o.key === goalFilter)?.goalId ?? null
+  const goalFilterWording = goalFilterLabel(goalOptions, goalFilter)
+
   return (
     <div className="center-col">
       {/* 头部：标题 + 工作空间下拉 + 数据源（原「指挥总览 / Scrum 看板」双 Tab 已合并为单一泳道视图） */}
@@ -559,6 +610,31 @@ export function TaskCenterView({ scope, hubMode, spaces = [], onSelectScope, onD
         <span className="tc-sum-total">共 {(rows ?? []).length} 任务{hubMode ? (isAll ? ' · 跨全部空间' : '') : ''}</span>
       </div>
 
+      {/* 🎯 目标过滤条：一条目标一个胶囊（含「未挂目标」），计数为全量口径、顺序固定 */}
+      {goalOptions.length > 0 && (
+        <div className="panel tc-filter">
+          <span className="tc-filter-label">
+            🎯 目标{goalFilter ? ` · ${goalFilterId ?? goalFilterWording ?? goalFilter}` : ''}
+          </span>
+          <div className="tc-pills">
+            <button className={`tc-pill${goalFilter === null ? ' on' : ''}`} onClick={() => setGoalFilter(null)}>
+              全部
+            </button>
+            {goalOptions.map(o => (
+              <button
+                key={o.key}
+                className={`tc-pill tc-pill-goal${goalFilter === o.key ? ' on' : ''}`}
+                onClick={() => setGoalFilter(goalFilter === o.key ? null : o.key)}
+                title={`${o.title}（按目标过滤；再次点击取消）`}
+              >
+                {o.label} <span className="tc-pill-cnt">{o.count}</span>
+              </button>
+            ))}
+          </div>
+          {clearLink}
+        </div>
+      )}
+
       {/* 角色/岗位过滤条 */}
       {(roles.length > 0 || (visible.length === 0 && rows !== null)) && (
         <div className="panel tc-filter">
@@ -569,11 +645,8 @@ export function TaskCenterView({ scope, hubMode, spaces = [], onSelectScope, onD
             </button>
             {roleOptions}
           </div>
-          {(query !== '' || roleFilter !== null) && (
-            <span className="tc-filter-clear" onClick={() => { setQuery(''); setRoleFilter(null) }}>
-              ✕ 清除过滤
-            </span>
-          )}
+          {/* 目标条在时「清除过滤」已经挂在它末尾，这里不重复给第二个 */}
+          {goalOptions.length === 0 ? clearLink : null}
         </div>
       )}
 
@@ -620,11 +693,13 @@ export function TaskCenterView({ scope, hubMode, spaces = [], onSelectScope, onD
         </div>
       )}
 
-      {rows !== null && !loadErr && visible.length === 0 && (query !== '' || roleFilter !== null || view !== 'all') && (
+      {rows !== null && !loadErr && visible.length === 0 && (query !== '' || roleFilter !== null || goalFilter !== null || view !== 'all') && (
         <div className="panel" style={{ padding: 16, color: 'var(--muted-2)', fontSize: 12 }}>
           没有符合当前条件的任务
           {view !== 'all' ? `（视角：${TC_VIEWS.find(v => v.id === view)?.label ?? ''}）` : ''}
-          —— 清空搜索/岗位过滤，或点「📊 全部」恢复完整泳道
+          {goalFilter ? `（目标：${goalFilterWording ?? goalFilter}）` : ''}
+          {roleFilter ? `（岗位：${roleFilter}）` : ''}
+          —— 清空搜索/岗位/目标过滤，或点「📊 全部」恢复完整泳道
         </div>
       )}
 

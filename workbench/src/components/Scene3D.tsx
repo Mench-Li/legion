@@ -5,9 +5,9 @@ import * as THREE from 'three'
 import type { ScenePreset } from '../types'
 import type { SceneAgent, SceneCue } from '../scene/sceneState'
 import type { SceneBoardVisit, SceneTaskChip } from '../scene/sceneBoard'
-import { layoutScene } from '../scene/sceneLayout'
+import { layoutScene, framingZoom } from '../scene/sceneLayout'
 import type { SceneLayout } from '../scene/sceneLayout'
-import { SCENE_THEMES } from '../scene/sceneTheme'
+import { SCENE_BACKGROUND, SCENE_GROUND_BOUNCE, SCENE_THEMES } from '../scene/sceneTheme'
 import { Employee3D } from './Employee3D'
 import { OfficeDressing } from './OfficeDressing'
 import { TaskBoard3D } from './TaskBoard3D'
@@ -40,7 +40,9 @@ function CameraRig({ layout }: { layout: SceneLayout }): null {
     const ortho = camera as THREE.OrthographicCamera
     ortho.position.set(layout.camera.distance * 0.64, layout.camera.distance * 0.75, layout.camera.distance * 0.78)
     ortho.lookAt(0, layout.camera.targetY, 0)
-    ortho.zoom = Math.max(14, Math.min(75, size.width / (layout.floorWidth * 1.2), size.height / (layout.floorDepth * 1.2)))
+    // ★ 取景是**纯函数**（`framingZoom`）：它决定"房间够不够空间展示"，
+    //   搬出组件之后判据才能直接断言"画面里的世界尺寸 ≥ 房间尺寸"（见 scene-layout.test.mjs）。
+    ortho.zoom = framingZoom({ width: size.width, height: size.height }, layout)
     ortho.updateProjectionMatrix(); invalidate()
   }, [camera, invalidate, layout, size.width, size.height])
   return null
@@ -67,15 +69,17 @@ function OfficeWorld({ agents, cues, boardVisits = [], boardTasks = [], layout, 
   const activeVisit = boardVisits.filter(visit => visit.expiresAtMs > Date.now())
     .sort((a, b) => a.expiresAtMs - b.expiresAtMs)[0] ?? null
   return <>
-    <color attach="background" args={['#0b111a']} />
-    <ambientLight intensity={1.15} />
-    <hemisphereLight color={theme.light} groundColor="#17202a" intensity={1.4} />
-    <directionalLight position={[8, 14, 10]} intensity={2.3} color={theme.light} castShadow />
+    {/* ★ 明亮的背景（将军："办公室场景还是需要明亮的背景色"）：见 sceneTheme 里那段明度关系 */}
+    <color attach="background" args={[SCENE_BACKGROUND]} />
+    <ambientLight intensity={1.45} />
+    <hemisphereLight color={theme.light} groundColor={SCENE_GROUND_BOUNCE} intensity={1.05} />
+    <directionalLight position={[8, 14, 10]} intensity={1.75} color={theme.light} castShadow />
     <CameraRig layout={layout} />
     <mesh rotation={[-Math.PI / 2, 0, 0]} position={[0, -0.025, 0]} receiveShadow>
       <planeGeometry args={[layout.floorWidth, layout.floorDepth]} /><meshStandardMaterial color={theme.floor} roughness={1} />
     </mesh>
-    <Grid position={[0, 0, 0]} args={[layout.floorWidth, layout.floorDepth]} cellSize={0.5} cellColor={theme.desk}
+    {/* 网格线用 `wallTrim`（比地板深一档）：亮地板配浅网格线会看不见 */}
+    <Grid position={[0, 0, 0]} args={[layout.floorWidth, layout.floorDepth]} cellSize={0.5} cellColor={theme.wallTrim}
       sectionSize={2} sectionColor={theme.accent} sectionThickness={0.5} infiniteGrid={false} fadeDistance={80} />
     {/* 办公室布景：墙、窗、吊灯、地毯、会议桌、书架、茶水角、绿植（只落在安全带里，见其文件头） */}
     <OfficeDressing layout={layout} theme={theme} />
@@ -134,6 +138,8 @@ export function Scene3D({ agents, cues, preset, goalLabel, boardVisits = [], boa
   const [motionOn, setMotionOn] = useState(true)
   const [reduced, setReduced] = useState(false)
   const [visible, setVisible] = useState(true)
+  /** 底部员工列表是否展开（默认展开：第一次进来要看得见有谁）。 */
+  const [listOpen, setListOpen] = useState(true)
   const [cueTick, setCueTick] = useState(0)
   useEffect(() => {
     if (!container.current) return
@@ -171,10 +177,22 @@ export function Scene3D({ agents, cues, preset, goalLabel, boardVisits = [], boa
           motion={motion} compact={agents.length > 12 || width < 700} onAgentClick={onAgentClick} layout={layout} />
       </Canvas></SceneBoundary> : fallback}
     </div>
-    <div className="pixel-scene-toolbar"><span>{SCENE_THEMES[preset].label} · {agents.length} 位员工</span>
-      <button type="button" onClick={() => setMotionOn(value => !value)} aria-pressed={motionOn}>{motionOn ? '暂停动画' : '开启动画'}</button>
+    <div className="pixel-scene-toolbar">
+      <span>{SCENE_THEMES[preset].label} · {agents.length} 位员工</span>
+      <div className="pixel-scene-toolbar-actions">
+        {/*
+          ★ 2026-10-14（将军："底部办公室员工可以收起"）：员工列表占着 68px 高，
+            收起后那一段**全部给画面**（canvas 是 flex:1，于是自动吃掉这份空间）——
+            这也是"确保办公室场景有足够的空间展示"最直接的一步。
+            默认展开（第一次进来要看得见有谁），之后的选择由人自己定。
+        */}
+        <button type="button" onClick={() => setListOpen(value => !value)} aria-expanded={listOpen}>
+          {listOpen ? '收起员工列表' : `展开员工列表（${agents.length}）`}
+        </button>
+        <button type="button" onClick={() => setMotionOn(value => !value)} aria-pressed={motionOn}>{motionOn ? '暂停动画' : '开启动画'}</button>
+      </div>
     </div>
-    <SceneAgentList agents={agents} onAgentClick={onAgentClick} />
+    {listOpen && <SceneAgentList agents={agents} onAgentClick={onAgentClick} />}
   </div>
 }
 

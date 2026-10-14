@@ -66,26 +66,30 @@ export function AgentBubble({ agent, expanded, minimal = false, onHoverChange, o
         <span className="agent-bubble-mood">{mood.label}</span>
         <span className="agent-bubble-count">{agent.taskCount} 项</span>
       </div>
-      {agent.taskCount === 0
-        ? (!minimal || expanded) && <div className="agent-bubble-empty">暂无进行中的任务</div>
-        : expanded
-          ? <div className="agent-bubble-panel">
-            {agent.tasks.map(task => {
-              const taskStyle = STATUS_STYLE[task.status]
-              const open = hoverTask === task.id
-              return <div className={`agent-bubble-task ${open ? 'open' : ''}`} key={task.id}
-                onPointerEnter={event => { event.stopPropagation(); setHoverTask(task.id) }}
-                onPointerLeave={event => { event.stopPropagation(); setHoverTask(current => (current === task.id ? null : current)) }}
-              >
-                <i className="agent-bubble-dot" style={{ background: taskStyle.color }} />
-                <b style={{ color: taskStyle.color }}>{task.id}</b>
-                <span className="agent-bubble-task-state">{taskStyle.label}</span>
-                {/* 完整标题：只在鼠标停在这一行时出现 */}
-                {open && <span className="agent-bubble-task-title">{task.title}</span>}
-              </div>
-            })}
-          </div>
-          : (!minimal && <div className="agent-bubble-focus">{agent.tasks[0].id}</div>)}
+      {/*
+        ★ 2026-10-14（将军："直接不显示暂无进行中任务，没有就不显示"）：
+          没有任务时**什么都不显示**（不再是"暂无进行中的任务"那句话）。
+          气泡于是塌成只有头部那一行 —— 名字 + 气色 + `0 项`，
+          既回答了"他此刻在干什么"（待命），又不占地方。
+      */}
+      {agent.taskCount > 0 && (expanded
+        ? <div className="agent-bubble-panel">
+          {agent.tasks.map(task => {
+            const taskStyle = STATUS_STYLE[task.status]
+            const open = hoverTask === task.id
+            return <div className={`agent-bubble-task ${open ? 'open' : ''}`} key={task.id}
+              onPointerEnter={event => { event.stopPropagation(); setHoverTask(task.id) }}
+              onPointerLeave={event => { event.stopPropagation(); setHoverTask(current => (current === task.id ? null : current)) }}
+            >
+              <i className="agent-bubble-dot" style={{ background: taskStyle.color }} />
+              <b style={{ color: taskStyle.color }}>{task.id}</b>
+              <span className="agent-bubble-task-state">{taskStyle.label}</span>
+              {/* 完整标题：只在鼠标停在这一行时出现 */}
+              {open && <span className="agent-bubble-task-title">{task.title}</span>}
+            </div>
+          })}
+        </div>
+        : (!minimal && <div className="agent-bubble-focus">{agent.tasks[0].id}</div>))}
       {expanded && agent.taskCount > 0 && <div className="agent-bubble-more">移上某一行看完整内容 · 点击气泡查看任务详情</div>}
     </div>
   )

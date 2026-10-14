@@ -64,7 +64,9 @@
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 .agent-bubble-more { font-size: 10px; color: #8fa3bd; padding-top: 3px }
-.agent-bubble-empty { font-size: 10.5px; color: #8fa3bd }
+
+/* ── 场景工具条：右侧按钮成组（收起员工列表 + 动画开关） ───────────────────── */
+.pixel-scene-toolbar-actions { display: flex; align-items: center; gap: 6px }
 
 /* ── 微缩任务看板 ───────────────────────────────────────────────────────── */
 .task-board-title {

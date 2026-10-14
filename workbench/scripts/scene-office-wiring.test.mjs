@@ -154,8 +154,51 @@ test('⑨★ 气泡每行只写编号、鼠标停在该行才展开完整标题�
   assert.match(bubble, /<b style=\{\{ color: taskStyle\.color \}\}>\{task\.id\}<\/b>/, '行里显示的是任务编号')
   // 常驻形态也改成显示编号（原来显示的是最要紧那条的标题）
   assert.match(bubble, /<div className="agent-bubble-focus">\{agent\.tasks\[0\]\.id\}<\/div>/, '常驻形态显示最要紧那条的编号')
-  assert.match(bubble, /暂无进行中的任务/, '空状态要说明是"进行中"，与"不显示已完成"一致')
   const css = read('scene/officeScene.css')
   assert.match(css, /\.agent-bubble-task-title \{[\s\S]{0,120}flex-basis: 100%/, '标题要独占一行（换行显示，不挤在编号旁）')
   assert.match(css, /\.task-board-card-id \{/, '看板编号要有自己的样式（否则与卡片色块糊在一起看不清）')
+})
+
+// ══════════════════════════════════════════════════════════════════════════
+// ⑩ 将军 2026-10-14 的另两条：
+//    · 「直接不显示暂无进行中任务，没有就不显示」
+//    · 「底部办公室员工可以收起」/「明亮的背景色」/「足够的空间展示」
+// ══════════════════════════════════════════════════════════════════════════
+
+test('⑩★ 气泡：没有任务时**什么都不显示**（不再有"暂无进行中任务"那句）', () => {
+  const bubble = read('components/AgentBubble.tsx')
+  // ⚠ 判据只看**真正会渲染出来的 JSX**：先切出 `return (` 之后的部分，再**剥掉 JSX 注释**。
+  //   第一版只切了 `return (`，结果被我自己写的那句说明注释绊倒 ——
+  //   （注释里引述了被删掉的文案）。判据要盯"用户看得见什么"，不是"文件里有哪些字"。
+  const render = bubble.slice(bubble.indexOf('return (')).replace(/\{\/\*[\s\S]*?\*\/\}/g, '')
+  assert.doesNotMatch(render, /暂无进行中的任务/, '那句空态文案必须删掉（将军：没有就不显示）')
+  assert.doesNotMatch(render, /agent-bubble-empty/, '空态那个元素也不该再被渲染')
+  // 清单与"看完整内容"的提示都必须挂在 taskCount > 0 上（否则空气泡会拖一条空面板）
+  assert.match(render, /\{agent\.taskCount > 0 && \(expanded/, '清单要有"有任务"这个前提')
+  assert.match(render, /\{expanded && agent\.taskCount > 0 && <div className="agent-bubble-more">/, '底部提示同理')
+  const css = read('scene/officeScene.css')
+  assert.doesNotMatch(css, /\.agent-bubble-empty \{/, '那条空态样式也删掉（留着会让人以为还在用）')
+})
+
+test('⑩★ 底部员工列表可收起，收起后把那 68px 让给画面', () => {
+  const scene = read('components/Scene3D.tsx')
+  assert.match(scene, /const \[listOpen, setListOpen\] = useState\(true\)/, '要有展开状态（默认展开）')
+  assert.match(scene, /onClick=\{\(\) => setListOpen\(value => !value\)\} aria-expanded=\{listOpen\}/, '工具栏要有可访问的收起按钮')
+  assert.match(scene, /收起员工列表/, '按钮文案要说明当前能做什么')
+  assert.match(scene, /\{listOpen && <SceneAgentList agents=\{agents\} onAgentClick=\{onAgentClick\} \/>\}/,
+    '收起时**不渲染**列表（不是只藏起来：canvas 是 flex:1，省下的高度必须真的给它）')
+  const css = read('scene/officeScene.css')
+  assert.match(css, /\.pixel-scene-toolbar-actions \{ display: flex/, '两个按钮要成组（否则一个左一个右）')
+})
+
+test('⑩★ 背景是亮的，且取景来自可测的纯函数（接线不许再写死）', () => {
+  const scene = read('components/Scene3D.tsx')
+  assert.match(scene, /import \{ SCENE_BACKGROUND, SCENE_GROUND_BOUNCE, SCENE_THEMES \} from '\.\.\/scene\/sceneTheme'/, '背景色要取自主题模块')
+  assert.match(scene, /<color attach="background" args=\{\[SCENE_BACKGROUND\]\} \/>/, '背景必须用常量（不许再写死深色）')
+  assert.doesNotMatch(scene, /'#0b111a'/, '那个近黑的背景必须消失')
+  assert.match(scene, /ortho\.zoom = framingZoom\(\{ width: size\.width, height: size\.height \}, layout\)/,
+    '取景必须调纯函数 framingZoom（它决定"够不够空间展示"，写死在组件里就测不到）')
+  const theme = read('scene/sceneTheme.ts')
+  assert.match(theme, /export const SCENE_BACKGROUND = '#/, '主题模块要导出背景常量')
+  assert.match(theme, /地板 < 背景 < 墙/, '明度关系要写在注释里（下一个人改色号时才知道约束是什么）')
 })

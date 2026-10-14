@@ -1085,6 +1085,10 @@ async function stageTest() {
         //   判据 ⑤ 专门守"状态颜色只许有一份"——那是这类改动最容易留下的沉默缺陷。
         'workbench/scripts/scene-board.test.mjs',
         'workbench/scripts/scene-office-wiring.test.mjs',
+        // ★ 2026-10-14：配色的**明度契约**（"办公室要亮"变成可断言的不等式 ——
+        //   相对亮度 地板 < 背景 < 墙、家具必须明显暗于墙）。没有它，下一个人加新预设时
+        //   会带进来一块暗色，而那时不会有任何东西会响。
+        'workbench/scripts/scene-theme.test.mjs',
         'workbench/scripts/sw-shell.test.mjs',
       ],
       cwd: ROOT,

@@ -33,8 +33,16 @@ export function layoutScene(agentKeys: readonly string[], preset: ScenePreset): 
   const rows = Math.max(2, Math.ceil(count / columns))
   const spacingX = 2.45
   const spacingZ = 3.1
-  const floorWidth = Math.max(12, columns * spacingX + 3.5)
-  const floorDepth = Math.max(10, rows * spacingZ + 3.5)
+  /**
+   * ★ 2026-10-14（将军："确保办公室场景有足够的空间展示"）：四周余量从 3.5 加到 **6.5**。
+   *
+   * 3.5 是"只有工位"时的尺寸：刚好裹住桌椅。布景进来之后就紧了 ——
+   * 后墙要挂看板（板宽最大 8.6）、两侧要放书架与茶水台（各占约 0.5 进深）、
+   * 前面要摆会议桌 + 一圈椅子（半径 1.72）。这些只能在**工位之外**落脚，
+   * 3.5 装不下 ⇒ 家具挤到工位线上（表现为人物穿模桌子，且只在某些人数下出现）。
+   */
+  const floorWidth = Math.max(18, columns * spacingX + 6.5)
+  const floorDepth = Math.max(14, rows * spacingZ + 6.5)
   const stations = agentKeys.map((key, index) => {
     const row = Math.floor(index / columns)
     const column = index % columns
@@ -61,6 +69,28 @@ export function layoutScene(agentKeys: readonly string[], preset: ScenePreset): 
     help: { x: floorWidth / 2 - 1, z: -floorDepth / 2 + 1 },
     board: { x: 0, z: boardZ, y: 2.02, width: boardWidth, height: boardHeight, standZ: boardZ + 1.15 },
     dressing: { wallHeight: 4.4, wallThickness: 0.3 },
-    camera: { distance: span * 1.15, targetY: 0.7, zoom: Math.max(20, 440 / span) },
+    camera: { distance: span * 1.25, targetY: 1.0, zoom: Math.max(20, 440 / span) },
   }
+}
+
+/**
+ * 正交相机的缩放：**让整个房间（含墙高与家具）带边距地落进画布**。
+ *
+ * ★ 2026-10-14（将军："确保办公室场景有足够的空间展示"）：这段原来是 `CameraRig` 里
+ *   写死的一行（`size.width / (floorWidth * 1.2)`）—— 而它恰恰是"够不够空间"的**唯一**决定式，
+ *   埋在组件里就没法判据化（没有浏览器就测不到）。搬到这里成为纯函数后，
+ *   `scene-layout.test.mjs` 能直接断言"画面里的世界尺寸 ≥ 房间尺寸"。
+ *
+ * 两个方向各留一份边距，取值来自实测：
+ *   · 水平 1.45：两侧要放书架/茶水台，贴到画面边缘会显得房间被切掉；
+ *   · 垂直 1.42：相机是斜俯视，地板深度会被压缩约 0.8，但同时墙高要占掉上方空间，
+ *     两者相抵后 1.42 能让后墙的看板标题与吊灯都在画面内。
+ *
+ * ⚠ 下限 11（原来是 14）：14 在**窄而矮**的画布上会把房间撑出画面 —— 而那正是
+ *   面板收起员工列表之前的样子。宁可略远一点，也不要让看板或人出画。
+ */
+export function framingZoom(canvas: { width: number; height: number }, layout: SceneLayout): number {
+  const horizontal = canvas.width / (layout.floorWidth * 1.45)
+  const vertical = canvas.height / (layout.floorDepth * 1.42)
+  return Math.max(11, Math.min(75, horizontal, vertical))
 }

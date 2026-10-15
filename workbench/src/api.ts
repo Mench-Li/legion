@@ -418,6 +418,7 @@ export interface SpacePipelineConfig {
       modelConfig: { id: string; version: number } | null
       nodeId?: string | null
       executionNode?: { id: string; version: number; label: string } | null
+      testRunner?: { executable: string; args: string[]; timeoutMs: number } | null
     }>
   } | null
   stages: SpacePipelineStage[]

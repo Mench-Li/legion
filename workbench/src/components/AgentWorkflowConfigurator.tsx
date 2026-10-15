@@ -112,6 +112,9 @@ export function AgentWorkflowConfigurator({ scope }: Props): React.JSX.Element {
   //   不留空 —— 留空 + 发布时必填 = 用户必须先去读 DSH 源码才发得出去。
   const [dshProvider, setDshProvider] = useState<string>(DEFAULT_NATIVE_PROVIDER)
   const [maxReworkRounds, setMaxReworkRounds] = useState(2)
+  const [testExecutable, setTestExecutable] = useState('node')
+  const [testArgs, setTestArgs] = useState('["--test"]')
+  const [testTimeoutMs, setTestTimeoutMs] = useState(900000)
   const [definitionName, setDefinitionName] = useState('Claude Code → DeepSeek Harness → Codex')
   const [graphStages, setGraphStages] = useState<GraphStageDraft[]>([])
   const [graphEdges, setGraphEdges] = useState<GraphEdgeDraft[]>([])
@@ -151,6 +154,11 @@ export function AgentWorkflowConfigurator({ scope }: Props): React.JSX.Element {
         reviewRole: workflow?.reviewRole ?? defaultRoleFor(nextPipeline.stages, 'reviewRole'),
       })
       setMaxReworkRounds(workflow?.maxReworkRounds ?? 2)
+      const implementationRole = workflow?.implementationRole ?? defaultRoleFor(nextPipeline.stages, 'implementationRole')
+      const savedTestRunner = workflow?.stageTools?.[implementationRole]?.testRunner
+      setTestExecutable(savedTestRunner?.executable ?? 'node')
+      setTestArgs(JSON.stringify(savedTestRunner?.args ?? ['--test']))
+      setTestTimeoutMs(savedTestRunner?.timeoutMs ?? 900000)
       const nextNodeIds = { designRole: '', implementationRole: '', reviewRole: '' } as Record<RoleKey, string>
       for (const key of Object.keys(ROLE_LABEL) as RoleKey[]) {
         const role = workflow?.[key] ?? defaultRoleFor(nextPipeline.stages, key)
@@ -260,16 +268,31 @@ export function AgentWorkflowConfigurator({ scope }: Props): React.JSX.Element {
       setError(nativeDerivation.blockers.join(' '))
       return
     }
+    let parsedTestArgs: unknown
+    try {
+      parsedTestArgs = JSON.parse(testArgs)
+    } catch {
+      setError('独立测试 argv 必须是 JSON 字符串数组，例如 ["--test"]。')
+      return
+    }
+    if (!testExecutable.trim() || !Array.isArray(parsedTestArgs) || parsedTestArgs.length === 0
+      || parsedTestArgs.some(argument => typeof argument !== 'string')) {
+      setError('请填写独立测试 executable 和非空 JSON 字符串参数数组。')
+      return
+    }
     setSaving(true)
     setError('')
     try {
       const choices: Record<RoleKey, ToolChoice> = tools
       const refs = {} as Record<RoleKey, { id: string; version: number }>
       for (const key of Object.keys(ROLE_LABEL) as RoleKey[]) refs[key] = await createOrReuseConfig(choices[key])
-      const stageTools: Record<string, { agentToolConfig: { id: string; version: number }; modelConfig: null; nodeId: string | null }> = {
-        [roles.designRole]: { agentToolConfig: refs.designRole, modelConfig: null, nodeId: nodeIds.designRole || null },
-        [roles.implementationRole]: { agentToolConfig: refs.implementationRole, modelConfig: null, nodeId: nodeIds.implementationRole || null },
-        [roles.reviewRole]: { agentToolConfig: refs.reviewRole, modelConfig: null, nodeId: nodeIds.reviewRole || null },
+      const stageTools: Record<string, { agentToolConfig: { id: string; version: number }; modelConfig: null; nodeId: string | null; testRunner: { executable: string; args: string[]; timeoutMs: number } | null }> = {
+        [roles.designRole]: { agentToolConfig: refs.designRole, modelConfig: null, nodeId: nodeIds.designRole || null, testRunner: null },
+        [roles.implementationRole]: {
+          agentToolConfig: refs.implementationRole, modelConfig: null, nodeId: nodeIds.implementationRole || null,
+          testRunner: { executable: testExecutable.trim(), args: parsedTestArgs as string[], timeoutMs: testTimeoutMs },
+        },
+        [roles.reviewRole]: { agentToolConfig: refs.reviewRole, modelConfig: null, nodeId: nodeIds.reviewRole || null, testRunner: null },
       }
       await saveSpacePipeline({
         scope,
@@ -504,7 +527,7 @@ export function AgentWorkflowConfigurator({ scope }: Props): React.JSX.Element {
               <div style={{ marginTop: 4 }}>· 只有想要下面三件事之一时才需要它：① 把某个阶段**换成别的 Agent 工具**跑（Claude Code / Codex）；
                 ② 固定一条**自定义交接链**（阶段可并行或汇合，不按流水线顺序）；
                 ③ 把一条链**冻结成版本**，以后发布目标时点名复用。</div>
-              <div style={{ marginTop: 4 }}>· 最短路径：三行各选一个岗位（已按你的流水线预填）→ 工具保持「DSH」→ 点「保存闭环配置」。要把某条链**冻结成版本**、以后按名字复用，再到下面的「高级设置」里发布。</div>
+              <div style={{ marginTop: 4 }}>· 最短路径：三行各选一个岗位（已按你的流水线预填）→ 选择工具并确认下方测试命令 → 点「保存闭环配置」。要把某条链**冻结成版本**、以后按名字复用，再到下面的「高级设置」里发布。</div>
               <div style={{ marginTop: 4 }}>· 想让任务**自动开跑**：设置 → <b>持续执行</b>。想让**写码阶段**动起来：任务详情 → <b>🤖 派 AI 执行</b>。这两件事都**不**在本页。</div>
             </div>
             {/* ★★ 2026-10-13：本机 provider **就绪度**（只读）。
@@ -611,6 +634,15 @@ export function AgentWorkflowConfigurator({ scope }: Props): React.JSX.Element {
                 {nodes.map(node => <option key={node.id} value={node.id}>{node.label} · {node.status}</option>)}
               </select>
             </div>)}
+            <div style={{ marginTop: 10, padding: 10, border: '1px solid var(--line)', borderRadius: 6 }}>
+              <b>标准闭环独立测试命令</b>
+              <div style={{ color: 'var(--muted-2)', marginTop: 4 }}>实现 Agent 提交代码后，Legion 会在其工作区启动此命令并记录结果；executable 与 argv 分开执行，不经过 shell。</div>
+              <div style={{ display: 'grid', gridTemplateColumns: 'minmax(130px,1fr) minmax(180px,1.5fr) minmax(130px,1fr)', gap: 8, marginTop: 7 }}>
+                <label>executable<input aria-label="标准闭环测试 executable" value={testExecutable} onChange={event => setTestExecutable(event.target.value)} placeholder="node / npm / pytest / go" /></label>
+                <label>argv（JSON 数组）<input aria-label="标准闭环测试 argv" value={testArgs} onChange={event => setTestArgs(event.target.value)} placeholder='["--test"]' /></label>
+                <label>超时（毫秒）<input aria-label="标准闭环测试超时" type="number" min={1000} max={3600000} step={1000} value={testTimeoutMs} onChange={event => setTestTimeoutMs(Number(event.target.value))} /></label>
+              </div>
+            </div>
             {/* ★★ 2026-10-13（② 常用/高级分层）：平时只看到"就绪度 + 三行岗位/工具 + 按钮"。
                 下面这些**不常用但有用**（改 DSH provider 名、能力声明、审查路由、自定义 DAG、
                 冻结版本）收进折叠区 —— 它们的复杂度不该挡在最短路径前面。

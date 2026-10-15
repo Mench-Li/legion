@@ -78,6 +78,16 @@ describe('面板分层：什么必须始终可见', () => {
     assert.ok(outside.includes('bundleRemedy'), '缺 bundle 的修法要在折叠区之外')
   })
 
+  test('标准闭环配置公开独立测试命令，并把它保存到实现岗位', () => {
+    const saveBlock = SRC.slice(SRC.indexOf('const save = async'), SRC.indexOf('const publishDefinition = async'))
+    assert.ok(outside.includes('标准闭环独立测试命令'), '测试命令配置必须在标准闭环表单中可见')
+    assert.ok(saveBlock.includes('testRunner:'), '闭环保存载荷必须包含 testRunner')
+    assert.match(saveBlock, /\[roles\.implementationRole\]:\s*\{[\s\S]*?testRunner:/,
+      'testRunner 必须绑定到实现岗位，而不是设计或审查岗位')
+    assert.ok(outside.includes('testExecutable') && outside.includes('testArgs') && outside.includes('testTimeoutMs'),
+      '闭环测试命令应包含 executable、argv 和超时')
+  })
+
   test('★ 高级区确实存在，且把"不常用但有用"的那些装进去了', () => {
     const bodies = detailsBodies(SRC)
     assert.ok(bodies.length >= 1, '要有折叠区')

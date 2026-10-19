@@ -574,9 +574,12 @@ export function AgentWorkflowConfigurator({ scope }: Props): React.JSX.Element {
             {/* 外部依赖告警的**唯一**门槛：只有用户真的选了外部工具才提示。
                 原来这里是 `Object.values(tools).some(t => t !== 'dsh-native')`，
                 配合硬编码的外部默认值 ⇒ 首次打开就满屏告警，而用户什么都还没选。 */}
-            {externalToolsChosen([...Object.values(tools), ...graphStages.map(stage => stage.tool)]) && <div style={{ color: 'var(--yellow)', marginTop: 8 }}>
-              外部 provider 心跳会报告 执行服务实例解析的原生权限模式；该值可核对配置是否匹配，但不证明文件访问边界已生效。真实验收请在可丢弃的系统账户或容器内检查读写边界、取消和清理。
-            </div>}
+            {externalToolsChosen([...Object.values(tools), ...graphStages.map(stage => stage.tool)]) && <details style={{ color: 'var(--muted-2)', marginTop: 8 }}>
+              <summary style={{ cursor: 'pointer', userSelect: 'none' }}>权限边界说明（展开）</summary>
+              <div style={{ marginTop: 6 }}>
+                外部 provider 心跳会报告执行服务实例解析的原生权限模式；该值可核对配置是否匹配，但不证明文件访问边界已生效。真实验收请在可丢弃的系统账户或容器内检查读写边界、取消和清理。
+              </div>
+            </details>}
             {permissionModeMismatches.length > 0 && <div style={{ color: 'var(--yellow)', marginTop: 8 }}>
               节点权限模式与工作流要求不匹配：{permissionModeMismatches.map(([providerName, mode]) => `${providerName}（需要 ${mode}）`).join('、')}。请在对应 执行服务配置 中应用以下配置并重启 worker，否则阶段不会派工。
               <pre style={{ whiteSpace: 'pre-wrap', margin: '6px 0', padding: 8, background: 'var(--surface-2)' }}>{permissionModePatch}</pre>

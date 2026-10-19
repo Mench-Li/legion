@@ -278,6 +278,34 @@ describe('缓存壳子（纪律 ②：绝不阻塞心跳）', () => {
     assert.equal(calls, 2, '过期后应当重新探测')
   })
 
+  test('no_network 和 unknown 只短暂缓存，网络恢复后自动重探', async () => {
+    for (const transientState of [READINESS_STATE.NO_NETWORK, READINESS_STATE.UNKNOWN]) {
+      let nowMs = 0
+      let calls = 0
+      const cache = createReadinessCache({
+        probe: async () => {
+          calls += 1
+          return {
+            codex: { state: calls === 1 ? transientState : READINESS_STATE.READY },
+            spawn: { state: READINESS_STATE.READY },
+          }
+        },
+        ttlMs: 10 * 60 * 1000,
+        transientFailureTtlMs: 30_000,
+        now: () => nowMs,
+      })
+
+      cache.snapshot(['codex', 'spawn']); await cache.settled()
+      assert.equal(cache.snapshot(['codex', 'spawn']).codex.state, transientState)
+      assert.equal(calls, 1)
+
+      nowMs = 30_001
+      cache.snapshot(['codex', 'spawn']); await cache.settled()
+      assert.equal(calls, 2, `${transientState} 不应沿用成功读数的 10 分钟 TTL`)
+      assert.equal(cache.snapshot(['codex', 'spawn']).codex.state, READINESS_STATE.READY)
+    }
+  })
+
   test('探测抛错不把心跳带崩：缓存保持原值，错误交给 onError', async () => {
     const seen = []
     const cache = createReadinessCache({

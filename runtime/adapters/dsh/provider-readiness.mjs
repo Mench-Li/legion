@@ -548,17 +548,29 @@ export async function probeProviders(names, deps = createLocalReadinessDeps(), {
  * 调用方在心跳里只调 `snapshot()` —— 它**立刻返回**上一次的结果（可能为空），
  * 同时在后台按需要刷新。于是探测慢/挂死都不会拖住心跳。
  */
-export function createReadinessCache({ probe, ttlMs = 10 * 60 * 1000, now = () => Date.now(), onError = null } = {}) {
+export function createReadinessCache({
+  probe,
+  ttlMs = 10 * 60 * 1000,
+  transientFailureTtlMs = 30 * 1000,
+  now = () => Date.now(),
+  onError = null,
+} = {}) {
   let cached = null
   let inflight = null
   return {
     /** 立刻返回缓存（可能为 null = 本轮还没有读数）。为空时会触发一次后台刷新。 */
     snapshot(names) {
-      const stale = cached === null || now() - cached.atMs > ttlMs
+      const stale = cached === null || now() - cached.atMs > cached.ttlMs
       if (stale && inflight === null) {
         inflight = Promise.resolve()
           .then(() => probe(names))
-          .then((value) => { cached = { atMs: now(), value } })
+          .then((value) => {
+            // 网络失败或探测超时可能是瞬时状况。若与成功读数一样缓存 10 分钟，
+            // 一次代理抖动就会在网络恢复后继续显示为不可用。
+            const transientFailure = Object.values(value ?? {}).some(entry =>
+              entry?.state === READINESS_STATE.NO_NETWORK || entry?.state === READINESS_STATE.UNKNOWN)
+            cached = { atMs: now(), ttlMs: transientFailure ? transientFailureTtlMs : ttlMs, value }
+          })
           .catch((e) => { if (onError) onError(e) })
           .finally(() => { inflight = null })
       }

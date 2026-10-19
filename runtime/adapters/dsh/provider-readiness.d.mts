@@ -84,6 +84,8 @@ export declare function probeProviders(
 export declare function createReadinessCache(options: {
   probe: (names: string[]) => Promise<ProviderReadinessTable>
   ttlMs?: number
+  /** Recheck transient `no_network` / `unknown` results sooner than stable results. */
+  transientFailureTtlMs?: number
   now?: () => number
   onError?: (error: unknown) => void
 }): {

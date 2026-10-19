@@ -1,7 +1,7 @@
 import { useState } from 'react'
 import { fetchAgentNodes, fetchAgentToolConfigs, fetchAgentWorkflowDefinitions, fetchMemberReadiness, fetchModelProfiles, fetchSpacePipeline, registerAgentToolConfig, registerAgentWorkflowDefinition, saveSpacePipeline, } from '../api'
 import type { AgentNodeRecord, AgentToolConfigRecord, AgentWorkflowDefinition, HubModelProfile, SpacePipelineConfig } from '../api'
-import { formatCodexSystemProxyMode } from '../agentWorkflowView'
+import { formatCodexSystemProxyNodeStatus } from '../agentWorkflowView'
 import {
   DEFAULT_NATIVE_PROVIDER,
   NATIVE_TOOL_DEFAULTS,
@@ -102,6 +102,8 @@ export function AgentWorkflowConfigurator({ scope }: Props): React.JSX.Element {
   const [readiness, setReadiness] = useState<{ member: string; providers: Record<string, ProviderReadinessLike>; profile: string | null } | null>(null)
   const [definitions, setDefinitions] = useState<AgentWorkflowDefinition[]>([])
   const [nodes, setNodes] = useState<AgentNodeRecord[]>([])
+  const codexProviderNodes = nodes.filter(node =>
+    node.providerNames.includes('codex') || node.observedProviders.includes('codex'))
   const [nodeIds, setNodeIds] = useState<Record<RoleKey, string>>({ designRole: '', implementationRole: '', reviewRole: '' })
   const [roles, setRoles] = useState<Record<RoleKey, string>>({ designRole: '', implementationRole: '', reviewRole: '' })
   // ★ 默认值 = **DSH 执行服务**（不是 Claude Code / Codex）。理由见 agentWorkflowDefaults.ts：
@@ -669,13 +671,22 @@ export function AgentWorkflowConfigurator({ scope }: Props): React.JSX.Element {
                 ? <div style={{ color: 'var(--muted-2)' }}>本空间还没有节点。执行服务启动后**会自己登记**（不需要你填任何东西）；留空时由任一在线节点认领。</div>
                 : nodes.map(node => <div key={node.id} style={{ color: 'var(--muted-2)' }}>{node.label} · {node.id} · {node.status}{node.observedProviders.length ? ` · ${node.observedProviders.join(', ')}` : ''} · {observedPermissionModes(node)}</div>)}
               <div style={{ color: 'var(--muted-2)' }}>节点是运行 Legion worker 的 执行服务实例，不是 Claude/Codex 产品。Provider、能力和 生效权限模式由 daemon 心跳报告；外部阶段只有匹配冻结权限模式时才会派工。节点身份由守护按 `agentNodeId`（支持 `{'{scope}'}` 占位符）自行上报，不会复制登录凭据。</div>
-              {nodes.some(node => node.providerNames.includes('codex')) && <div style={{ color: 'var(--muted-2)', marginTop: 6 }}>
-                Codex 网络代理状态（逐节点）：{nodes.filter(node => node.providerNames.includes('codex')).map(node => `${node.label}：${formatCodexSystemProxyMode(observedCodexSystemProxyMode(node))}`).join('；')}。
-              </div>}
+              <div style={{ color: 'var(--muted-2)', marginTop: 6 }}>
+                Codex 网络代理状态（逐节点）：{nodes.length === 0
+                  ? '尚无执行节点心跳，暂时无法确认。'
+                  : nodes.map(node => `${node.label}：${formatCodexSystemProxyNodeStatus(
+                    codexProviderNodes.includes(node), observedCodexSystemProxyMode(node),
+                  )}`).join('；')}。
+              </div>
             </div>
             {(Object.values(tools).includes('codex') || graphStages.some(stage => stage.tool === 'codex')) && <div style={{ color: 'var(--yellow)', marginTop: 10, padding: 8, border: '1px solid var(--line)', borderRadius: 6 }}>
               <b>Codex 网络代理设置（按执行节点配置）</b>
-              <div>在执行节点的 Codex 子 Agent 配置中设置 `systemProxyMode`。`system` 会为 Codex 子进程启用系统代理；`inherit`（默认）沿用 Codex 原生配置和进程代理环境变量，不会强制开启系统代理。Codex CLI 仍将 `respect_system_proxy` 标为开发中；节点心跳只确认配置模式，不代表服务端已连通。启用 `system` 后，应在每个目标节点用该节点实际使用的兼容模型发起只读请求验收网络。修改后重启执行服务，并确认上方心跳模式；未上报表示 Codex 执行服务 版本较旧。</div>
+              <div>在执行节点的 Codex 子 Agent 配置中设置 `systemProxyMode`。`system` 会为 Codex 子进程启用系统代理；`inherit`（默认）沿用 Codex 原生配置和进程代理环境变量，不会强制开启系统代理。节点心跳只确认 provider 和配置模式，不代表服务端已连通。</div>
+              {nodes.length === 0
+                ? <div style={{ marginTop: 6 }}>尚无执行节点心跳，当前无法确认 Codex provider 是否安装或代理配置是否生效。节点上线后刷新此页再检查。</div>
+                : codexProviderNodes.length === 0
+                  ? <div style={{ marginTop: 6 }}>当前节点心跳没有报告 Codex provider，因此目前无法确认 `systemProxyMode` 被执行器读取。请在目标执行节点对应的 DSH profile 安装或启用 `@deepseek-ai/dsh-subagent-codex`，重启执行服务后刷新心跳；若使用 DSH Desktop 管理的 profile，请从 Desktop「设置 → 插件」安装，不要用 CLI 修改该 profile。</div>
+                  : <div style={{ marginTop: 6 }}>修改配置后重启执行服务并刷新心跳。若某节点已报告 Codex provider、但未报告 `systemProxyMode`，请检查配置是否写入该节点实际使用的 profile、服务是否重启及心跳是否更新。即使显示 `system`，仍需在每个目标节点用实际使用的兼容模型发起只读请求验收网络。</div>}
               <pre style={{ whiteSpace: 'pre-wrap', margin: '6px 0', padding: 8, background: 'var(--surface-2)' }}>{'- id: subagent-codex\n  config:\n    systemProxyMode: system  # 或 inherit'}</pre>
             </div>}
             {Object.values(tools).includes('dsh-native') && <div style={{ marginTop: 10 }}>

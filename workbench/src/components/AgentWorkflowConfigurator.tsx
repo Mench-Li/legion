@@ -68,6 +68,19 @@ function observedPermissionModes(node: AgentNodeRecord): string {
   return modes.length > 0 ? modes.join(', ') : '权限模式未上报'
 }
 
+function agentToolConfigOptionLabel(config: AgentToolConfigRecord): string {
+  const toolName = config.adapter === 'dsh-native'
+    ? `DSH 执行服务（注册名 ${config.providerName}）`
+    : config.providerName === 'claude-code' ? 'Claude Code'
+      : config.providerName === 'codex' ? 'Codex' : `外部 Agent（${config.providerName}）`
+  return `${toolName} · 固定配置 ${config.id} v${config.version}`
+}
+
+function agentToolConfigReferenceLabel(configs: AgentToolConfigRecord[], ref: { id: string; version: number }): string {
+  const config = configs.find(candidate => candidate.id === ref.id && candidate.version === ref.version)
+  return config ? agentToolConfigOptionLabel(config) : `${ref.id} v${ref.version}（未找到或已停用）`
+}
+
 function observedPermissionMode(node: AgentNodeRecord, providerName: string): string | null {
   const providers = node.observedCapabilities?.providers
   if (providers === null || typeof providers !== 'object' || Array.isArray(providers)) return null
@@ -851,8 +864,8 @@ export function AgentWorkflowConfigurator({ scope }: Props): React.JSX.Element {
                         {rolesForSelect.map(role => <option key={role.role} value={role.role}>{role.label} · {role.role}</option>)}
                       </select>
                     </label>
-                    <label style={{ display: 'grid', gap: 4 }}>Agent 工具配置
-                      <select aria-label={'阶段 ' + (index + 1) + ' Agent 工具'} value={stage.toolConfigRef ? 'ref:' + stage.toolConfigRef.id + '@' + stage.toolConfigRef.version : 'new:' + stage.tool} onChange={event => setGraphStages(current => current.map((item, at) => {
+                    <label style={{ display: 'grid', gap: 4 }}>阶段由谁执行？
+                      <select aria-label={'阶段 ' + (index + 1) + ' 执行工具和配置版本'} value={stage.toolConfigRef ? 'ref:' + stage.toolConfigRef.id + '@' + stage.toolConfigRef.version : 'new:' + stage.tool} onChange={event => setGraphStages(current => current.map((item, at) => {
                         if (at !== index) return item
                         const selected = event.target.value
                         if (selected.startsWith('ref:')) {
@@ -865,11 +878,22 @@ export function AgentWorkflowConfigurator({ scope }: Props): React.JSX.Element {
                         }
                         return { ...item, tool: selected.slice(4) as ToolChoice, toolConfigRef: null }
                       }))}>
-                        <option value="new:claude-code">新增/复用 Claude Code 配置</option>
-                        <option value="new:dsh-native">新增/复用 DSH 执行服务配置</option>
-                        <option value="new:codex">新增/复用 Codex 配置</option>
-                        {configs.filter(config => config.enabled).map(config => <option key={config.id + '@' + config.version} value={'ref:' + config.id + '@' + config.version}>{config.providerName} · {config.id} v{config.version}</option>)}
+                        <optgroup label="自动选择工具（发布时复用兼容配置，没有时创建）">
+                          <option value="new:claude-code">Claude Code</option>
+                          <option value="new:dsh-native">DSH 执行服务（注册名：{dshProvider || '未填写'}）</option>
+                          <option value="new:codex">Codex</option>
+                        </optgroup>
+                        <optgroup label="固定使用一个已保存配置版本">
+                          {configs.filter(config => config.enabled).map(config => <option key={config.id + '@' + config.version} value={'ref:' + config.id + '@' + config.version}>{agentToolConfigOptionLabel(config)}</option>)}
+                        </optgroup>
                       </select>
+                      <small style={{ color: 'var(--muted-2)' }}>
+                        {stage.toolConfigRef
+                          ? `当前固定绑定：${agentToolConfigReferenceLabel(configs, stage.toolConfigRef)}。可用时发布会引用这个版本；若已停用，则自动复用或创建可用配置。`
+                          : stage.tool === 'dsh-native'
+                            ? `使用 DSH 注册名“${dshProvider || '未填写'}”；发布时自动复用兼容配置，没有时创建。`
+                            : `使用 ${stage.tool === 'claude-code' ? 'Claude Code' : 'Codex'}；发布时自动复用兼容配置，没有时创建。`}
+                      </small>
                     </label>
                   </div>
 

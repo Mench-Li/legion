@@ -45,6 +45,11 @@ export function subagentProvider(ctx, name) {
   return subagentsOf(ctx).getProvider(name)
 }
 
+/** DSH providers expose effective settings either directly or in their config. */
+function permissionModeOf(provider) {
+  return provider?.permissionMode ?? provider?.config?.permissionMode
+}
+
 /**
  * provider 在注册时固定的生效权限模式，**原样**返回运行期报告的值。
  *
@@ -55,7 +60,7 @@ export function subagentProvider(ctx, name) {
  * 留在调用方。
  */
 export function subagentProviderPermissionMode(ctx, name) {
-  return subagentProvider(ctx, name)?.permissionMode
+  return permissionModeOf(subagentProvider(ctx, name))
 }
 
 /**
@@ -67,11 +72,12 @@ export function subagentProviderPermissionMode(ctx, name) {
 export function subagentProviderCapabilities(ctx, name) {
   const provider = subagentProvider(ctx, name)
   const caps = provider?.capabilities
+  const permissionMode = permissionModeOf(provider)
   return {
     outputSchema: caps?.outputSchema === true,
     toolFilter: caps?.toolFilter === true,
     cancellation: true,
-    ...(typeof provider?.permissionMode === 'string' ? { permissionMode: provider.permissionMode } : {}),
+    ...(typeof permissionMode === 'string' ? { permissionMode } : {}),
     ...(typeof provider?.systemProxyMode === 'string' ? { systemProxyMode: provider.systemProxyMode } : {}),
   }
 }

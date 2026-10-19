@@ -23,6 +23,8 @@ export interface DshSubagentProvider {
   readonly capabilities: DshSubagentCapabilities
   /** 注册时固定的生效非交互权限模式；未声明即 undefined。 */
   readonly permissionMode?: string
+  /** Some DSH providers keep their effective settings on the provider config. */
+  readonly config?: { readonly permissionMode?: unknown }
   /** 注册时固定的生效系统代理模式；未声明即 undefined。 */
   readonly systemProxyMode?: string
 }

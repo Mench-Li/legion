@@ -501,6 +501,27 @@ export function AgentWorkflowConfigurator({ scope }: Props): React.JSX.Element {
    * **能粘才给命令**，否则说清该做什么。见 workbench/src/dshRemedy.ts。
    */
   const bundleRemedy = bundleInstallRemedy(readiness?.profile ?? null, missingAgentBundles)
+  const renameGraphStage = (index: number, nextId: string): void => {
+    const previousId = graphStages[index]?.id
+    if (previousId === undefined || previousId === nextId) return
+    setGraphStages(current => current.map((stage, at) => at === index ? { ...stage, id: nextId } : stage))
+    setGraphEdges(current => current.map(edge => ({
+      from: edge.from === previousId ? nextId : edge.from,
+      to: edge.to === previousId ? nextId : edge.to,
+    })))
+    if (reviewStageId === previousId) setReviewStageId(nextId)
+    if (reviewDesignRoute === previousId) setReviewDesignRoute(nextId)
+    if (reviewImplementationRoute === previousId) setReviewImplementationRoute(nextId)
+  }
+  const graphStageLabel = (id: string): string => {
+    const stage = graphStages.find(item => item.id === id)
+    return stage ? (stage.label.trim() || stage.role) + ' · ' + stage.id : id
+  }
+  const graphEntryStages = graphStages.filter(stage => !graphEdges.some(edge => edge.to === stage.id))
+  const nextGraphDependency = graphStages.flatMap(from => graphStages
+    .filter(to => to.id !== from.id)
+    .map(to => ({ from: from.id, to: to.id })))
+    .find(candidate => !graphEdges.some(edge => edge.from === candidate.from && edge.to === candidate.to))
   const rowStyle = { display: 'grid', gridTemplateColumns: '105px minmax(130px, 1fr) minmax(150px, 1.2fr) minmax(150px, 1fr)', gap: 8, alignItems: 'center', marginTop: 8 } as const
   return (
     <div className="field" style={{ borderTop: '1px solid var(--line)', paddingTop: 12 }}>
@@ -748,105 +769,231 @@ export function AgentWorkflowConfigurator({ scope }: Props): React.JSX.Element {
               <label>审查返工上限 <input type="number" min={0} max={20} value={maxReworkRounds} onChange={e => setMaxReworkRounds(Number(e.target.value))} style={{ width: 70 }} /> 轮</label>
               <div style={{ color: 'var(--muted-2)' }}>设计问题退回 Claude Code；实现问题退回编码岗位；混合问题先修订设计，再重新实现和审查。</div>
             </div>
-            <section style={{ marginTop: 12, padding: 10, border: '1px solid var(--line)', borderRadius: 6 }}>
+            <section style={{ marginTop: 12, padding: 12, border: '1px solid var(--line)', borderRadius: 8 }}>
               <b>可复用工作流 DAG</b>
-              <div style={{ color: 'var(--muted-2)', marginTop: 4 }}>阶段可并行或汇合；同一岗位可以承担多个不同阶段。阶段 ID 是稳定标识，输入/输出契约填写逗号分隔的产物名。</div>
-              {graphStages.map((stage, index) => <div key={`${stage.id}-${index}`} style={{ marginTop: 10, padding: 8, background: 'var(--surface-2)', borderRadius: 5 }}>
-                <div style={{ display: 'grid', gridTemplateColumns: '110px minmax(120px,1fr) minmax(120px,1fr) minmax(120px,1fr) auto', gap: 7, alignItems: 'center' }}>
-                  <input aria-label={`阶段 ${index + 1} ID`} value={stage.id} onChange={event => setGraphStages(current => current.map((item, at) => at === index ? { ...item, id: event.target.value.trim() } : item))} placeholder="stage-id" />
-                  <input aria-label={`阶段 ${index + 1} 名称`} value={stage.label} onChange={event => setGraphStages(current => current.map((item, at) => at === index ? { ...item, label: event.target.value } : item))} placeholder="阶段名称" />
-                  <select aria-label={`阶段 ${index + 1} 岗位`} value={stage.role} onChange={event => setGraphStages(current => current.map((item, at) => at === index ? { ...item, role: event.target.value } : item))}>
-                    {rolesForSelect.map(role => <option key={role.role} value={role.role}>{role.label} · {role.role}</option>)}
-                  </select>
-                  <select aria-label={`阶段 ${index + 1} Agent 工具`} value={stage.toolConfigRef ? `ref:${stage.toolConfigRef.id}@${stage.toolConfigRef.version}` : `new:${stage.tool}`} onChange={event => setGraphStages(current => current.map((item, at) => {
-                    if (at !== index) return item
-                    const selected = event.target.value
-                    if (selected.startsWith('ref:')) {
-                      const value = selected.slice(4)
-                      const split = value.lastIndexOf('@')
-                      const config = configs.find(candidate => candidate.id === value.slice(0, split) && candidate.version === Number(value.slice(split + 1)))
-                      const tool: ToolChoice = config?.adapter === 'dsh-subagent' && config.providerName === 'codex' ? 'codex'
-                        : config?.adapter === 'dsh-subagent' && config.providerName === 'claude-code' ? 'claude-code' : 'dsh-native'
-                      return { ...item, tool, toolConfigRef: config ? { id: config.id, version: config.version } : null }
-                    }
-                    const tool = selected.slice(4) as ToolChoice
-                    return { ...item, tool, toolConfigRef: null }
-                  }))}>
-                    <option value="new:claude-code">新增/复用 Claude Code 配置</option><option value="new:dsh-native">新增/复用 DSH 执行服务 配置</option><option value="new:codex">新增/复用 Codex 配置</option>
-                    {configs.filter(config => config.enabled).map(config => <option key={`${config.id}@${config.version}`} value={`ref:${config.id}@${config.version}`}>{config.providerName} · {config.id} v{config.version}</option>)}
-                  </select>
-                  <button type="button" className="btn ghost" disabled={graphStages.length <= 2} aria-label={`删除阶段 ${stage.id}`} onClick={() => {
-                    const next = graphStages.filter((_, at) => at !== index)
-                    setGraphStages(next)
-                    setGraphEdges(edges => edges.filter(edge => edge.from !== stage.id && edge.to !== stage.id))
-                    if (reviewStageId === stage.id) setReviewStageId(next[0]?.id ?? '')
-                    if (reviewDesignRoute === stage.id) setReviewDesignRoute(next[0]?.id ?? '')
-                    if (reviewImplementationRoute === stage.id) setReviewImplementationRoute(next[0]?.id ?? '')
-                  }}>删除</button>
+              <div style={{ color: 'var(--muted-2)', marginTop: 4 }}>
+                这是给目标任务选用的流程模板，定义阶段及等待关系。发布版本本身不会启动任务；创建目标时选择该版本后才生效。
+              </div>
+
+              <div style={{ marginTop: 10, padding: 10, borderRadius: 6, background: 'var(--surface-2)' }}>
+                <b>成功路径预览</b>
+                <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginTop: 7 }}>
+                  {graphStages.map((stage, index) => <span key={stage.id} style={{ padding: '3px 8px', border: '1px solid var(--line)', borderRadius: 14 }}>
+                    {index + 1}. {stage.label.trim() || stage.role} <code style={{ color: 'var(--muted-2)' }}>{stage.id}</code>
+                  </span>)}
                 </div>
-                <div style={{ display: 'grid', gridTemplateColumns: 'minmax(130px,1fr) minmax(130px,1fr) minmax(150px,1.2fr) minmax(130px,1fr)', gap: 7, marginTop: 7 }}>
-                  <input aria-label={`${stage.id} 输入产物`} value={stage.inputArtifacts} onChange={event => setGraphStages(current => current.map((item, at) => at === index ? { ...item, inputArtifacts: event.target.value } : item))} placeholder="输入产物：design-bundle, ..." />
-                  <input aria-label={`${stage.id} 输出产物`} value={stage.outputArtifacts} onChange={event => setGraphStages(current => current.map((item, at) => at === index ? { ...item, outputArtifacts: event.target.value } : item))} placeholder="输出产物：implementation-commit, ..." />
-                  {stage.id === reviewImplementationRoute && <div style={{ display: 'grid', gap: 6, marginTop: 6 }}>
-                    <small>Legion 在实现 Agent 提交代码后，会按冻结的 executable + argv 直接启动测试（shell=false）。包管理器运行脚本时仍遵循其自身脚本语义；测试进程使用 worker 账户权限。Windows 下 npm 可用，pnpm/yarn shell shim 不支持。</small>
-                    <input aria-label={`${stage.id} 独立测试 executable`} value={stage.testExecutable} onChange={event => setGraphStages(current => current.map((item, at) => at === index ? { ...item, testExecutable: event.target.value } : item))} placeholder="node / npm / pytest / go ..." />
-                    <input aria-label={`${stage.id} 独立测试 argv JSON`} value={stage.testArgs} onChange={event => setGraphStages(current => current.map((item, at) => at === index ? { ...item, testArgs: event.target.value } : item))} placeholder='["--test"]' />
-                    <input aria-label={`${stage.id} 独立测试超时毫秒`} type="number" min={1000} max={3600000} step={1000} value={stage.testTimeoutMs} onChange={event => setGraphStages(current => current.map((item, at) => at === index ? { ...item, testTimeoutMs: Number(event.target.value) } : item))} />
-                  </div>}
-                  <select aria-label={`${stage.id} 模型配置`} title="模型档案覆盖仅支持 DSH 工具；Claude Code/Codex 使用其自身模型设置" disabled={stage.toolConfigRef
-                    ? configs.find(config => config.id === stage.toolConfigRef?.id && config.version === stage.toolConfigRef?.version)?.adapter !== 'dsh-native'
-                    : stage.tool !== 'dsh-native'} value={stage.modelConfigRef ? `${stage.modelConfigRef.id}@${stage.modelConfigRef.version}` : ''} onChange={event => {
-                    const selected = event.target.value
-                    const split = selected.lastIndexOf('@')
-                    const id = selected.slice(0, split)
-                    const version = selected.slice(split + 1)
-                    const modelConfigRef = split > 0 && Number.isSafeInteger(Number(version)) ? { id, version: Number(version) } : null
-                    setGraphStages(current => current.map((item, at) => at === index ? { ...item, modelConfigRef } : item))
-                  }}>
-                    <option value="">使用 Agent 工具默认模型</option>
-                    {modelProfiles.filter(profile => Number.isSafeInteger(profile.version)).map(profile => <option key={`${profile.id}@${profile.version}`} value={`${profile.id}@${profile.version}`}>{profile.displayName} · {profile.provider}/{profile.model} v{profile.version}</option>)}
-                  </select>
-                  <select aria-label={`${stage.id} 执行节点`} value={stage.nodeId} onChange={event => setGraphStages(current => current.map((item, at) => at === index ? { ...item, nodeId: event.target.value } : item))}>
-                    <option value="">自动选择节点</option>{nodes.map(node => <option key={node.id} value={node.id}>{node.label} · {node.status}</option>)}
-                  </select>
+                <div style={{ display: 'grid', gap: 5, marginTop: 8 }}>
+                  {graphEdges.length === 0
+                    ? <div>当前没有依赖：所有阶段都可以并行开始。</div>
+                    : graphEdges.map((edge, index) => <div key={index}>
+                      成功完成 <b>{graphStageLabel(edge.from)}</b> 后，才启动 <b>{graphStageLabel(edge.to)}</b>。
+                    </div>)}
                 </div>
-              </div>)}
-              <div style={{ display: 'flex', gap: 8, marginTop: 8 }}>
-                <button type="button" className="btn ghost" onClick={() => {
-                  const id = `stage-${graphStages.length + 1}`
-                  setGraphStages(current => [...current, { id, role: rolesForSelect[0]?.role ?? '', label: `阶段 ${current.length + 1}`, tool: 'dsh-native', toolConfigRef: null, modelConfigRef: null, nodeId: '', inputArtifacts: '', outputArtifacts: '', testExecutable: '', testArgs: '[]', testTimeoutMs: 900000 }])
+                <div style={{ color: 'var(--muted-2)', marginTop: 6 }}>
+                  无前置阶段的入口可以并行开始；汇入同一阶段的多个依赖必须全部成功。审查失败后的返工规则在下方单独设置。
+                  {graphEntryStages.length > 0 && <> 当前入口：{graphEntryStages.map(stage => graphStageLabel(stage.id)).join('、')}。</>}
+                </div>
+              </div>
+
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8, flexWrap: 'wrap', marginTop: 10 }}>
+                <div>
+                  <b>阶段配置</b>
+                  <div style={{ color: 'var(--muted-2)', marginTop: 3 }}>每个阶段指定执行岗位和工具；产物字段描述阶段之间交接的内容。</div>
+                </div>
+                <button type="button" className="btn ghost" disabled={rolesForSelect.length === 0} onClick={() => {
+                  const usedIds = new Set(graphStages.map(stage => stage.id))
+                  let suffix = graphStages.length + 1
+                  while (usedIds.has('stage-' + suffix)) suffix += 1
+                  setGraphStages(current => [...current, {
+                    id: 'stage-' + suffix,
+                    role: rolesForSelect[0]?.role ?? '',
+                    label: '新阶段',
+                    tool: 'dsh-native',
+                    toolConfigRef: null,
+                    modelConfigRef: null,
+                    nodeId: '',
+                    inputArtifacts: '',
+                    outputArtifacts: '',
+                    testExecutable: '',
+                    testArgs: '[]',
+                    testTimeoutMs: 900000,
+                  }])
                 }}>添加阶段</button>
-                <button type="button" className="btn ghost" disabled={graphStages.length < 2} onClick={() => setGraphEdges(current => [...current, { from: graphStages[0].id, to: graphStages[1].id }])}>添加依赖边</button>
               </div>
-              <div style={{ marginTop: 10 }}><b>成功路径依赖</b>
-                {graphEdges.map((edge, index) => <div key={index} style={{ display: 'flex', gap: 7, alignItems: 'center', marginTop: 6 }}>
-                  <select aria-label={`依赖 ${index + 1} 起点`} value={edge.from} onChange={event => setGraphEdges(current => current.map((item, at) => at === index ? { ...item, from: event.target.value } : item))}>
-                    {graphStages.map(stage => <option key={stage.id} value={stage.id}>{stage.id}</option>)}
-                  </select><span>→</span>
-                  <select aria-label={`依赖 ${index + 1} 终点`} value={edge.to} onChange={event => setGraphEdges(current => current.map((item, at) => at === index ? { ...item, to: event.target.value } : item))}>
-                    {graphStages.map(stage => <option key={stage.id} value={stage.id}>{stage.id}</option>)}
-                  </select>
-                  <button type="button" className="btn ghost" aria-label={`删除依赖 ${index + 1}`} onClick={() => setGraphEdges(current => current.filter((_, at) => at !== index))}>移除边</button>
-                </div>)}
+
+              <div style={{ display: 'grid', gap: 10, marginTop: 8 }}>
+                {graphStages.map((stage, index) => <article key={index} style={{ padding: 10, border: '1px solid var(--line)', borderRadius: 7, background: 'var(--surface-2)' }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8, marginBottom: 8 }}>
+                    <div>
+                      <b>{stage.label.trim() || ('阶段 ' + (index + 1))}</b>
+                      <span style={{ marginLeft: 8, color: 'var(--muted-2)' }}>阶段 {index + 1} · ID <code>{stage.id || '未填写'}</code></span>
+                    </div>
+                    <button type="button" className="btn ghost" disabled={graphStages.length <= 2} aria-label={'删除阶段 ' + stage.id} onClick={() => {
+                      const next = graphStages.filter((_, at) => at !== index)
+                      setGraphStages(next)
+                      setGraphEdges(edges => edges.filter(edge => edge.from !== stage.id && edge.to !== stage.id))
+                      if (reviewStageId === stage.id) setReviewStageId(next[0]?.id ?? '')
+                      if (reviewDesignRoute === stage.id) setReviewDesignRoute(next[0]?.id ?? '')
+                      if (reviewImplementationRoute === stage.id) setReviewImplementationRoute(next[0]?.id ?? '')
+                    }}>删除阶段</button>
+                  </div>
+
+                  <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(210px, 1fr))', gap: 8 }}>
+                    <label style={{ display: 'grid', gap: 4 }}>阶段名称
+                      <input aria-label={'阶段 ' + (index + 1) + ' 名称'} value={stage.label} onChange={event => setGraphStages(current => current.map((item, at) => at === index ? { ...item, label: event.target.value } : item))} placeholder="例如：方案设计" />
+                    </label>
+                    <label style={{ display: 'grid', gap: 4 }}>稳定 ID
+                      <input aria-label={'阶段 ' + (index + 1) + ' ID'} value={stage.id} onChange={event => renameGraphStage(index, event.target.value.trim())} placeholder="例如：design" />
+                      <small style={{ color: 'var(--muted-2)' }}>依赖和返工路由使用此 ID；改名会同步更新引用。</small>
+                    </label>
+                    <label style={{ display: 'grid', gap: 4 }}>执行岗位
+                      <select aria-label={'阶段 ' + (index + 1) + ' 岗位'} value={stage.role} onChange={event => setGraphStages(current => current.map((item, at) => at === index ? { ...item, role: event.target.value } : item))}>
+                        {rolesForSelect.map(role => <option key={role.role} value={role.role}>{role.label} · {role.role}</option>)}
+                      </select>
+                    </label>
+                    <label style={{ display: 'grid', gap: 4 }}>Agent 工具配置
+                      <select aria-label={'阶段 ' + (index + 1) + ' Agent 工具'} value={stage.toolConfigRef ? 'ref:' + stage.toolConfigRef.id + '@' + stage.toolConfigRef.version : 'new:' + stage.tool} onChange={event => setGraphStages(current => current.map((item, at) => {
+                        if (at !== index) return item
+                        const selected = event.target.value
+                        if (selected.startsWith('ref:')) {
+                          const value = selected.slice(4)
+                          const split = value.lastIndexOf('@')
+                          const config = configs.find(candidate => candidate.id === value.slice(0, split) && candidate.version === Number(value.slice(split + 1)))
+                          const tool: ToolChoice = config?.adapter === 'dsh-subagent' && config.providerName === 'codex' ? 'codex'
+                            : config?.adapter === 'dsh-subagent' && config.providerName === 'claude-code' ? 'claude-code' : 'dsh-native'
+                          return { ...item, tool, toolConfigRef: config ? { id: config.id, version: config.version } : null }
+                        }
+                        return { ...item, tool: selected.slice(4) as ToolChoice, toolConfigRef: null }
+                      }))}>
+                        <option value="new:claude-code">新增/复用 Claude Code 配置</option>
+                        <option value="new:dsh-native">新增/复用 DSH 执行服务配置</option>
+                        <option value="new:codex">新增/复用 Codex 配置</option>
+                        {configs.filter(config => config.enabled).map(config => <option key={config.id + '@' + config.version} value={'ref:' + config.id + '@' + config.version}>{config.providerName} · {config.id} v{config.version}</option>)}
+                      </select>
+                    </label>
+                  </div>
+
+                  <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: 8, marginTop: 10 }}>
+                    <label style={{ display: 'grid', gap: 4 }}>需要的上游产物
+                      <input aria-label={stage.id + ' 输入产物'} value={stage.inputArtifacts} onChange={event => setGraphStages(current => current.map((item, at) => at === index ? { ...item, inputArtifacts: event.target.value } : item))} placeholder="多个名称用逗号分隔，例如：design-bundle" />
+                      <small style={{ color: 'var(--muted-2)' }}>阶段启动前检查这些产物是否已由上游交付。</small>
+                    </label>
+                    <label style={{ display: 'grid', gap: 4 }}>交付的产物
+                      <input aria-label={stage.id + ' 输出产物'} value={stage.outputArtifacts} onChange={event => setGraphStages(current => current.map((item, at) => at === index ? { ...item, outputArtifacts: event.target.value } : item))} placeholder="例如：implementation-commit, test-evidence" />
+                      <small style={{ color: 'var(--muted-2)' }}>填写交接契约名称，不是文件路径。</small>
+                    </label>
+                  </div>
+
+                  <details style={{ marginTop: 9 }}>
+                    <summary style={{ cursor: 'pointer' }}>执行设置：模型、节点{stage.id === reviewImplementationRoute ? '和独立测试命令' : ''}</summary>
+                    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(210px, 1fr))', gap: 8, marginTop: 8 }}>
+                      <label style={{ display: 'grid', gap: 4 }}>模型覆盖
+                        <select aria-label={stage.id + ' 模型配置'} title="模型档案覆盖仅支持 DSH 工具；Claude Code/Codex 使用其自身模型设置" disabled={stage.toolConfigRef
+                          ? configs.find(config => config.id === stage.toolConfigRef?.id && config.version === stage.toolConfigRef?.version)?.adapter !== 'dsh-native'
+                          : stage.tool !== 'dsh-native'} value={stage.modelConfigRef ? stage.modelConfigRef.id + '@' + stage.modelConfigRef.version : ''} onChange={event => {
+                          const selected = event.target.value
+                          const split = selected.lastIndexOf('@')
+                          const id = selected.slice(0, split)
+                          const version = selected.slice(split + 1)
+                          const modelConfigRef = split > 0 && Number.isSafeInteger(Number(version)) ? { id, version: Number(version) } : null
+                          setGraphStages(current => current.map((item, at) => at === index ? { ...item, modelConfigRef } : item))
+                        }}>
+                          <option value="">使用 Agent 工具默认模型</option>
+                          {modelProfiles.filter(profile => Number.isSafeInteger(profile.version)).map(profile => <option key={profile.id + '@' + profile.version} value={profile.id + '@' + profile.version}>{profile.displayName} · {profile.provider}/{profile.model} v{profile.version}</option>)}
+                        </select>
+                      </label>
+                      <label style={{ display: 'grid', gap: 4 }}>执行节点
+                        <select aria-label={stage.id + ' 执行节点'} value={stage.nodeId} onChange={event => setGraphStages(current => current.map((item, at) => at === index ? { ...item, nodeId: event.target.value } : item))}>
+                          <option value="">自动选择节点</option>{nodes.map(node => <option key={node.id} value={node.id}>{node.label} · {node.status}</option>)}
+                        </select>
+                      </label>
+                    </div>
+                    {stage.id === reviewImplementationRoute && <div style={{ marginTop: 10, padding: 9, border: '1px solid var(--line)', borderRadius: 6 }}>
+                      <b>独立测试命令</b>
+                      <div style={{ color: 'var(--muted-2)', margin: '4px 0 8px' }}>实现阶段提交代码后，Legion 会在工作区执行这条命令并记录结果；程序与参数分开填写，不经过 shell。</div>
+                      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: 8 }}>
+                        <label style={{ display: 'grid', gap: 4 }}>程序
+                          <input aria-label={stage.id + ' 独立测试 executable'} value={stage.testExecutable} onChange={event => setGraphStages(current => current.map((item, at) => at === index ? { ...item, testExecutable: event.target.value } : item))} placeholder="例如：node、npm、pytest" />
+                        </label>
+                        <label style={{ display: 'grid', gap: 4 }}>参数（JSON 字符串数组）
+                          <input aria-label={stage.id + ' 独立测试 argv JSON'} value={stage.testArgs} onChange={event => setGraphStages(current => current.map((item, at) => at === index ? { ...item, testArgs: event.target.value } : item))} placeholder='例如：["--test"]' />
+                        </label>
+                        <label style={{ display: 'grid', gap: 4 }}>超时（毫秒）
+                          <input aria-label={stage.id + ' 独立测试超时毫秒'} type="number" min={1000} max={3600000} step={1000} value={stage.testTimeoutMs} onChange={event => setGraphStages(current => current.map((item, at) => at === index ? { ...item, testTimeoutMs: Number(event.target.value) } : item))} />
+                        </label>
+                      </div>
+                    </div>}
+                  </details>
+                </article>)}
               </div>
-              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, minmax(120px,1fr))', gap: 7, marginTop: 10 }}>
-                <label>审查阶段<select value={reviewStageId} onChange={event => setReviewStageId(event.target.value)}>{graphStages.map(stage => <option key={stage.id} value={stage.id}>{stage.id} · {stage.label}</option>)}</select></label>
-                <label>设计问题退回<select value={reviewDesignRoute} onChange={event => setReviewDesignRoute(event.target.value)}>{graphStages.map(stage => <option key={stage.id} value={stage.id}>{stage.id} · {stage.label}</option>)}</select></label>
-                <label>实现问题退回<select value={reviewImplementationRoute} onChange={event => setReviewImplementationRoute(event.target.value)}>{graphStages.map(stage => <option key={stage.id} value={stage.id}>{stage.id} · {stage.label}</option>)}</select></label>
-              </div>
-              <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap', marginTop: 10 }}>
-                <select aria-label="从已发布定义载入并续版" value="" onChange={event => {
-                  const selected = definitions.find(item => `${item.id}@${item.version}` === event.target.value)
-                  if (selected) loadDefinitionDraft(selected)
-                }}>
-                  <option value="">从已发布版本载入并创建新版本…</option>
-                  {definitions.map(item => <option key={`${item.id}@${item.version}`} value={`${item.id}@${item.version}`}>{item.name} · {item.id} v{item.version}</option>)}
-                </select>
-                <input value={definitionId} onChange={event => setDefinitionId(event.target.value)} placeholder="工作流 ID，如 workflow.team.custom" aria-label="工作流 ID" />
-                <input value={definitionName} onChange={event => setDefinitionName(event.target.value)} placeholder="可复用工作流名称" aria-label="可复用工作流名称" />
-                <button type="button" className="btn ghost" disabled={saving || loading || rolesForSelect.length === 0} onClick={() => void publishDefinition()}>{saving ? '发布中…' : '发布为可复用工作流版本'}</button>
-                <span style={{ color: 'var(--muted-2)' }}>{definitions.length} 个已登记版本 · 阶段与依赖由服务端校验</span>
-              </div>
+
+              <section style={{ marginTop: 12, padding: 10, border: '1px solid var(--line)', borderRadius: 7 }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+                  <div><b>阶段依赖</b><div style={{ color: 'var(--muted-2)', marginTop: 3 }}>只有成功路径使用依赖；多个前置阶段都成功后才解锁下游阶段。</div></div>
+                  <button type="button" className="btn ghost" disabled={nextGraphDependency === undefined} onClick={() => {
+                    if (nextGraphDependency !== undefined) setGraphEdges(current => [...current, nextGraphDependency])
+                  }}>添加依赖</button>
+                </div>
+                <div style={{ display: 'grid', gap: 7, marginTop: 8 }}>
+                  {graphEdges.map((edge, index) => <div key={index} style={{ display: 'grid', gridTemplateColumns: 'minmax(180px, 1fr) auto minmax(180px, 1fr) auto', gap: 7, alignItems: 'center' }}>
+                    <label style={{ display: 'grid', gap: 3 }}>前置阶段
+                      <select aria-label={'依赖 ' + (index + 1) + ' 起点'} value={edge.from} onChange={event => setGraphEdges(current => current.map((item, at) => at === index ? { ...item, from: event.target.value } : item))}>
+                        {graphStages.map(stage => <option key={stage.id} value={stage.id}>{graphStageLabel(stage.id)}</option>)}
+                      </select>
+                    </label>
+                    <span style={{ paddingTop: 18 }}>成功后解锁 →</span>
+                    <label style={{ display: 'grid', gap: 3 }}>后置阶段
+                      <select aria-label={'依赖 ' + (index + 1) + ' 终点'} value={edge.to} onChange={event => setGraphEdges(current => current.map((item, at) => at === index ? { ...item, to: event.target.value } : item))}>
+                        {graphStages.map(stage => <option key={stage.id} value={stage.id}>{graphStageLabel(stage.id)}</option>)}
+                      </select>
+                    </label>
+                    <button type="button" className="btn ghost" aria-label={'移除依赖 ' + (index + 1)} onClick={() => setGraphEdges(current => current.filter((_, at) => at !== index))}>移除</button>
+                  </div>)}
+                </div>
+                {graphEdges.length === 0 && <div style={{ color: 'var(--muted-2)', marginTop: 6 }}>尚未建立依赖；上面列出的入口阶段会并行开始。</div>}
+              </section>
+
+              <section style={{ marginTop: 10, padding: 10, border: '1px solid var(--line)', borderRadius: 7 }}>
+                <b>审查返工规则</b>
+                <div style={{ color: 'var(--muted-2)', marginTop: 3 }}>只在审查未通过时使用，不改变上面的成功路径依赖。</div>
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(210px, 1fr))', gap: 8, marginTop: 8 }}>
+                  <label style={{ display: 'grid', gap: 4 }}>审查阶段
+                    <select value={reviewStageId} onChange={event => setReviewStageId(event.target.value)}>{graphStages.map(stage => <option key={stage.id} value={stage.id}>{graphStageLabel(stage.id)}</option>)}</select>
+                  </label>
+                  <label style={{ display: 'grid', gap: 4 }}>发现设计问题后退回
+                    <select value={reviewDesignRoute} onChange={event => setReviewDesignRoute(event.target.value)}>{graphStages.map(stage => <option key={stage.id} value={stage.id}>{graphStageLabel(stage.id)}</option>)}</select>
+                  </label>
+                  <label style={{ display: 'grid', gap: 4 }}>发现实现问题后退回
+                    <select value={reviewImplementationRoute} onChange={event => setReviewImplementationRoute(event.target.value)}>{graphStages.map(stage => <option key={stage.id} value={stage.id}>{graphStageLabel(stage.id)}</option>)}</select>
+                  </label>
+                </div>
+              </section>
+
+              <section style={{ marginTop: 10, padding: 10, border: '1px solid var(--line)', borderRadius: 7 }}>
+                <b>发布可复用版本</b>
+                <div style={{ color: 'var(--muted-2)', marginTop: 3 }}>发布后可在创建目标时按名称选择。已有目标冻结所选版本；后续修改请发布新版本。</div>
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(210px, 1fr))', gap: 8, marginTop: 8 }}>
+                  <label style={{ display: 'grid', gap: 4 }}>载入已有版本并续版
+                    <select aria-label="从已发布定义载入并续版" value="" onChange={event => {
+                      const selected = definitions.find(item => item.id + '@' + item.version === event.target.value)
+                      if (selected) loadDefinitionDraft(selected)
+                    }}>
+                      <option value="">选择一个已有版本…</option>
+                      {definitions.map(item => <option key={item.id + '@' + item.version} value={item.id + '@' + item.version}>{item.name} · {item.id} v{item.version}</option>)}
+                    </select>
+                  </label>
+                  <label style={{ display: 'grid', gap: 4 }}>工作流 ID
+                    <input value={definitionId} onChange={event => setDefinitionId(event.target.value)} placeholder="例如：workflow.team.custom" aria-label="工作流 ID" />
+                  </label>
+                  <label style={{ display: 'grid', gap: 4 }}>工作流名称
+                    <input value={definitionName} onChange={event => setDefinitionName(event.target.value)} placeholder="例如：设计—实现—审查" aria-label="可复用工作流名称" />
+                  </label>
+                </div>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8, flexWrap: 'wrap', marginTop: 8 }}>
+                  <span style={{ color: 'var(--muted-2)' }}>{definitions.length} 个已发布版本；阶段与依赖由服务端校验。</span>
+                  <button type="button" className="btn primary" disabled={saving || loading || rolesForSelect.length === 0} onClick={() => void publishDefinition()}>{saving ? '发布中…' : '发布为可复用工作流版本'}</button>
+                </div>
+              </section>
             </section>
               </div>
             </details>

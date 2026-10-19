@@ -675,22 +675,21 @@ export function AgentWorkflowConfigurator({ scope }: Props): React.JSX.Element {
                 : nodes.map(node => <div key={node.id} style={{ color: 'var(--muted-2)' }}>{node.label} · {node.id} · {node.status}{node.observedProviders.length ? ` · ${node.observedProviders.join(', ')}` : ''} · {observedPermissionModes(node)}</div>)}
               <div style={{ color: 'var(--muted-2)' }}>节点是运行 Legion worker 的 执行服务实例，不是 Claude/Codex 产品。Provider、能力和 生效权限模式由 daemon 心跳报告；外部阶段只有匹配冻结权限模式时才会派工。节点身份由守护按 `agentNodeId`（支持 `{'{scope}'}` 占位符）自行上报，不会复制登录凭据。</div>
               <div style={{ color: 'var(--muted-2)', marginTop: 6 }}>
-                Codex 网络代理状态（逐节点）：{nodes.length === 0
+                Codex provider / 代理模式读数（逐节点）：{nodes.length === 0
                   ? '尚无执行节点心跳，暂时无法确认。'
                   : nodes.map(node => `${node.label}：${formatCodexSystemProxyNodeStatus(
                     codexProviderNodes.includes(node), observedCodexSystemProxyMode(node),
                   )}`).join('；')}。
               </div>
             </div>
-            {(Object.values(tools).includes('codex') || graphStages.some(stage => stage.tool === 'codex')) && <div style={{ color: 'var(--yellow)', marginTop: 10, padding: 8, border: '1px solid var(--line)', borderRadius: 6 }}>
-              <b>Codex 网络代理设置（按执行节点配置）</b>
-              <div>在执行节点的 Codex 子 Agent 配置中设置 `systemProxyMode`。`system` 会为 Codex 子进程启用系统代理；`inherit`（默认）沿用 Codex 原生配置和进程代理环境变量，不会强制开启系统代理。节点心跳只确认 provider 和配置模式，不代表服务端已连通。</div>
+            {(Object.values(tools).includes('codex') || graphStages.some(stage => stage.tool === 'codex')) && <div style={{ color: 'var(--muted-2)', marginTop: 10, padding: 8, border: '1px solid var(--line)', borderRadius: 6 }}>
+              <b>Codex 网络连通性说明（按执行节点）</b>
+              <div>节点心跳只确认 Codex provider 已加载，不会请求 chatgpt.com 或实际模型端点。`systemProxyMode` 没有上报只表示缺少这项遥测，不是配置错误，也不能证明网络可达。代理按该 DSH provider 支持的配置生效（例如 `config.env` 中的 `HTTP_PROXY`、`HTTPS_PROXY`、`ALL_PROXY`，或 Codex 原生设置）；要确认网络，必须在目标节点用实际使用的模型发起只读请求。</div>
               {nodes.length === 0
-                ? <div style={{ marginTop: 6 }}>尚无执行节点心跳，当前无法确认 Codex provider 是否安装或代理配置是否生效。节点上线后刷新此页再检查。</div>
+                ? <div style={{ marginTop: 6 }}>尚无执行节点心跳，当前无法确认 Codex provider 是否加载。节点上线后刷新此页再检查。</div>
                 : codexProviderNodes.length === 0
-                  ? <div style={{ marginTop: 6 }}>当前节点心跳没有报告 Codex provider，因此目前无法确认 `systemProxyMode` 被执行器读取。请在目标执行节点对应的 DSH profile 安装或启用 `@deepseek-ai/dsh-subagent-codex`，重启执行服务后刷新心跳；若使用 DSH Desktop 管理的 profile，请从 Desktop「设置 → 插件」安装，不要用 CLI 修改该 profile。</div>
-                  : <div style={{ marginTop: 6 }}>修改配置后重启执行服务并刷新心跳。若某节点已报告 Codex provider、但未报告 `systemProxyMode`，请检查配置是否写入该节点实际使用的 profile、服务是否重启及心跳是否更新。即使显示 `system`，仍需在每个目标节点用实际使用的兼容模型发起只读请求验收网络。</div>}
-              <pre style={{ whiteSpace: 'pre-wrap', margin: '6px 0', padding: 8, background: 'var(--surface-2)' }}>{'- id: subagent-codex\n  config:\n    systemProxyMode: system  # 或 inherit'}</pre>
+                  ? <div style={{ marginTop: 6 }}>当前节点没有报告 Codex provider；请先在目标执行节点安装并启用对应 provider。节点上线并报告后，仍需实际请求验证端点连通性。</div>
+                  : <div style={{ marginTop: 6 }}>当前已有节点报告 Codex provider，但这不是网络探针结果。配置代理后，请在目标执行节点用实际使用的模型发起一次只读请求验收。</div>}
             </div>}
             {Object.values(tools).includes('dsh-native') && <div style={{ marginTop: 10 }}>
               {/* ★ 这里原本只有一个纯文本输入框，提示语是"填写 ctx.subagents 中的 provider 名称"

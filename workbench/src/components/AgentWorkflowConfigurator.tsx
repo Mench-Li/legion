@@ -433,17 +433,11 @@ export function AgentWorkflowConfigurator({ scope }: Props): React.JSX.Element {
   }
 
   const rolesForSelect = pipeline?.stages.filter(stage => stage.enabled) ?? []
-  /**
-   * ★ 可选 provider 候选 = **本机读数** ∪ **节点心跳上报的** ∪ **已知默认值**。
-   *
-   * 三处合并而不是只取一处，是因为它们各自会**独立地迟到**：
-   *   · 读数要等守护自检（TTL 10 分钟）；
-   *   · 节点心跳要等 `agentNodeId` 配好（本环境 0 个节点 ⇒ 这一路是空的）；
-   *   · 默认值永远在（它不需要安装）。
-   * 只取任一条，都会出现"明明能用却选不到"。
-   */
+  /** provider 就绪度只用于校验当前选择；标准下拉值固定为 spawn / fork。 */
   const providerCandidates: ProviderChoice[] = providerChoices(readiness, nativeProviderCandidates(nodes))
   const providerNameValidation = providerChoiceValidation(dshProvider, providerCandidates)
+  const selectedDshProviderReady = nodes.some(node =>
+    node.status === 'ready' && node.observedProviders.includes(dshProvider))
   /**
    * ★ 当前注册名对应的能力位推导结果（2026-10-13）。
    *
@@ -692,23 +686,27 @@ export function AgentWorkflowConfigurator({ scope }: Props): React.JSX.Element {
                   : <div style={{ marginTop: 6 }}>当前已有节点报告 Codex provider，但这不是网络探针结果。配置代理后，请在目标执行节点用实际使用的模型发起一次只读请求验收。</div>}
             </div>}
             {Object.values(tools).includes('dsh-native') && <div style={{ marginTop: 10 }}>
-              {/* ★ 这里原本只有一个纯文本输入框，提示语是"填写 ctx.subagents 中的 provider 名称"
-                  —— 要求用户知道 DSH 的内部服务名，而**界面上没有任何地方能查到它**，
-                  且发布时它是必填（留空直接抛"请填写 已注册的子 Agent provider 名称"）。
-                  现在候选来自三处合并（本机读数 ∪ 节点心跳 ∪ 已知默认值），**仍然可以自由输入**
-                  —— 用 datalist 而不是 select，是为了不让"读数还没到"变成"选不了"。 */}
+              {/* DSH 子 Agent provider 使用离散注册名；这里明确提供标准选择，避免 datalist
+                  按当前输入过滤后看起来只剩当前值。未知的既有自定义名仍暂时保留，避免加载旧配置时误改。 */}
               <label>DSH 执行服务 注册名
-                <input list="agent-provider-candidates" value={dshProvider} onChange={e => setDshProvider(e.target.value)}
-                  placeholder={`默认 ${DEFAULT_NATIVE_PROVIDER}（随 Legion 一起跑，不需要额外安装）`} />
+                <select value={dshProvider} onChange={e => setDshProvider(e.target.value)}>
+                  <option value="spawn">spawn · 新建空对话（默认）</option>
+                  <option value="fork">fork · 继承已完成的父对话</option>
+                  {dshProvider !== 'spawn' && dshProvider !== 'fork' &&
+                    <option value={dshProvider}>{dshProvider} · 当前已保存的自定义注册名</option>}
+                </select>
               </label>
-              <datalist id="agent-provider-candidates">
-                {providerCandidates.map(choice => <option key={choice.name} value={choice.name}>
-                  {choice.ready ? '就绪' : choice.state === null ? '还没有读数' : choice.state}
-                </option>)}
-              </datalist>
               <div style={{ color: 'var(--muted-2)' }}>
-                默认 <code>{DEFAULT_NATIVE_PROVIDER}</code> 是 Legion 守护自带的DSH 执行服务，不需要额外安装；
-                候选里的其他名字来自**本机自检读数**与节点心跳。填错时任务会派不出去，届时会在这里报出来。
+                <code>spawn</code> 每次从空对话启动，只收到本阶段任务内容，适合彼此独立的阶段；
+                <code>fork</code> 会把父对话中已经完成的轮次带给子 Agent（不包含正在进行的这一轮），适合需要延续当前讨论的阶段。
+                两者都在 DSH 进程内执行；<code>fork</code> 因携带上下文，通常会增加输入 token。默认 <code>{DEFAULT_NATIVE_PROVIDER}</code> 是 Legion 随附的执行服务。
+              </div>
+              <div style={{ color: 'var(--muted-2)' }}>
+                {nodes.length === 0
+                  ? `尚无节点心跳，暂时无法确认 ${dshProvider} 是否可派工。`
+                  : selectedDshProviderReady
+                    ? `当前至少一个在线节点已报告 ${dshProvider}，可以使用。`
+                    : `当前没有在线节点报告 ${dshProvider}；选择它前请确认目标 DSH 节点已加载该 provider。`}
               </div>
               {providerNameValidation.message !== null && <div style={{ color: providerNameValidation.ok ? 'var(--yellow)' : 'var(--red)' }}>
                 {providerNameValidation.message}

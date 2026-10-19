@@ -535,6 +535,8 @@ export function AgentWorkflowConfigurator({ scope }: Props): React.JSX.Element {
     .filter(to => to.id !== from.id)
     .map(to => ({ from: from.id, to: to.id })))
     .find(candidate => !graphEdges.some(edge => edge.from === candidate.from && edge.to === candidate.to))
+  const graphFieldLabelStyle = { display: 'grid', gap: 4, minWidth: 0 } as const
+  const graphControlStyle = { width: '100%', minWidth: 0, boxSizing: 'border-box' } as const
   const rowStyle = { display: 'grid', gridTemplateColumns: '105px minmax(130px, 1fr) minmax(150px, 1.2fr) minmax(150px, 1fr)', gap: 8, alignItems: 'center', marginTop: 8 } as const
   return (
     <div className="field" style={{ borderTop: '1px solid var(--line)', paddingTop: 12 }}>
@@ -835,7 +837,7 @@ export function AgentWorkflowConfigurator({ scope }: Props): React.JSX.Element {
               </div>
 
               <div style={{ display: 'grid', gap: 10, marginTop: 8 }}>
-                {graphStages.map((stage, index) => <article key={index} style={{ padding: 10, border: '1px solid var(--line)', borderRadius: 7, background: 'var(--surface-2)' }}>
+                {graphStages.map((stage, index) => <article key={index} style={{ padding: 10, border: '1px solid var(--line)', borderRadius: 7, background: 'var(--surface-2)', minWidth: 0 }}>
                   <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8, marginBottom: 8 }}>
                     <div>
                       <b>{stage.label.trim() || ('阶段 ' + (index + 1))}</b>
@@ -851,21 +853,21 @@ export function AgentWorkflowConfigurator({ scope }: Props): React.JSX.Element {
                     }}>删除阶段</button>
                   </div>
 
-                  <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(210px, 1fr))', gap: 8 }}>
-                    <label style={{ display: 'grid', gap: 4 }}>阶段名称
-                      <input aria-label={'阶段 ' + (index + 1) + ' 名称'} value={stage.label} onChange={event => setGraphStages(current => current.map((item, at) => at === index ? { ...item, label: event.target.value } : item))} placeholder="例如：方案设计" />
+                  <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(min(100%, 210px), 1fr))', gap: 8, minWidth: 0 }}>
+                    <label style={graphFieldLabelStyle}>阶段名称
+                      <input style={graphControlStyle} aria-label={'阶段 ' + (index + 1) + ' 名称'} value={stage.label} onChange={event => setGraphStages(current => current.map((item, at) => at === index ? { ...item, label: event.target.value } : item))} placeholder="例如：方案设计" />
                     </label>
-                    <label style={{ display: 'grid', gap: 4 }}>稳定 ID
-                      <input aria-label={'阶段 ' + (index + 1) + ' ID'} value={stage.id} onChange={event => renameGraphStage(index, event.target.value.trim())} placeholder="例如：design" />
+                    <label style={graphFieldLabelStyle}>稳定 ID
+                      <input style={graphControlStyle} aria-label={'阶段 ' + (index + 1) + ' ID'} value={stage.id} onChange={event => renameGraphStage(index, event.target.value.trim())} placeholder="例如：design" />
                       <small style={{ color: 'var(--muted-2)' }}>依赖和返工路由使用此 ID；改名会同步更新引用。</small>
                     </label>
-                    <label style={{ display: 'grid', gap: 4 }}>执行岗位
-                      <select aria-label={'阶段 ' + (index + 1) + ' 岗位'} value={stage.role} onChange={event => setGraphStages(current => current.map((item, at) => at === index ? { ...item, role: event.target.value } : item))}>
+                    <label style={graphFieldLabelStyle}>执行岗位
+                      <select style={graphControlStyle} aria-label={'阶段 ' + (index + 1) + ' 岗位'} value={stage.role} onChange={event => setGraphStages(current => current.map((item, at) => at === index ? { ...item, role: event.target.value } : item))}>
                         {rolesForSelect.map(role => <option key={role.role} value={role.role}>{role.label} · {role.role}</option>)}
                       </select>
                     </label>
-                    <label style={{ display: 'grid', gap: 4 }}>阶段由谁执行？
-                      <select aria-label={'阶段 ' + (index + 1) + ' 执行工具和配置版本'} value={stage.toolConfigRef ? 'ref:' + stage.toolConfigRef.id + '@' + stage.toolConfigRef.version : 'new:' + stage.tool} onChange={event => setGraphStages(current => current.map((item, at) => {
+                    <label style={graphFieldLabelStyle}>阶段由谁执行？
+                      <select style={graphControlStyle} aria-label={'阶段 ' + (index + 1) + ' 执行工具和配置版本'} value={stage.toolConfigRef ? 'ref:' + stage.toolConfigRef.id + '@' + stage.toolConfigRef.version : 'new:' + stage.tool} onChange={event => setGraphStages(current => current.map((item, at) => {
                         if (at !== index) return item
                         const selected = event.target.value
                         if (selected.startsWith('ref:')) {
@@ -887,7 +889,7 @@ export function AgentWorkflowConfigurator({ scope }: Props): React.JSX.Element {
                           {configs.filter(config => config.enabled).map(config => <option key={config.id + '@' + config.version} value={'ref:' + config.id + '@' + config.version}>{agentToolConfigOptionLabel(config)}</option>)}
                         </optgroup>
                       </select>
-                      <small style={{ color: 'var(--muted-2)' }}>
+                      <small style={{ color: 'var(--muted-2)', overflowWrap: 'anywhere' }}>
                         {stage.toolConfigRef
                           ? `当前固定绑定：${agentToolConfigReferenceLabel(configs, stage.toolConfigRef)}。可用时发布会引用这个版本；若已停用，则自动复用或创建可用配置。`
                           : stage.tool === 'dsh-native'
@@ -897,22 +899,22 @@ export function AgentWorkflowConfigurator({ scope }: Props): React.JSX.Element {
                     </label>
                   </div>
 
-                  <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: 8, marginTop: 10 }}>
-                    <label style={{ display: 'grid', gap: 4 }}>需要的上游产物
-                      <input aria-label={stage.id + ' 输入产物'} value={stage.inputArtifacts} onChange={event => setGraphStages(current => current.map((item, at) => at === index ? { ...item, inputArtifacts: event.target.value } : item))} placeholder="多个名称用逗号分隔，例如：design-bundle" />
+                  <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(min(100%, 220px), 1fr))', gap: 8, marginTop: 10, minWidth: 0 }}>
+                    <label style={graphFieldLabelStyle}>需要的上游产物
+                      <input style={graphControlStyle} aria-label={stage.id + ' 输入产物'} value={stage.inputArtifacts} onChange={event => setGraphStages(current => current.map((item, at) => at === index ? { ...item, inputArtifacts: event.target.value } : item))} placeholder="多个名称用逗号分隔，例如：design-bundle" />
                       <small style={{ color: 'var(--muted-2)' }}>阶段启动前检查这些产物是否已由上游交付。</small>
                     </label>
-                    <label style={{ display: 'grid', gap: 4 }}>交付的产物
-                      <input aria-label={stage.id + ' 输出产物'} value={stage.outputArtifacts} onChange={event => setGraphStages(current => current.map((item, at) => at === index ? { ...item, outputArtifacts: event.target.value } : item))} placeholder="例如：implementation-commit, test-evidence" />
+                    <label style={graphFieldLabelStyle}>交付的产物
+                      <input style={graphControlStyle} aria-label={stage.id + ' 输出产物'} value={stage.outputArtifacts} onChange={event => setGraphStages(current => current.map((item, at) => at === index ? { ...item, outputArtifacts: event.target.value } : item))} placeholder="例如：implementation-commit, test-evidence" />
                       <small style={{ color: 'var(--muted-2)' }}>填写交接契约名称，不是文件路径。</small>
                     </label>
                   </div>
 
                   <details style={{ marginTop: 9 }}>
                     <summary style={{ cursor: 'pointer' }}>执行设置：模型、节点{stage.id === reviewImplementationRoute ? '和独立测试命令' : ''}</summary>
-                    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(210px, 1fr))', gap: 8, marginTop: 8 }}>
-                      <label style={{ display: 'grid', gap: 4 }}>模型覆盖
-                        <select aria-label={stage.id + ' 模型配置'} title="模型档案覆盖仅支持 DSH 工具；Claude Code/Codex 使用其自身模型设置" disabled={stage.toolConfigRef
+                    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(min(100%, 210px), 1fr))', gap: 8, marginTop: 8, minWidth: 0 }}>
+                      <label style={graphFieldLabelStyle}>模型覆盖
+                        <select style={graphControlStyle} aria-label={stage.id + ' 模型配置'} title="模型档案覆盖仅支持 DSH 工具；Claude Code/Codex 使用其自身模型设置" disabled={stage.toolConfigRef
                           ? configs.find(config => config.id === stage.toolConfigRef?.id && config.version === stage.toolConfigRef?.version)?.adapter !== 'dsh-native'
                           : stage.tool !== 'dsh-native'} value={stage.modelConfigRef ? stage.modelConfigRef.id + '@' + stage.modelConfigRef.version : ''} onChange={event => {
                           const selected = event.target.value
@@ -926,8 +928,8 @@ export function AgentWorkflowConfigurator({ scope }: Props): React.JSX.Element {
                           {modelProfiles.filter(profile => Number.isSafeInteger(profile.version)).map(profile => <option key={profile.id + '@' + profile.version} value={profile.id + '@' + profile.version}>{profile.displayName} · {profile.provider}/{profile.model} v{profile.version}</option>)}
                         </select>
                       </label>
-                      <label style={{ display: 'grid', gap: 4 }}>执行节点
-                        <select aria-label={stage.id + ' 执行节点'} value={stage.nodeId} onChange={event => setGraphStages(current => current.map((item, at) => at === index ? { ...item, nodeId: event.target.value } : item))}>
+                      <label style={graphFieldLabelStyle}>执行节点
+                        <select style={graphControlStyle} aria-label={stage.id + ' 执行节点'} value={stage.nodeId} onChange={event => setGraphStages(current => current.map((item, at) => at === index ? { ...item, nodeId: event.target.value } : item))}>
                           <option value="">自动选择节点</option>{nodes.map(node => <option key={node.id} value={node.id}>{node.label} · {node.status}</option>)}
                         </select>
                       </label>
@@ -935,15 +937,15 @@ export function AgentWorkflowConfigurator({ scope }: Props): React.JSX.Element {
                     {stage.id === reviewImplementationRoute && <div style={{ marginTop: 10, padding: 9, border: '1px solid var(--line)', borderRadius: 6 }}>
                       <b>独立测试命令</b>
                       <div style={{ color: 'var(--muted-2)', margin: '4px 0 8px' }}>实现阶段提交代码后，Legion 会在工作区执行这条命令并记录结果；程序与参数分开填写，不经过 shell。</div>
-                      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: 8 }}>
-                        <label style={{ display: 'grid', gap: 4 }}>程序
-                          <input aria-label={stage.id + ' 独立测试 executable'} value={stage.testExecutable} onChange={event => setGraphStages(current => current.map((item, at) => at === index ? { ...item, testExecutable: event.target.value } : item))} placeholder="例如：node、npm、pytest" />
+                      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(min(100%, 180px), 1fr))', gap: 8, minWidth: 0 }}>
+                        <label style={graphFieldLabelStyle}>程序
+                          <input style={graphControlStyle} aria-label={stage.id + ' 独立测试 executable'} value={stage.testExecutable} onChange={event => setGraphStages(current => current.map((item, at) => at === index ? { ...item, testExecutable: event.target.value } : item))} placeholder="例如：node、npm、pytest" />
                         </label>
-                        <label style={{ display: 'grid', gap: 4 }}>参数（JSON 字符串数组）
-                          <input aria-label={stage.id + ' 独立测试 argv JSON'} value={stage.testArgs} onChange={event => setGraphStages(current => current.map((item, at) => at === index ? { ...item, testArgs: event.target.value } : item))} placeholder='例如：["--test"]' />
+                        <label style={graphFieldLabelStyle}>参数（JSON 字符串数组）
+                          <input style={graphControlStyle} aria-label={stage.id + ' 独立测试 argv JSON'} value={stage.testArgs} onChange={event => setGraphStages(current => current.map((item, at) => at === index ? { ...item, testArgs: event.target.value } : item))} placeholder='例如：["--test"]' />
                         </label>
-                        <label style={{ display: 'grid', gap: 4 }}>超时（毫秒）
-                          <input aria-label={stage.id + ' 独立测试超时毫秒'} type="number" min={1000} max={3600000} step={1000} value={stage.testTimeoutMs} onChange={event => setGraphStages(current => current.map((item, at) => at === index ? { ...item, testTimeoutMs: Number(event.target.value) } : item))} />
+                        <label style={graphFieldLabelStyle}>超时（毫秒）
+                          <input style={graphControlStyle} aria-label={stage.id + ' 独立测试超时毫秒'} type="number" min={1000} max={3600000} step={1000} value={stage.testTimeoutMs} onChange={event => setGraphStages(current => current.map((item, at) => at === index ? { ...item, testTimeoutMs: Number(event.target.value) } : item))} />
                         </label>
                       </div>
                     </div>}

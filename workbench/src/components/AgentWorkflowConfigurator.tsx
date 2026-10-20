@@ -1,5 +1,6 @@
 import { useState } from 'react'
 import { cleanArtifactNames, declaredArtifactOptions, nextGraphStageId, upstreamArtifactOptions } from '../agentWorkflowDag'
+import { workflowModelSelectionState } from '../workflowModelSelection'
 import { fetchAgentNodes, fetchAgentToolConfigs, fetchAgentWorkflowDefinitions, fetchMemberReadiness, fetchModelProfiles, fetchSpacePipeline, registerAgentToolConfig, registerAgentWorkflowDefinition, saveSpacePipeline, } from '../api'
 import type { AgentNodeRecord, AgentToolConfigRecord, AgentWorkflowDefinition, HubModelProfile, SpacePipelineConfig } from '../api'
 import { formatCodexSystemProxyNodeStatus } from '../agentWorkflowView'
@@ -836,7 +837,9 @@ export function AgentWorkflowConfigurator({ scope }: Props): React.JSX.Element {
               </div>
 
               <div style={{ display: 'grid', gap: 10, marginTop: 8 }}>
-                {graphStages.map((stage, index) => <article key={index} style={{ padding: 10, border: '1px solid var(--line)', borderRadius: 7, background: 'var(--surface-2)', minWidth: 0 }}>
+                {graphStages.map((stage, index) => {
+                  const modelSelectionState = workflowModelSelectionState(stage, configs, modelProfiles)
+                  return <article key={index} style={{ padding: 10, border: '1px solid var(--line)', borderRadius: 7, background: 'var(--surface-2)', minWidth: 0 }}>
                   <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8, marginBottom: 8 }}>
                     <div>
                       <b>{stage.label.trim() || ('阶段 ' + (index + 1))}</b>
@@ -871,9 +874,14 @@ export function AgentWorkflowConfigurator({ scope }: Props): React.JSX.Element {
                           const config = configs.find(candidate => candidate.id === value.slice(0, split) && candidate.version === Number(value.slice(split + 1)))
                           const tool: ToolChoice = config?.adapter === 'dsh-subagent' && config.providerName === 'codex' ? 'codex'
                             : config?.adapter === 'dsh-subagent' && config.providerName === 'claude-code' ? 'claude-code' : 'dsh-native'
-                          return { ...item, tool, toolConfigRef: config ? { id: config.id, version: config.version } : null }
+                          return {
+                            ...item, tool,
+                            toolConfigRef: config ? { id: config.id, version: config.version } : null,
+                            modelConfigRef: config?.adapter === 'dsh-native' ? item.modelConfigRef : null,
+                          }
                         }
-                        return { ...item, tool: selected.slice(4) as ToolChoice, toolConfigRef: null }
+                        const tool = selected.slice(4) as ToolChoice
+                        return { ...item, tool, toolConfigRef: null, modelConfigRef: tool === 'dsh-native' ? item.modelConfigRef : null }
                       }))}>
                         <optgroup label="自动选择工具（发布时复用兼容配置，没有时创建）">
                           <option value="new:claude-code">Claude Code</option>
@@ -930,19 +938,37 @@ export function AgentWorkflowConfigurator({ scope }: Props): React.JSX.Element {
                     <summary style={{ cursor: 'pointer' }}>执行设置：模型、节点{stage.id === reviewImplementationRoute ? '和独立测试命令' : ''}</summary>
                     <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(min(100%, 210px), 1fr))', gap: 8, marginTop: 8, minWidth: 0 }}>
                       <label style={graphFieldLabelStyle}>模型覆盖
-                        <select style={graphControlStyle} aria-label={stage.id + ' 模型配置'} title="模型档案覆盖仅支持 DSH 工具；Claude Code/Codex 使用其自身模型设置" disabled={stage.toolConfigRef
-                          ? configs.find(config => config.id === stage.toolConfigRef?.id && config.version === stage.toolConfigRef?.version)?.adapter !== 'dsh-native'
-                          : stage.tool !== 'dsh-native'} value={stage.modelConfigRef ? stage.modelConfigRef.id + '@' + stage.modelConfigRef.version : ''} onChange={event => {
-                          const selected = event.target.value
-                          const split = selected.lastIndexOf('@')
-                          const id = selected.slice(0, split)
-                          const version = selected.slice(split + 1)
-                          const modelConfigRef = split > 0 && Number.isSafeInteger(Number(version)) ? { id, version: Number(version) } : null
-                          setGraphStages(current => current.map((item, at) => at === index ? { ...item, modelConfigRef } : item))
-                        }}>
-                          <option value="">使用 Agent 工具默认模型</option>
-                          {modelProfiles.filter(profile => Number.isSafeInteger(profile.version)).map(profile => <option key={profile.id + '@' + profile.version} value={profile.id + '@' + profile.version}>{profile.displayName} · {profile.provider}/{profile.model} v{profile.version}</option>)}
-                        </select>
+                        {modelSelectionState === 'selectable'
+                          ? <select style={graphControlStyle} aria-label={stage.id + ' 模型配置'} value={stage.modelConfigRef ? stage.modelConfigRef.id + '@' + stage.modelConfigRef.version : ''} onChange={event => {
+                            const selected = event.target.value
+                            const split = selected.lastIndexOf('@')
+                            const id = selected.slice(0, split)
+                            const version = selected.slice(split + 1)
+                            const modelConfigRef = split > 0 && Number.isSafeInteger(Number(version)) ? { id, version: Number(version) } : null
+                            setGraphStages(current => current.map((item, at) => at === index ? { ...item, modelConfigRef } : item))
+                          }}>
+                            <option value="">使用 Agent 工具默认模型</option>
+                            {modelProfiles.filter(profile => Number.isSafeInteger(profile.version)).map(profile => <option key={profile.id + '@' + profile.version} value={profile.id + '@' + profile.version}>{profile.displayName} · {profile.provider}/{profile.model} v{profile.version}</option>)}
+                          </select>
+                          : <div role="status" aria-label={stage.id + ' 模型配置状态'} style={{ ...graphControlStyle, display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, minHeight: 38, padding: '6px 10px', border: '1px solid var(--line)', borderRadius: 6, background: 'var(--surface-1, #fff)', color: 'var(--muted-2)' }}>
+                            <span>{modelSelectionState === 'unsupported'
+                              ? `此阶段由 ${stage.tool === 'claude-code' ? 'Claude Code' : 'Codex'} 执行，模型请在对应工具中设置`
+                              : modelSelectionState === 'no-profiles'
+                                ? '没有可选模型档案 · 正在使用 Agent 工具默认模型'
+                                : modelSelectionState === 'missing-profile'
+                                  ? '已绑定的模型档案当前不可用'
+                                  : '绑定的工具配置未加载 · 请重新选择执行工具'}</span>
+                            {(modelSelectionState === 'unsupported' || modelSelectionState === 'missing-profile') && stage.modelConfigRef && <button type="button" className="btn ghost" onClick={() => setGraphStages(current => current.map((item, at) => at === index ? { ...item, modelConfigRef: null } : item))}>切回默认模型</button>}
+                          </div>}
+                        {modelSelectionState === 'no-profiles'
+                          ? <small style={{ color: 'var(--muted-2)' }}>需要按阶段指定模型时，请先到“模型与凭证”创建模型档案。</small>
+                          : modelSelectionState === 'unsupported'
+                            ? <small style={{ color: 'var(--muted-2)' }}>Claude Code 和 Codex 使用各自工具配置中的模型；此处不提供覆盖选项。</small>
+                            : modelSelectionState === 'missing-config'
+                              ? <small style={{ color: 'var(--muted-2)' }}>系统无法确认绑定配置的类型；请重新选择 DSH 执行服务或其他工具。</small>
+                              : modelSelectionState === 'missing-profile'
+                                ? <small style={{ color: 'var(--muted-2)' }}>该模型档案可能已删除或停用；切回默认模型后即可继续配置。</small>
+                                : <small style={{ color: 'var(--muted-2)' }}>只对当前阶段生效；选择模型档案会固定其版本。</small>}
                       </label>
                       <label style={graphFieldLabelStyle}>执行节点
                         <select style={graphControlStyle} aria-label={stage.id + ' 执行节点'} value={stage.nodeId} onChange={event => setGraphStages(current => current.map((item, at) => at === index ? { ...item, nodeId: event.target.value } : item))}>
@@ -966,7 +992,8 @@ export function AgentWorkflowConfigurator({ scope }: Props): React.JSX.Element {
                       </div>
                     </div>}
                   </details>
-                </article>)}
+                </article>
+                })}
               </div>
 
               <section style={{ marginTop: 12, padding: 10, border: '1px solid var(--line)', borderRadius: 7 }}>

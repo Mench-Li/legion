@@ -91,8 +91,21 @@ async function fetchWithSessionRetry(input: string, init: RequestInit): Promise<
  * hub GET 统一携带已存 token（P2-2 读面同步：远程受保护中枢的读接口/SSE 必须带 token）。
  * 探测 /api/config 不走本函数（hubBase 可达性探测保持匿名；服务端对 config 能力发现放行）。
  */
-function hubGet(path: string): Promise<Response> {
-  return fetchWithSessionRetry(`${hubBase()}${path}`, { headers: authHeaders() })
+function hubGet(path: string, timeoutMs?: number): Promise<Response> {
+  const controller = timeoutMs ? new AbortController() : null
+  let timer: ReturnType<typeof setTimeout> | undefined
+  const request = fetchWithSessionRetry(`${hubBase()}${path}`, {
+    headers: authHeaders(),
+    ...(controller ? { signal: controller.signal } : {}),
+  })
+  if (!timeoutMs || controller === null) return request
+  const timeout = new Promise<never>((_resolve, reject) => {
+    timer = setTimeout(() => {
+      controller.abort()
+      reject(new Error(`读取中枢超时（${timeoutMs} 毫秒）：${hubBase()} 无响应，请检查中枢连接后重试`))
+    }, timeoutMs)
+  })
+  return Promise.race([request, timeout]).finally(() => clearTimeout(timer))
 }
 
 /**
@@ -296,7 +309,7 @@ export interface AgentWorkflowDefinition {
 
 export async function fetchAgentWorkflowDefinitions(scope: string): Promise<AgentWorkflowDefinition[]> {
   const qs = new URLSearchParams({ scope })
-  const value = await readJson<{ definitions: AgentWorkflowDefinition[] }>(await hubGet(`/api/agent-workflows/definitions?${qs}`))
+  const value = await readJson<{ definitions: AgentWorkflowDefinition[] }>(await hubGet(`/api/agent-workflows/definitions?${qs}`, 15_000))
   return value.definitions
 }
 

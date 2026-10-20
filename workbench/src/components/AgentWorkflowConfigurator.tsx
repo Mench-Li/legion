@@ -21,8 +21,10 @@ import {
   ASSUMED_REASONS,
   DERIVED_KEYS,
   declaredFor,
+  declaredForAgentNode,
   deriveNativeCapabilities,
 } from '../nativeCapabilities'
+import { findReusableAgentToolConfig, matchesAgentToolConfig } from '../agentToolConfigCompatibility.mjs'
 import { bundleInstallRemedy } from '../dshRemedy'
 import { toast } from './Toast'
 import { WorkflowArtifactPicker } from './WorkflowArtifactPicker'
@@ -230,32 +232,51 @@ export function AgentWorkflowConfigurator({ scope }: Props): React.JSX.Element {
 
 
 
-  const createOrReuseConfig = async (choice: ToolChoice): Promise<{ id: string; version: number }> => {
+  const toolConfigExpectation = (choice: ToolChoice, nodeId = '') => {
     const providerName = choice === 'dsh-native' ? dshProvider.trim() : choice
     // 报错要说**下一步做什么**。原来只有一句"请填写 已注册的子 Agent provider 名称"——
     // 而用户既不知道去哪查、也不知道默认值是什么（现在默认已填 `spawn`，这句基本不会再出现）。
     if (!providerName) throw new Error(`请填写「DSH 执行服务 注册名」。不确定填什么就填 ${DEFAULT_NATIVE_PROVIDER}（Legion 守护自带的DSH 执行服务，无需额外安装）。`)
-    const adapter = choice === 'dsh-native' ? 'dsh-native' : 'dsh-subagent'
+    const adapter: AgentToolConfigRecord['adapter'] = choice === 'dsh-native' ? 'dsh-native' : 'dsh-subagent'
     const permissionProfile = choice === 'codex' ? 'codex-workspace-write'
       : choice === 'claude-code' ? 'claude-code-acceptEdits' : `dsh-native:${providerName}`
     // ★★ 2026-10-13：能力位**从 provider 自报的读数推导**，不再整体由复选框决定。
     //    原来 `outputSchema` 是**硬编码 true**（连复选框都没有），而派工与认领都真的按它拒收 ——
     //    provider 不支持结构化输出时：UI 看不到、也改不了，**发布成功、每次派工都抛错**。
     //    现在能读到的按读数走，读不到的如实标成"声明"。推导规则见 nativeCapabilities.ts。
-    const capabilities = choice === 'dsh-native'
-      ? deriveNativeCapabilities(declaredFor(readiness, providerName), {
+    let capabilities = EXTERNAL_CAPABILITIES
+    if (choice === 'dsh-native') {
+      const node = nodeId ? nodes.find(candidate => candidate.id === nodeId) : undefined
+      if (nodeId && !node) throw new Error(`指定的执行节点 ${nodeId} 不在当前节点列表中，请刷新后重试。`)
+      const declaration = nodeId
+        ? declaredForAgentNode(node, providerName)
+        : declaredFor(readiness, providerName)
+      if (nodeId && !declaration) {
+        throw new Error(`执行节点 ${nodeId} 尚未完整上报 ${providerName} 能力；请刷新节点心跳后再发布。`)
+      }
+      const derived = deriveNativeCapabilities(declaration, {
         toolFilter: nativeToolFilter, localAgent: nativeLocalAgent,
         cancellation: nativeCancellation,
-      }).capabilities
-      : EXTERNAL_CAPABILITIES
-    const compatible = configs.filter(item => item.enabled && item.providerName === providerName
-      && item.adapter === adapter && item.permissionProfile === permissionProfile
-      && JSON.stringify(item.capabilities) === JSON.stringify(capabilities)).sort((a, b) => b.version - a.version)[0]
+      })
+      if (derived.blockers.length) throw new Error(derived.blockers.join(' '))
+      capabilities = derived.capabilities
+    }
+    return { providerName, adapter, permissionProfile, capabilities }
+  }
+
+  const createOrReuseConfig = async (
+    choice: ToolChoice,
+    nodeId = '',
+    configPool: AgentToolConfigRecord[] = [...configs],
+  ): Promise<{ id: string; version: number }> => {
+    const expected = toolConfigExpectation(choice, nodeId)
+    const { providerName, adapter, permissionProfile, capabilities } = expected
+    const compatible = findReusableAgentToolConfig(configPool, expected)
     if (compatible) return { id: compatible.id, version: compatible.version }
 
     const idPart = providerName.replace(/[^A-Za-z0-9._:-]/g, '-')
     const id = `tool.${choice === 'dsh-native' ? `dsh-${idPart}` : choice}`
-    const version = Math.max(0, ...configs.filter(item => item.id === id).map(item => item.version)) + 1
+    const version = Math.max(0, ...configPool.filter(item => item.id === id).map(item => item.version)) + 1
     const config: AgentToolConfigRecord = {
       id, version, providerName, adapter,
       permissionProfile,
@@ -264,7 +285,9 @@ export function AgentWorkflowConfigurator({ scope }: Props): React.JSX.Element {
       enabled: true,
     }
     await registerAgentToolConfig(config)
-    setConfigs(previous => [...previous, config])
+    configPool.push(config)
+    setConfigs(previous => previous.some(item => item.id === config.id && item.version === config.version)
+      ? previous : [...previous, config])
     return { id, version }
   }
 
@@ -303,7 +326,10 @@ export function AgentWorkflowConfigurator({ scope }: Props): React.JSX.Element {
     try {
       const choices: Record<RoleKey, ToolChoice> = tools
       const refs = {} as Record<RoleKey, { id: string; version: number }>
-      for (const key of Object.keys(ROLE_LABEL) as RoleKey[]) refs[key] = await createOrReuseConfig(choices[key])
+      const configPool = [...configs]
+      for (const key of Object.keys(ROLE_LABEL) as RoleKey[]) {
+        refs[key] = await createOrReuseConfig(choices[key], nodeIds[key], configPool)
+      }
       const stageTools: Record<string, { agentToolConfig: { id: string; version: number }; modelConfig: null; nodeId: string | null; testRunner: { executable: string; args: string[]; timeoutMs: number } | null }> = {
         [roles.designRole]: { agentToolConfig: refs.designRole, modelConfig: null, nodeId: nodeIds.designRole || null, testRunner: null },
         [roles.implementationRole]: {
@@ -352,11 +378,16 @@ export function AgentWorkflowConfigurator({ scope }: Props): React.JSX.Element {
     setError('')
     try {
       const refs = new Map<string, { id: string; version: number }>()
+      const configPool = [...configs]
       for (const stage of graphStages) {
         const existing = stage.toolConfigRef && configs.find(config => config.enabled
           && config.id === stage.toolConfigRef?.id && config.version === stage.toolConfigRef?.version)
-        if (existing) refs.set(stage.id, { id: existing.id, version: existing.version })
-        else refs.set(stage.id, await createOrReuseConfig(stage.tool))
+        const expected = toolConfigExpectation(stage.tool, stage.nodeId)
+        if (existing && matchesAgentToolConfig(existing, expected)) {
+          refs.set(stage.id, { id: existing.id, version: existing.version })
+        } else {
+          refs.set(stage.id, await createOrReuseConfig(stage.tool, stage.nodeId, configPool))
+        }
       }
       const id = definitionId.trim()
       const version = Math.max(0, ...definitions.filter(item => item.id === id).map(item => item.version)) + 1
@@ -392,6 +423,10 @@ export function AgentWorkflowConfigurator({ scope }: Props): React.JSX.Element {
         reviewRoutes: { design: reviewDesignRoute, implementation: reviewImplementationRoute }, maxReworkRounds,
       }
       await registerAgentWorkflowDefinition(scope, definition)
+      setGraphStages(current => current.map(stage => {
+        const reference = refs.get(stage.id)
+        return reference ? { ...stage, toolConfigRef: reference } : stage
+      }))
       setDefinitions(await fetchAgentWorkflowDefinitions(scope))
       setConfigs(await fetchAgentToolConfigs())
       toast('ok', `已发布可复用工作流 ${definition.name} · v${version}（${stages.length} 阶段 / ${graphEdges.length} 条依赖）；发布目标时可选择该版本。`)
@@ -898,7 +933,7 @@ export function AgentWorkflowConfigurator({ scope }: Props): React.JSX.Element {
                       </select>
                       <small style={graphFieldHintStyle}>
                         {stage.toolConfigRef
-                          ? `当前固定绑定：${agentToolConfigReferenceLabel(configs, stage.toolConfigRef)}。可用时发布会引用这个版本；若已停用，则自动复用或创建可用配置。`
+                          ? `当前固定绑定：${agentToolConfigReferenceLabel(configs, stage.toolConfigRef)}。发布前会按执行节点当前上报的能力校验；不匹配时自动改用或创建兼容配置。`
                           : stage.tool === 'dsh-native'
                             ? `使用 DSH 注册名“${dshProvider || '未填写'}”；发布时自动复用兼容配置，没有时创建。`
                             : `使用 ${stage.tool === 'claude-code' ? 'Claude Code' : 'Codex'}；发布时自动复用兼容配置，没有时创建。`}

@@ -207,6 +207,23 @@ export function declaredFor(
   return isUsableReading(out as DeclaredCapabilities) ? out as DeclaredCapabilities : null
 }
 
+/** Read the capability declaration from a specific execution node heartbeat. */
+export function declaredForAgentNode(
+  node: { observedCapabilities?: Record<string, unknown> | null } | null | undefined,
+  providerName: string,
+): DeclaredCapabilities | null {
+  const observedProviders = node?.observedCapabilities?.providers
+  if (observedProviders === null || typeof observedProviders !== 'object' || Array.isArray(observedProviders)) return null
+  const raw = (observedProviders as Record<string, unknown>)[providerName]
+  if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) return null
+  const record = raw as Record<string, unknown>
+  const out: Record<string, unknown> = {}
+  for (const key of DERIVED_KEYS) if (typeof record[key] === 'boolean') out[key] = record[key]
+  if (typeof record.permissionMode === 'string' && record.permissionMode !== '') out.permissionMode = record.permissionMode
+  if (typeof record.systemProxyMode === 'string') out.systemProxyMode = record.systemProxyMode
+  return isUsableReading(out as DeclaredCapabilities) ? out as DeclaredCapabilities : null
+}
+
 /** 读数里这个 provider 的就绪状态（`null` = 没读到）。 */
 export function readinessStateOf(
   readiness: { providers?: Record<string, { state?: unknown }> } | null | undefined,

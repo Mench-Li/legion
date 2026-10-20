@@ -49,7 +49,7 @@ export async function executeExternalAgent({
   expectedPermissionMode = null,
   returnRun = false,
 } = {}) {
-  if (!subagents || typeof subagents.getProvider !== 'function' || typeof subagents.start !== 'function') {
+  if (!subagents || typeof subagents.getProvider !== 'function') {
     throw new TypeError('external Agent adapter requires the DSH subagents service')
   }
   if (typeof providerName !== 'string' || providerName.trim() === '') {
@@ -91,12 +91,13 @@ export async function executeExternalAgent({
   if (typeof expectedPermissionMode !== 'string' || expectedPermissionMode.trim() === '') {
     return denied(EXTERNAL_AGENT_CODES.PERMISSION_MODE_UNVERIFIED, '冻结工具配置没有可核验的原生权限模式', { provider: name })
   }
-  if (provider.permissionMode !== expectedPermissionMode) {
+  const permissionMode = provider.permissionMode ?? provider.config?.permissionMode
+  if (permissionMode !== expectedPermissionMode) {
     return denied(EXTERNAL_AGENT_CODES.PERMISSION_MODE_UNVERIFIED,
       `DSH provider ${name} 未报告与冻结配置相符的原生权限模式`, {
         provider: name,
         expectedPermissionMode,
-        actualPermissionMode: typeof provider.permissionMode === 'string' ? provider.permissionMode : null,
+        actualPermissionMode: typeof permissionMode === 'string' ? permissionMode : null,
       })
   }
   if (signal?.aborted === true) {
@@ -107,12 +108,31 @@ export async function executeExternalAgent({
   try {
     // Deliberately omit provider-unsupported DSH features. The prompt carries
     // the output contract; the caller validates the returned text separately.
-    run = await subagents.start(name, {
+    const request = {
       label: typeof label === 'string' && label.trim() !== '' ? label.trim() : name,
       prompt: [{ type: 'text', text: prompt }],
       parent,
       ...(signal === undefined ? {} : { signal }),
-    })
+    }
+    if (typeof subagents.start === 'function') {
+      // Compatibility with DSH versions that exposed one-shot start on the
+      // registry service.
+      run = await subagents.start(name, request)
+    } else if (typeof provider.start === 'function') {
+      // Current DSH exposes startActivation() for managed, model-facing
+      // delegations and start(request) on the registered provider for direct
+      // one-shot runs. Use the already-verified parent cwd because provider
+      // start requests require it explicitly.
+      const providerSignal = signal ?? new AbortController().signal
+      run = await provider.start({
+        cwd: parent.session.header.cwd,
+        prompt: request.prompt,
+        parent,
+        signal: providerSignal,
+      })
+    } else {
+      return denied(EXTERNAL_AGENT_CODES.PROVIDER_MISSING, `DSH provider ${name} 不支持一次性启动`, { provider: name })
+    }
   } catch (error) {
     return denied(EXTERNAL_AGENT_CODES.START_FAILED, `DSH provider ${name} 启动失败`, {
       provider: name,

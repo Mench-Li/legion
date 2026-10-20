@@ -7,3 +7,4 @@ export interface GoalWorkflowOption {
 }
 
 export declare function goalWorkflowOptions(definitions: AgentWorkflowDefinition[]): GoalWorkflowOption[]
+export declare function defaultGoalWorkflowSelection(options: Array<Pick<GoalWorkflowOption, 'value'>>): string

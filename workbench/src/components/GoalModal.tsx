@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
 import { fetchAgentNodes, fetchAgentWorkflowDefinitions, type AgentNodeRecord, type AgentWorkflowDefinition, type AgentWorkflowDefinitionRef } from '../api'
-import { goalWorkflowOptions } from '../goalWorkflowOptions.mjs'
+import { defaultGoalWorkflowSelection, goalWorkflowOptions } from '../goalWorkflowOptions.mjs'
 import { bindingWarning, crossNodeConflict, decideAutoNode, describeCrossNodeConflict, effectiveNodeId, scanNodes } from '../goalNodeChoice'
 import { toast } from './Toast'
 
@@ -36,7 +36,11 @@ export function GoalModal({ scope, spaceName, activeCount = 0, onClose, onPublis
     setDefinitionsError('')
     setSelectedDefinition('')
     void fetchAgentWorkflowDefinitions(scope)
-      .then(value => { if (active) setDefinitions(value) })
+      .then(value => {
+        if (!active) return
+        setDefinitions(value)
+        setSelectedDefinition(defaultGoalWorkflowSelection(goalWorkflowOptions(value)))
+      })
       .catch(error => {
         if (!active) return
         setDefinitions([])
@@ -119,7 +123,7 @@ export function GoalModal({ scope, spaceName, activeCount = 0, onClose, onPublis
                 : definitionsError
                   ? <>读取失败：{definitionsError} <button type="button" className="btn ghost" onClick={() => setDefinitionsReload(value => value + 1)}>重试</button></>
                   : workflowOptions.length > 0
-                    ? '选择后，本目标会冻结该工作流版本及各阶段工具配置。'
+                    ? '工作流配置统一在「Agent 工作流」设置页维护；这里仅显示每条工作流最新发布的版本。新目标使用所选版本，已发布目标保留创建时的版本。'
                     : '当前空间还没有已发布的 Agent 工作流；可继续使用空间当前设置。'}
             </span>
           </div>

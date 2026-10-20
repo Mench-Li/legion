@@ -538,9 +538,13 @@ export function AgentWorkflowConfigurator({ scope }: Props): React.JSX.Element {
     .filter(to => to.id !== from.id)
     .map(to => ({ from: from.id, to: to.id })))
     .find(candidate => !graphEdges.some(edge => edge.from === candidate.from && edge.to === candidate.to))
-  const graphFieldLabelStyle = { display: 'grid', gap: 4, minWidth: 0 } as const
-  const graphControlStyle = { width: '100%', minWidth: 0, boxSizing: 'border-box' } as const
-  const rowStyle = { display: 'grid', gridTemplateColumns: '105px minmax(130px, 1fr) minmax(150px, 1.2fr) minmax(150px, 1fr)', gap: 8, alignItems: 'center', marginTop: 8 } as const
+  const graphFieldLabelStyle = { display: 'grid', gap: 4, width: '100%', minWidth: 0, alignContent: 'start' } as const
+  const graphControlStyle = { width: '100%', minWidth: 0, height: 40, boxSizing: 'border-box' } as const
+  const graphFieldHintStyle = { display: 'block', width: '100%', minWidth: 0, color: 'var(--muted-2)', overflowWrap: 'anywhere', lineHeight: 1.45 } as const
+  const graphFields3Style = { display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(min(100%, 210px), 1fr))', gap: 8, minWidth: 0, alignItems: 'start' } as const
+  const graphFields2Style = { display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(min(100%, 220px), 1fr))', gap: 8, minWidth: 0, alignItems: 'start' } as const
+  const graphTestFieldsStyle = { display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(min(100%, 180px), 1fr))', gap: 8, minWidth: 0, alignItems: 'start' } as const
+  const rowStyle = { display: 'grid', gridTemplateColumns: '105px repeat(3, minmax(0, 1fr))', gap: 8, alignItems: 'center', marginTop: 8 } as const
   return (
     <div className="field" style={{ borderTop: '1px solid var(--line)', paddingTop: 12 }}>
       <button type="button" className="btn ghost" onClick={toggle} disabled={loading}>
@@ -855,7 +859,7 @@ export function AgentWorkflowConfigurator({ scope }: Props): React.JSX.Element {
                     }}>删除阶段</button>
                   </div>
 
-                  <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(min(100%, 210px), 1fr))', gap: 8, minWidth: 0 }}>
+                  <div style={graphFields3Style}>
                     <label style={graphFieldLabelStyle}>阶段名称
                       <input style={graphControlStyle} aria-label={'阶段 ' + (index + 1) + ' 名称'} value={stage.label} onChange={event => setGraphStages(current => current.map((item, at) => at === index ? { ...item, label: event.target.value } : item))} placeholder="例如：方案设计" />
                     </label>
@@ -892,7 +896,7 @@ export function AgentWorkflowConfigurator({ scope }: Props): React.JSX.Element {
                           {configs.filter(config => config.enabled).map(config => <option key={config.id + '@' + config.version} value={'ref:' + config.id + '@' + config.version}>{agentToolConfigOptionLabel(config)}</option>)}
                         </optgroup>
                       </select>
-                      <small style={{ color: 'var(--muted-2)', overflowWrap: 'anywhere' }}>
+                      <small style={graphFieldHintStyle}>
                         {stage.toolConfigRef
                           ? `当前固定绑定：${agentToolConfigReferenceLabel(configs, stage.toolConfigRef)}。可用时发布会引用这个版本；若已停用，则自动复用或创建可用配置。`
                           : stage.tool === 'dsh-native'
@@ -906,11 +910,11 @@ export function AgentWorkflowConfigurator({ scope }: Props): React.JSX.Element {
                     <summary style={{ cursor: 'pointer' }}>高级设置：稳定 ID</summary>
                     <label style={{ ...graphFieldLabelStyle, marginTop: 6 }}>阶段 ID
                       <input style={graphControlStyle} aria-label={'阶段 ' + (index + 1) + ' ID'} value={stage.id} onChange={event => renameGraphStage(index, event.target.value.trim())} placeholder="例如：design" />
-                      <small style={{ color: 'var(--muted-2)' }}>新阶段会自动分配 ID。依赖和返工路由会使用此 ID；手动修改时，已有引用会同步更新。</small>
+                      <small style={graphFieldHintStyle}>新阶段会自动分配 ID。依赖和返工路由会使用此 ID；手动修改时，已有引用会同步更新。</small>
                     </label>
                   </details>
 
-                  <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(min(100%, 220px), 1fr))', gap: 8, marginTop: 10, minWidth: 0 }}>
+                  <div style={{ ...graphFields2Style, marginTop: 10 }}>
                     <div style={graphFieldLabelStyle}>
                       <WorkflowArtifactPicker
                         label="需要的上游产物"
@@ -919,7 +923,7 @@ export function AgentWorkflowConfigurator({ scope }: Props): React.JSX.Element {
                         placeholder="选择依赖链上游阶段交付的产物"
                         onChange={inputArtifacts => setGraphStages(current => current.map((item, at) => at === index ? { ...item, inputArtifacts } : item))}
                       />
-                      <small style={{ color: 'var(--muted-2)' }}>仅列出依赖链上游阶段交付的产物；启动前会检查这些产物是否已交付。</small>
+                      <small style={graphFieldHintStyle}>仅列出依赖链上游阶段交付的产物；启动前会检查这些产物是否已交付。</small>
                     </div>
                     <div style={graphFieldLabelStyle}>
                       <WorkflowArtifactPicker
@@ -930,14 +934,15 @@ export function AgentWorkflowConfigurator({ scope }: Props): React.JSX.Element {
                         allowCreate
                         onChange={outputArtifacts => setGraphStages(current => current.map((item, at) => at === index ? { ...item, outputArtifacts } : item))}
                       />
-                      <small style={{ color: 'var(--muted-2)' }}>选择现有交接名称，或新增自定义名称；它描述交接内容，不是文件路径。</small>
+                      <small style={graphFieldHintStyle}>选择现有交接名称，或新增自定义名称；它描述交接内容，不是文件路径。</small>
                     </div>
                   </div>
 
                   <details style={{ marginTop: 9 }}>
                     <summary style={{ cursor: 'pointer' }}>执行设置：模型、节点{stage.id === reviewImplementationRoute ? '和独立测试命令' : ''}</summary>
-                    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(min(100%, 210px), 1fr))', gap: 8, marginTop: 8, minWidth: 0 }}>
-                      <label style={graphFieldLabelStyle}>模型覆盖
+                    <div style={{ ...graphFields2Style, marginTop: 8 }}>
+                      <div style={graphFieldLabelStyle}>
+                        <span>模型覆盖</span>
                         {modelSelectionState === 'selectable'
                           ? <select style={graphControlStyle} aria-label={stage.id + ' 模型配置'} value={stage.modelConfigRef ? stage.modelConfigRef.id + '@' + stage.modelConfigRef.version : ''} onChange={event => {
                             const selected = event.target.value
@@ -950,36 +955,37 @@ export function AgentWorkflowConfigurator({ scope }: Props): React.JSX.Element {
                             <option value="">使用 Agent 工具默认模型</option>
                             {modelProfiles.filter(profile => Number.isSafeInteger(profile.version)).map(profile => <option key={profile.id + '@' + profile.version} value={profile.id + '@' + profile.version}>{profile.displayName} · {profile.provider}/{profile.model} v{profile.version}</option>)}
                           </select>
-                          : <div role="status" aria-label={stage.id + ' 模型配置状态'} style={{ ...graphControlStyle, display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, minHeight: 38, padding: '6px 10px', border: '1px solid var(--line)', borderRadius: 6, background: 'var(--surface-1, #fff)', color: 'var(--muted-2)' }}>
-                            <span>{modelSelectionState === 'unsupported'
-                              ? `此阶段由 ${stage.tool === 'claude-code' ? 'Claude Code' : 'Codex'} 执行，模型请在对应工具中设置`
+                          : <div role="status" aria-label={stage.id + ' 模型配置状态'} style={{ ...graphControlStyle, display: 'flex', alignItems: 'center', padding: '0 10px', border: '1px solid var(--line)', borderRadius: 6, background: 'var(--surface-1, #fff)', color: 'var(--muted-2)' }}>
+                            {modelSelectionState === 'unsupported'
+                              ? '不适用'
                               : modelSelectionState === 'no-profiles'
-                                ? '没有可选模型档案 · 正在使用 Agent 工具默认模型'
+                                ? '使用 Agent 工具默认模型'
                                 : modelSelectionState === 'missing-profile'
-                                  ? '已绑定的模型档案当前不可用'
-                                  : '绑定的工具配置未加载 · 请重新选择执行工具'}</span>
-                            {(modelSelectionState === 'unsupported' || modelSelectionState === 'missing-profile') && stage.modelConfigRef && <button type="button" className="btn ghost" onClick={() => setGraphStages(current => current.map((item, at) => at === index ? { ...item, modelConfigRef: null } : item))}>切回默认模型</button>}
+                                  ? '模型档案不可用'
+                                  : '工具配置未加载'}
                           </div>}
                         {modelSelectionState === 'no-profiles'
-                          ? <small style={{ color: 'var(--muted-2)' }}>需要按阶段指定模型时，请先到“模型与凭证”创建模型档案。</small>
+                          ? <small style={graphFieldHintStyle}>需要按阶段指定模型时，请先到“模型与凭证”创建模型档案。</small>
                           : modelSelectionState === 'unsupported'
-                            ? <small style={{ color: 'var(--muted-2)' }}>Claude Code 和 Codex 使用各自工具配置中的模型；此处不提供覆盖选项。</small>
+                            ? <small style={graphFieldHintStyle}>Claude Code 和 Codex 使用各自工具配置中的模型；此处不提供覆盖选项。</small>
                             : modelSelectionState === 'missing-config'
-                              ? <small style={{ color: 'var(--muted-2)' }}>系统无法确认绑定配置的类型；请重新选择 DSH 执行服务或其他工具。</small>
+                              ? <small style={graphFieldHintStyle}>系统无法确认绑定配置的类型；请重新选择 DSH 执行服务或其他工具。</small>
                               : modelSelectionState === 'missing-profile'
-                                ? <small style={{ color: 'var(--muted-2)' }}>该模型档案可能已删除或停用；切回默认模型后即可继续配置。</small>
-                                : <small style={{ color: 'var(--muted-2)' }}>只对当前阶段生效；选择模型档案会固定其版本。</small>}
-                      </label>
+                                ? <small style={graphFieldHintStyle}>该模型档案可能已删除或停用；切回默认模型后即可继续配置。</small>
+                                : <small style={graphFieldHintStyle}>只对当前阶段生效；选择模型档案会固定其版本。</small>}
+                        {(modelSelectionState === 'unsupported' || modelSelectionState === 'missing-profile') && stage.modelConfigRef && <button type="button" className="btn ghost" style={{ justifySelf: 'start' }} onClick={() => setGraphStages(current => current.map((item, at) => at === index ? { ...item, modelConfigRef: null } : item))}>切回默认模型</button>}
+                      </div>
                       <label style={graphFieldLabelStyle}>执行节点
                         <select style={graphControlStyle} aria-label={stage.id + ' 执行节点'} value={stage.nodeId} onChange={event => setGraphStages(current => current.map((item, at) => at === index ? { ...item, nodeId: event.target.value } : item))}>
                           <option value="">自动选择节点</option>{nodes.map(node => <option key={node.id} value={node.id}>{node.label} · {node.status}</option>)}
                         </select>
+                        <small style={graphFieldHintStyle}>自动选择由 Legion 分配可用节点；也可以固定到特定执行节点。</small>
                       </label>
                     </div>
                     {stage.id === reviewImplementationRoute && <div style={{ marginTop: 10, padding: 9, border: '1px solid var(--line)', borderRadius: 6 }}>
                       <b>独立测试命令</b>
                       <div style={{ color: 'var(--muted-2)', margin: '4px 0 8px' }}>实现阶段提交代码后，Legion 会在工作区执行这条命令并记录结果；程序与参数分开填写，不经过 shell。</div>
-                      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(min(100%, 180px), 1fr))', gap: 8, minWidth: 0 }}>
+                      <div style={graphTestFieldsStyle}>
                         <label style={graphFieldLabelStyle}>程序
                           <input style={graphControlStyle} aria-label={stage.id + ' 独立测试 executable'} value={stage.testExecutable} onChange={event => setGraphStages(current => current.map((item, at) => at === index ? { ...item, testExecutable: event.target.value } : item))} placeholder="例如：node、npm、pytest" />
                         </label>

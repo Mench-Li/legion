@@ -29,7 +29,7 @@ export function WorkflowArtifactPicker({ label, value, options, placeholder, all
     <details style={{ position: 'relative' }}>
       <summary aria-label={`${label}，已选 ${value.length} 项`} style={{
         display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8,
-        minHeight: 38, padding: '6px 10px', border: '1px solid var(--line)', borderRadius: 6,
+        width: '100%', minHeight: 40, padding: '6px 10px', border: '1px solid var(--line)', borderRadius: 6,
         background: 'var(--surface-1, #fff)', cursor: 'pointer', listStyle: 'none', boxSizing: 'border-box',
       }}>
         <span style={{ display: 'flex', flexWrap: 'wrap', gap: 4, minWidth: 0 }}>

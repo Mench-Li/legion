@@ -115,6 +115,22 @@ describe('面板分层：什么必须始终可见', () => {
   })
 })
 
+describe('DAG 表单布局', () => {
+  test('表单框占满等分列、统一高度，说明文字排在框下方', () => {
+    assert.match(SRC, /const graphFieldLabelStyle = \{[^}]*width: '100%'/s, '每个字段标签应占满自己的网格列')
+    assert.match(SRC, /const graphControlStyle = \{[^}]*height: 40/s, 'DAG 控件应统一高度')
+    assert.match(SRC, /gridTemplateColumns: '105px repeat\(3, minmax\(0, 1fr\)\)'/, '三列岗位框应等宽')
+
+    const modelFieldStart = SRC.lastIndexOf('<div style={graphFieldLabelStyle}>', SRC.indexOf('<span>模型覆盖</span>'))
+    const modelFieldEnd = SRC.indexOf('<label style={graphFieldLabelStyle}>执行节点', modelFieldStart)
+    const modelField = SRC.slice(modelFieldStart, modelFieldEnd)
+    const statusBoxEnd = modelField.indexOf('</div>}')
+    const hintStart = modelField.indexOf('<small style={graphFieldHintStyle}>')
+    assert.ok(statusBoxEnd >= 0 && hintStart > statusBoxEnd, '模型状态说明应位于状态框下方')
+    assert.ok(modelField.includes("? '不适用'"), '不支持模型覆盖时，框内只显示简短状态')
+  })
+})
+
 describe('面板减法：删掉的东西不许悄悄回来', () => {
   test('★★ 手工「登记节点」输入框已删（守护会自注册）', () => {
     assert.ok(!SRC.includes('节点 ID，如 workstation-a'), '那个要求用户猜 ID 的输入框不该回来')

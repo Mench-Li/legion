@@ -1009,15 +1009,29 @@ export function commentTask(input: { id: string; by: string; text: string }): Pr
  * @throws 理由为空时**在发请求之前**抛具名错误（见下）——空理由等于让执行者
  *   按原样再交一次，而"又交了一遍同样的东西"与"根本没重做"在下次验收时看不出区别。
  */
-export function rejectTask(input: { id: string; by: string; reason: string; ifVersion?: number }): Promise<unknown> {
+export async function rejectTask(input: { id: string; by: string; reason: string; ifVersion?: number }): Promise<unknown> {
   const reason = typeof input.reason === 'string' ? input.reason.trim() : ''
   if (reason.length === 0) {
     const err = new Error('打回缺少理由：它是执行者下一轮唯一的输入（空着等于让它按原样再交一次）')
     Object.assign(err, { code: 'REJECT_REASON_REQUIRED' })
-    return Promise.reject(err)
+    throw err
   }
-  return hubComment(input.id, `↩ 打回重做：${reason}`).then((receipt) => {
-    let transitionIfVersion = input.ifVersion
+  const commentText = `↩ 打回重做：${reason}`
+  const currentTask = await fetchHubTask(input.id)
+  if (currentTask.status !== 'in_review') {
+    throw new Error(`任务 ${input.id} 当前为 ${currentTask.status}，只能打回待验收任务`)
+  }
+
+  // 上一次若在“评论成功、迁移失败”之间中断，复用已落库的同一条评论，
+  // 让用户可以安全重试，不会再追加重复批注。
+  const commentAlreadySaved = (currentTask.comments ?? []).some(comment => comment.text === commentText)
+  if (input.ifVersion !== undefined && currentTask.version !== input.ifVersion && !commentAlreadySaved) {
+    throw new Error('任务版本已变化，请刷新任务后重新打回')
+  }
+
+  let transitionIfVersion = input.ifVersion === undefined ? undefined : currentTask.version
+  if (!commentAlreadySaved) {
+    const receipt = await hubComment(input.id, commentText)
     if (input.ifVersion !== undefined) {
       const task = typeof receipt === 'object' && receipt !== null && 'task' in receipt
         ? receipt.task
@@ -1031,17 +1045,18 @@ export function rejectTask(input: { id: string; by: string; reason: string; ifVe
       }
       // appendTaskNote increments version. The transition must use the version returned
       // by that write, while still detecting changes that happened after the UI read.
-      if (nextVersion !== input.ifVersion + 1) {
+      if (nextVersion !== currentTask.version + 1) {
         throw new Error('任务版本已变化；打回原因已保存为评论，请刷新任务后确认状态')
       }
       transitionIfVersion = nextVersion
     }
-    return hubTransition({
-      id: input.id,
-      to: 'todo',
-      by: input.by,
-      ...(transitionIfVersion === undefined ? {} : { ifVersion: transitionIfVersion }),
-    })
+  }
+
+  return hubTransition({
+    id: input.id,
+    to: 'todo',
+    by: input.by,
+    ...(transitionIfVersion === undefined ? {} : { ifVersion: transitionIfVersion }),
   })
 }
 // ───────────────────────── 对话中心（S2 ← S1 team-hub /api/chat/*）─────────────────────────

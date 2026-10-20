@@ -171,9 +171,9 @@ describe('接线判据（静态读源码）：判定对了还要真的接上', (
     assert.match(api, /export async function hubRework/)
     assert.match(api, /hubPost\('\/api\/rework'/)
     // 不变量搬到 api.ts 之后，**得有人继续钉着它**：下面这一条 + reject-path.test.mjs 的运行时用例
-    const at = api.indexOf('export function rejectTask')
+    const at = api.indexOf('export async function rejectTask')
     assert.ok(at > 0, '找不到 rejectTask')
-    const body = api.slice(at, at + 1600)
+    const body = api.slice(at, at + 3500)
     assert.ok(body.indexOf('hubComment(') < body.indexOf('hubTransition('),
       '先落评论再退回：退回后守护可能立刻认领，先落评论才保证它带得上改动点')
   })

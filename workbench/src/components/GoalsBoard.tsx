@@ -141,7 +141,7 @@ function GoalTasks({ goal, onOpenTask }: { goal: HubGoal; onOpenTask?: (id: stri
   useEffect(() => {
     let alive = true
     setTasks(null)
-    fetchHubTasks(goal.scope)
+    fetchHubTasks(goal.scope, { compact: true })
       .then(all => {
         if (!alive) return
         // 链任务按 goalId 归属该目标（老库回填过 goalId；slice/fix 也沿目标反查挂接）

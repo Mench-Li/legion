@@ -40,7 +40,7 @@ export function AgentTasksModal({ agent, roster = [], onClose, onOpenTask, embed
     let cancelled = false
     void (async () => {
       try {
-        const all = await fetchHubTasks(agent.scope ?? null)
+        const all = await fetchHubTasks(agent.scope ?? null, { compact: true })
         if (cancelled) return
         const mine = tasksForRosterAgent(agent, all, roster)
         setTasks(mine)

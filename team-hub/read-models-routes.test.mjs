@@ -143,6 +143,14 @@ test('⑫b ★★ `?compact=1` 只回看板字段（patches/comments/evidence �
   }
   assert.deepEqual(Object.keys(t).sort(), ['blockedBy', 'hold', 'id', 'priority', 'role', 'scope', 'soldier', 'status', 'title', 'version'],
     '白名单变了就要复核手机端读的字段（workbench/mobile/board.mjs）')
+
+  const workbench = await get('/api/board?scope=compact-alpha&compact=workbench')
+  assert.equal(workbench.status, 200)
+  assert.equal(workbench.body[0].patchesCount, 1, '工作台列表保留补丁数量提示')
+  assert.equal('patches' in workbench.body[0], false, '工作台列表不应传输完整 git diff')
+  assert.equal(workbench.body[0].description, '描述')
+  assert.deepEqual(workbench.body[0].comments, [{ text: 'y'.repeat(5000) }])
+  assert.ok(JSON.stringify(workbench.body).length < 20 * 1024, '工作台精简响应应显著小于完整补丁响应')
 })
 
 test('⑫c ★ `compact` 与三个过滤参数**正交**（一起用仍然各自生效）', async () => {

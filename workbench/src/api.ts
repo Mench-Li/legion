@@ -404,9 +404,13 @@ export async function createHubTask(input: NewTaskInput, scope?: string | null):
   return hubPost('/api/create', { ...input, scope: scope ?? 'default' })
 }
 
-/** team-hub v2：某空间的全部任务（/api/board，含角色/指派/依赖/版本），供中枢调度。 */
-export async function fetchHubTasks(scope: string | null): Promise<HubTask[]> {
-  const qs = scope ? `?scope=${encodeURIComponent(scope)}` : ''
+/** team-hub v2：某空间的任务列表；compact 列表省去完整补丁 diff，详情仍从 /api/task 读取。 */
+export async function fetchHubTasks(scope: string | null, options: { compact?: boolean } = {}): Promise<HubTask[]> {
+  const query = new URLSearchParams()
+  if (scope) query.set('scope', scope)
+  if (options.compact) query.set('compact', 'workbench')
+  const params = query.toString()
+  const qs = params ? `?${params}` : ''
   return readJson<HubTask[]>(await hubGet(`/api/board${qs}`))
 }
 

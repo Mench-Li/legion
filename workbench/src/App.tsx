@@ -193,7 +193,7 @@ export default function App(): React.JSX.Element {
           throw new Error(`未探测到中枢 ${hubBase()} 的响应`)
         }
         const [tasks, spaces, hubActs, hubMissions] = await Promise.all([
-          fetchHubTasks(null),
+          fetchHubTasks(null, { compact: true }),
           fetchSpaces(),
           fetchHubActivity({ limit: MAX_ACTIVITY }),
           fetchHubMissions(null),
@@ -294,7 +294,8 @@ export default function App(): React.JSX.Element {
       return
     }
     const controller = createSceneController({
-      scope, subscribe: subscribeHubAudit, fetchRoster, fetchTasks: fetchHubTasks,
+      scope, subscribe: subscribeHubAudit, fetchRoster,
+      fetchTasks: (currentScope) => fetchHubTasks(currentScope, { compact: true }),
       onSnapshot: (facts, cues, visits) => {
         setSceneFacts(facts)
         setSceneCues(cues)
@@ -468,7 +469,7 @@ export default function App(): React.JSX.Element {
     try {
       // 中枢是唯一数据源（v1 看板那条取数分支已随那条被取消的链路一起删除）。
       const [tasks, acts, spaces] = await Promise.all([
-        fetchHubTasks(scope),
+        fetchHubTasks(scope, { compact: true }),
         fetchHubActivity({ scope: scope ?? undefined, limit: MAX_ACTIVITY }),
         fetchSpaces(),
       ])

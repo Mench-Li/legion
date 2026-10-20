@@ -2412,8 +2412,59 @@ function listTasks(filter = {}) {
   if (filter.soldier) { where.push('soldier = $soldier'); params.soldier = filter.soldier }
   if (filter.role) { where.push('role = $role'); params.role = filter.role }
   if (filter.scope) { where.push('scope = $scope'); params.scope = filter.scope }
-  const sql = `SELECT * FROM tasks${where.length ? ' WHERE ' + where.join(' AND ') : ''} ORDER BY id`
+  const mobileFields = 'id,title,status,role,soldier,priority,scope,blockedBy,hold,version'
+  const workbenchFields = [
+    'id', 'title', 'description', 'acceptance', 'boundary', 'hold', 'priority', 'status', 'version',
+    'soldier', 'claimedAt', 'parent', 'role', 'scope', 'blocks', 'blockedBy', 'comments', 'evidence',
+    'artifacts', 'fixOf', 'fixCount', 'goalId', 'createdAt', 'updatedAt',
+    'CASE WHEN patches IS NOT NULL AND json_valid(patches) THEN json_array_length(patches) ELSE 0 END AS patchesCount',
+  ].join(',')
+  const fields = filter.compact === 'mobile' ? mobileFields : filter.compact === 'workbench' ? workbenchFields : '*'
+  const sql = `SELECT ${fields} FROM tasks${where.length ? ' WHERE ' + where.join(' AND ') : ''} ORDER BY id`
   const rows = db.prepare(sql).all(params)
+  if (filter.compact === 'mobile') {
+    return rows.map((row) => ({
+      id: row.id,
+      title: row.title,
+      status: row.status,
+      role: row.role,
+      soldier: row.soldier,
+      priority: row.priority,
+      scope: row.scope,
+      blockedBy: parseJson(row.blockedBy, []),
+      hold: row.hold === 1,
+      version: row.version,
+    }))
+  }
+  if (filter.compact === 'workbench') {
+    return rows.map((row) => ({
+      id: row.id,
+      title: row.title,
+      description: row.description,
+      acceptance: parseJson(row.acceptance, []),
+      boundary: parseJson(row.boundary, { do: [], dont: [] }),
+      hold: row.hold === 1,
+      priority: row.priority,
+      status: row.status,
+      version: row.version,
+      soldier: row.soldier,
+      claimedAt: row.claimedAt,
+      parent: row.parent,
+      role: row.role,
+      scope: row.scope,
+      blocks: parseJson(row.blocks, []),
+      blockedBy: parseJson(row.blockedBy, []),
+      comments: parseJson(row.comments, []),
+      evidence: parseJson(row.evidence, []),
+      patchesCount: Number(row.patchesCount) || 0,
+      artifacts: parseJson(row.artifacts, []),
+      fixOf: row.fixOf ?? null,
+      fixCount: row.fixCount ?? 0,
+      goalId: row.goalId ?? null,
+      createdAt: row.createdAt,
+      updatedAt: row.updatedAt,
+    }))
+  }
   return rows.map(rowToTask)
 }
 

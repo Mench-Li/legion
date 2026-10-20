@@ -165,7 +165,7 @@ function rowFromHub(t: HubTask): TcRow {
     createdAt: t.createdAt,
     comments: t.comments ?? [],
     evidenceCount: (t.evidence ?? []).length,
-    patchesCount: (t.patches ?? []).length,
+    patchesCount: t.patchesCount ?? (t.patches ?? []).length,
     artifactsCount: (t.artifacts ?? []).length,
   }
 }
@@ -232,7 +232,7 @@ export function TaskCenterView({ scope, hubMode, spaces = [], goals = [], onSele
 
   const load = useCallback(async (): Promise<void> => {
     try {
-      const list = await fetchHubTasks(scope)
+      const list = await fetchHubTasks(scope, { compact: true })
       setRows(list.map(rowFromHub))
       setLoadErr(null)
     } catch (e) {
@@ -251,8 +251,27 @@ export function TaskCenterView({ scope, hubMode, spaces = [], goals = [], onSele
     let poll = 0
     let disposed = false
     let off: (() => void) | null = null
+    let reloadTimer = 0
+    let reloadInFlight = false
+    let reloadAgain = false
     const reload = (): void => {
-      if (!disposed) void load()
+      if (disposed || reloadTimer) return
+      reloadTimer = window.setTimeout(() => {
+        reloadTimer = 0
+        if (disposed) return
+        if (reloadInFlight) {
+          reloadAgain = true
+          return
+        }
+        reloadInFlight = true
+        void load().finally(() => {
+          reloadInFlight = false
+          if (reloadAgain) {
+            reloadAgain = false
+            reload()
+          }
+        })
+      }, 500)
     }
     if (hubMode) {
       try {
@@ -266,6 +285,7 @@ export function TaskCenterView({ scope, hubMode, spaces = [], goals = [], onSele
     }
     return () => {
       disposed = true
+      if (reloadTimer) window.clearTimeout(reloadTimer)
       off?.()
       if (poll) window.clearInterval(poll)
     }

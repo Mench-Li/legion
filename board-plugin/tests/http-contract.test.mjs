@@ -679,6 +679,7 @@ describe('board-plugin HTTP 契约：hub 模式（fake team-hub）', () => {
     const e = lastHub()
     assert.equal(e.path, '/api/board')
     assert.match(e.search, /scope=software/)
+    assert.match(e.search, /compact=1/, '插件看板只需要精简字段，不能拉取完整 patches 大字段')
     assert.equal(e.auth, 'Bearer tk-hub-1')
   })
 
@@ -773,16 +774,38 @@ describe('board-plugin HTTP 契约：hub 模式（fake team-hub）', () => {
     assert.equal(e.auth, 'Bearer tk-hub-1')
   })
 
-  it('hub 模式 /api/board/events：首帧 = hub /api/board 全量；hub 事件 → 泵新帧', async () => {
+  it('hub 模式 /api/board/events：首帧精简；同空间任务事件合并重拉，忽略无关事件', async () => {
+    for (let i = 0; i < 50 && hubSse.length === 0; i += 1) await new Promise((resolve) => setTimeout(resolve, 10))
+    assert.ok(hubSse.length > 0, '插件应已订阅 hub 事件流')
+    const beforeNoClients = hubLog.filter((e) => e.path === '/api/board').length
+    hubEmit({ seq: hubSeq + 1, event: 'transition', action: 'transition', taskId: 'H-NONE', scope: 'software' })
+    await new Promise((resolve) => setTimeout(resolve, 1100))
+    assert.equal(hubLog.filter((e) => e.path === '/api/board').length, beforeNoClients,
+      '没有看板 SSE 客户端时，hub 事件不能触发全量看板读取')
+
     const sse = sseClient(board.base, '/scrum-board/api/board/events')
     try {
-      // 首帧：v2 hub 数据（含 from:hub 全量 JSON 行帧）
+      // 首帧：v2 hub 看板字段投影（含 from:hub JSON 行帧）
       await sse.waitFor((f) => f.some((x) => x.includes('"from":"hub"') || x.includes('"from": "hub"')), 4000)
-      // hub 侧改数据 + 推事件 → board-plugin 泵出新帧
+      const before = hubLog.filter((e) => e.path === '/api/board').length
+      // 其他空间和非看板事件不能触发整张看板重拉。
+      hubEmit({ seq: hubSeq + 1, event: 'chat:message', action: 'chat:message', taskId: null, scope: 'software' })
+      hubEmit({ seq: hubSeq + 1, event: 'transition', action: 'transition', taskId: 'OTHER', scope: 'another-space' })
+      await new Promise((resolve) => setTimeout(resolve, 450))
+      assert.equal(hubLog.filter((e) => e.path === '/api/board').length, before)
+
+      // 连续任务事件（略慢于旧 200ms 防抖）只应触发一次精简快照。
       hubState.board = { status: 200, body: { from: 'hub', tasks: [{ id: 'H-1', title: 'after-event', status: 'done' }] } }
-      hubEmit({ seq: hubSeq + 1, event: 'transition', action: 'transition', taskId: 'H-0', scope: 'software' })
+      for (let i = 0; i < 3; i += 1) {
+        hubEmit({ seq: hubSeq + 1, event: 'transition', action: 'transition', taskId: `H-${i}`, scope: 'software' })
+        if (i < 2) await new Promise((resolve) => setTimeout(resolve, 230))
+      }
       const got = await sse.waitFor((f) => f.some((x) => x.includes('after-event')), 4000)
       assert.ok(got, 'hub 事件应触发 board 重拉并泵帧给 /scrum-board/api/board/events 客户端')
+      await new Promise((resolve) => setTimeout(resolve, 450))
+      const refreshes = hubLog.filter((e) => e.path === '/api/board').slice(before)
+      assert.equal(refreshes.length, 1, '事件突发必须合并成一次 board 请求')
+      assert.match(refreshes[0].search, /compact=1/)
     } finally {
       sse.close()
     }

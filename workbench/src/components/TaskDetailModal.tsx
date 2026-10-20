@@ -203,7 +203,7 @@ export function TaskDetailModal({ taskId, onClose, onChanged, onContactAgent }: 
       } else setAgentWorkflowHistory(null)
       if (t.scope) {
         try {
-          const all = await fetchHubTasks(t.scope)
+          const all = await fetchHubTasks(t.scope, { compact: true })
           setChildren(all.filter(x => x.parent === taskId))
         } catch {
           setChildren([])

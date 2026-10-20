@@ -364,7 +364,9 @@ export interface HubTask {
   /** 执行者提交的产出证据（isEvidence=true 的评论：by/at/text）。 */
   evidence: Array<{ by: string; at: string; text: string }>
   /** 结构化补丁记录（L1 审计：改动文件 + diff）。兼容旧版字符串补丁列表。 */
-  patches: Array<AuditPatch | string>
+  /** 任务列表精简投影只返回 patchesCount；详情端点返回完整 patches。 */
+  patches?: Array<AuditPatch | string>
+  patchesCount?: number
   /** 首次认领冻结的 Agent 与上游工作流版本选择。 */
   agentSelectionSnapshot?: {
     source?: string

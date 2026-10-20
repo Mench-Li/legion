@@ -28,6 +28,7 @@ import type { SceneCue, SceneFacts } from './scene/sceneState'
 import type { SceneBoardVisit } from './scene/sceneBoard'
 import { buildMissions } from './missions'
 import { boardFromHubTasks } from './hubBoard'
+import { hubRetryDelay } from './hubReconnect'
 import type { ActivityEvent, BoardData, GoalInfo, GoalStatus, Mission, RosterAgent, SpaceInfo } from './types'
 import { WorkspaceNavigation } from './components/WorkspaceNavigation'
 import { AgentWorkspace } from './components/AgentWorkspace'
@@ -131,6 +132,8 @@ export default function App(): React.JSX.Element {
   const [spaceSettings, setSpaceSettings] = useState<SpaceInfo | null>(null)
   const [conn, setConn] = useState<ConnState>('connecting')
   const [error, setError] = useState('')
+  const [hubRetryInfo, setHubRetryInfo] = useState<{ attempt: number; delayMs: number } | null>(null)
+  const retryHubNowRef = useRef<(() => void) | null>(null)
   const [active, setActive] = useState(() => {
     try { const saved = localStorage.getItem('legion.workspace.page'); return saved && (saved === 'chat' || NAV_GROUPS.some(g => g.target === saved || SUB_NAV[g.id].some(n => n.id === saved))) ? saved : 'home' } catch { return 'home' }
   })
@@ -174,23 +177,26 @@ export default function App(): React.JSX.Element {
 
   useEffect(() => {
     let disposed = false
+    let retryTimer: ReturnType<typeof setTimeout> | null = null
+    let failedAttempts = 0
 
     const load = async (): Promise<void> => {
+      if (disposed) return
+      setConn('connecting')
+      setError('')
+      setHubRetryInfo(null)
       try {
-        // 中枢是**唯一**的数据源：探测不到就明确报「中枢不可达」。
+        // 中枢是**唯一**的数据源：探测不到就显示「中枢不可达」，并按退避间隔自动重试。
         // 这里从前还有一段"回退到 v1 看板只读模式"的分支，已随那条被取消的链路一起删掉了 ——
         // 那种回退会把"中枢没起来"显示成"有一份任务的旧快照"，用户看到的是**假数据**。
         if (!(await probeHub())) {
-          if (disposed) return
-          setHubMode(false)
-          setConn('error')
-          setError(`未探测到中枢 ${hubBase()} 的响应`)
-          return
+          throw new Error(`未探测到中枢 ${hubBase()} 的响应`)
         }
-        const [tasks, spaces, hubActs] = await Promise.all([
+        const [tasks, spaces, hubActs, hubMissions] = await Promise.all([
           fetchHubTasks(null),
           fetchSpaces(),
           fetchHubActivity({ limit: MAX_ACTIVITY }),
+          fetchHubMissions(null),
         ])
         if (disposed) return
         setHubMode(true)
@@ -199,22 +205,41 @@ export default function App(): React.JSX.Element {
         setScope(null)
         setBoard(boardFromHubTasks(tasks))
         setActivity(hubActs.map(ev => ({ ts: ev.ts, kind: ev.action, taskId: ev.taskId ?? undefined, text: `${ev.member} · ${ev.action}` })))
-        setConn('live')
-        setError('')
-        const hubMissions = await fetchHubMissions(null)
         setMissions(hubMissions.missions)
         setScopeAware(hubMissions.scopeAware)
+        setConn('live')
+        setHubRetryInfo(null)
+        failedAttempts = 0
       } catch (e) {
         if (disposed) return
+        setHubMode(false)
         setConn('error')
         setError(e instanceof Error ? e.message : String(e))
+        const delayMs = hubRetryDelay(failedAttempts)
+        failedAttempts += 1
+        setHubRetryInfo({ attempt: failedAttempts, delayMs })
+        retryTimer = setTimeout(() => {
+          retryTimer = null
+          void load()
+        }, delayMs)
       }
     }
 
+    const retryNow = (): void => {
+      if (retryTimer !== null) {
+        clearTimeout(retryTimer)
+        retryTimer = null
+      }
+      failedAttempts = 0
+      void load()
+    }
+    retryHubNowRef.current = retryNow
     void load()
 
     return () => {
       disposed = true
+      if (retryTimer !== null) clearTimeout(retryTimer)
+      retryHubNowRef.current = null
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
@@ -647,18 +672,23 @@ export default function App(): React.JSX.Element {
       <div className="state-box">
         <div className="err">✕ 无法连接中枢 {hubBase()}</div>
         <div style={{ fontSize: 12 }}>错误：{error}</div>
+        {hubRetryInfo && (
+          <div style={{ fontSize: 12 }} aria-live="polite">
+            自动重连已开启：第 {hubRetryInfo.attempt} 次重试，间隔 {Math.ceil(hubRetryInfo.delayMs / 1000)} 秒。也可以立即重试。
+          </div>
+        )}
         <div style={{ fontSize: 12, lineHeight: 1.9 }}>
           1. 确认中枢 team-hub v2 已启动，且本页的 <code>{hubBase()}</code> 指向它（默认走同源 <code>/hub</code> 反代）。
           <br />
           2. 中枢在别处时：在浏览器控制台执行
           <code>localStorage.setItem('legion.workbench.hub', 'http://127.0.0.1:8787')</code>
-          后刷新页面。
+          后点击「立即重试」。
           <br />
           说明：v1 看板那条数据源已**整条取消**，这里不再有任何回退 —— 中枢不可达就是「没有数据」，
           不会退回去显示一份过期快照。
         </div>
-        <button className="btn primary" onClick={() => window.location.reload()}>
-          重试
+        <button className="btn primary" onClick={() => retryHubNowRef.current?.()}>
+          立即重试
         </button>
       </div>
     )

@@ -1016,13 +1016,33 @@ export function rejectTask(input: { id: string; by: string; reason: string; ifVe
     Object.assign(err, { code: 'REJECT_REASON_REQUIRED' })
     return Promise.reject(err)
   }
-  return hubComment(input.id, `↩ 打回重做：${reason}`).then(() =>
-    hubTransition({
+  return hubComment(input.id, `↩ 打回重做：${reason}`).then((receipt) => {
+    let transitionIfVersion = input.ifVersion
+    if (input.ifVersion !== undefined) {
+      const task = typeof receipt === 'object' && receipt !== null && 'task' in receipt
+        ? receipt.task
+        : null
+      const nextVersion = typeof task === 'object' && task !== null && 'version' in task
+        && Number.isInteger(task.version)
+        ? task.version
+        : null
+      if (nextVersion === null) {
+        throw new Error('打回评论已保存，但中枢未返回最新任务版本；请刷新任务状态后重试')
+      }
+      // appendTaskNote increments version. The transition must use the version returned
+      // by that write, while still detecting changes that happened after the UI read.
+      if (nextVersion !== input.ifVersion + 1) {
+        throw new Error('任务版本已变化；打回原因已保存为评论，请刷新任务后确认状态')
+      }
+      transitionIfVersion = nextVersion
+    }
+    return hubTransition({
       id: input.id,
       to: 'todo',
       by: input.by,
-      ...(input.ifVersion === undefined ? {} : { ifVersion: input.ifVersion }),
-    }))
+      ...(transitionIfVersion === undefined ? {} : { ifVersion: transitionIfVersion }),
+    })
+  })
 }
 // ───────────────────────── 对话中心（S2 ← S1 team-hub /api/chat/*）─────────────────────────
 

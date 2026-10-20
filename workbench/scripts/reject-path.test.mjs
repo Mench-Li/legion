@@ -63,6 +63,7 @@ store.set('legion.workbench.hub', 'http://hub.test')
 const api = await import('../src/api.ts')
 
 let calls = []
+let commentVersion = 8
 const realFetch = globalThis.fetch
 const fakeResponse = (status, body) => ({
   ok: status >= 200 && status < 300,
@@ -75,11 +76,14 @@ const fakeResponse = (status, body) => ({
 before(() => {
   globalThis.fetch = async (url, init = {}) => {
     calls.push({ url: String(url), method: init.method ?? 'GET', body: init.body ? JSON.parse(init.body) : undefined })
-    return fakeResponse(200, { ok: true })
+    const path = String(url).replace('http://hub.test', '')
+    return path === '/api/comment'
+      ? fakeResponse(200, { ok: true, task: { id: calls.at(-1).body.id, version: commentVersion } })
+      : fakeResponse(200, { ok: true })
   }
 })
 after(() => { globalThis.fetch = realFetch })
-beforeEach(() => { calls = [] })
+beforeEach(() => { calls = []; commentVersion = 8 })
 
 const paths = () => calls.map(c => `${c.method} ${c.url.replace('http://hub.test', '')}`)
 
@@ -99,12 +103,23 @@ describe('① rejectTask 的行为：评论 + 归还待办，两件事一起做'
       'v1 的 /api/reject 已退役；再打过去只会得到一句像"路径拼错了"的 404')
   })
 
-  it('ifVersion 必须带出去（乐观锁：将军看到的版本 vs 现在的版本）', async () => {
+  it('评论递增任务版本后，用回执中的新版本迁回待办', async () => {
     await api.rejectTask({ id: 'T-1', by: 'general', reason: 'x', ifVersion: 7 })
-    assert.equal(calls[1].body.ifVersion, 7)
+    assert.equal(calls[1].body.ifVersion, 8,
+      '评论先成功并递增版本；transition 必须使用评论回执的新版本，否则每次都会乐观锁冲突')
     calls = []
     await api.rejectTask({ id: 'T-1', by: 'general', reason: 'x' })
     assert.equal('ifVersion' in calls[1].body, false, '没给版本就不许编一个')
+  })
+
+  it('检测到评论前任务已并发变化时，不用旧决定迁移状态', async () => {
+    commentVersion = 10
+    await assert.rejects(
+      () => api.rejectTask({ id: 'T-1', by: 'general', reason: 'x', ifVersion: 7 }),
+      /版本已变化/,
+    )
+    assert.equal(calls.length, 1, '检测到版本冲突后不能继续迁移')
+    assert.equal(calls[0].url.endsWith('/api/comment'), true)
   })
 
   it('by 由调用方决定（看板拖拽传绑定者、调度弹窗传 general）', async () => {
@@ -195,6 +210,17 @@ describe('③ 接线判据（静态读源码）：修了底层还得真的接上
     assert.match(src, /import \{ hubRework, rejectTask \} from '\.\.\/api'/)
     assert.match(src, /await rejectTask\(\{/)
     assert.match(src, /by: by \?\? 'general'/)
+  })
+
+  it('★ TaskDetailModal 的详情打回也必须走 rejectTask', () => {
+    const full = read('src/components/TaskDetailModal.tsx')
+    const start = full.indexOf('const doReject =')
+    const end = full.indexOf('\n  const doStart =', start)
+    assert.ok(start >= 0 && end > start, '找不到详情打回处理函数')
+    const rejectBody = full.slice(start, end)
+    assert.match(rejectBody, /rejectTask\(/, '详情按钮必须复用带版本修正的打回路径')
+    assert.doesNotMatch(rejectBody, /hubComment\(|hubTransition\(/,
+      '详情弹窗不能再自己拼评论与迁移，否则乐观锁问题会复发')
   })
 
   it('★ 看板拖拽那条路仍然必填（上一批的判据不能被这次改动弄松）', () => {

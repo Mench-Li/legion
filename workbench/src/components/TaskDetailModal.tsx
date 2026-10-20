@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type { CSSProperties } from 'react'
-import { approveTaskDelivery, confirmTaskWorkerStopped, execRequest, fetchAgentWorkflowHistory, fetchHubActivity, fetchHubCalendarByLink, fetchHubDocContent, fetchHubOverlaps, fetchHubTask, fetchHubTasks, fetchRepoContention, fetchTaskContention, fetchTaskDelivery, fetchTaskWriteIntent, hubClaim, hubComment, hubHold, hubReassign, hubReviewNote, hubTransition, reconcileAgentWorkflowAttempt, setTaskWriteIntent } from '../api'
+import { approveTaskDelivery, confirmTaskWorkerStopped, execRequest, fetchAgentWorkflowHistory, fetchHubActivity, fetchHubCalendarByLink, fetchHubDocContent, fetchHubOverlaps, fetchHubTask, fetchHubTasks, fetchRepoContention, fetchTaskContention, fetchTaskDelivery, fetchTaskWriteIntent, hubClaim, hubComment, hubHold, hubReassign, hubReviewNote, hubTransition, reconcileAgentWorkflowAttempt, rejectTask, setTaskWriteIntent } from '../api'
 import type { AgentWorkflowHistory, LiveDelivery, LiveIntegrationEvent, LiveReservation, LiveTaskContention, LiveWriteIntent } from '../api'
 import type { AuditPatch, HubActivity, HubDocContent, HubTask, OverlapGroup, ReviewNote } from '../types'
 import type { LinkedCalendarEvent } from '../api'
@@ -363,13 +363,11 @@ export function TaskDetailModal({ taskId, onClose, onChanged, onContactAgent }: 
     if (reason === null) return Promise.resolve()
     const issues = (t.reviewNotes ?? []).filter(n => n.verdict === 'issue')
     const noteLines = issues.map(n => `- ${n.file === '*' ? '整体' : n.file}${n.note ? `：${n.note}` : ''}`)
-    const body = noteLines.length > 0
-      ? `↩ 打回重做：${reason.trim()}\n📋 审计批注（按文件）：\n${noteLines.join('\n')}`
-      : `↩ 打回重做：${reason.trim()}`
-    return act(async () => {
-      await hubComment(t.id, body)
-      await hubTransition({ id: t.id, to: 'todo', by: bindOf(t), ifVersion: t.version })
-    }, `${t.id} 已打回（批注已交付下一轮 worker）`)
+    const reasonText = noteLines.length > 0
+      ? `${reason.trim()}\n📋 审计批注（按文件）：\n${noteLines.join('\n')}`
+      : reason.trim()
+    return act(() => rejectTask({ id: t.id, by: 'general', reason: reasonText, ifVersion: t.version }),
+      `${t.id} 已打回待办（批注已写入）`)
   }
   // 士兵 ❓ 提问待将军确认：该条评论在「AI 执行过程」区就地长出答复框（见下方 isAsk 分支）——免拉到底部、免二级弹框
   const askComment = pendingAskOf(t)

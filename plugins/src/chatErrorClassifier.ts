@@ -9,6 +9,19 @@
  *     （原「子代理未完成（…）」笼统样式）或裸 undefined 样式文案（兜底为可行动 empty-other）；
  *   - 边界：stopReason 空/缺省、error 超长等一律不抛，落 empty-other 兜底并截断原文片段。
  * 纯函数、无 I/O；node --test 直接单测（plugins/tests/chat-error-classifier.test.mjs）。
+ *
+ * ★ 2026-10-20 追加第六类 `host-api-mismatch`（**只加不漏**：五类语义与文案原样保留）。
+ *
+ *   现场：和 Agent 对话回「原因暂不可识别（原文：TypeError: ctx.subagents.start is not a function）」。
+ *   它被归到 empty-other，于是文案引导人去"确认守护在线 + 选 assistant 模型"——
+ *   **方向从一开始就是错的**：那是插件编译用的 dsh-subagent（0.2.1-alpha.1，有 `start`）
+ *   与真正加载的 DSH（0.2.1-rc.2，只有 `startActivation`）不是一代。
+ *
+ *   > 一类"看起来什么都像"的失败落进兜底箱子，
+ *   > 与一类**本该单独成类**的失败落进同一个箱子，
+ *   > 在用户眼里是同一句话：去查模型配置。
+ *
+ *   所以它必须**先于**其它判定被认出来，并给出真正可行动的话：重启 DSH 宿主 / 对齐版本。
  */
 
 export const CATEGORIES = [
@@ -16,6 +29,7 @@ export const CATEGORIES = [
   'provider-error',
   'timeout-aborted',
   'foreman-down',
+  'host-api-mismatch',
   'empty-other',
 ] as const
 
@@ -49,6 +63,19 @@ function pick(input: ChatErrorInput): { category: ChatErrorCategory; snippet: st
   const snippet = safeSnippet(input?.error)
   const text = (snippet + ' ' + stop).toLowerCase()
 
+  // 0) 宿主 API 不匹配（**先于**所有其它判定）。
+  //
+  //    2026-10-20 实测：`TypeError: ctx.subagents.start is not a function`。
+  //    编译用的 dsh-subagent 是 0.2.1-alpha.1（有 start），运行的是 0.2.1-rc.2
+  //    （只有 startActivation）。它不是"模型/密钥/网络"问题，而是**装的那份 DSH 与插件期望不是一代**——
+  //    归到 empty-other 会让人去查模型配置，方向从一开始就错。
+  //
+  //    判据同时认：我们自己的稳定前缀、以及原生的 `X is not a function`（`ctx.subagents.start`）。
+  if (/subagent_api_unavailable/.test(text)
+    || /subagents?\.(start|startactivation)\b.{0,20}is not a function/.test(text)
+    || /(start|startactivation)\b.{0,10}is not a function/.test(text)) {
+    return { category: 'host-api-mismatch', snippet }
+  }
   // 1) 超时/中止：stopReason=aborted（或调用方把 null 语义补 aborted），错误含超时/中止语义
   if (stop === 'aborted' || /timeout|timed? ?out|aborted|abort|超时|中止|预算|deadline/.test(text)) {
     return { category: 'timeout-aborted', snippet }
@@ -72,6 +99,8 @@ function pick(input: ChatErrorInput): { category: ChatErrorCategory; snippet: st
 function messageFor(category: ChatErrorCategory, snippet: string): string {
   const src = snippet.length > 0 ? `（原文：${snippet.slice(0, 120)}）` : ''
   switch (category) {
+    case 'host-api-mismatch':
+      return `AI 回复失败：DSH 宿主接口不匹配（插件与所装 DSH 不是同一代）${src}。刚升级过 DSH 后出现属预期，请重启 DSH 宿主让插件重新加载；仍失败请对齐版本后重试。`
     case 'model-unavailable':
       return `AI 回复失败：未配置可用的 assistant 模型${src}。请到对话中心「回复设置」或模型配置中选择 assistant 可用模型后，点击「重试」或重新发送。`
     case 'provider-error':

@@ -1,4 +1,5 @@
 import { useState } from 'react'
+import { cleanArtifactNames, declaredArtifactOptions, nextGraphStageId, upstreamArtifactOptions } from '../agentWorkflowDag'
 import { fetchAgentNodes, fetchAgentToolConfigs, fetchAgentWorkflowDefinitions, fetchMemberReadiness, fetchModelProfiles, fetchSpacePipeline, registerAgentToolConfig, registerAgentWorkflowDefinition, saveSpacePipeline, } from '../api'
 import type { AgentNodeRecord, AgentToolConfigRecord, AgentWorkflowDefinition, HubModelProfile, SpacePipelineConfig } from '../api'
 import { formatCodexSystemProxyNodeStatus } from '../agentWorkflowView'
@@ -23,6 +24,7 @@ import {
 } from '../nativeCapabilities'
 import { bundleInstallRemedy } from '../dshRemedy'
 import { toast } from './Toast'
+import { WorkflowArtifactPicker } from './WorkflowArtifactPicker'
 
 interface Props { scope: string }
 interface GraphStageDraft {
@@ -33,8 +35,8 @@ interface GraphStageDraft {
   toolConfigRef: { id: string; version: number } | null
   modelConfigRef: { id: string; version: number } | null
   nodeId: string
-  inputArtifacts: string
-  outputArtifacts: string
+  inputArtifacts: string[]
+  outputArtifacts: string[]
   testExecutable: string
   testArgs: string
   testTimeoutMs: number
@@ -203,9 +205,9 @@ export function AgentWorkflowConfigurator({ scope }: Props): React.JSX.Element {
       }
       setTools(nextTools)
       setGraphStages([
-        { id: 'design', role: workflow?.designRole ?? defaultRoleFor(nextPipeline.stages, 'designRole'), label: '方案设计', tool: nextTools.designRole, toolConfigRef: workflow?.stageTools?.[workflow.designRole]?.agentToolConfig ?? null, modelConfigRef: null, nodeId: nextNodeIds.designRole, inputArtifacts: '', outputArtifacts: 'design-bundle', testExecutable: '', testArgs: '[]', testTimeoutMs: 900000 },
-        { id: 'implement', role: workflow?.implementationRole ?? defaultRoleFor(nextPipeline.stages, 'implementationRole'), label: '编码与测试', tool: nextTools.implementationRole, toolConfigRef: workflow?.stageTools?.[workflow.implementationRole]?.agentToolConfig ?? null, modelConfigRef: null, nodeId: nextNodeIds.implementationRole, inputArtifacts: 'design-bundle', outputArtifacts: 'implementation-commit, test-evidence', testExecutable: 'node', testArgs: '["--test"]', testTimeoutMs: 900000 },
-        { id: 'review', role: workflow?.reviewRole ?? defaultRoleFor(nextPipeline.stages, 'reviewRole'), label: '代码审查', tool: nextTools.reviewRole, toolConfigRef: workflow?.stageTools?.[workflow.reviewRole]?.agentToolConfig ?? null, modelConfigRef: null, nodeId: nextNodeIds.reviewRole, inputArtifacts: 'design-bundle, implementation-commit, test-evidence', outputArtifacts: '', testExecutable: '', testArgs: '[]', testTimeoutMs: 900000 },
+        { id: 'design', role: workflow?.designRole ?? defaultRoleFor(nextPipeline.stages, 'designRole'), label: '方案设计', tool: nextTools.designRole, toolConfigRef: workflow?.stageTools?.[workflow.designRole]?.agentToolConfig ?? null, modelConfigRef: null, nodeId: nextNodeIds.designRole, inputArtifacts: [], outputArtifacts: ['design-bundle'], testExecutable: '', testArgs: '[]', testTimeoutMs: 900000 },
+        { id: 'implement', role: workflow?.implementationRole ?? defaultRoleFor(nextPipeline.stages, 'implementationRole'), label: '编码与测试', tool: nextTools.implementationRole, toolConfigRef: workflow?.stageTools?.[workflow.implementationRole]?.agentToolConfig ?? null, modelConfigRef: null, nodeId: nextNodeIds.implementationRole, inputArtifacts: ['design-bundle'], outputArtifacts: ['implementation-commit', 'test-evidence'], testExecutable: 'node', testArgs: '["--test"]', testTimeoutMs: 900000 },
+        { id: 'review', role: workflow?.reviewRole ?? defaultRoleFor(nextPipeline.stages, 'reviewRole'), label: '代码审查', tool: nextTools.reviewRole, toolConfigRef: workflow?.stageTools?.[workflow.reviewRole]?.agentToolConfig ?? null, modelConfigRef: null, nodeId: nextNodeIds.reviewRole, inputArtifacts: ['design-bundle', 'implementation-commit', 'test-evidence'], outputArtifacts: [], testExecutable: '', testArgs: '[]', testTimeoutMs: 900000 },
       ])
       setGraphEdges([{ from: 'design', to: 'implement' }, { from: 'implement', to: 'review' }])
       setReviewStageId('review')
@@ -358,9 +360,8 @@ export function AgentWorkflowConfigurator({ scope }: Props): React.JSX.Element {
       const id = definitionId.trim()
       const version = Math.max(0, ...definitions.filter(item => item.id === id).map(item => item.version)) + 1
       const stages = graphStages.map(stage => {
-        const artifacts = (value: string): string[] => value.split(',').map(item => item.trim()).filter(Boolean)
-        const inputArtifacts = artifacts(stage.inputArtifacts)
-        const outputArtifacts = artifacts(stage.outputArtifacts)
+        const inputArtifacts = cleanArtifactNames(stage.inputArtifacts)
+        const outputArtifacts = cleanArtifactNames(stage.outputArtifacts)
         let testRunner: { executable: string; args: string[]; timeoutMs: number } | null = null
         if (stage.id === reviewImplementationRoute) {
           let args: unknown
@@ -421,8 +422,8 @@ export function AgentWorkflowConfigurator({ scope }: Props): React.JSX.Element {
       return {
         id: stage.id, role: stage.role, label: stage.label, tool, toolConfigRef: stage.agentToolConfig, modelConfigRef: stage.modelConfig,
         nodeId: stage.nodeId ?? '',
-        inputArtifacts: Array.isArray(stage.inputContract?.artifacts) ? (stage.inputContract.artifacts as string[]).join(', ') : '',
-        outputArtifacts: Array.isArray(stage.outputContract?.artifacts) ? (stage.outputContract.artifacts as string[]).join(', ') : '',
+        inputArtifacts: cleanArtifactNames(stage.inputContract?.artifacts),
+        outputArtifacts: cleanArtifactNames(stage.outputContract?.artifacts),
         testExecutable: stage.testRunner?.executable ?? '',
         testArgs: JSON.stringify(stage.testRunner?.args ?? []),
         testTimeoutMs: stage.testRunner?.timeoutMs ?? 900000,
@@ -531,6 +532,7 @@ export function AgentWorkflowConfigurator({ scope }: Props): React.JSX.Element {
     return stage ? (stage.label.trim() || stage.role) + ' · ' + stage.id : id
   }
   const graphEntryStages = graphStages.filter(stage => !graphEdges.some(edge => edge.to === stage.id))
+  const graphArtifactOptions = declaredArtifactOptions(graphStages)
   const nextGraphDependency = graphStages.flatMap(from => graphStages
     .filter(to => to.id !== from.id)
     .map(to => ({ from: from.id, to: to.id })))
@@ -816,19 +818,16 @@ export function AgentWorkflowConfigurator({ scope }: Props): React.JSX.Element {
                   <div style={{ color: 'var(--muted-2)', marginTop: 3 }}>每个阶段指定执行岗位和工具；产物字段描述阶段之间交接的内容。</div>
                 </div>
                 <button type="button" className="btn ghost" disabled={rolesForSelect.length === 0} onClick={() => {
-                  const usedIds = new Set(graphStages.map(stage => stage.id))
-                  let suffix = graphStages.length + 1
-                  while (usedIds.has('stage-' + suffix)) suffix += 1
                   setGraphStages(current => [...current, {
-                    id: 'stage-' + suffix,
+                    id: nextGraphStageId(current),
                     role: rolesForSelect[0]?.role ?? '',
                     label: '新阶段',
                     tool: 'dsh-native',
                     toolConfigRef: null,
                     modelConfigRef: null,
                     nodeId: '',
-                    inputArtifacts: '',
-                    outputArtifacts: '',
+                    inputArtifacts: [],
+                    outputArtifacts: [],
                     testExecutable: '',
                     testArgs: '[]',
                     testTimeoutMs: 900000,
@@ -856,10 +855,6 @@ export function AgentWorkflowConfigurator({ scope }: Props): React.JSX.Element {
                   <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(min(100%, 210px), 1fr))', gap: 8, minWidth: 0 }}>
                     <label style={graphFieldLabelStyle}>阶段名称
                       <input style={graphControlStyle} aria-label={'阶段 ' + (index + 1) + ' 名称'} value={stage.label} onChange={event => setGraphStages(current => current.map((item, at) => at === index ? { ...item, label: event.target.value } : item))} placeholder="例如：方案设计" />
-                    </label>
-                    <label style={graphFieldLabelStyle}>稳定 ID
-                      <input style={graphControlStyle} aria-label={'阶段 ' + (index + 1) + ' ID'} value={stage.id} onChange={event => renameGraphStage(index, event.target.value.trim())} placeholder="例如：design" />
-                      <small style={{ color: 'var(--muted-2)' }}>依赖和返工路由使用此 ID；改名会同步更新引用。</small>
                     </label>
                     <label style={graphFieldLabelStyle}>执行岗位
                       <select style={graphControlStyle} aria-label={'阶段 ' + (index + 1) + ' 岗位'} value={stage.role} onChange={event => setGraphStages(current => current.map((item, at) => at === index ? { ...item, role: event.target.value } : item))}>
@@ -899,15 +894,36 @@ export function AgentWorkflowConfigurator({ scope }: Props): React.JSX.Element {
                     </label>
                   </div>
 
+                  <details style={{ marginTop: 8 }}>
+                    <summary style={{ cursor: 'pointer' }}>高级设置：稳定 ID</summary>
+                    <label style={{ ...graphFieldLabelStyle, marginTop: 6 }}>阶段 ID
+                      <input style={graphControlStyle} aria-label={'阶段 ' + (index + 1) + ' ID'} value={stage.id} onChange={event => renameGraphStage(index, event.target.value.trim())} placeholder="例如：design" />
+                      <small style={{ color: 'var(--muted-2)' }}>新阶段会自动分配 ID。依赖和返工路由会使用此 ID；手动修改时，已有引用会同步更新。</small>
+                    </label>
+                  </details>
+
                   <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(min(100%, 220px), 1fr))', gap: 8, marginTop: 10, minWidth: 0 }}>
-                    <label style={graphFieldLabelStyle}>需要的上游产物
-                      <input style={graphControlStyle} aria-label={stage.id + ' 输入产物'} value={stage.inputArtifacts} onChange={event => setGraphStages(current => current.map((item, at) => at === index ? { ...item, inputArtifacts: event.target.value } : item))} placeholder="多个名称用逗号分隔，例如：design-bundle" />
-                      <small style={{ color: 'var(--muted-2)' }}>阶段启动前检查这些产物是否已由上游交付。</small>
-                    </label>
-                    <label style={graphFieldLabelStyle}>交付的产物
-                      <input style={graphControlStyle} aria-label={stage.id + ' 输出产物'} value={stage.outputArtifacts} onChange={event => setGraphStages(current => current.map((item, at) => at === index ? { ...item, outputArtifacts: event.target.value } : item))} placeholder="例如：implementation-commit, test-evidence" />
-                      <small style={{ color: 'var(--muted-2)' }}>填写交接契约名称，不是文件路径。</small>
-                    </label>
+                    <div style={graphFieldLabelStyle}>
+                      <WorkflowArtifactPicker
+                        label="需要的上游产物"
+                        value={stage.inputArtifacts}
+                        options={[...upstreamArtifactOptions(graphStages, graphEdges, stage.id), ...stage.inputArtifacts]}
+                        placeholder="选择依赖链上游阶段交付的产物"
+                        onChange={inputArtifacts => setGraphStages(current => current.map((item, at) => at === index ? { ...item, inputArtifacts } : item))}
+                      />
+                      <small style={{ color: 'var(--muted-2)' }}>仅列出依赖链上游阶段交付的产物；启动前会检查这些产物是否已交付。</small>
+                    </div>
+                    <div style={graphFieldLabelStyle}>
+                      <WorkflowArtifactPicker
+                        label="交付的产物"
+                        value={stage.outputArtifacts}
+                        options={graphArtifactOptions}
+                        placeholder="选择已有产物，或输入名称新增"
+                        allowCreate
+                        onChange={outputArtifacts => setGraphStages(current => current.map((item, at) => at === index ? { ...item, outputArtifacts } : item))}
+                      />
+                      <small style={{ color: 'var(--muted-2)' }}>选择现有交接名称，或新增自定义名称；它描述交接内容，不是文件路径。</small>
+                    </div>
                   </div>
 
                   <details style={{ marginTop: 9 }}>

@@ -105,7 +105,10 @@ describe('面板分层：什么必须始终可见', () => {
   })
 
   test('★ 高级区的标题要**列出里面有什么**（否则用户不知道点开值不值）', () => {
-    const summary = SRC.slice(SRC.indexOf('<summary'), SRC.indexOf('</summary>'))
+    const summary = [...SRC.matchAll(/<summary[^>]*>([\s\S]*?)<\/summary>/g)]
+      .map(match => match[1])
+      .find(value => value.includes('高级设置：执行节点说明')) ?? ''
+    assert.ok(summary !== '', '要找到包含高级配置的主折叠标题')
     for (const part of ['能力声明', 'DAG', '发布为可复用工作流版本']) {
       assert.ok(summary.includes(part), `summary 里应当提到「${part}」`)
     }

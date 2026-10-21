@@ -25,6 +25,7 @@
 // 却看不见任务卡在哪——而"我要下个任务"的前提恰恰是前者。
 // ============================================================================
 import {
+  BOARD_COLUMNS,
   BOARD_VIEWS,
   DEFAULT_INTENT,
   DEFAULT_VIEW,
@@ -77,6 +78,13 @@ import {
   cacheKey, usability, packPayload, unpackPayload, shouldClearReadCacheOnLogout,
   offlineNotice, trimToBudget, CACHE_MAX_BYTES, READ_CACHE_CODES,
 } from './read-cache.mjs'
+// 手机端**交互决策**：状态列分页、横向手势、对话滚动位置。抽成纯函数是为了
+// 可测 —— 本文件在 Node 里不可 import（顶层读 `sessionStorage`），
+// 而这三件事恰好都是"只在手机上错"的那一类。
+import {
+  boardPages, clampPageIndex, decideSwipe, gestureAxis, pageAnnouncement,
+  timelineScrollPlan, nearBottom, SWIPE_EDGE_GUARD, UNKNOWN_PAGE_TITLE,
+} from './interaction.mjs'
 
 const $ = (id) => document.getElementById(id)
 const LS_REFRESH = 'legion.mobile.refresh'
@@ -144,6 +152,30 @@ const state = {
   intent: DEFAULT_INTENT,
   /** 任务视角（与指挥台任务中心同一条轴）。 */
   boardView: DEFAULT_VIEW,
+  /**
+   * 看板当前状态列页索引（仅 `boardView === 'all'` 有效）。
+   *
+   * ★ 它必须**夹取**在"当前非空列"范围内：列集合会因刷新/筛选/切空间变化
+   *   （这一列刚被清空），不夹的话用户会停在一张空白页上 —— 而它看起来像"任务没了"。
+   *   夹取在 `clampPageIndex` 里做，见 `interaction.mjs`。
+   */
+  boardPage: 0,
+  /** 每个状态列独立的纵向滚动位置（会话内；只影响滚动，不影响数据）。 */
+  columnScroll: {},
+  /** 当前打开的轻量详情（`null` = 关闭）。任务消失时自动关闭（见 refreshTasks）。 */
+  detailTaskId: null,
+  /** 用户不在底部时累计的新消息数（R-08 的「N 条新消息」入口）。 */
+  pendingNewMessages: 0,
+  /** 正在进行的横向手势（`null` = 没有）。不持久化，切页签/切空间/关闭详情时清掉。 */
+  gesture: null,
+  /** 切换页签时记住的聊天滚动位置（切回来要回到原处，R-08）。 */
+  chatScrollTop: 0,
+  /** 切换页签时记住的看板滚动位置（用于"回来时回到原处"）。 */
+  tasksScrollTop: 0,
+  /** 下一次渲染要恢复到哪个视图的滚动位置（`null` = 跟随当前 DOM）。 */
+  scrollRestorePending: null,
+  /** 详情层打开前焦点所在的元素（关闭后要还回去）。 */
+  sheetLastFocus: null,
   /**
    * 空间代际。**每切一次空间加一**。
    *
@@ -303,8 +335,23 @@ function timelineMetaFor(entry) {
   return { who, tagText, tagClass }
 }
 
-function renderTimeline() {
+/**
+ * 一次时间线渲染。
+ *
+ * ★ 滚动位置是**有条件的**：修复前每次渲染都 `scrollTop = scrollHeight`，
+ *   用户向上翻历史时任何一次 SSE/刷新都会把他拽到底部 —— 长对话**读不了**。
+ *   现在只有"本来就在底部"或"刚发了消息/换了会话"才跟到底；否则位置不动，
+ *   并在底部浮出「N 条新消息」入口（见 `applyTimelineScroll`）。
+ */
+function renderTimeline({ forceFollow = false, incoming = 0 } = {}) {
   const root = $('timeline')
+  const main = $('main')
+  // 从别的页签切回来：先把阅读位置还回去，再判断"现在离底部多远"。
+  if (state.view === 'chat' && state.scrollRestorePending === 'chat') {
+    main.scrollTop = state.chatScrollTop
+    state.scrollRestorePending = null
+  }
+  const before = { scrollTop: main.scrollTop, scrollHeight: main.scrollHeight, clientHeight: main.clientHeight }
   if (state.timeline.length === 0) {
     const p = document.createElement('div')
     p.className = 'hint'
@@ -312,6 +359,7 @@ function renderTimeline() {
       ? t('这个空间下还没有 Agent。')
       : t('还没有消息。用下面输入框给这个 Agent 派一个任务试试。')
     root.replaceChildren(p)
+    applyTimelineScroll({ before, incoming: 0, forceFollow })
     return
   }
   const frag = document.createDocumentFragment()
@@ -358,7 +406,51 @@ function renderTimeline() {
     frag.appendChild(wrap)
   }
   root.replaceChildren(frag)
-  $('main').scrollTop = $('main').scrollHeight
+  applyTimelineScroll({ before, incoming, forceFollow })
+}
+
+/**
+ * 渲染之后的滚动决策。判断本身在 `interaction.mjs` 的 `timelineScrollPlan`。
+ *
+ * ★ 不在对话视图时**不许**碰 `#main` 的滚动：那块内容此刻是看板的。
+ *   修复前那种"无条件跳底"会顺带把看板的滚动位置也清掉。
+ */
+function applyTimelineScroll({ before, incoming, forceFollow }) {
+  const main = $('main')
+  if (state.view !== 'chat') {
+    if (forceFollow) state.pendingNewMessages = 0
+    updateNewMessagePill()
+    return
+  }
+  const plan = timelineScrollPlan({ ...before, incoming, forceFollow })
+  if (plan.follow) {
+    main.scrollTop = main.scrollHeight
+    state.pendingNewMessages = 0
+  } else {
+    state.pendingNewMessages += plan.pending
+  }
+  updateNewMessagePill()
+}
+
+/** 「N 条新消息」浮标：用户不在底部时给一个**入口**，而不是把他拽下去。 */
+function updateNewMessagePill() {
+  const host = $('new-msg-pill')
+  if (host === null) return
+  const n = state.pendingNewMessages
+  if (n <= 0 || state.view !== 'chat') {
+    host.classList.add('hidden')
+    return
+  }
+  $('new-msg-jump').textContent = t('@newMessages', { n: String(n) })
+  host.classList.remove('hidden')
+}
+
+/** 点浮标回到底部：这是用户**显式**要求跟到底，所以清零并滚。 */
+function jumpToLatest() {
+  state.pendingNewMessages = 0
+  const main = $('main')
+  main.scrollTop = main.scrollHeight
+  updateNewMessagePill()
 }
 
 // ── 渲染：看板 ──────────────────────────────────────────────────────────────
@@ -376,18 +468,40 @@ function renderBoardViews() {
   }
 }
 
+/** 某条任务属于哪一列（不认识的 status 归到"未识别的状态"）。 */
+function columnFor(status) {
+  const s = String(status ?? '')
+  const hit = BOARD_COLUMNS.find((c) => c.statuses.includes(s))
+  // 未知状态的标题只在 `interaction.mjs` 里定义一次（`UNKNOWN_PAGE_TITLE`）——
+  // 在这里再写一遍字面量，就等于有了第二个能漂移的来源。
+  return hit ?? { id: 'unknown', title: UNKNOWN_PAGE_TITLE, tone: 'muted' }
+}
+
+/**
+ * 看板渲染。
+ *
+ * 两种形态，切换判据是**视角**（与需求 R-05 一致）：
+ *   · `all` → **状态列横向分页**：一屏一列、左右滑切列、列内纵向滚动。
+ *     页集合来自 `interaction.mjs` 的 `boardPages`（空列不生成页、未知状态单独成页）。
+ *   · 其余视角 → 仍是**平铺列表**：视角已经把状态收窄过，再分列会让滚动距离翻倍。
+ *
+ * ★ 每列保留独立的纵向滚动位置：`state.columnScroll` 在切页时记下离开那列的位置，
+ *   回来时还原。它只影响滚动，不影响数据。
+ */
 function renderBoard() {
   const root = $('task-groups')
+  const main = $('main')
   const shown = applyView(state.tasks, state.boardView)
+  const keepScroll = main.scrollTop
+  const restore = state.scrollRestorePending === 'tasks'
   const frag = document.createDocumentFragment()
-  let any = false
 
   if (state.boardView !== 'all') {
     // ★ 选中某个视角时给**平铺列表**，不按状态分列。
     //
     // 视角已经把状态收窄过一次了（比如「待我决定」= in_review + blocked），
     // 再分列会得到两列各一条，而手机上那两列的高度加起来比列表还高——
-    // 信息量没增加，滚动距离翻了倍。
+    // 信息量没增加，滚动距离翻倍。
     const box = document.createElement('div')
     box.className = 'group'
     const h = document.createElement('h2')
@@ -401,53 +515,155 @@ function renderBoard() {
       p.textContent = t('@noTasksInView', { n: state.tasks.length })
       box.appendChild(p)
     }
-    for (const task of shown) box.appendChild(taskCard(task))
+    for (const task of shown) box.appendChild(taskCard(task, columnFor(task.status).tone))
     frag.appendChild(box)
     root.replaceChildren(frag)
+    root.classList.remove('board-pager')
+    $('board-nav').classList.add('hidden')
+    $('page-indicator').textContent = ''
+    state.boardPage = 0
+    applyBoardScroll(restore ? state.tasksScrollTop : keepScroll)
+    state.scrollRestorePending = null
     return
   }
 
-  const { columns, unknown } = boardColumns(shown)
-  for (const col of columns) {
-    if (col.count === 0) continue
-    any = true
-    const box = document.createElement('div')
-    box.className = 'group'
-    const h = document.createElement('h2')
-    h.textContent = t(col.title)
-    const n = document.createElement('span')
-    n.className = 'n'
-    n.textContent = String(col.count)
-    h.appendChild(n)
-    box.appendChild(h)
-    for (const task of col.tasks) box.appendChild(taskCard(task))
-    frag.appendChild(box)
-  }
-  if (unknown.length > 0) {
-    any = true
-    const box = document.createElement('div')
-    box.className = 'group'
-    const h = document.createElement('h2')
-    // 不认识的状态照实说。悄悄丢掉的后果是"状态机加了状态、手机上少了任务"。
-    h.textContent = t('未识别的状态')
-    box.appendChild(h)
-    // ★ 循环变量**不能**叫 `t`：这个循环体里要调 `t('@rawStatus', …)` 去翻译，
-    //   而 `t` 是本模块的翻译函数。叫作 `t` 时那一行会变成"把任务对象当函数调用"，
-    //   于是**只要出现一个未知状态的任务，整块看板就渲染不出来**。
-    for (const task of unknown) {
-      const card = taskCard(task)
-      card.querySelector('.s').textContent = t('@rawStatus', { status: task.status })
-      box.appendChild(card)
-    }
-    frag.appendChild(box)
-  }
-  if (!any) {
+  const pages = boardPages(shown)
+  state.boardPage = clampPageIndex(state.boardPage, pages.length)
+  $('board-nav').classList.toggle('hidden', pages.length <= 1)
+  root.classList.add('board-pager')
+  if (pages.length === 0) {
     const p = document.createElement('div')
     p.className = 'hint'
     p.textContent = t('这个空间还没有任务。用下面输入框派一个。')
     frag.appendChild(p)
+    root.replaceChildren(frag)
+    $('page-indicator').textContent = ''
+    applyBoardScroll(restore ? state.tasksScrollTop : keepScroll)
+    state.scrollRestorePending = null
+    return
   }
+  const track = document.createElement('div')
+  track.className = 'board-track'
+  track.id = 'board-track'
+  track.style.setProperty('--page', String(state.boardPage))
+  for (let i = 0; i < pages.length; i += 1) track.appendChild(boardPageEl(pages[i], i))
+  frag.appendChild(track)
   root.replaceChildren(frag)
+  renderBoardPageState(pages)
+  syncBoardTransform(false)
+  const target = restore
+    ? (state.columnScroll[pages[state.boardPage].id] ?? 0)
+    : keepScroll
+  applyBoardScroll(target)
+  state.scrollRestorePending = null
+}
+
+/** 一列 = 一页。列头 sticky，卡片沿用同一套任务卡。 */
+function boardPageEl(page, index) {
+  const sec = document.createElement('section')
+  sec.className = 'board-page'
+  sec.dataset.page = String(index)
+  sec.dataset.pageId = page.id
+  const head = document.createElement('div')
+  head.className = 'col-head'
+  const h = document.createElement('h2')
+  h.textContent = t(page.title)
+  const n = document.createElement('span')
+  n.className = 'n'
+  n.textContent = String(page.count)
+  h.appendChild(n)
+  head.appendChild(h)
+  sec.appendChild(head)
+  for (const task of page.tasks) {
+    const card = taskCard(task, page.tone)
+    // 不认识的状态照实说。悄悄丢掉的后果是"状态机加了状态、手机上少了任务"。
+    if (page.unknown) card.querySelector('.s').textContent = t('@rawStatus', { status: task.status })
+    sec.appendChild(card)
+  }
+  return sec
+}
+
+/** 页码指示 + 左右替代按钮（滑动之外**必须**有的可见路径，R-05/R-11）。 */
+function renderBoardNav(pages) {
+  const page = pages[state.boardPage]
+  if (page === undefined) {
+    $('page-indicator').textContent = ''
+    return
+  }
+  const a = pageAnnouncement({
+    index: state.boardPage, pageCount: pages.length, title: t(page.title), count: page.count,
+  })
+  $('page-indicator').textContent = t(a.key, a.vars)
+  $('board-prev').disabled = state.boardPage <= 0
+  $('board-next').disabled = state.boardPage >= pages.length - 1
+}
+
+/** 把"当前页"这个状态同步到 DOM（可见/可访问/可播报）。 */
+function renderBoardPageState(pages) {
+  const root = $('task-groups')
+  for (const sec of root.querySelectorAll('.board-page')) {
+    const current = Number(sec.dataset.page) === state.boardPage
+    sec.setAttribute('aria-hidden', String(!current))
+    // `inert` 让非当前列的卡片**不进入 Tab 顺序**（aria-hidden 管不了键盘）。
+    if ('inert' in sec) sec.inert = !current
+  }
+  renderBoardNav(pages)
+}
+
+/** 设置轨道位移。`animate === false` 时直接跳（首次渲染 / 减少动态）。 */
+function syncBoardTransform(animate = true) {
+  const track = $('board-track')
+  if (track === null) return
+  track.classList.toggle('animate', animate === true)
+  track.style.setProperty('--drag', '0px')
+  track.style.setProperty('--page', String(state.boardPage))
+}
+
+/** 只改滚动位置（不改数据）。不在任务视图时不动 `#main`（那块可能是对话）。 */
+function applyBoardScroll(top) {
+  if (state.view !== 'tasks') return
+  const main = $('main')
+  const max = Math.max(0, main.scrollHeight - main.clientHeight)
+  const value = Number(top)
+  main.scrollTop = Math.min(Math.max(0, Number.isFinite(value) ? value : 0), max)
+}
+
+/**
+ * 切到某一页。
+ *
+ * ★ 离开的那一列**先记下滚动位置**，再切：不记的话用户滑走一次回来就回到顶部，
+ *   而"我刚才看到第 12 条"这件事只能靠他自己再找一遍。
+ */
+function setBoardPage(index, { animate = true } = {}) {
+  if (state.boardView !== 'all') return
+  const pages = boardPages(applyView(state.tasks, state.boardView))
+  if (pages.length === 0) return
+  const target = clampPageIndex(index, pages.length)
+  if (target === state.boardPage) {
+    syncBoardTransform(animate)
+    return
+  }
+  const main = $('main')
+  const leaving = pages[state.boardPage]
+  if (leaving !== undefined) state.columnScroll[leaving.id] = main.scrollTop
+  state.boardPage = target
+  renderBoardPageState(pages)
+  syncBoardTransform(animate)
+  const entering = pages[target]
+  const saved = Number(state.columnScroll[entering.id] ?? 0)
+  applyBoardScroll(Number.isFinite(saved) ? saved : 0)
+}
+
+/** 数据刷新后同步详情层：还在就重画（状态会变），不在了就关掉并说清。 */
+function syncDetailSheet() {
+  if (state.detailTaskId === null) return
+  const task = detailTask()
+  if (task === null) {
+    closeTaskSheet({ restoreFocus: false })
+    showNotice(t('任务不存在或无权访问'))
+    return
+  }
+  renderTaskSheet(task)
 }
 
 /**
@@ -471,10 +687,22 @@ function renderBoard() {
  *   > 在被渲染的那一层出错时是同一个东西 ——
  *   > 只不过前者永远绿，而用户看到的是"这里没有任务"。
  */
-function taskCard(task) {
-  const card = document.createElement('div')
+function taskCard(task, tone = 'muted') {
+  // 整块可点：`role="button"` + `tabindex`，键盘 Enter/Space 同样打开详情。
+  const card = document.createElement('article')
   card.className = 'task'
   card.id = `card-${task.id}`
+  card.dataset.tone = tone
+  card.tabIndex = 0
+  card.setAttribute('role', 'button')
+  card.setAttribute('aria-label', `${task.id} ${task.title ?? ''} ${t(taskLine(task))}`)
+  card.addEventListener('click', () => { openTaskSheet(task.id) })
+  card.addEventListener('keydown', (ev) => {
+    if (ev.key === 'Enter' || ev.key === ' ') {
+      ev.preventDefault()
+      openTaskSheet(task.id)
+    }
+  })
   const name = document.createElement('div')
   name.className = 't'
   name.textContent = `${task.id} ${task.title ?? ''}`
@@ -493,28 +721,14 @@ function taskCard(task) {
   // "未包 t() 的中文字面量"那支判据看不见它（现由"生产者"判据盯着）。
   m.textContent = t(taskMeta(task))
   if (m.textContent.length > 0) card.appendChild(m)
-  const acts = document.createElement('div')
-  acts.className = 'acts'
-  // ★ 「追加要求」只给**还没结束**的任务。
+  // ★ 卡内动作**移进详情层**（R-06 允许的两种做法之一）。
   //
-  // 已结束的任务上放这个按钮，按下去必然失败（服务端以 TASK_TERMINAL 拒）——
-  // 而一个必然失败的按钮是最坏的一种：用户会以为是自己哪里点错了，
-  // 或者反复试。要改已完成的活，那是**新任务**，不是追加要求。
-  if (canAppendFeedback(task)) {
-    const b1 = document.createElement('button')
-    b1.textContent = t('追加要求')
-    b1.addEventListener('click', () => { chooseTaskForFeedback(task.id); focusComposer('feedback') })
-    acts.appendChild(b1)
-  }
-  const b2 = document.createElement('button')
-  b2.textContent = t('问这个 Agent')
-  b2.addEventListener('click', () => {
-    const owner = state.agents.find((a) => a.role === (task.role ?? task.soldier))
-    if (owner !== undefined) void selectAgent(owner.agentId)
-    showView('chat')
-  })
-  acts.appendChild(b2)
-  card.appendChild(acts)
+  //   卡片本身整块可点，于是"点一下打开这一条"与"点两个小按钮"不再挤在
+  //   同一块 44px 高的区域里 —— 后者在 320px 上必然点错。
+  const more = document.createElement('div')
+  more.className = 'more'
+  more.textContent = t('查看与操作')
+  card.appendChild(more)
   return card
 }
 
@@ -527,10 +741,136 @@ function highlightTask(taskId) {
   setTimeout(() => { el.style.borderColor = '' }, 2500)
 }
 
+/**
+ * 打开某条任务：切到任务页 → 刷新 → 找到它所在的状态列 → 打开详情。
+ *
+ * 系统通知的深链（`#task=<id>`，R-15）也走这里：一条"点进来找不到"的通知，
+ * 比不通知更让人困惑。任务不存在/无权访问时**留在看板**并说清，不白屏。
+ */
 async function openTask(taskId) {
   showView('tasks')
   await refreshTasks()
+  const task = state.tasks.find((x) => x.id === taskId)
+  if (task === undefined) {
+    showNotice(t('任务不存在或无权访问'))
+    return false
+  }
+  // 当前视角筛不到它 → 回到「全部」再定位（否则用户会在一个"没有这条任务"的列表里找）。
+  if (state.boardView !== 'all' && !applyView(state.tasks, state.boardView).some((x) => x.id === taskId)) {
+    state.boardView = 'all'
+    renderBoardViews()
+  }
+  renderBoard()
+  if (state.boardView === 'all') {
+    const pages = boardPages(applyView(state.tasks, 'all'))
+    const idx = pages.findIndex((pg) => pg.tasks.some((x) => x.id === taskId))
+    if (idx >= 0) setBoardPage(idx, { animate: false })
+  }
   highlightTask(taskId)
+  openTaskSheet(taskId)
+  return true
+}
+
+// ── 任务详情（轻量抽屉）────────────────────────────────────────────────────
+
+/** 当前详情对应的任务（任务消失时返回 `null`）。 */
+function detailTask() {
+  if (state.detailTaskId === null) return null
+  return state.tasks.find((x) => x.id === state.detailTaskId) ?? null
+}
+
+/**
+ * 打开轻量详情层（R-07）。
+ *
+ * 只显示**现有字段 + 现有动作**：任务号/标题、状态一句话、角色/优先级、所属列/视角，
+ * 以及「追加要求」「问这个 Agent」。**不新增**验收/打回/评论/转派/审计 diff ——
+ * 那是桌面的活（A6），手机上做等于把验收降级成误触。
+ */
+function openTaskSheet(taskId) {
+  const task = state.tasks.find((x) => x.id === taskId)
+  if (task === undefined) {
+    showNotice(t('任务不存在或无权访问'))
+    return
+  }
+  if (state.detailTaskId === null) state.sheetLastFocus = document.activeElement
+  state.detailTaskId = taskId
+  renderTaskSheet(task)
+  const host = $('task-sheet')
+  host.classList.remove('hidden')
+  host.setAttribute('aria-hidden', 'false')
+  const close = $('sheet-close')
+  if (close !== null) close.focus()
+}
+
+/** 填详情层。文案全部走 i18n；拼出来的句子用显式键（`@sheetWhere`）。 */
+function renderTaskSheet(task) {
+  $('sheet-title').textContent = `${task.id} ${task.title ?? ''}`
+  const status = t(taskLine(task))
+  $('sheet-status').textContent = isWaitingForNode(task) ? status + t('（电脑上线后自动开始）') : status
+  const meta = t(taskMeta(task))
+  $('sheet-meta').textContent = meta
+  $('sheet-meta').classList.toggle('hidden', meta.length === 0)
+  const col = columnFor(task.status)
+  const viewLabel = t(viewOf(state.boardView)?.label ?? '')
+  $('sheet-where').textContent = t('@sheetWhere', { column: t(col.title), view: viewLabel })
+  const acts = $('sheet-acts')
+  acts.replaceChildren()
+  // ★ 「追加要求」只给**还没结束**的任务。
+  //
+  // 已结束的任务上放这个按钮，按下去必然失败（服务端以 TASK_TERMINAL 拒）——
+  // 而一个必然失败的按钮是最坏的一种：用户会以为是自己哪里点错了，
+  // 或者反复试。要改已完成的活，那是**新任务**，不是追加要求。
+  if (canAppendFeedback(task)) {
+    const b = document.createElement('button')
+    b.textContent = t('追加要求')
+    b.addEventListener('click', () => {
+      closeTaskSheet({ restoreFocus: false })
+      chooseTaskForFeedback(task.id)
+      showView('chat')
+      focusComposer('feedback')
+    })
+    acts.appendChild(b)
+  }
+  const ask = document.createElement('button')
+  ask.textContent = t('问这个 Agent')
+  ask.addEventListener('click', () => {
+    closeTaskSheet({ restoreFocus: false })
+    const owner = state.agents.find((a) => a.role === (task.role ?? task.soldier))
+    if (owner !== undefined) void selectAgent(owner.agentId)
+    showView('chat')
+  })
+  acts.appendChild(ask)
+}
+
+/** 关闭详情层：焦点**回到触发卡片**（否则键盘/读屏用户会掉到页面顶部）。 */
+function closeTaskSheet({ restoreFocus = true } = {}) {
+  if (state.detailTaskId === null) return
+  state.detailTaskId = null
+  const host = $('task-sheet')
+  host.classList.add('hidden')
+  host.setAttribute('aria-hidden', 'true')
+  $('sheet-acts').replaceChildren()
+  const back = state.sheetLastFocus
+  state.sheetLastFocus = null
+  if (restoreFocus === true && back !== null && typeof back?.focus === 'function' && document.contains(back)) {
+    try { back.focus({ preventScroll: true }) } catch { back.focus() }
+  }
+}
+
+/** 详情层里的焦点陷阱 + Esc 关闭（R-11）。 */
+function onSheetKeydown(ev) {
+  if (state.detailTaskId === null) return
+  if (ev.key === 'Escape') { ev.preventDefault(); closeTaskSheet(); return }
+  if (ev.key !== 'Tab') return
+  const sheet = $('task-sheet').querySelector('.sheet')
+  if (sheet === null) return
+  const focusables = [...sheet.querySelectorAll('button, a[href], input, select, textarea, [tabindex]:not([tabindex="-1"])')]
+    .filter((el) => el.disabled !== true && el.offsetParent !== null)
+  if (focusables.length === 0) return
+  const first = focusables[0]
+  const last = focusables[focusables.length - 1]
+  if (ev.shiftKey && document.activeElement === first) { ev.preventDefault(); last.focus() }
+  else if (!ev.shiftKey && document.activeElement === last) { ev.preventDefault(); first.focus() }
 }
 
 // ── 渲染：目标选择（Agent / 任务）──────────────────────────────────────────
@@ -661,16 +1001,28 @@ function chooseTaskForFeedback(taskId) {
  * 放在手机上只会让主路径多一个岔口。
  */
 function showView(view) {
+  // ★ 切走时**先记下**当前滚动位置：切回来要回到原处（R-08：切页签不丢位置）。
+  const main = $('main')
+  const previous = state.view
+  const switching = previous !== view
+  if (switching && previous === 'chat') state.chatScrollTop = main.scrollTop
+  if (switching && previous === 'tasks') state.tasksScrollTop = main.scrollTop
   state.view = view
   $('view-chat').classList.toggle('hidden', view !== 'chat')
   $('view-tasks').classList.toggle('hidden', view !== 'tasks')
   $('tab-chat').setAttribute('aria-selected', String(view === 'chat'))
   $('tab-tasks').setAttribute('aria-selected', String(view === 'tasks'))
-  // ★ 切视图时**重画离线标记**：两块数据的年龄是各自记的，
-  //   而标记说的是"你**现在看的这块**是不是旧的"。
-  //   不重画的话，从"消息是旧的"切到看板会继续显示那句话 ——
-  //   一句与屏幕无关的话，用户读两次之后就再也不读了。
+  // ★ 切视图时**重画离线标记**：两块数据的年龄是各自记的，而标记说的是
+  //   "你**现在看的这块**是不是旧的"。不重画的话，从"消息是旧的"切到看板
+  //   会继续显示那句话 —— 一句与屏幕无关的话，用户读两次之后就再也不读了。
   renderOfflineNote()
+  // 切回来时把位置还回去；看板的还原点交给 `renderBoard`（它要等列表重新画完）。
+  if (switching && view === 'chat') {
+    main.scrollTop = state.chatScrollTop
+    state.scrollRestorePending = null
+  }
+  if (switching && view === 'tasks') state.scrollRestorePending = 'tasks'
+  updateNewMessagePill()
   if (view === 'tasks') void refreshTasks()
 }
 
@@ -723,6 +1075,10 @@ async function selectAgent(agentId) {
   localStorage.setItem(LS_AGENT, agentId)
   state.timeline = []
   state.cursor = null
+  // 换 Agent = 换一段对话：新消息计数与阅读位置都从头开始（R-08 明说这是新会话）。
+  state.pendingNewMessages = 0
+  state.chatScrollTop = 0
+  updateNewMessagePill()
   renderTargets()
   await openConversation()
 }
@@ -747,7 +1103,7 @@ async function openConversation() {
   void connectStream()
 }
 
-async function refreshTimeline() {
+async function refreshTimeline({ forceFollow = false } = {}) {
   if (state.convId === null) return
   const gen = state.scopeGen
   const conv = state.convId
@@ -766,14 +1122,18 @@ async function refreshTimeline() {
     // 切了空间或换了会话 → 这批缓存已经不属于当前界面，丢掉。
     if (gen !== state.scopeGen || conv !== state.convId) return
     state.timeline = cached.payload
-    renderTimeline()
+    renderTimeline({ forceFollow })
     markOffline('messages', cached.ageMs)
     return
   }
   // 同上：切了空间或换了会话，这批消息就不该往界面上写。
   if (gen !== state.scopeGen || conv !== state.convId) return
   const entries = (r.messages ?? []).map(timelineEntry)
+  // ★ 先记住"渲染前有多少条"：多出来的就是**新消息**。用户不在底部时，
+  //   它们不该把视图拽走，而是累计到「N 条新消息」浮标上（R-08）。
+  const previousCount = state.timeline.length
   const merged = mergeTimeline(state.timeline, entries)
+  const incoming = Math.max(0, merged.entries.length - previousCount)
   state.timeline = merged.entries
   state.cursor = merged.cursor
   markOffline('messages', null)
@@ -781,7 +1141,7 @@ async function refreshTimeline() {
   //   用户离线时想看到的是他刚才在屏幕上看到的完整时间线，
   //   而不是"上一次请求恰好返回的那 200 条"。`packPayload` 自己会截到上限。
   putReadCache('messages', state.timeline, conv)
-  renderTimeline()
+  renderTimeline({ incoming, forceFollow })
 }
 
 /**
@@ -825,6 +1185,7 @@ async function refreshTasks() {
     renderBoardViews()
     renderBoard()
     renderTargets()
+    syncDetailSheet()
     // ★ 由 `read-cache.mjs` 判过：超过一小时的看板**根本不会**走到这里
     //   （`getReadCache` 对过期数据返回 null）。所以这里能显示的就一定是
     //   "一小时以内"的，而不是一个三天前的世界。
@@ -842,6 +1203,8 @@ async function refreshTasks() {
   state.tasks = mergeAttempts(Array.isArray(board) ? board : (board.tasks ?? []), detail)
   // ★ 实时数据到手 → 清掉"这是旧的"的标记，并把它缓存下来备用。
   markOffline('board', null)
+  // 详情层正开着：状态可能已经变了，重画；任务被删/无权访问则关掉并说清。
+  syncDetailSheet()
   putReadCache('board', { tasks: state.tasks, agents: state.agents })
   renderBoardViews()
   renderBoard()
@@ -921,6 +1284,14 @@ async function switchScope(scope) {
   state.cursor = null
   state.tasks = []
   state.targetTaskId = null
+  // 换空间 = 换一整套看板与对话：分页、每列滚动位置、新消息计数、详情层全部重置。
+  state.boardPage = 0
+  state.columnScroll = {}
+  state.pendingNewMessages = 0
+  state.chatScrollTop = 0
+  state.gesture = null
+  closeTaskSheet({ restoreFocus: false })
+  updateNewMessagePill()
   // ★ 换空间换一把弹框游标：否则新空间的第一批历史会被当成"刚发生的"弹出来。
   state.popupSeq = readPopupSeq(scope)
   // 上一个空间的提醒不该留在屏幕上（它属于另一个空间的任务）。
@@ -1331,7 +1702,8 @@ async function send(text, intentOverride = null) {
       },
     })
     $('composer-input').value = ''
-    await refreshTimeline()
+    // 自己刚发的话必须看得见 —— 这是"显式要求跟到底"的那一种（R-08）。
+    await refreshTimeline({ forceFollow: true })
     // 派了任务就切到看板并高亮它——"我派的活去哪了"必须在同一屏回答，
     // 否则用户只能自己猜它有没有生效。
     if (plan.intent.id === 'create_task') {
@@ -1700,6 +2072,158 @@ function renderNotifyButton() {
   btn.dataset.notifyActionable = plan.actionable ? '1' : '0'
 }
 
+// ── 动态视口 / 深链 / 看板手势 ──────────────────────────────────────────────
+
+/**
+ * 动态视口：把 `visualViewport` 的高度与软键盘高度写成 CSS 变量。
+ *
+ * ★ 为什么必须有：`100vh/100dvh` 在 iOS 上是**布局视口**，软键盘弹起时它不变，
+ *   于是底部输入区被键盘盖住 —— 而用户在那一刻唯一想做的事就是看见自己打的字。
+ *   `--vvh` 让 body 跟着**可视**高度收缩；`--kb-h` 让浮层上移。
+ *   Android Chrome 那一半由 `viewport` 的 `interactive-widget=resizes-content` 补。
+ */
+function syncViewport() {
+  const vv = typeof window !== 'undefined' ? window.visualViewport : null
+  // ★ 用户**双指放大**时 visualViewport.height 会变小 —— 那不是键盘，
+  //   跟着它收缩 body 会让"放大看字"变成"页面被压扁"。所以缩放态直接跳过。
+  if (vv !== null && vv !== undefined && Number.isFinite(vv.scale) && vv.scale > 1.01) return
+  const height = vv !== null && vv !== undefined ? vv.height : window.innerHeight
+  if (Number.isFinite(height)) {
+    document.documentElement.style.setProperty('--vvh', `${Math.round(height)}px`)
+  }
+  const keyboard = vv !== null && vv !== undefined
+    ? Math.max(0, Math.round(window.innerHeight - vv.height - vv.offsetTop))
+    : 0
+  // 80px 以下不是键盘（地址栏收展、捏合缩放都会产生小的差值）。
+  document.documentElement.style.setProperty('--kb-h', keyboard > 80 ? `${keyboard}px` : '0px')
+}
+
+/** 从地址栏取 `#task=<id>`（系统通知点击后 SW 打开的地址）。 */
+function taskIdFromHash() {
+  const m = /^#task=(.+)$/.exec(location.hash)
+  if (m === null) return null
+  try { return decodeURIComponent(m[1]) } catch { return m[1] }
+}
+
+/**
+ * 处理通知深链（R-15）。
+ *
+ * ★ 处理完**把 hash 清掉**：不清的话每次刷新都会再弹一次 ——
+ *   用户关掉详情后刷新，它又冒出来，像一条关不掉的提醒。
+ */
+async function handleTaskHash() {
+  const taskId = taskIdFromHash()
+  if (taskId === null) return
+  try { history.replaceState(null, '', location.pathname + location.search) } catch { /* 某些壳禁止改地址 */ }
+  await openTask(taskId)
+}
+
+/**
+ * 看板横向手势：滑动切换状态列（R-05 的核心）。
+ *
+ * ★ 用 Pointer Events + CSS `touch-action: pan-y`：纵向滚动交给浏览器
+ *   （**不** preventDefault），横向位移才由我们接管。用 touchmove + preventDefault
+ *   的那类实现，会让整列在手机上滚不动 —— 而那正是"滑动式界面"最常见的坏法。
+ *
+ * 判定（阈值/轴/边缘/边界）全部在 `interaction.mjs` 的 `decideSwipe` 里，
+ * 这里只做三件事：跟手预览、到边界阻尼、提交/回弹。
+ */
+function bindBoardGestures() {
+  const root = $('task-groups')
+  if (root === null) return
+  const pagesNow = () => boardPages(applyView(state.tasks, state.boardView))
+  // 一次横向滑动之后浏览器仍会补一个 click；不掐掉的话"滑到卡上"会顺手打开详情。
+  let suppressClick = false
+
+  const start = (ev) => {
+    if (state.boardView !== 'all') return
+    if (ev.pointerType === 'mouse' && ev.buttons !== 1) return
+    if (pagesNow().length <= 1) return
+    const el = ev.target instanceof Element ? ev.target : null
+    // ★ 起点在**控件**上就不接管（按钮/链接/输入框自己处理这次拖动）。
+    //
+    //   但**任务卡是例外**：它 `role="button"` 只是为了"整块可点 + 键盘可开"，
+    //   而卡本身没有可拖动的行为 —— 一次横向拖动从来不是一次点击。
+    //   把卡片也排除掉的话，一列里几乎每条都被卡片铺满，用户就只能在缝隙里滑，
+    //   而"左右滑切状态列"会在真机上表现为"时灵时不灵"（最难被报告的那一类坏法）。
+    const onCard = el !== null && el.closest('.task') !== null
+    const targetInteractive = el !== null && onCard !== true
+      && el.closest('button, a, input, select, textarea, [role="button"]') !== null
+    state.gesture = {
+      id: ev.pointerId, startX: ev.clientX, startY: ev.clientY,
+      dx: 0, dy: 0, axis: 'undecided', active: false, targetInteractive,
+    }
+  }
+
+  const move = (ev) => {
+    const g = state.gesture
+    if (g === null || g.id !== ev.pointerId) return
+    g.dx = ev.clientX - g.startX
+    g.dy = ev.clientY - g.startY
+    if (g.axis === 'undecided') {
+      const axis = gestureAxis({ dx: g.dx, dy: g.dy })
+      // 纵向占优：**彻底放弃**这次手势，把滚动还给浏览器。
+      if (axis === 'vertical') { state.gesture = null; return }
+      if (axis !== 'horizontal') return
+      // 控件上的横向拖动属于控件；边缘 20px 属于系统返回手势（R-05/RK-1）。
+      if (g.targetInteractive === true) { state.gesture = null; return }
+      if (g.startX < SWIPE_EDGE_GUARD || g.startX > window.innerWidth - SWIPE_EDGE_GUARD) {
+        state.gesture = null
+        return
+      }
+      g.axis = 'horizontal'
+      g.active = true
+      const track = $('board-track')
+      if (track !== null) track.classList.remove('animate')
+      try { root.setPointerCapture(ev.pointerId) } catch { /* 个别浏览器不支持捕获 */ }
+    }
+    if (g.active !== true) return
+    // 到边界时给阻尼，表达"到头了"，而不是假装还能继续滑。
+    const atFirst = state.boardPage <= 0 && g.dx > 0
+    const atLast = state.boardPage >= pagesNow().length - 1 && g.dx < 0
+    const dx = (atFirst || atLast) ? g.dx * 0.35 : g.dx
+    const track = $('board-track')
+    if (track !== null) track.style.setProperty('--drag', `${Math.round(dx)}px`)
+  }
+
+  const finish = (ev) => {
+    const g = state.gesture
+    if (g === null || g.id !== ev.pointerId) return
+    state.gesture = null
+    if (g.active !== true) return
+    if (typeof root.hasPointerCapture === 'function' && root.hasPointerCapture(ev.pointerId)) {
+      try { root.releasePointerCapture(ev.pointerId) } catch { /* 已经释放 */ }
+    }
+    // 这次手指抬起之后不要把它读成一次卡片点击。
+    suppressClick = true
+    setTimeout(() => { suppressClick = false }, 400)
+    const pages = pagesNow()
+    const decision = decideSwipe({
+      dx: g.dx, dy: g.dy, startX: g.startX, viewportWidth: window.innerWidth,
+      targetInteractive: g.targetInteractive, pageIndex: state.boardPage, pageCount: pages.length,
+    })
+    const track = $('board-track')
+    if (track !== null) track.classList.add('animate')
+    if (decision.action === 'none') {
+      // 回弹：无副作用（不改页、不改任务状态、不点开卡片）。
+      if (track !== null) track.style.setProperty('--drag', '0px')
+      return
+    }
+    setBoardPage(decision.pageIndex, { animate: true })
+  }
+
+  // 捕获阶段拦下"滑动之后的那一次 click"。
+  root.addEventListener('click', (ev) => {
+    if (suppressClick !== true) return
+    ev.preventDefault()
+    ev.stopPropagation()
+  }, true)
+  root.addEventListener('pointerdown', start)
+  root.addEventListener('pointermove', move)
+  root.addEventListener('pointerup', finish)
+  root.addEventListener('pointercancel', finish)
+}
+
 // ── 事件流 ──────────────────────────────────────────────────────────────────
 
 /**
@@ -1884,6 +2408,9 @@ function renderAll() {
   renderTimeline()
   renderNotifyButton()
   renderLangButton()
+  updateNewMessagePill()
+  // 详情层开着时重画它：切语言后层里的文案也要跟着变。
+  syncDetailSheet()
 }
 
 /**
@@ -2007,6 +2534,8 @@ async function enterApp(me) {
   // 登录后落在 **Agent**（聊天）——那是这个产品的主功能；
   // 「任务」是查账的地方，不是入口。
   showView('chat')
+  // 冷启动带 `#task=<id>`（点系统通知进来）：落到那条任务上（R-15）。
+  void handleTaskHash()
 }
 
 function doLogout() {
@@ -2077,7 +2606,13 @@ function bind() {
   $('btn-refresh').addEventListener('click', () => { refreshLoop.now() })
   $('btn-send').addEventListener('click', () => { void send($('composer-input').value) })
   $('composer-input').addEventListener('keydown', (e) => {
-    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); void send($('composer-input').value) }
+    // ★ 软键盘回车 = **换行**（R-03）。手机上的回车键是"我要换一行"，
+    //   不是"发送"；把发送绑在它上面，用户每打一段就误发一次。
+    //   发送只由「发送」按钮触发；物理键盘用 Ctrl/Cmd+Enter 作为增强。
+    if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
+      e.preventDefault()
+      void send($('composer-input').value)
+    }
   })
   $('composer-input').addEventListener('input', (e) => {
     e.target.style.height = 'auto'
@@ -2123,6 +2658,42 @@ function bind() {
     if (opening) renderOutboxList()
   })
   $('outbox-retry').addEventListener('click', () => { void flushOutbox() })
+
+  // ── 看板分页：左右按钮与方向键（滑动的可见替代，R-05/R-11）──
+  $('board-prev').addEventListener('click', () => setBoardPage(state.boardPage - 1))
+  $('board-next').addEventListener('click', () => setBoardPage(state.boardPage + 1))
+  $('task-groups').addEventListener('keydown', (ev) => {
+    if (ev.key === 'ArrowLeft') { ev.preventDefault(); setBoardPage(state.boardPage - 1) }
+    else if (ev.key === 'ArrowRight') { ev.preventDefault(); setBoardPage(state.boardPage + 1) }
+  })
+  bindBoardGestures()
+
+  // ── 任务详情层（R-07/R-11）──
+  $('sheet-close').addEventListener('click', () => closeTaskSheet())
+  const backdrop = $('task-sheet').querySelector('.sheet-backdrop')
+  if (backdrop !== null) backdrop.addEventListener('click', () => closeTaskSheet())
+  document.addEventListener('keydown', onSheetKeydown)
+
+  // ── 「N 条新消息」浮标（R-08）──
+  $('new-msg-jump').addEventListener('click', jumpToLatest)
+  // 用户自己滚到底 ⇒ 清零（否则浮标会一直挂着，而它已经不再描述屏幕）。
+  $('main').addEventListener('scroll', () => {
+    if (state.pendingNewMessages === 0) return
+    const main = $('main')
+    if (nearBottom({ scrollTop: main.scrollTop, scrollHeight: main.scrollHeight, clientHeight: main.clientHeight })) {
+      state.pendingNewMessages = 0
+      updateNewMessagePill()
+    }
+  }, { passive: true })
+
+  // ── 通知深链（R-15）与动态视口（R-02/R-03）──
+  window.addEventListener('hashchange', () => { void handleTaskHash() })
+  syncViewport()
+  window.addEventListener('resize', syncViewport)
+  if (typeof window !== 'undefined' && window.visualViewport) {
+    window.visualViewport.addEventListener('resize', syncViewport)
+    window.visualViewport.addEventListener('scroll', syncViewport)
+  }
 }
 
 /**
@@ -2142,6 +2713,9 @@ function registerServiceWorker() {
 
 async function main() {
   bind()
+  // 动态视口要**在第一帧之后**就读一次：软键盘/地址栏是随用户行为变的，
+  // 但初始高度决定了首屏会不会被切掉一截。
+  syncViewport()
   registerServiceWorker()
   // ★ 语言要在**任何渲染之前**定下来：静态文案替换与脚本生成的文案都要用它，
   //   晚一步就会出现"中文界面闪一下然后变英文"。

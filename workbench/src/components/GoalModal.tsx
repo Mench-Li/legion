@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
 import { fetchAgentNodes, fetchAgentWorkflowDefinitions, type AgentNodeRecord, type AgentWorkflowDefinition, type AgentWorkflowDefinitionRef } from '../api'
+import { defaultGoalWorkflowSelection, goalWorkflowOptions } from '../goalWorkflowOptions.mjs'
 import { bindingWarning, crossNodeConflict, decideAutoNode, describeCrossNodeConflict, effectiveNodeId, scanNodes } from '../goalNodeChoice'
 import { toast } from './Toast'
 
@@ -18,6 +19,8 @@ export function GoalModal({ scope, spaceName, activeCount = 0, onClose, onPublis
   const [definitions, setDefinitions] = useState<AgentWorkflowDefinition[]>([])
   const [selectedDefinition, setSelectedDefinition] = useState('')
   const [definitionsLoaded, setDefinitionsLoaded] = useState(false)
+  const [definitionsError, setDefinitionsError] = useState('')
+  const [definitionsReload, setDefinitionsReload] = useState(0)
   /**
    * 执行节点扫描结果（2026-10-13）。`null` = 还没扫到。
    *
@@ -29,23 +32,34 @@ export function GoalModal({ scope, spaceName, activeCount = 0, onClose, onPublis
 
   useEffect(() => {
     let active = true
+    setDefinitionsLoaded(false)
+    setDefinitionsError('')
+    setSelectedDefinition('')
     void fetchAgentWorkflowDefinitions(scope)
-      .then(value => { if (active) setDefinitions(value) })
-      .catch(() => { if (active) setDefinitions([]) })
+      .then(value => {
+        if (!active) return
+        setDefinitions(value)
+        setSelectedDefinition(defaultGoalWorkflowSelection(goalWorkflowOptions(value)))
+      })
+      .catch(error => {
+        if (!active) return
+        setDefinitions([])
+        setDefinitionsError(error instanceof Error ? error.message : String(error))
+      })
       .finally(() => { if (active) setDefinitionsLoaded(true) })
     // 扫描执行节点：读失败就当"没登记"（与后端语义一致：不绑定也能跑）。
     void fetchAgentNodes(scope)
       .then(value => { if (active) setNodes(value) })
       .catch(() => { if (active) setNodes([]) })
     return () => { active = false }
-  }, [scope])
+  }, [scope, definitionsReload])
 
-  const runnableDefinitions = useMemo(() => definitions.filter(isRunnableClosedLoop), [definitions])
+  const workflowOptions = useMemo(() => goalWorkflowOptions(definitions), [definitions])
   const scan = useMemo(() => scanNodes(nodes), [nodes])
   /** 选中的具名定义（用于在发布前就查"工作流绑的节点 vs 我选的节点"是否冲突）。 */
   const selectedDefinitionRecord = useMemo(
-    () => runnableDefinitions.find(item => `${item.id}@${item.version}` === selectedDefinition) ?? null,
-    [runnableDefinitions, selectedDefinition],
+    () => workflowOptions.find(option => option.value === selectedDefinition)?.definition ?? null,
+    [workflowOptions, selectedDefinition],
   )
   const conflictText = useMemo(() => describeCrossNodeConflict(crossNodeConflict(
     (selectedDefinitionRecord?.stages ?? []).map(stage => stage.nodeId),
@@ -63,7 +77,7 @@ export function GoalModal({ scope, spaceName, activeCount = 0, onClose, onPublis
   const submit = async (): Promise<void> => {
     const text = objective.trim()
     if (!text) return
-    const selected = runnableDefinitions.find(item => `${item.id}@${item.version}` === selectedDefinition)
+    const selected = workflowOptions.find(option => option.value === selectedDefinition)?.definition
     const reference = selected ? { id: selected.id, version: selected.version } : undefined
     setBusy(true)
     try {
@@ -97,18 +111,20 @@ export function GoalModal({ scope, spaceName, activeCount = 0, onClose, onPublis
           </div>
           <div className="field">
             <label>跨 Agent 工作流</label>
-            <select value={selectedDefinition} onChange={event => setSelectedDefinition(event.target.value)} disabled={busy}>
+            <select value={selectedDefinition} onChange={event => setSelectedDefinition(event.target.value)} disabled={busy || !definitionsLoaded}>
               <option value="">沿用空间当前设置</option>
-              {runnableDefinitions.map(item => <option key={`${item.id}@${item.version}`} value={`${item.id}@${item.version}`}>
-                {item.name} · v{item.version}
+              {workflowOptions.map(option => <option key={option.value} value={option.value}>
+                {option.label}
               </option>)}
             </select>
             <span style={{ color: 'var(--muted-2)', fontSize: 10 }}>
-              {definitionsLoaded
-                ? runnableDefinitions.length > 0
-                  ? '选择后，本目标会冻结该工作流版本及各阶段工具配置。'
-                  : '当前空间还没有可执行的命名闭环定义；可继续使用空间当前设置。'
-                : '正在读取可用工作流…'}
+              {!definitionsLoaded
+                ? '正在读取可用工作流…'
+                : definitionsError
+                  ? <>读取失败：{definitionsError} <button type="button" className="btn ghost" onClick={() => setDefinitionsReload(value => value + 1)}>重试</button></>
+                  : workflowOptions.length > 0
+                    ? '工作流配置统一在「Agent 工作流」设置页维护；这里仅显示每条工作流最新发布的版本。新目标使用所选版本，已发布目标保留创建时的版本。'
+                    : '当前空间还没有已发布的 Agent 工作流；可继续使用空间当前设置。'}
             </span>
           </div>
           <div className="field">
@@ -169,18 +185,4 @@ export function GoalModal({ scope, spaceName, activeCount = 0, onClose, onPublis
       </div>
     </div>
   )
-}
-
-function isRunnableClosedLoop(definition: AgentWorkflowDefinition): boolean {
-  if (definition.stages.length !== 3 || definition.entryStageIds.length !== 1 || definition.terminalStageIds.length !== 1) return false
-  const [designId, implementationId, reviewId] = [definition.reviewRoutes.design, definition.reviewRoutes.implementation, definition.reviewStageId]
-  if (new Set([designId, implementationId, reviewId]).size !== 3) return false
-  if (definition.entryStageIds[0] !== designId || definition.terminalStageIds[0] !== reviewId) return false
-  if (!definition.stages.some(stage => stage.id === designId)
-    || !definition.stages.some(stage => stage.id === implementationId)
-    || !definition.stages.some(stage => stage.id === reviewId)) return false
-  const edges = new Set(definition.edges.map(edge => `${edge.from}\0${edge.to}`))
-  return definition.edges.length === 2
-    && edges.has(`${designId}\0${implementationId}`)
-    && edges.has(`${implementationId}\0${reviewId}`)
 }

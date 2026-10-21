@@ -6,7 +6,8 @@
     "tests/p13-fixture/control-plugin.mjs": "P13 集成夹具：一个进程内测试插件，用 ctx.subagents 注册假 provider 并以 inject:['subagents'] 声明依赖，给真实 Codex/Claude 通路测试当对照物。它不是产品代码（tests/ 下的夹具，不随产品发布）。留到下一轮：夹具本身就是要复刻宿主形状，等执行面的测试替身下沉到 runtime/adapters/dsh 的测试工具后统一迁移。",
     "tests/p13-fixture/real-codex-cancel.mjs": "P13 夹具：真实 Codex 取消路径的宿主脚本，需要 ctx.subagents 起一次真实 provider 才能测取消。属测试脚手架，不是产品执行面依赖。留到下一轮：与同一套 P13 夹具基座同批迁移。",
     "tests/p13-fixture/real-codex-system-proxy-connectivity.mjs": "P13 夹具：真实 Codex 经系统代理连通的宿主脚本，同样需要 ctx.subagents 起 provider。属测试脚手架，不随产品发布。留到下一轮：与同一套 P13 夹具基座同批迁移。",
-    "workbench/src/components/AgentWorkflowConfigurator.tsx": "前端只读展示：从已注册 provider 名单渲染配置下拉框，只调用 list/getProvider 读取，不启动任何执行、不进入产品运行时。留到下一轮：等 provider 目录改由 team-hub HTTP 端点暴露后改为经 API 读取，该记号会自然归零。"
+    "workbench/src/components/AgentWorkflowConfigurator.tsx": "前端只读展示：从已注册 provider 名单渲染配置下拉框，只调用 list/getProvider 读取，不启动任何执行、不进入产品运行时。留到下一轮：等 provider 目录改由 team-hub HTTP 端点暴露后改为经 API 读取，该记号会自然归零。",
+    "plugins/tests/chat-error-classifier.test.mjs": "分类器**测试夹具**：它必须逐字持有那次真实故障的错误原文（`TypeError: <服务>.start is not a function`），否则\"能认出这类失败\"这条判据就测不到。它只是把一段字符串喂给纯函数 classifyChatError，不接触任何服务、不发起执行、不随产品发布。留到下一轮：等运行期也改用同一代的 API 名之后（届时原文会变成 `<服务>.startActivation`），这条夹具可随之改名并自然归零；在那之前删掉它，等于删掉\"这类失败必须被单独分类\"的唯一守卫。"
   },
   "version": 1,
   "rules": {
@@ -88,6 +89,9 @@
     },
     "workbench/src/components/AgentWorkflowConfigurator.tsx": {
       "ctx.subagents": 1
+    },
+    "plugins/tests/chat-error-classifier.test.mjs": {
+      "ctx.subagents": 3
     }
   }
 }

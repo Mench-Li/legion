@@ -1080,6 +1080,15 @@ async function stageTest() {
         'workbench/scripts/scene-layout.test.mjs',
         'workbench/scripts/scene-ownership.test.mjs',
         'workbench/scripts/scene-state.test.mjs',
+        // ★ 2026-10-14 办公室场景：看板/气泡的状态契约与"谁该去走一趟看板"的派生，
+        //   以及四件事（布景/看板/气泡/走看板的动作）**接线**是否真的接上。
+        //   判据 ⑤ 专门守"状态颜色只许有一份"——那是这类改动最容易留下的沉默缺陷。
+        'workbench/scripts/scene-board.test.mjs',
+        'workbench/scripts/scene-office-wiring.test.mjs',
+        // ★ 2026-10-14：配色的**明度契约**（"办公室要亮"变成可断言的不等式 ——
+        //   相对亮度 地板 < 背景 < 墙、家具必须明显暗于墙）。没有它，下一个人加新预设时
+        //   会带进来一块暗色，而那时不会有任何东西会响。
+        'workbench/scripts/scene-theme.test.mjs',
         'workbench/scripts/sw-shell.test.mjs',
       ],
       cwd: ROOT,
@@ -2270,6 +2279,19 @@ async function stageTest() {
     // 第 4 类在**真实仓库**上放一个真实探针文件跑真实 CLI，证明棘轮拦得住回归——
     // 只测纯函数无法证明扫描范围（git ls-files 口径）本身是对的（该缺陷已在开发中真实出现过一次）。
     { label: 'dsh-boundary（PRT-002 依赖清单 / PRT-108 执行面边界棘轮）', files: ['scripts/ci/dsh-boundary.test.mjs'], cwd: ROOT },
+    // DSH **代际一致性**与 `patches/dsh` 补丁基线。
+    //
+    // 前者盯的是"编译期类型 vs 运行期实现"那个**交集**（2026-10-20 运行期缺方法
+    // 那次故障的唯一可判据形式）；后者盯"补丁存在 ≠ 修复在生效"（profile 一次重装
+    // 就能把修复抹掉而仓库里的一切照旧）。
+    //
+    // 两套都在没有已装 DSH 的机器上也必须绿：那几条用例显式走"未观察"分支
+    // 而不是假装通过（`skipped` 语义与本仓其余门禁一致）。
+    {
+      label: 'dsh-generation（DSH 代际一致性门禁 + patches/dsh 补丁基线）',
+      files: ['scripts/ci/dsh-api-surface.test.mjs', 'scripts/ci/dsh-patch.test.mjs'],
+      cwd: ROOT,
+    },
     // PRT-101~107：Runtime Contract 与内存 Fake Adapter。**零 DSH 依赖**（由 dsh-boundary 的
     // must-be-zero 判定强制），因此本套件在无 DSH_CHECKOUT 的机器上也必须全绿——
     // 这正是阶段 1 完成标准「不启动 DSH 即可测试编排」的可执行形式。
@@ -2791,6 +2813,10 @@ async function stageTest() {
     // 阶段 2：DshRuntimeAdapter。全部用假宿主端口，覆盖真实 DSH 无法稳定复现的故障
     // （run.result 永不结算、abort 无效、畸形结果、事件流中断）。
     { label: 'dsh-adapter（PRT-201~209：DSH 适配器契约、脱敏、看门狗与取消/恢复）', files: ['runtime/adapters/dsh/adapter.test.mjs'], cwd: ROOT },
+    // 2026-10-20：子 Agent 启动的**两代 API** 兼容层。用两种形状的假服务真的调一遍 ——
+    // 只给 `startActivation`（rc）与只给 `start`（alpha）都必须走通，两代都没有时必须
+    // 抛一条"这里到底有什么"的错误而不是 `xxx is not a function`。
+    { label: 'subagent-start（子代理启动两代 API 兼容层）', files: ['runtime/adapters/dsh/subagent-start.test.mjs'], cwd: ROOT },
     // PRT-210/211：阶段 2 的**完成标准**在两处容易被读错的地方被钉死。
     //   ① 对拍：旧调用是 `plugins/src/index.ts` 里的复刻件，不是调用的那份代码。
     //      复刻会腐化，而**失去意义的对拍会静默通过**——所以有漂移检测守着它。
@@ -5831,7 +5857,16 @@ async function stageBoundary() {
   const rp = await exec(process.execPath, [join(ROOT, 'scripts', 'prt', 'dsh-pin-drift.mjs')], { cwd: ROOT })
   const pinRaw = (rp.out + '\n' + rp.err).trim()
   const pinUnobserved = rp.code === 3
-  const ok = r.code === 0 && (rp.code === 0 || pinUnobserved)
+  // ★ DSH **代际一致性**（2026-10-20 那次"运行期缺方法"的收口：编译期类型描述了一代，
+  //   而装着的运行时只有另一代的方法名，于是 `tsc` 全绿、运行期崩）。
+  //
+  //   类型检查器信任 `node_modules` 里的 `.d.ts`，而那份 `.d.ts` 可能描述的是**另一代**
+  //   运行时 —— 于是 `tsc` 全绿、运行期缺方法。这类缺陷只在"编译期 ∩ 运行期 = ∅"时发生，
+  //   所以判据就是那个交集。同样用 0/1/3：1 是不一致，3 是本机没有可比的已装 DSH。
+  const ra = await exec(process.execPath, [join(ROOT, 'scripts', 'ci', 'dsh-api-surface.mjs')], { cwd: ROOT })
+  const apiRaw = (ra.out + '\n' + ra.err).trim()
+  const apiUnobserved = ra.code === 3
+  const ok = r.code === 0 && (rp.code === 0 || pinUnobserved) && (ra.code === 0 || apiUnobserved)
   const raw = (r.out + '\n' + r.err).trim()
   let extra = ''
   if (ok) {
@@ -5841,6 +5876,9 @@ async function stageBoundary() {
     const pinLine = pinRaw.split('\n').filter(l => /dsh-pin-drift:/.test(l)).slice(-1)[0]
     if (pinLine) extra += '\n  ' + pinLine.trim()
     if (pinUnobserved) extra += '\n  ⚠️ 出处锚点**这一批没有核对**（不是"核对通过"）：未找到 DSH 检出'
+    const apiLine = apiRaw.split('\n').filter(l => /dsh-api-surface:/.test(l)).slice(-1)[0]
+    if (apiLine) extra += '\n  ' + apiLine.trim()
+    if (apiUnobserved) extra += '\n  ⚠️ 代际一致性**这一批没有核对**（不是"核对通过"）：未找到已装 DSH 产物'
   } else {
     const lines = raw.split('\n').filter(Boolean)
     const fails = lines.filter(l => /^\s*FAIL \[/.test(l))
@@ -5850,11 +5888,18 @@ async function stageBoundary() {
       const pinFails = pinRaw.split('\n').filter(l => /^\s*✖/.test(l)).slice(-8).join('\n  ')
       extra += '\n  \n  出处锚点对不上（PRT-211）：\n  ' + pinFails
     }
+    if (ra.code === 1) {
+      const apiFails = apiRaw.split('\n').filter(l => /^\s*✘/.test(l)).slice(-8).join('\n  ')
+      extra += '\n  \n  编译期与运行期不是一代（DSH 代际一致性）：\n  ' + apiFails
+      extra += '\n  修法：把依赖装成与已装 DSH 同一代，或用兼容层吸收两代差异'
+        + '（plugins/src/subagentStart.ts 就是这么做的），再用 patches/dsh 持有运行时的兼容补丁。'
+    }
   }
   return {
     ok,
     detail: 'boundary: DSH 执行面边界棘轮（dsh-boundary.mjs）exit=' + r.code +
-      ' / DSH 出处锚点漂移（dsh-pin-drift.mjs）exit=' + rp.code + extra,
+      ' / DSH 出处锚点漂移（dsh-pin-drift.mjs）exit=' + rp.code +
+      ' / DSH 代际一致性（dsh-api-surface.mjs）exit=' + ra.code + extra,
   }
 }
 

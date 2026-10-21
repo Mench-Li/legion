@@ -91,8 +91,21 @@ async function fetchWithSessionRetry(input: string, init: RequestInit): Promise<
  * hub GET 统一携带已存 token（P2-2 读面同步：远程受保护中枢的读接口/SSE 必须带 token）。
  * 探测 /api/config 不走本函数（hubBase 可达性探测保持匿名；服务端对 config 能力发现放行）。
  */
-function hubGet(path: string): Promise<Response> {
-  return fetchWithSessionRetry(`${hubBase()}${path}`, { headers: authHeaders() })
+function hubGet(path: string, timeoutMs?: number): Promise<Response> {
+  const controller = timeoutMs ? new AbortController() : null
+  let timer: ReturnType<typeof setTimeout> | undefined
+  const request = fetchWithSessionRetry(`${hubBase()}${path}`, {
+    headers: authHeaders(),
+    ...(controller ? { signal: controller.signal } : {}),
+  })
+  if (!timeoutMs || controller === null) return request
+  const timeout = new Promise<never>((_resolve, reject) => {
+    timer = setTimeout(() => {
+      controller.abort()
+      reject(new Error(`读取中枢超时（${timeoutMs} 毫秒）：${hubBase()} 无响应，请检查中枢连接后重试`))
+    }, timeoutMs)
+  })
+  return Promise.race([request, timeout]).finally(() => clearTimeout(timer))
 }
 
 /**
@@ -296,7 +309,7 @@ export interface AgentWorkflowDefinition {
 
 export async function fetchAgentWorkflowDefinitions(scope: string): Promise<AgentWorkflowDefinition[]> {
   const qs = new URLSearchParams({ scope })
-  const value = await readJson<{ definitions: AgentWorkflowDefinition[] }>(await hubGet(`/api/agent-workflows/definitions?${qs}`))
+  const value = await readJson<{ definitions: AgentWorkflowDefinition[] }>(await hubGet(`/api/agent-workflows/definitions?${qs}`, 15_000))
   return value.definitions
 }
 
@@ -391,9 +404,13 @@ export async function createHubTask(input: NewTaskInput, scope?: string | null):
   return hubPost('/api/create', { ...input, scope: scope ?? 'default' })
 }
 
-/** team-hub v2：某空间的全部任务（/api/board，含角色/指派/依赖/版本），供中枢调度。 */
-export async function fetchHubTasks(scope: string | null): Promise<HubTask[]> {
-  const qs = scope ? `?scope=${encodeURIComponent(scope)}` : ''
+/** team-hub v2：某空间的任务列表；compact 列表省去完整补丁 diff，详情仍从 /api/task 读取。 */
+export async function fetchHubTasks(scope: string | null, options: { compact?: boolean } = {}): Promise<HubTask[]> {
+  const query = new URLSearchParams()
+  if (scope) query.set('scope', scope)
+  if (options.compact) query.set('compact', 'workbench')
+  const params = query.toString()
+  const qs = params ? `?${params}` : ''
   return readJson<HubTask[]>(await hubGet(`/api/board${qs}`))
 }
 
@@ -418,6 +435,7 @@ export interface SpacePipelineConfig {
       modelConfig: { id: string; version: number } | null
       nodeId?: string | null
       executionNode?: { id: string; version: number; label: string } | null
+      testRunner?: { executable: string; args: string[]; timeoutMs: number } | null
     }>
   } | null
   stages: SpacePipelineStage[]
@@ -991,20 +1009,55 @@ export function commentTask(input: { id: string; by: string; text: string }): Pr
  * @throws 理由为空时**在发请求之前**抛具名错误（见下）——空理由等于让执行者
  *   按原样再交一次，而"又交了一遍同样的东西"与"根本没重做"在下次验收时看不出区别。
  */
-export function rejectTask(input: { id: string; by: string; reason: string; ifVersion?: number }): Promise<unknown> {
+export async function rejectTask(input: { id: string; by: string; reason: string; ifVersion?: number }): Promise<unknown> {
   const reason = typeof input.reason === 'string' ? input.reason.trim() : ''
   if (reason.length === 0) {
     const err = new Error('打回缺少理由：它是执行者下一轮唯一的输入（空着等于让它按原样再交一次）')
     Object.assign(err, { code: 'REJECT_REASON_REQUIRED' })
-    return Promise.reject(err)
+    throw err
   }
-  return hubComment(input.id, `↩ 打回重做：${reason}`).then(() =>
-    hubTransition({
-      id: input.id,
-      to: 'todo',
-      by: input.by,
-      ...(input.ifVersion === undefined ? {} : { ifVersion: input.ifVersion }),
-    }))
+  const commentText = `↩ 打回重做：${reason}`
+  const currentTask = await fetchHubTask(input.id)
+  if (currentTask.status !== 'in_review') {
+    throw new Error(`任务 ${input.id} 当前为 ${currentTask.status}，只能打回待验收任务`)
+  }
+
+  // 上一次若在“评论成功、迁移失败”之间中断，复用已落库的同一条评论，
+  // 让用户可以安全重试，不会再追加重复批注。
+  const commentAlreadySaved = (currentTask.comments ?? []).some(comment => comment.text === commentText)
+  if (input.ifVersion !== undefined && currentTask.version !== input.ifVersion && !commentAlreadySaved) {
+    throw new Error('任务版本已变化，请刷新任务后重新打回')
+  }
+
+  let transitionIfVersion = input.ifVersion === undefined ? undefined : currentTask.version
+  if (!commentAlreadySaved) {
+    const receipt = await hubComment(input.id, commentText)
+    if (input.ifVersion !== undefined) {
+      const task = typeof receipt === 'object' && receipt !== null && 'task' in receipt
+        ? receipt.task
+        : null
+      const nextVersion = typeof task === 'object' && task !== null && 'version' in task
+        && Number.isInteger(task.version)
+        ? task.version
+        : null
+      if (nextVersion === null) {
+        throw new Error('打回评论已保存，但中枢未返回最新任务版本；请刷新任务状态后重试')
+      }
+      // appendTaskNote increments version. The transition must use the version returned
+      // by that write, while still detecting changes that happened after the UI read.
+      if (nextVersion !== currentTask.version + 1) {
+        throw new Error('任务版本已变化；打回原因已保存为评论，请刷新任务后确认状态')
+      }
+      transitionIfVersion = nextVersion
+    }
+  }
+
+  return hubTransition({
+    id: input.id,
+    to: 'todo',
+    by: input.by,
+    ...(transitionIfVersion === undefined ? {} : { ifVersion: transitionIfVersion }),
+  })
 }
 // ───────────────────────── 对话中心（S2 ← S1 team-hub /api/chat/*）─────────────────────────
 

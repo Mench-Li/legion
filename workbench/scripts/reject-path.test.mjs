@@ -63,6 +63,9 @@ store.set('legion.workbench.hub', 'http://hub.test')
 const api = await import('../src/api.ts')
 
 let calls = []
+let taskVersion = 7
+let commentVersion = 8
+let existingComments = []
 const realFetch = globalThis.fetch
 const fakeResponse = (status, body) => ({
   ok: status >= 200 && status < 300,
@@ -75,22 +78,28 @@ const fakeResponse = (status, body) => ({
 before(() => {
   globalThis.fetch = async (url, init = {}) => {
     calls.push({ url: String(url), method: init.method ?? 'GET', body: init.body ? JSON.parse(init.body) : undefined })
-    return fakeResponse(200, { ok: true })
+    const path = String(url).replace('http://hub.test', '')
+    if (path.startsWith('/api/task?')) {
+      return fakeResponse(200, { id: 'T-1', status: 'in_review', version: taskVersion, comments: existingComments })
+    }
+    return path === '/api/comment'
+      ? fakeResponse(200, { ok: true, task: { id: calls.at(-1).body.id, version: commentVersion } })
+      : fakeResponse(200, { ok: true })
   }
 })
 after(() => { globalThis.fetch = realFetch })
-beforeEach(() => { calls = [] })
+beforeEach(() => { calls = []; taskVersion = 7; commentVersion = 8; existingComments = [] })
 
 const paths = () => calls.map(c => `${c.method} ${c.url.replace('http://hub.test', '')}`)
 
 describe('① rejectTask 的行为：评论 + 归还待办，两件事一起做', () => {
   it('先写评论、再迁移；理由进评论正文', async () => {
     await api.rejectTask({ id: 'T-199', by: 'general', reason: '头像裁切有黑边' })
-    assert.deepEqual(paths(), ['POST /api/comment', 'POST /api/transition'], '顺序不能反：退回后守护可能立刻认领')
-    assert.equal(calls[0].body.id, 'T-199')
-    assert.match(calls[0].body.text, /头像裁切有黑边/, '理由必须真的进评论——这是 worker 下一轮唯一的输入')
-    assert.equal(calls[1].body.to, 'todo')
+    assert.deepEqual(paths(), ['GET /api/task?id=T-199', 'POST /api/comment', 'POST /api/transition'], '先读当前状态，再写评论，最后迁移')
     assert.equal(calls[1].body.id, 'T-199')
+    assert.match(calls[1].body.text, /头像裁切有黑边/, '理由必须真的进评论——这是 worker 下一轮唯一的输入')
+    assert.equal(calls[2].body.to, 'todo')
+    assert.equal(calls[2].body.id, 'T-199')
   })
 
   it('★ 绝不打 `/api/reject`（那个端点没有任何服务端在实现）', async () => {
@@ -99,17 +108,46 @@ describe('① rejectTask 的行为：评论 + 归还待办，两件事一起做'
       'v1 的 /api/reject 已退役；再打过去只会得到一句像"路径拼错了"的 404')
   })
 
-  it('ifVersion 必须带出去（乐观锁：将军看到的版本 vs 现在的版本）', async () => {
+  it('评论递增任务版本后，用回执中的新版本迁回待办', async () => {
     await api.rejectTask({ id: 'T-1', by: 'general', reason: 'x', ifVersion: 7 })
-    assert.equal(calls[1].body.ifVersion, 7)
+    assert.equal(calls[2].body.ifVersion, 8,
+      '评论先成功并递增版本；transition 必须使用评论回执的新版本，否则每次都会乐观锁冲突')
     calls = []
     await api.rejectTask({ id: 'T-1', by: 'general', reason: 'x' })
-    assert.equal('ifVersion' in calls[1].body, false, '没给版本就不许编一个')
+    assert.equal('ifVersion' in calls[2].body, false, '没给版本就不许编一个')
+  })
+
+  it('检测到评论前任务已并发变化时，不用旧决定迁移状态', async () => {
+    commentVersion = 10
+    await assert.rejects(
+      () => api.rejectTask({ id: 'T-1', by: 'general', reason: 'x', ifVersion: 7 }),
+      /版本已变化/,
+    )
+    assert.equal(calls.length, 2, '检测到版本冲突后不能继续迁移')
+    assert.equal(calls[1].url.endsWith('/api/comment'), true)
+  })
+
+  it('评论已写入且页面版本过期时，复用该评论并完成迁移', async () => {
+    taskVersion = 8
+    existingComments = [{ text: '↩ 打回重做：x' }]
+    await api.rejectTask({ id: 'T-1', by: 'general', reason: 'x', ifVersion: 7 })
+    assert.deepEqual(paths(), ['GET /api/task?id=T-1', 'POST /api/transition'],
+      '失败重试不能再追加重复评论')
+    assert.equal(calls[1].body.ifVersion, 8, '重试时必须使用服务端当前版本')
+  })
+
+  it('页面版本过期且没有已写入的打回评论时，不产生半条评论', async () => {
+    taskVersion = 8
+    await assert.rejects(
+      () => api.rejectTask({ id: 'T-1', by: 'general', reason: 'x', ifVersion: 7 }),
+      /版本已变化/,
+    )
+    assert.deepEqual(paths(), ['GET /api/task?id=T-1'], '过期决定必须在写评论前被拦截')
   })
 
   it('by 由调用方决定（看板拖拽传绑定者、调度弹窗传 general）', async () => {
     await api.rejectTask({ id: 'T-1', by: 'coder', reason: 'x' })
-    assert.equal(calls[1].body.by, 'coder')
+    assert.equal(calls[2].body.by, 'coder')
   })
 
   it('★ 空理由在**发请求之前**就被拒，且是具名错误（不是 404，也不是"无理由"三个字）', async () => {
@@ -133,9 +171,9 @@ describe('① rejectTask 的行为：评论 + 归还待办，两件事一起做'
 describe('② rejectTask 是"打回"的唯一实现（不许在别处再拼一遍）', () => {
   it('api.ts 的 rejectTask 里就是 comment + transition，没有第二条路', () => {
     const api = codeOnly(read('src/api.ts'))
-    const at = api.indexOf('export function rejectTask')
+    const at = api.indexOf('export async function rejectTask')
     assert.ok(at > 0, '找不到 rejectTask')
-    const body = api.slice(at, at + 1600)
+    const body = api.slice(at, at + 3500)
     assert.match(body, /hubComment\(/, '必须先写评论')
     assert.match(body, /hubTransition\(/, '再归还待办')
     assert.ok(body.indexOf('hubComment(') < body.indexOf('hubTransition('), '顺序：评论在前')
@@ -195,6 +233,17 @@ describe('③ 接线判据（静态读源码）：修了底层还得真的接上
     assert.match(src, /import \{ hubRework, rejectTask \} from '\.\.\/api'/)
     assert.match(src, /await rejectTask\(\{/)
     assert.match(src, /by: by \?\? 'general'/)
+  })
+
+  it('★ TaskDetailModal 的详情打回也必须走 rejectTask', () => {
+    const full = read('src/components/TaskDetailModal.tsx')
+    const start = full.indexOf('const doReject =')
+    const end = full.indexOf('\n  const doStart =', start)
+    assert.ok(start >= 0 && end > start, '找不到详情打回处理函数')
+    const rejectBody = full.slice(start, end)
+    assert.match(rejectBody, /rejectTask\(/, '详情按钮必须复用带版本修正的打回路径')
+    assert.doesNotMatch(rejectBody, /hubComment\(|hubTransition\(/,
+      '详情弹窗不能再自己拼评论与迁移，否则乐观锁问题会复发')
   })
 
   it('★ 看板拖拽那条路仍然必填（上一批的判据不能被这次改动弄松）', () => {

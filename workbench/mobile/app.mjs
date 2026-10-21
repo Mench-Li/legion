@@ -401,7 +401,7 @@ function renderBoard() {
       p.textContent = t('@noTasksInView', { n: state.tasks.length })
       box.appendChild(p)
     }
-    for (const t of shown) box.appendChild(taskCard(t))
+    for (const task of shown) box.appendChild(taskCard(task))
     frag.appendChild(box)
     root.replaceChildren(frag)
     return
@@ -420,7 +420,7 @@ function renderBoard() {
     n.textContent = String(col.count)
     h.appendChild(n)
     box.appendChild(h)
-    for (const t of col.tasks) box.appendChild(taskCard(t))
+    for (const task of col.tasks) box.appendChild(taskCard(task))
     frag.appendChild(box)
   }
   if (unknown.length > 0) {
@@ -431,9 +431,12 @@ function renderBoard() {
     // 不认识的状态照实说。悄悄丢掉的后果是"状态机加了状态、手机上少了任务"。
     h.textContent = t('未识别的状态')
     box.appendChild(h)
-    for (const t of unknown) {
-      const card = taskCard(t)
-      card.querySelector('.s').textContent = t('@rawStatus', { status: t.status })
+    // ★ 循环变量**不能**叫 `t`：这个循环体里要调 `t('@rawStatus', …)` 去翻译，
+    //   而 `t` 是本模块的翻译函数。叫作 `t` 时那一行会变成"把任务对象当函数调用"，
+    //   于是**只要出现一个未知状态的任务，整块看板就渲染不出来**。
+    for (const task of unknown) {
+      const card = taskCard(task)
+      card.querySelector('.s').textContent = t('@rawStatus', { status: task.status })
       box.appendChild(card)
     }
     frag.appendChild(box)
@@ -447,27 +450,48 @@ function renderBoard() {
   root.replaceChildren(frag)
 }
 
-function taskCard(t) {
+/**
+ * 一张任务卡。
+ *
+ * ★★ 形参**不能**叫 `t`：`t` 是本模块的 i18n 翻译函数（`from './i18n.mjs'`），
+ * 而函数体里到处要 `t(...)` 去翻 `taskLine` / `taskMeta` 的结果。
+ *
+ * 它原先叫 `t`，于是 `t(taskLine(t))` 变成**把任务对象当函数调用** ⇒
+ * `TypeError: t is not a function` ⇒ `renderBoard` 整个中断 ⇒ 手机上「任务」页签
+ * **永远**显示「这个空间还没有任务」，而接口明明返回了任务。
+ *
+ * 这个 bug 从 2026-10-06（`3244deb9`）活到 2026-10-14 才被一次**真登录**的活体走查
+ * 抓出来 —— 因为：
+ *   · 它不报错给用户看（只有 console 里一条 exception）；
+ *   · 现有判据测的是**投影层**（`taskLine` / `taskMeta` / `boardColumns`），
+ *     没有一条真的去**渲染**一张卡；
+ *   · `mobile-live-check` 从**不登录**，所以它 40 条全绿也照不出这个。
+ *
+ *   > 一批"对着投影函数断言"的判据，与一批"真的把界面画出来"的判据，
+ *   > 在被渲染的那一层出错时是同一个东西 ——
+ *   > 只不过前者永远绿，而用户看到的是"这里没有任务"。
+ */
+function taskCard(task) {
   const card = document.createElement('div')
   card.className = 'task'
-  card.id = `card-${t.id}`
+  card.id = `card-${task.id}`
   const name = document.createElement('div')
   name.className = 't'
-  name.textContent = `${t.id} ${t.title ?? ''}`
+  name.textContent = `${task.id} ${task.title ?? ''}`
   card.appendChild(name)
   const s = document.createElement('div')
   s.className = 's'
-  s.textContent = t(taskLine(t))
+  s.textContent = t(taskLine(task))
   // 「等电脑领取」是**等待**不是**执行中**。不标出来的话，用户在电脑关机时
   // 会以为任务在跑，于是等下去。
-  if (isWaitingForNode(t)) s.textContent += t('（电脑上线后自动开始）')
+  if (isWaitingForNode(task)) s.textContent += t('（电脑上线后自动开始）')
   card.appendChild(s)
   const m = document.createElement('div')
   m.className = 'm'
   // `taskMeta` 也是**投影层**（`board.mjs`），返回中文标签（"等电脑领取"等）——
   // 与 `taskLine` 一样在渲染处翻。它曾漏掉：它是函数调用、不是字面量，
   // "未包 t() 的中文字面量"那支判据看不见它（现由"生产者"判据盯着）。
-  m.textContent = t(taskMeta(t))
+  m.textContent = t(taskMeta(task))
   if (m.textContent.length > 0) card.appendChild(m)
   const acts = document.createElement('div')
   acts.className = 'acts'
@@ -476,16 +500,16 @@ function taskCard(t) {
   // 已结束的任务上放这个按钮，按下去必然失败（服务端以 TASK_TERMINAL 拒）——
   // 而一个必然失败的按钮是最坏的一种：用户会以为是自己哪里点错了，
   // 或者反复试。要改已完成的活，那是**新任务**，不是追加要求。
-  if (canAppendFeedback(t)) {
+  if (canAppendFeedback(task)) {
     const b1 = document.createElement('button')
     b1.textContent = t('追加要求')
-    b1.addEventListener('click', () => { chooseTaskForFeedback(t.id); focusComposer('feedback') })
+    b1.addEventListener('click', () => { chooseTaskForFeedback(task.id); focusComposer('feedback') })
     acts.appendChild(b1)
   }
   const b2 = document.createElement('button')
   b2.textContent = t('问这个 Agent')
   b2.addEventListener('click', () => {
-    const owner = state.agents.find((a) => a.role === (t.role ?? t.soldier))
+    const owner = state.agents.find((a) => a.role === (task.role ?? task.soldier))
     if (owner !== undefined) void selectAgent(owner.agentId)
     showView('chat')
   })
@@ -569,12 +593,14 @@ function renderTargets() {
 
   const tsel = $('task-select')
   tsel.replaceChildren()
-  const active = state.tasks.filter((t) => !['done', 'canceled'].includes(String(t.status)))
-  for (const t of active) {
+  // `t` 是翻译函数，这里一律用 `task` 作局部名（同一个遮蔽陷阱，
+  // 只是这个循环体恰好还没调 `t(...)` 而已 —— 下一行改动就会踩上）。
+  const active = state.tasks.filter((task) => !['done', 'canceled'].includes(String(task.status)))
+  for (const task of active) {
     const o = document.createElement('option')
-    o.value = t.id
-    o.textContent = `${t.id} ${t.title ?? ''}`.slice(0, 40)
-    if (t.id === state.targetTaskId) o.selected = true
+    o.value = task.id
+    o.textContent = `${task.id} ${task.title ?? ''}`.slice(0, 40)
+    if (task.id === state.targetTaskId) o.selected = true
     tsel.appendChild(o)
   }
   // 「追加要求」必须选一条任务；没有活动任务时把这一条意图**关掉**而不是
@@ -833,7 +859,7 @@ async function refreshTasks() {
 
   const presence = await api('/api/devices/presence').catch(() => ({ presence: [] }))
   const anyOnline = (presence.presence ?? []).some((p) => p.online === true)
-  const active = state.tasks.find((t) => !['done', 'canceled'].includes(String(t.status)))
+  const active = state.tasks.find((task) => !['done', 'canceled'].includes(String(task.status)))
   setConnection({
     hubReachable: true,
     // 没有设备时是"未知"而不是"离线"：`presence` 里没有行不代表电脑关了，

@@ -235,11 +235,19 @@ export function apply(ctx: Context, config: Config): void {
     return data.task ?? data
   }
 
-  /** hub 读任务列表（按 scope 过滤）。 */
+  /** hub 读任务列表（按 scope 过滤）；复用进行中的请求并只取看板字段。 */
+  let hubBoardRequest: Promise<unknown> | null = null
   async function hubBoard(): Promise<unknown> {
-    const res = await fetch(`${hubUrl}/api/board?scope=${encodeURIComponent(config.scope)}`, { headers: hubHeaders() })
-    if (!res.ok) throw new Error(`hub board 失败（${res.status}）`)
-    return res.json()
+    if (hubBoardRequest) return hubBoardRequest
+    const request = (async () => {
+      const query = new URLSearchParams({ scope: config.scope, compact: '1' })
+      const res = await fetch(`${hubUrl}/api/board?${query}`, { headers: hubHeaders() })
+      if (!res.ok) throw new Error(`hub board 失败（${res.status}）`)
+      return res.json()
+    })()
+    hubBoardRequest = request
+    try { return await request }
+    finally { if (hubBoardRequest === request) hubBoardRequest = null }
   }
 
   /** hub 通用 GET（v2 audit / activity 面）。 */
@@ -369,8 +377,30 @@ export function apply(ctx: Context, config: Config): void {
   const hubBoardClients = new Set<ServerResponse>()
   const hubActivityClients = new Set<ServerResponse>()
   let hubPumpTimer: NodeJS.Timeout | undefined
+  let hubPumpWindowStartedAt = 0
+  let hubPumpInFlight = false
+  let hubPumpPending = false
+  let lastHubPumpAt = 0
   let hubUpstream: { req: ClientRequest; close: () => void } | null = null
   let hubEventsAlive = true // hub events effect 的 dispose 守卫（detectHub 晚到时不重建上游）
+
+  const HUB_BOARD_ACTIONS = new Set([
+    'create', 'claim', 'transition', 'advance', 'reassign', 'hold', 'unhold',
+    'comment', 'evidence', 'patch', 'artifact', 'review-note', 'test-report', 'release-stale',
+  ])
+  const HUB_BOARD_DEBOUNCE_MS = 350
+  const HUB_BOARD_MAX_WAIT_MS = 1000
+  const HUB_BOARD_MIN_INTERVAL_MS = 1000
+
+  function isBoardEvent(data: string): boolean {
+    try {
+      const event = JSON.parse(data) as { action?: unknown; event?: unknown; scope?: unknown }
+      const action = typeof event.action === 'string' ? event.action : event.event
+      return event.scope === config.scope && typeof action === 'string' && HUB_BOARD_ACTIONS.has(action)
+    } catch {
+      return false
+    }
+  }
 
   function sseHeaders(res: ServerResponse): void {
     res.writeHead(200, {
@@ -381,16 +411,41 @@ export function apply(ctx: Context, config: Config): void {
   }
 
   async function pumpHubBoard(): Promise<void> {
+    if (hubBoardClients.size === 0) return
+    if (hubPumpInFlight) {
+      hubPumpPending = true
+      return
+    }
+    hubPumpInFlight = true
+    lastHubPumpAt = Date.now()
     try {
       const data = await hubBoard()
       const payload = ssePayload(JSON.stringify(data))
       for (const res of hubBoardClients) res.write(payload)
     } catch { /* 上游暂不可达，保持连接，下个事件再试 */ }
+    finally {
+      hubPumpInFlight = false
+      if (hubPumpPending) {
+        hubPumpPending = false
+        scheduleHubPump()
+      }
+    }
   }
 
   function scheduleHubPump(): void {
+    if (hubBoardClients.size === 0) return
+    const now = Date.now()
+    if (!hubPumpWindowStartedAt) hubPumpWindowStartedAt = now
     clearTimeout(hubPumpTimer)
-    hubPumpTimer = setTimeout(() => { void pumpHubBoard() }, 200)
+    const debounceAt = now + HUB_BOARD_DEBOUNCE_MS
+    const maxWaitAt = hubPumpWindowStartedAt + HUB_BOARD_MAX_WAIT_MS
+    const minIntervalAt = lastHubPumpAt + HUB_BOARD_MIN_INTERVAL_MS
+    const runAt = Math.max(Math.min(debounceAt, maxWaitAt), minIntervalAt)
+    hubPumpTimer = setTimeout(() => {
+      hubPumpTimer = undefined
+      hubPumpWindowStartedAt = 0
+      void pumpHubBoard()
+    }, Math.max(0, runAt - Date.now()))
   }
 
   function connectHubEvents(): void {
@@ -413,7 +468,7 @@ export function apply(ctx: Context, config: Config): void {
           const data = line.slice(5).trim()
           if (data === '') continue
           for (const ac of hubActivityClients) ac.write(`data: ${data}\n\n`)
-          scheduleHubPump()
+          if (isBoardEvent(data)) scheduleHubPump()
         }
       })
       res.on('end', () => scheduleHubRetry())

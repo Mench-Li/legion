@@ -12,7 +12,7 @@ export function SpaceOverview({ scope, spaces, hubMode, scenePicker = false, onS
     if (!hubMode) return
     async function load(): Promise<void> {
       try {
-        const [tasks, roster] = await Promise.all([fetchHubTasks(scope), fetchRoster(scope)])
+        const [tasks, roster] = await Promise.all([fetchHubTasks(scope, { compact: true }), fetchRoster(scope)])
         if (!stopped) { setData({ scope, tasks, agents: roster.agents }); setError('') }
       } catch (e) { if (!stopped) setError(e instanceof Error ? e.message : String(e)) }
     }

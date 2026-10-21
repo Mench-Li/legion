@@ -4,7 +4,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { classifyChatError, CATEGORIES } from '../lib/chatErrorClassifier.js'
 
-test('TC-S1-01 五类别映射：每类 ≥1 输入 → 类别 + 可行动文案（含恢复指引）', () => {
+test('TC-S1-01 六类别映射：每类 ≥1 输入 → 类别 + 可行动文案（含恢复指引）', () => {
   const cases = [
     { in: { stopReason: 'error', error: 'model not found: x-unknown-9' }, cls: 'model-unavailable' },
     { in: { stopReason: 'error', error: 'unauthorized: invalid api key 401' }, cls: 'provider-error' },
@@ -12,16 +12,30 @@ test('TC-S1-01 五类别映射：每类 ≥1 输入 → 类别 + 可行动文案
     { in: { stopReason: null, error: 'timeout' }, cls: 'timeout-aborted' },
     { in: { stopReason: 'aborted', error: '' }, cls: 'timeout-aborted' },
     { in: { stopReason: 'error', error: '守护 foreman 不可用' }, cls: 'foreman-down' },
+    // ★ 2026-10-20 现场原句：必须落到 host-api-mismatch，不许进兜底（否则文案把人引向模型配置）
+    { in: { stopReason: 'error', error: 'TypeError: ctx.subagents.start is not a function' }, cls: 'host-api-mismatch' },
+    { in: { stopReason: 'error', error: 'SUBAGENT_API_UNAVAILABLE: ctx.subagents 既没有 startActivation 也没有 start' }, cls: 'host-api-mismatch' },
     { in: { stopReason: 'error', error: 'weird upstream noise text' }, cls: 'empty-other' },
   ]
-  assert.deepEqual([...CATEGORIES].sort(), ['empty-other', 'foreman-down', 'model-unavailable', 'provider-error', 'timeout-aborted'])
+  assert.deepEqual([...CATEGORIES].sort(), ['empty-other', 'foreman-down', 'host-api-mismatch', 'model-unavailable', 'provider-error', 'timeout-aborted'])
   for (const c of cases) {
     const out = classifyChatError(c.in)
     assert.equal(out.category, c.cls, 'input ' + JSON.stringify(c.in))
     assert.ok(out.message && out.message.length > 0)
     assert.ok(out.message.length <= 500, 'aiError ≤500 契约')
-    assert.ok(/(重试|配置|模型|恢复)/.test(out.message), '含恢复指引: ' + out.message)
+    assert.ok(/(重试|配置|模型|恢复|重启)/.test(out.message), '含恢复指引: ' + out.message)
   }
+})
+
+test('TC-S1-05 宿主接口不匹配的文案要指对方向：说"重启/版本"，不许把人引向模型配置', () => {
+  const out = classifyChatError({ stopReason: 'error', error: 'TypeError: ctx.subagents.start is not a function' })
+  assert.equal(out.category, 'host-api-mismatch')
+  assert.match(out.message, /宿主接口不匹配/, '要说出真实原因（不是"原因暂不可识别"）')
+  assert.match(out.message, /重启/, '要给真正可行动的恢复动作')
+  assert.doesNotMatch(out.message, /原因暂不可识别/, '不许回落到兜底话术')
+  // 与「模型缺失」必须分开：两者的修复动作完全不同
+  const model = classifyChatError({ stopReason: 'error', error: 'model not found: x' })
+  assert.notEqual(model.category, out.category)
 })
 
 test('TC-S1-03 负例：error/undefined 原文不得产出裸「回复子代理未完成（error）」', () => {

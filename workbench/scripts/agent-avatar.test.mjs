@@ -106,15 +106,28 @@ describe('S1 头像基座', () => {
   const photoKeys = () => Object.keys(photos.AVATAR_PHOTOS)
 
   test('TC-S1-01 两条来源都渲染成"图形"且都没有文本节点（AC-R3-1）', () => {
-    // ① 配了图的 key → `<img>`（用户提供的写实头像）
+    // ① 配了图的 key → `<img>`（用户提供的写真头像）
     const withPhoto = render('human:coder')
     assert.ok(withPhoto.includes('<img'), '配了图的位面必须走 <img>')
     assert.equal(withPhoto.replace(/<[^>]*>/g, '').trim(), '', '不得有文本节点（emoji/首字）')
-    // ② 没配图的 key → 内联 `<svg>`（矢量人形；`s10` 就是这种）
-    const withoutPhoto = render('human:s10')
-    assert.ok(withoutPhoto.includes('<svg'), '没配图的位面必须回落内联 SVG')
-    assert.ok(!withoutPhoto.includes('<img'), '没配图时不许出现 <img（那会是一张破图）')
-    assert.equal(withoutPhoto.replace(/<[^>]*>/g, '').trim(), '', '不得有文本节点（emoji/首字）')
+    // ② 没配图的 key → 内联 `<svg>`（矢量人形）
+    //
+    // ★ 这一格原来是**写死 `s10`** 的（"`s10` 就是这种"）。2026-10-14 将军补图时
+    //   s10（ozon 寻源参谋）配上了照片，这条断言随即变红 —— 而它不是故障，
+    //   正是本 describe 开头那句警告说的那件事：「写死会在配图那天全红」。
+    //   所以改成**从资产表里现找**一个没配图的位面：只要还有没配图的 key 就照常测这条回退，
+    //   一个都不剩时明说"没有可测的 key"，而不是留一条**恒假**的断言在那里。
+    const withoutPhotoKey = [...ROLES, ...SPARES].find(k => !photoKeys().includes(k))
+    if (withoutPhotoKey === undefined) {
+      // 全部位面都配了图 ⇒ 这条回退路径在**资产表**上已经没有入口了。
+      // 但代码里那条回退仍在（非法令牌会走到它），下一格 ③ 仍然守着它。
+      console.log('  注：资产表已覆盖全部位面，② 的"没配图"分支改用 ③ 的非法令牌来守')
+    } else {
+      const withoutPhoto = render('human:' + withoutPhotoKey)
+      assert.ok(withoutPhoto.includes('<svg'), `没配图的位面（${withoutPhotoKey}）必须回落内联 SVG`)
+      assert.ok(!withoutPhoto.includes('<img'), '没配图时不许出现 <img（那会是一张破图）')
+      assert.equal(withoutPhoto.replace(/<[^>]*>/g, '').trim(), '', '不得有文本节点（emoji/首字）')
+    }
     // ③ 非法/缺失令牌 → 占位矢量（不是图片）
     const placeholder = render('human:UNKNOWN')
     assert.ok(placeholder.includes('<svg'), '未知令牌必须回落占位矢量人形')

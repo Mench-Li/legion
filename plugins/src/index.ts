@@ -38,6 +38,10 @@ import { artifactFailureComment, rebuildMergedArtifacts, type ArtifactBuildRecei
 import { buildNormSections, type NormFile } from './norms.js'
 import { buildChatAnswerPrompt, chatIdentityFor, type ChatCtxMsg } from './chatResponder.js'
 import { classifyChatError } from './chatErrorClassifier.js'
+// ★ 子代理启动走**适配层**：编译期类型与运行期服务可能不是同一代（0.2.1-alpha 只有
+//   `start`、0.2.1-rc 只有 `startActivation`）—— 两代差异只在适配层吸收一次，
+//   见 runtime/adapters/dsh/subagent-start.mjs 文件头。产品层不出现执行面记号（PRT-108）。
+import { startChildAgent, type ChildRun } from '../../runtime/adapters/dsh/subagent-start.mjs'
 import { gatherChatContext, type AttachmentRef, type ChatContextBundle } from './chatContext.js'
 import { pluginConfigLogLines } from './config.js'
 import {
@@ -1295,7 +1299,7 @@ function spaceWorker(ctx: AppContext, config: Config): void {
       const prompt = isSkill
         ? buildPromotePrompt(draftTaskId, body)
         : buildLearningPrompt(draftTaskId, body)
-      const run = await ctx.subagents.start(config.provider, {
+      const run = await startChildAgent(ctx.subagents, config.provider, {
         label: `exp:${draftTaskId}:${isSkill ? 'skill' : 'learning'}`,
         prompt: [{ type: 'text', text: prompt }],
         parent,
@@ -2548,7 +2552,9 @@ function spaceWorker(ctx: AppContext, config: Config): void {
           workflowStageAttemptId = record.id
           activity('dispatch', t.id, `已创建阶段 Attempt ${record.id}（provider=${providerName}）`)
         }
-        let started
+        // ★ 显式类型：两条分支（原生 provider / 外部执行者）给出的句柄形状由
+        //   `ChildRun` 统一，避免推断出"少一个 localAgent 的联合类型"。
+        let started: ChildRun
         if (hasFrozenTool && frozenConfig.adapter === 'dsh-subagent') {
           const expectedPermissionMode = expectedExternalPermissionMode(frozenConfig)
           if (frozenConfig.enabled !== true || frozenConfig.workspacePolicy !== 'attempt-worktree-parent-cwd'
@@ -2585,7 +2591,7 @@ function spaceWorker(ctx: AppContext, config: Config): void {
           providerRunId = external.runId ?? null
           const externalRun = external.run
           started = {
-            id: external.runId,
+            id: external.runId ?? null,
             result: externalRun.result.then((result: { stopReason?: string; diagnostic?: string; output?: Array<{ type?: string; text?: string }> }) => {
               const diagnostic = typeof result?.diagnostic === 'string'
                 ? result.diagnostic.replace(/[\r\n\t]+/g, ' ').slice(0, 500)
@@ -2666,7 +2672,7 @@ function spaceWorker(ctx: AppContext, config: Config): void {
           //   一个条件展开。注释落在某个段里，会让那一段既不是 `...` 也不是 `key:`，
           //   于是被整段丢掉 —— 实测：`LEGACY_CALL_OPTIONS` 的两个 `...spread` 变成
           //   一个，对拍报"复刻件不再代表旧路径"。（门禁说得对，这里就是它说的地方。）
-          started = await ctx.subagents.start(selectedProvider, {
+          started = await startChildAgent(ctx.subagents, selectedProvider, {
             label: `scrum:${t.id}`,
             prompt: [{ type: 'text', text: promptText }],
             parent,
@@ -3331,7 +3337,7 @@ function spaceWorker(ctx: AppContext, config: Config): void {
     controllers.add(controller)
     // 看门狗：挂死的子代理在 workerTimeoutMs 内未结算也强制返回 null（abort 不保证杀死子代理）
     try {
-      const run = await ctx.subagents.start(config.provider, {
+      const run = await startChildAgent(ctx.subagents, config.provider, {
         label,
         prompt: [{ type: 'text', text: promptText }],
         parent,
@@ -3789,7 +3795,7 @@ function spaceWorker(ctx: AppContext, config: Config): void {
       const controller = new AbortController()
       controllers.add(controller)
       try {
-        const run = await ctx.subagents.start(config.provider, {
+        const run = await startChildAgent(ctx.subagents, config.provider, {
           label: `chat:${msg.scope}:${msg.id}`,
           prompt: [{ type: 'text', text: prompt }],
           parent,

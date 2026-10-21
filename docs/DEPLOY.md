@@ -684,34 +684,70 @@ systemctl list-timers legion-hub-storage-check.timer    # 看 LAST 那一列
 **没有**进表 —— 它们可能是 bundle 里拼接路径的**片段**（裸 `/api/reject`
 看着不像一个完整端点）。**未核实**，所以宁可不说，也不说错。
 
-### ★★ 6.4b 一个必须记下的事：生产上的 SPA **无法从仓库复现**
+### ★★★ 6.4b 生产上的 SPA **是可以复现的**（这一节原先写的是反的）
 
-部署里的 `/workbench/` 产物是 `assets/index-BjYkts4m.js`。为了知道"重建它会不会
-连带带上别的改动"，我把动过 `workbench/src` 的提交**各自构建了一遍**：
+> ⚠️ **更正（2026-10-14）**：这一节原先的结论是"生产上的 SPA **无法从仓库复现**"，
+> 并列了一张"每个提交各构建一遍、没一个对得上"的表。**那个结论是错的，
+> 那张表里的哈希也全部不可信** —— 因为它们都是用 `--base=/workbench/` 构建的，
+> 而仓库的 `workbench/vite.config.ts` 写的是 **`base: './'`**。
+> 换一个 base 会同时改变 `index.html` 里的引用**和**入口 chunk 的哈希，
+> 所以"对不上"是被我自己造出来的。
+>
+> 下面这行注释就在那个配置文件里，是它的作者为"两个宿主要一份产物"写的：
+>
+>     // ★ `base: './'`（**相对**）是"一份产物、两个宿主"的前提：
+>     //   · serve.mjs 挂在 `/`（本地/桌面端）→ 资源解析成 `/assets/…`；
+>     //   · 中枢挂在 `/workbench/`（远程）→ 资源解析成 `/workbench/assets/…`。
+>
+>   > 一次"用错参数构建、然后宣布无法复现"的调查，
+>   > 与一次"真的无法复现"的调查，在结论上都写着"复现不了" ——
+>   > 只不过前者把一份**好的**产物说成了孤本。
 
-| 来源 | 产出的 bundle |
-| --- | --- |
-| `f9a1b4b3` | `index-ClRLzxPM.js` |
-| `260cc742` | `index-MNOx9ITs.js` |
-| `833546e7` | `index-CdCnA807.js` |
-| `2c67dfb6` | `index-CVFe7rHD.js` |
-| `ca7589c9`（该目录的最后一个提交） | `index-SGdYgfb7.js` |
-| `origin/main`（41ee12f3） | `index-SGdYgfb7.js` |
-| **生产上的** | **`index-BjYkts4m.js`** ← 没有一个候选对得上 |
+**正确的复现方式**（`base` 走配置，**不要**在命令行覆盖）：
 
-换 `--base=/workbench/` 也不对（产出 `index-BTUIzIla.js`）；产物里没有绝对路径。
+```bash
+git worktree add /tmp/wt --detach <要复现的提交>
+cd /tmp/wt/workbench && npx vite build      # 不要加 --base
+```
 
-> **结论：部署里的那份 SPA 不是从当前历史里的任何提交构建的。**
+实测：用 `9c3ae86a` 构建，产出与生产**逐字节相同**（含文件名哈希）：
 
-后果很实际：**下一次重建会把若干提交的前端改动一起带上** ——
-而它们的后端配对未经验证。所以这一轮**没有**部署重建的 SPA（那是"假验证"）。
+| | 生产 | 用 `9c3ae86a` 重建 |
+| --- | --- | --- |
+| 入口 | `index-BjYkts4m.js` 678177 B | **同一个** ✓ |
+| 样式 | `index-DhBSBG1s.css` 105502 B | **同一个** ✓ |
+| Scene3D | `Scene3D-C8hVyUWg.js` 951528 B | **同一个** ✓ |
 
-`workbench/src/api.ts` 里 `readJson` 的那处修复（让它保留后端的
-`code`/`error`/`hint`，而不是只抛 `statusText`）**已经在源码里、`tsc --noEmit` 通过**，
-但**没有部署** —— 它会随下一次**有出处的** SPA 发布一起生效。
+**所以线上那份 SPA 有确切出处**：`9c3ae86a`（部署于 2026-10-12T03:26:42Z，
+而那一刻 main 的 HEAD 正是它）。**问题不是"复现不了"，而是"它落后了"**：
+`origin/main` 上改动 `workbench/src` 的提交比它多 **30 个**（截至 2026-10-14），
+其中含一条 `fix(security)`。`workbench/src/api.ts` 里 `readJson` 的那处修复
+就在这 30 个里。
 
-在那之前，浏览器里的界面显示的是 `501 Not Implemented`
-（比 `not found` 好，但还不是那句中文）。
+→ **2026-10-14 已把生产对齐到 `fe637310`**，见 §17。对齐后线上 bundle 是
+`index-BFfHom0A.js`（与用 `fe637310` 构建的产物**逐字节相同**），
+所以 `readJson` 那条修复**已经上线** —— 桌面端专属面不再以英文
+`501 Not Implemented` 呈现，而是后端给的那句中文与 `hint`。
+
+### ★★★ 6.4c 但**不能只部署 SPA** —— 它与中枢是成对的
+
+"SPA 只是静态文件、先单独发上去"这个念头很自然，也已验证过是**不安全**的：
+
+1. **凭证协议换过。** `9c3ae86a` 那版 SPA 在写请求里**发 `secretRef`**
+   （`DshProvidersPanel.tsx`: `baseURL: …, secretRef: form.key || …`），
+   而 main 那版改发 **`credentialValue`**、由服务端按现有槽位落名（BUG-028）。
+   生产的中枢**没有**那个修复（`routes/model-providers.mjs` 里 `publicProvider` = 0 次）。
+   而旧服务端的 `update` 语义是"**留空 `secretRef` = 清掉引用**"
+   —— 9c3ae86a 那版 SPA 的文件头自己就写着这句话。
+   ⇒ 新 SPA + 旧中枢 = **保存供应商时会静默清掉凭证引用**。
+2. **新 SPA 调一个还不存在的端点。** 新 SPA 有"验收不满意就重做"，打 `/api/rework`；
+   生产上实测 **404**（那是 `e70c81bc` 的配对端点）。
+
+  > 一个"新旧搭着能用"的组合，
+  > 与一个"保存时静默清掉用户的凭证引用"的组合，
+  > 在只跑一遍冒烟检查的时候是同一个东西 —— 冒烟不会去配一把真钥匙。
+
+**所以 SPA 与中枢要么一起动，要么都不动。** 这一轮**没有**部署任何一半。
 
 ---
 
@@ -1435,7 +1471,414 @@ immutable）
 
 ---
 
+## 16. 修掉 `rel-0.1.3` / `rel-0.1.4` 的 GBK 说明（含**线上 stable 通道**）
+
+§15.5 查出的那件事（当前 stable 的说明是 GBK、客户端整份拒收），这一节把它修掉。
+
+### 16.1 范围：两棵树、四处，且**通道必须动**
+
+| 位置 | 当时的状态 | 处置 |
+| --- | --- | --- |
+| `prod/releases/rel-0.1.3` | notes **GBK**，无 feed 指向 | 转 UTF-8 + 重签清单 |
+| `prod/releases/rel-0.1.4` | notes **GBK**，**stable 通道指向它** | 转 UTF-8 + 重签清单 + **重签通道** |
+| `feeds/stable/win-x64.json` | seq=4，指向旧清单摘要 | **seq → 5**，摘要换成新清单 |
+| Hub 那棵树（`/var/lib/legion-hub/releases`） | 一是 notes 也 GBK；二是 `rel-0.1.4` 的清单**声明了一个磁盘上不存在的 notes**（线上 `notes-0.1.4.txt` = **404**） | 同样换 UTF-8；补上被引用的那个文件名 |
+
+★★ **通道的 `sequence` 必须加一，不能沿用 4。** `judgeSequence` 对
+"同号但摘要不同"回 `SEQUENCE_CONFLICT` 且 `accept:false` ——
+沿用 4 号会让**所有已经接受过 4 号的客户端永远拒绝**这份新通道，**不可自愈**。
+实测确认：喂进"已接受 seq=4"的状态，新通道得到 `feed-sequence-advanced` / `accept:true`。
+
+★ 这次与 §15 一样，**笔记内容不需要重建** —— GBK 解出来是**干净的中文**
+（与 0.1.1 那种有损乱码不同），只换编码：
+
+```
+rel-0.1.3:  GBK 215 B → UTF-8 289 B
+rel-0.1.4:  GBK 257 B → UTF-8 338 B
+```
+
+### 16.2 复现自检（动之前先证明管线与生产一致）
+
+三份要重签的文件，用生产私钥把**原样** payload 重签一遍，产出必须与磁盘**逐字节相同**：
+
+| 文件 | 结果 |
+| --- | --- |
+| `prod/releases/rel-0.1.3/manifest.json` | **逐字节一致** ✓ |
+| `prod/releases/rel-0.1.4/manifest.json` | **逐字节一致** ✓ |
+| `prod/feeds/stable/win-x64.json` | **逐字节一致** ✓ |
+
+### 16.3 生产验证
+
+**`verify-host`（仓库自己的 11 项端到端回读，走 nginx 生产面）：全部 `ok`，退出码 0。**
+
+```
+ok  host-config / feed-cache-policy(no-store) / feed-signature / feed-schema(sequence=5)
+ok  release-fetch / release-digest / release-signature / release-schema
+ok  artifact-package / artifact-installer / artifact-notes(338 字节已回读，清单声明 338)
+```
+
+另外：两份清单验签 `verified`、摘要与大小与实际一致、`decodePlainText` 接受；
+公网回读与磁盘逐字节一致、**U+FFFD 0 个**；Hub 那棵树 `notes-0.1.4.txt` 由
+**404 → 200**，`latestInstaller()` 仍挑 `rel-0.1.4`（installer 的 mtime 没被碰）。
+
+备份：`/srv/legion-updates/backup-226/`（含 `hub/` 子目录）。
+
+### 16.4 ★★★ 顺带查出一件**比 notes 严重得多**的事：OSS 账号欠费
+
+修完之后按惯例核"客户端到底从哪个源读"，结果发现**打包进客户端的**
+`product/release/update-config.json` 里，`stable` 指向的是**京东云 OSS**，
+而不是 `updates.legion-si.online`（后者只是**镜像**，写在 `example` 里）。
+
+而 OSS 整桶返回：
+
+```xml
+<Code>AccountArrear</Code>
+<Message>There is an arrear problem with this OSS account ...</Message>
+```
+
+⇒ **已安装的客户端现在检查不了更新**，而且这一条**无法从这里修**：
+`client.mjs` 没有多 origin 回退，客户端读的是**打包进去的**那份配置，
+设计又刻意不提供远程替换入口。处置与判读见
+[UPDATE-HOST-RUNBOOK.md](UPDATE-HOST-RUNBOOK.md) §4.1。
+
+★ 之所以一直没被发现，是因为**镜像那一侧的一切检查都是绿的**。
+
+> 一个"镜像还活着"的托管，
+> 与一个"主托管还活着"的托管，在只测镜像的时候是同一个东西 ——
+> 只不过前者能掩盖后者已经死了很久。
+
+★ 另外纠正一处**我自己的假阳性**：检查 `update-config.json` 时，
+PowerShell 终端把它的中文注释显示成了乱码，我一度以为那个文件也坏了。
+按**原始字节**复核：589 个汉字、0 个替换字符、0 个可疑双重编码字符 —— **它是好的**。
+（同一类显示假象本轮已经踩过两次，规矩见 §14.3。）
+
+---
+
+## 17. 把生产对齐到 main（web + 移动端，2026-10-14）
+
+### 17.1 为什么要做
+
+`workbench-live-check` / `mobile-live-check` **都是全绿**的 —— 也就是说"能不能打开、
+能不能用"这层没有问题。真正的缺口是**生产比 main 旧**：
+
+| | 对齐前 | main |
+| --- | --- | --- |
+| web SPA | 钉在 `9c3ae86a`（2026-10-12 03:26） | 领先 **30 个** `workbench/src` 提交 |
+| 中枢关键文件 | `routes/model-providers.mjs` **198 行**、`publicProvider` **0 处** | **750 行**、`publicProvider` **5 处** |
+
+其中一条是 **`833546e7 fix(security)`（BUG-028）**：`GET /api/model-providers`
+原本把密钥**引用名**（`secretRef`）原文发给客户端。对齐前生产上**没有**这条修复。
+
+### 17.2 ★★★ 部署范围 = **import 闭包**，不是"顶层目录"
+
+第一次尝试失败，报：
+
+```
+ERR_MODULE_NOT_FOUND: Cannot find module '/srv/legion-hub/app/product/dsh-location.mjs'
+  imported from /srv/legion-hub/app/team-hub/server.mjs
+```
+
+原因是**我算依赖的方式错了**：我用 `join(ROOT,'X')` 与 `from '../../X/'` 这类
+**模式匹配**去找"中枢读了哪些目录"，而那条 import 是 `../product/…`（**只往上一级**），
+两个模式都没覆盖。
+
+正确做法是**从入口做 BFS**，跟着相对 import 走到底：
+
+```
+team-hub/server.mjs → 190 个可达模块
+    team-hub 125 个 + 外部 65 个
+    外部落在：runtime(31) product(12) orchestrator(8) security(7) packages(5)
+```
+
+并且要确认没有**变量式动态 import**（那才是静态分析真的看不见的）：实测 80 处动态
+import **全是字面量**、非相对的只有 `node:*` 内置 ⇒ 静态闭包就是完整依赖。
+
+> 一个"用模式匹配猜依赖"的清单，
+> 与一个"跟着 import 走到底"的清单，在**大多数**时候给出同样的答案 ——
+> 只不过前者漏掉的那一个，会让服务端起不来。
+
+### 17.3 ★★ 部署前的两道门（都真的拦下过东西）
+
+现在这套流程里有两条**在重启之前**的判据：
+
+1. **逐文件哈希核对**（278 条，**按原始字节**）；
+2. **服务端 import 图预检**：在**磁盘上**从 `team-hub/server.mjs` 走一遍，
+   缺任何一个文件就拒绝重启（`node /tmp/legion-226/preflight2.mjs`）。
+
+第 2 条拦下过一次**误报**，而那次误报本身又是一课：预检 v1 没剥注释，
+于是把文档注释里的示例 `import('../server.mjs')` 当成了真依赖，
+报"缺 2 个文件"⇒ **拒绝重启并回滚**。v2 先剥注释（与仓库 `scripts/lib/code-only.mjs`
+同一件事）后：190 个模块、图闭合。
+
+> 一个"把注释里的示例当成真 import"的预检，
+> 与一个"真的缺文件"的预检，在输出上都写着"缺 N 个"——
+> 只不过前者会**误拦**一次本来成功的部署。
+
+### 17.4 ★★ 行尾归一化是个陷阱：改成**按原始字节**比
+
+第一次核对时 `workbench/dist/index.html` 报"不同"，而包里的字节与清单**完全一致**。
+根因是两边的"归一化"规则不一样：
+
+| 一侧 | 规则 |
+| --- | --- |
+| 我生成清单时 | 只把 `\r\n` 换成 `\n`（`replace(/\r\n/g,'\n')`）|
+| 服务器核对时 | `tr -d '\r'`（删掉**所有** `\r`）|
+
+那份 `index.html` 是 **CRLF**（vite 读的是 Windows 检出、带 CRLF 的源模板），
+一旦有**孤立 `\r`** 两个规则就分家。
+
+**修法是取消归一化**：既然部署的是**文件**，就按**文件字节**算、按**文件字节**比。
+（这一条同时把 §17.3 第 1 条门变成了纯字节比较，不再需要"猜行尾"。）
+
+### 17.5 结果（全部在生产上实测）
+
+| 检查 | 结果 |
+| --- | --- |
+| 278 条逐文件哈希（原始字节） | **278/278 一致**，0 不同 0 缺失 |
+| `node --check` 中枢全部非测试模块 | 145 个 OK / 0 错 |
+| 服务端 import 图预检 | 190 个模块，**闭合** |
+| 重启 | 第 2 次探测就绪；`active`、**`NRestarts=0`** |
+| `workbench-live-check` | **ALL PASSED**（6 条）|
+| `mobile-live-check` | **40 PASS / 0 FAIL** |
+| `site-live-check` | **ALL PASSED**（15 条）|
+| `verify-host`（更新链 11 项） | **全 ok，退出码 0** |
+| 公网入口 | `/` `/en` `/workbench/` `/mobile/` `/site/assets/site.css` `/api/config` 全 200 |
+| 安全修复上线 | `routes/model-providers.mjs` **750 行**、`publicProvider` **5 处**；实测响应里 `secretRef` **0 次** |
+| 旧端点 | `/api/model-migration/plan`、`/api/config-bundle` → **404**（已拆）|
+| 新端点 | `POST /api/rework` → **400「缺少操作者身份 by」**（路由在、在校验）|
+| 表格端点冒烟（15 个） | **无 5xx**；501 全是刻意的 `DESKTOP_ONLY`（带中文 `error` + `hint`），与真不存在的 404 **可区分** |
+
+### 17.6 ★ 两个刻意的选择
+
+- **不删旧 SPA 产物**：`workbench/dist/assets/` 里留着上一版
+  `index-BjYkts4m.js` / `Scene3D-C8hVyUWg.js` / `index-DhBSBG1s.css`。
+  理由是**缓存**：手里还拿着旧 `index.html` 的浏览器会去要旧 bundle，
+  删掉它们等于把那些用户当场打断。多余的静态文件不产生行为。
+- **只覆盖、不删除**：main 已拆掉的 `routes/model-migration.mjs` /
+  `routes/config-bundle.mjs` 仍留在磁盘上，但 `server.mjs`（main 版）不挂载它们，
+  于是它们是**惰性**的。`--delete` 会连带删掉历次部署留下的 `.bak-*`，
+  而那些是前几轮补丁的安全网。新端点的行为已在 §17.5 实测过。
+
+### 17.7 回滚手段（现在还留着）
+
+    /srv/legion-hub/backup-align-20261014-061439/
+      app-tree.tar.gz        整树（25 MB）
+      team.db                VACUUM INTO 一致性快照（97 张表、行数逐表核对过）
+      workbench-dist.tar.gz  部署前的 SPA 产物
+
+回滚 = 停服务 → 换目录 → 解 tarball → 起服务（脚本里那两处 `rollback()` 就是它，
+本轮**真的执行过两次**并都恢复到 `active` + `/api/config=200`）。
+
+### 17.8 诚实边界
+
+- **`workbench/src/**` 是源码、不参与运行**：它编译进 `dist`。所以生产上那 9 个
+  "源码比产物新/旧"的文件不影响行为 —— 但为了不留含糊状态，本轮把整棵树
+  钉到**同一个提交** `fe637310` 再构建，做到"源码 == 产物 == 中枢"。
+- 对齐**没有**动 `product/release/`（生产上只有 `.example.json`，没有部署专属配置）。
+- 对齐**没有**修 OSS 欠费（桌面端已降级、出范围），见 §16.4 与
+  [UPDATE-HOST-RUNBOOK.md](UPDATE-HOST-RUNBOOK.md) §4.1。
+- 本轮**没有**做"桌面端内嵌 UI 指向远程中枢"那种配置的兼容验证（没有这种部署）；
+  如果将来有，那两个已拆端点会 404。
+
+---
+
+## 18. ★★ 两个把"环境问题"误读成"产品缺陷"的坑（2026-10-14）
+
+这一节是**一次真实的误诊记录**，因为它的形状很容易重犯。
+
+### 18.1 症状：一条"长期红的既有失败"
+
+`team-hub/mobile-api-contract.test.mjs` ⑯ 是守**产品主标题动作**的一条用例：
+「手机建出的任务**真的可被认领**」（不是躺在 `backlog` 里）。它在我的
+`git worktree add --detach` 工作区里**一直红**：
+
+```
+AssertionError: 新任务应真的可被认领；拿到 null，reason=write-reservation-failed
+```
+
+于是它被记进了"既有失败清单"——**记错了**。
+
+### 18.2 真正的原因：`REPO_UNBOUND`，而且是我自己的工作区建法
+
+`reason` 是个**兜底桶**：`team-hub/run-store.mjs` 的 claim 把非
+`FILE_CONTENTION` / `SINGLE_WRITER_REQUIRED` 的冲突**一律**报成
+`write-reservation-failed`，把可操作的码藏进同级的 `contention` 字段。
+把 `contention` 打出来才看见：
+
+    contention: { ok:false, code:'REPO_UNBOUND',
+                  reason:'绑定工作区未检出可交付分支，请先切换到目标分支' }
+
+而 `resolveDeliveryBinding()` 的判定是两分叉（`team-hub/server.mjs`）：
+
+| 绑定目录 | 判定 |
+| --- | --- |
+| **不是** git 仓库（`capability !== 'git'`） | 返回绑定，`targetRef: null` —— **不报错** |
+| 是 git 仓库但 `symbolic-ref -q HEAD` 失败（**游离 HEAD**） | `REPO_UNBOUND` |
+
+`git worktree add --detach` 建出来的工作区**正是游离 HEAD** ⇒ 写预留被拒
+⇒ 认领失败。而主检出（在 `main` 分支上）跑同一条用例：**17/17 全绿**。
+
+> 一条"只在游离 HEAD 的工作区里红"的用例，
+> 与一条"真的红了"的用例，在输出上都写着 `reason=write-reservation-failed`——
+> 只不过前者会被记成产品的毛病，一记就是好几轮。
+
+**为什么生产不受影响**：`spaces.local_dir` 是空串 ⇒ 回退到 `ROOT`
+（`/srv/legion-hub/app`），而它**不是 git 仓库** ⇒ 走"非 git"那条 ⇒ 不报错。
+
+### 18.3 因此做的两处改动
+
+1. **用例的失败信息带上真正的原因码**（`team-hub/mobile-api-contract.test.mjs` ⑯）：
+   现在红的时候直接写
+   `reason=write-reservation-failed（contention.code=REPO_UNBOUND：绑定工作区未检出可交付分支，请先切换到目标分支）`。
+   一个把可操作错误码藏进兜底桶的失败信息，会让下一个人花掉同样的一个小时。
+2. **本节**：把"在工作区里跑测试"与"在真实环境里跑"分开写。
+
+### 18.4 ★★★ 顺带发现一个**部署侧**的真隐患
+
+上面那张表反过来读就是一个部署隐患：
+
+> **如果哪天把中枢部署成"一个 git 检出"，而那个检出处在游离 HEAD
+> （`git checkout <sha>` —— 部署固定版本时非常常见），
+> 那么生产上每一次认领都会以 `REPO_UNBOUND` 失败。**
+
+症状与 §18 里那个老 bug 完全一样地"安静"：手机/网页能建任务、任务进 `todo`、
+时间线回执也对，**只是没有任何 Agent 会碰它**，而日志里只有一句
+`write-reservation-failed`。
+
+当前的部署方式（tar 铺成一棵**普通目录**，`/srv/legion-hub/app` 没有 `.git`）
+**恰好避开了**这条路径 —— 但那是"恰好"，不是"设计"。所以：
+
+- 部署**不要**用 `git clone` + `git checkout <sha>`（游离 HEAD）；
+  要么保持普通的目录树（现状），要么用 `git checkout -B main` 落在**分支**上。
+- 判断当前部署属于哪种：
+
+      git -C /srv/legion-hub/app rev-parse --is-inside-work-tree   # 非 git = 安全
+      git -C /srv/legion-hub/app symbolic-ref -q HEAD              # 有输出 = 在分支上
+
+---
+
+## 19. ★★★ 手机端「任务」页签 8 天画不出任务（一次真登录的走查抓到的）
+
+### 19.1 症状：界面上说"没有任务"，而接口有 14 条
+
+2026-10-14 用一次性探针账号登录 `/mobile/`（真浏览器 + 手机仿真）走主路径，
+「任务」页签显示：
+
+    | 这个空间还没有任务。用下面输入框派一个。
+
+而同一个会话里 `/api/board?scope=default&compact=1` 返回 **200**、**14 条任务**。
+console 里躺着一条：
+
+    exception: TypeError: t is not a function
+        at taskCard (app.mjs:460:19)
+        at renderBoard (app.mjs:423:48)
+        at refreshTasks (…)
+
+### 19.2 根因：形参 `t` 遮蔽了 i18n 的翻译函数 `t`
+
+```js
+function taskCard(t) {                 // ← 形参 t = 任务对象
+  …
+  s.textContent = t(taskLine(t))       // ← 这里又把 t 当翻译函数调用
+  if (isWaitingForNode(t)) s.textContent += t('（电脑上线后自动开始）')
+  m.textContent = t(taskMeta(t))
+}
+```
+
+`t` 是这个模块从 `./i18n.mjs` 引入的翻译函数，而形参叫 `t` 把它遮蔽了 ——
+`t(...)` 于是变成**把任务对象当函数调用**，`taskCard` 每渲染一张卡就抛一次，
+`renderBoard` 整个中断，页面停在空态。
+
+★ 同一个遮蔽在 `renderBoard` 的未知状态分支里还有一次
+（`for (const t of unknown)` 里调 `t('@rawStatus', …)`）—— 只要出现一个未知状态
+的任务，整块看板也画不出来。另外 5 处（`for (const t of shown)` 等）当时**侥幸安全**，
+因为它们的作用域里恰好还没调 `t(...)`；一并改掉，免得下一行改动就踩上。
+
+**引入于 `3244deb9`（2026-10-06），在 `9c3ae86a` 那版里也在** —— 与 §17 的对齐部署无关。
+
+### 19.3 为什么 8 天没有任何判据变红（三条，缺一条都不会漏）
+
+| 这一层 | 它测什么 | 为什么漏掉 |
+| --- | --- | --- |
+| `mobile/*.test.mjs`（237 条） | **投影层**：`taskLine` / `taskMeta` / `boardColumns` / i18n 覆盖率 / 离线队列 | 没有一条真的去**渲染**一张卡 |
+| `mobile-live-check.mjs`（40 条） | 登录屏、SW、静态模块、字体 | **从不登录** ⇒ 永远走不到看板渲染 |
+| 界面本身 | —— | 不报错，只说"这个空间还没有任务" |
+
+> 一批"对着投影函数断言"的判据，与一批"真的把界面画出来"的判据，
+> 在被渲染的那一层出错时是同一个东西 ——
+> 只不过前者永远绿，而用户看到的是"这里没有任务"。
+
+### 19.4 修法与**两道**判据（形状判据 + 渲染判据）
+
+1. **改名字**：`taskCard` 的形参、以及 6 处同类绑定，全部改成 `task`。
+2. **源码形状判据**（`workbench/mobile/i18n.test.mjs`）：
+   「`t` 是翻译函数，源码里不许把 `t` 用作形参 / 循环变量 / 局部名」。
+   会列出**行号与命中片段**，并带一条恒真守卫。
+   实测：老代码 **45 通过 / 1 失败**（列出 7 处），修好后 **46/46**。
+3. **★ 渲染判据（可复用工具）**：`scripts/qa/mobile-logged-in-check.mjs`
+
+       LEGION_PROBE_USER=<用户> LEGION_PROBE_PASS=<口令> \
+         node scripts/qa/mobile-logged-in-check.mjs
+
+   核心判据是 **`/api/board` 说有 N 条 ⟺ 页面上有 N 个 `.task` 元素**：
+
+       [读数] /api/board 状态=200  任务数=14  页面上的 .task=14  当前视图=全部
+
+   这一条恰好是"接口对了、渲染死了"唯一藏不住的地方 —— 只看接口会绿，
+   只看页面会以为"本来就没任务"。
+
+   **探针账号的建与删**（用完必须删干净，它落在六处）：
+   建：`POST /api/identity/register`（`{name,password,space:'default'}`，生产 `registration=open`）；
+   删：按 userId 扫**所有表的所有文本列**再删（`hub_users` / `hub_space_roles` /
+   `hub_registrations` / `hub_user_sessions` / `hub_event_tickets` / `audit`）。
+   两次清理实测：15 行与 9 行，残留 0，读数回到基线
+   （`hub_users=1 hub_registrations=0 hub_sessions=141 tasks=14 messages=32`），
+   **且没有产生任何内容数据**。
+
+### 19.5 部署与影响面
+
+- 改的只有 `workbench/mobile/app.mjs` 一个**静态文件**（104869 字节）。
+  备份 `/srv/legion-hub/backup-mobile-fix/app.mjs.before`，
+  上线后公网回读与磁盘**逐字节一致**（`sha256 2445a4b6…`）。
+- ★ **已装的 PWA 下次打开就会拿到新代码**：`sw.js` 对
+  `.mjs|.js|html|webmanifest` 走 **network-first**（`CODE_EXT` 那一条），
+  所以**不需要**改 `CACHE = 'legion-mobile-v4'` 的版本号。
+  （如果哪天把代码文件也改成 cache-first，这个结论就不成立了 —— 那时必须递增版本。）
+- 修复后同一条走查：**14 张任务卡**（修前 0 张）、13 次接口请求全 200、
+  console 错误 **0**；登出后回到登录屏。
+  ★ 顺手纠正一个我当时的误判：登出后短暂停在 `data-screen=boot` 并说
+  「Hub 不可达」，看着像 bug —— 多等 4 秒后它落在登录屏（颜色数与登录屏完全相同），
+  那是**重载中的过渡态**，不是缺陷。
+
+### 19.6 诚实边界 + 我自己踩的两个坑
+
+- 源码形状判据只守"**遮蔽**"这一个成因，**不是**渲染测试。真正的渲染验证是
+  上面那条登录走查。两层都要有：形状判据便宜、能在 CI 跑；走查贵、但只有它能看
+  见"接口有数据而界面是空的"。
+- 这条走查**需要凭证**，所以我把它做成"没给凭证就跳（退出码 2）"，
+  与 `mobile-live-check` / `workbench-live-check` 一致 —— 它进不了普通 CI。
+- ★ 坑一：我用 PowerShell 的 `>` 把 `git show` 的输出写进文件去构造"老代码"，
+  而 **PS 5.1 的 `>` 会写成 UTF-16** ⇒ app.mjs 被写坏 ⇒ 六条**内容判据**连带变红
+  ⇒ 我一度以为"新判据红了 7 条"。改用 Node 按字节取（`execFileSync` 不传 encoding）
+  后才是对的：**老代码 45 通过 / 1 失败**，失败的正是那条新判据。
+  这是本仓第 N 次栽在"别让 PowerShell 碰文件内容"上（见 §14.3）。
+- ★ 坑二：判据里 import `scripts/lib/code-only.mjs` 时写死了 `'../../../'` ——
+  本仓的工作区建在仓库**里面**（`.legion-worktrees/<id>/`）要 4 层、建在外面要 3 层。
+  写死层数的后果不是"判据红了"，而是**整支套件 import 不到、直接跑不起来**。
+  改成从本文件往上找仓库根。
+
+> 一个"在某种工作区布局下 import 不到依赖"的判据，
+> 与一个"真的发现问题的"判据，在 CI 上都是红的 ——
+> 只不过前者在任何布局下都不该红。
+
+---
+
 ## 附录 A：发布检查单（每次发布逐项打勾）
+
+> ⚠️ 这个标题曾经被我**弄丢过一次**：加 §18 时我的替换片段以 `---` 结尾，
+> 而它原本紧跟着 `## 附录 A` —— 于是那一段从文档里消失了，`check-docs` 也没
+> 因此变红（它不要求有这一节）。补回来时留个记号：**用整段替换时，别把后面
+> 紧邻的标题留在匹配范围里又没写回 new_string**。
 
 - [ ] CI 全绿：`node scripts/ci/run-ci.mjs` exit 0（evidence 归档 docs/T093-evidence/）
 - [ ] L1 三件套探活 + whiteboard /healthz（§5.2/§5.4）

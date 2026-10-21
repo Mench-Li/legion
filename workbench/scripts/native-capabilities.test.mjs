@@ -22,6 +22,7 @@ import {
   ASSUMED_REASONS,
   DERIVED_KEYS,
   declaredFor,
+  declaredForAgentNode,
   deriveNativeCapabilities,
   isUsableReading,
   readinessStateOf,
@@ -165,6 +166,19 @@ describe('从心跳读数里取 declared', () => {
     assert.equal(d.toolFilter, true)
     assert.equal(d.cancellation, true)
     assert.equal(d.permissionMode, 'dsh-native:spawn')
+  })
+
+  test('绑定执行节点时从该节点心跳读取能力，而不是沿用守护的旧配置', () => {
+    const node = { observedCapabilities: { providers: {
+      spawn: { outputSchema: true, toolFilter: false, cancellation: true },
+    } } }
+
+    const declared = declaredForAgentNode(node, 'spawn')
+    const derived = deriveNativeCapabilities(declared, USER)
+
+    assert.deepEqual(declared, { outputSchema: true, toolFilter: false, cancellation: true })
+    assert.equal(derived.capabilities.toolFilter, false)
+    assert.equal(declaredForAgentNode({ observedCapabilities: { providers: { spawn: { outputSchema: true } } } }, 'spawn'), null)
   })
 
   test('★★ 没读到的三种形状都返回 null（**不是**"全 false"）', () => {

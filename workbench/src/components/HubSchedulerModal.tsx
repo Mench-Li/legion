@@ -230,7 +230,7 @@ export function HubSchedulerModal({ scope, onClose }: HubSchedulerModalProps): R
               ))}
               {(t.patches ?? []).length > 0 && (
                 <div className="detail-text" style={{ color: 'var(--cyan)', fontSize: 11 }}>
-                  🔧 补丁 {t.patches.length} 份：{(t.patches ?? []).join('、')}
+                  🔧 补丁 {t.patches?.length ?? 0} 份：{(t.patches ?? []).join('、')}
                 </div>
               )}
             </>

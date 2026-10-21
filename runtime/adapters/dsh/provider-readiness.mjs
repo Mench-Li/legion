@@ -35,7 +35,7 @@
 // ============================================================================
 import { join } from 'node:path'
 import { accessSync, constants, existsSync, readFileSync } from 'node:fs'
-import { execFile } from 'node:child_process'
+import { execFile, spawn } from 'node:child_process'
 import { delimiter } from 'node:path'
 
 /** 探测结论的取值。**每一个都要有独立的修法**，否则就该合并。 */
@@ -56,6 +56,36 @@ export const READINESS_STATE = Object.freeze({
 
 export const STEP_TIMEOUT_MS = 4_000
 export const PROVIDER_DEADLINE_MS = 12_000
+
+// Node's global fetch does not automatically use the Windows user's WinINet proxy.
+// Run the small HEAD probe through .NET's default proxy in an isolated PowerShell
+// process instead of changing the DSH process-wide dispatcher.
+const WINDOWS_SYSTEM_PROXY_HEAD_SCRIPT = [
+  "$ErrorActionPreference = 'Stop'",
+  '$client = $null',
+  '$probeUrl = $null',
+  '$request = $null',
+  '$response = $null',
+  'try {',
+  '  $probeUrl = [Console]::In.ReadLine() | ConvertFrom-Json',
+  "  [void][System.Reflection.Assembly]::LoadWithPartialName('System.Net.Http')",
+  '  $handler = [System.Net.Http.HttpClientHandler]::new()',
+  '  $handler.UseProxy = $true',
+  '  $handler.Proxy = [System.Net.WebRequest]::DefaultWebProxy',
+  '  $client = [System.Net.Http.HttpClient]::new($handler)',
+  '  $client.Timeout = [TimeSpan]::FromMilliseconds(3000)',
+  '  $request = [System.Net.Http.HttpRequestMessage]::new([System.Net.Http.HttpMethod]::Head, [Uri]$probeUrl)',
+  '  $response = $client.SendAsync($request, [System.Net.Http.HttpCompletionOption]::ResponseHeadersRead).GetAwaiter().GetResult()',
+  "  [Console]::Out.WriteLine('reachable')",
+  '} catch {',
+  "  [Console]::Out.WriteLine('unreachable')",
+  '} finally {',
+  '  if ($response) { $response.Dispose() }',
+  '  if ($request) { $request.Dispose() }',
+  '  if ($client) { $client.Dispose() }',
+  '}',
+].join('\n')
+const WINDOWS_SYSTEM_PROXY_HEAD_COMMAND = Buffer.from(WINDOWS_SYSTEM_PROXY_HEAD_SCRIPT, 'utf16le').toString('base64')
 
 const CLAUDE_LOGIN_HINT = '在这台机器上运行 `claude` 并执行 /login（会生成 ~/.claude/.credentials.json）'
 const CLAUDE_API_HINT = '在 ~/.claude/settings.json 的 env 块里配 ANTHROPIC_BASE_URL + ANTHROPIC_AUTH_TOKEN'
@@ -223,7 +253,13 @@ export function extractVersion(stdout) {
 }
 
 /** 默认的真实依赖（可注入，测试用假实现；纯函数部分因此不需要碰真实文件系统）。 */
-export function createLocalReadinessDeps({ env = process.env, home = null, platform = process.platform } = {}) {
+export function createLocalReadinessDeps({
+  env = process.env,
+  home = null,
+  platform = process.platform,
+  execFileImpl = execFile,
+  spawnImpl = spawn,
+} = {}) {
   const resolvedHome = home ?? env.HOME ?? env.USERPROFILE ?? ''
   return {
     platform,
@@ -252,7 +288,7 @@ export function createLocalReadinessDeps({ env = process.env, home = null, platf
     resolveOnPath: (bin) => resolveOnPath(bin, env.PATH ?? env.Path ?? '', { platform }),
     execVersion: (bin) => new Promise((resolve) => {
       try {
-        execFile(bin, ['--version'], { timeout: STEP_TIMEOUT_MS, windowsHide: true }, (err, stdout) => {
+        execFileImpl(bin, ['--version'], { timeout: STEP_TIMEOUT_MS, windowsHide: true }, (err, stdout) => {
           if (err) resolve({ ok: false, stdout: '' })
           else resolve({ ok: true, stdout: String(stdout ?? '') })
         })
@@ -260,6 +296,49 @@ export function createLocalReadinessDeps({ env = process.env, home = null, platf
     }),
     /** HEAD 一次供应商端点；不读响应体，只判能不能连上。 */
     httpHead: async (url) => {
+      if (platform === 'win32') {
+        const windowsRoot = env.WINDIR ?? env.SystemRoot ?? 'C:\\Windows'
+        const powershell = join(windowsRoot, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe')
+        return new Promise((resolve) => {
+          let child
+          let timer = null
+          let output = ''
+          let settled = false
+          const finish = (result) => {
+            if (settled) return
+            settled = true
+            if (timer !== null) clearTimeout(timer)
+            resolve(result)
+          }
+          try {
+            child = spawnImpl(powershell, [
+              '-NoLogo', '-NoProfile', '-NonInteractive',
+              '-EncodedCommand', WINDOWS_SYSTEM_PROXY_HEAD_COMMAND,
+            ], {
+              windowsHide: true,
+              stdio: ['pipe', 'pipe', 'ignore'],
+              env,
+            })
+            child.stdout.setEncoding('utf8')
+            child.stdout.on('data', (chunk) => {
+              if (output.length < 32) output += String(chunk).slice(0, 32 - output.length)
+            })
+            child.once('error', () => finish('unreachable'))
+            child.once('close', (code) => {
+              finish(code === 0 && output.trim() === 'reachable' ? 'reachable' : 'unreachable')
+            })
+            timer = setTimeout(() => {
+              try { child.kill() } catch { /* 退出竞态 */ }
+              finish('unreachable')
+            }, STEP_TIMEOUT_MS)
+            timer.unref?.()
+            child.stdin.end(`${JSON.stringify(String(url))}\n`)
+          } catch {
+            try { child?.kill() } catch { /* 启动失败时无需再处理 */ }
+            finish('unreachable')
+          }
+        })
+      }
       try {
         const res = await fetch(url, { method: 'HEAD', signal: AbortSignal.timeout(STEP_TIMEOUT_MS) })
         return res.status > 0 ? 'reachable' : 'unreachable'
@@ -469,17 +548,29 @@ export async function probeProviders(names, deps = createLocalReadinessDeps(), {
  * 调用方在心跳里只调 `snapshot()` —— 它**立刻返回**上一次的结果（可能为空），
  * 同时在后台按需要刷新。于是探测慢/挂死都不会拖住心跳。
  */
-export function createReadinessCache({ probe, ttlMs = 10 * 60 * 1000, now = () => Date.now(), onError = null } = {}) {
+export function createReadinessCache({
+  probe,
+  ttlMs = 10 * 60 * 1000,
+  transientFailureTtlMs = 30 * 1000,
+  now = () => Date.now(),
+  onError = null,
+} = {}) {
   let cached = null
   let inflight = null
   return {
     /** 立刻返回缓存（可能为 null = 本轮还没有读数）。为空时会触发一次后台刷新。 */
     snapshot(names) {
-      const stale = cached === null || now() - cached.atMs > ttlMs
+      const stale = cached === null || now() - cached.atMs > cached.ttlMs
       if (stale && inflight === null) {
         inflight = Promise.resolve()
           .then(() => probe(names))
-          .then((value) => { cached = { atMs: now(), value } })
+          .then((value) => {
+            // 网络失败或探测超时可能是瞬时状况。若与成功读数一样缓存 10 分钟，
+            // 一次代理抖动就会在网络恢复后继续显示为不可用。
+            const transientFailure = Object.values(value ?? {}).some(entry =>
+              entry?.state === READINESS_STATE.NO_NETWORK || entry?.state === READINESS_STATE.UNKNOWN)
+            cached = { atMs: now(), ttlMs: transientFailure ? transientFailureTtlMs : ttlMs, value }
+          })
           .catch((e) => { if (onError) onError(e) })
           .finally(() => { inflight = null })
       }

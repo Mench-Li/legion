@@ -10,6 +10,7 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc --noEmit && vite build",
+    "test:hub-reconnect": "node --experimental-strip-types --test src/hubReconnect.test.mjs",
     "preview": "vite preview",
     "serve": "node scripts/serve.mjs"
   },

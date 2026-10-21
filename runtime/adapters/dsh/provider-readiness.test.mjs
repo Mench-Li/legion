@@ -11,6 +11,7 @@
 import { describe, test } from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
+import { EventEmitter } from 'node:events'
 import { join, delimiter } from 'node:path'
 
 import {
@@ -18,6 +19,7 @@ import {
   PROVIDER_SPECS,
   READINESS_STATE,
   createReadinessCache,
+  createLocalReadinessDeps,
   endpointFor,
   endpointHost,
   extractVersion,
@@ -30,6 +32,53 @@ import {
 } from './provider-readiness.mjs'
 
 const HOME = '/home/testuser'
+
+describe('Windows 网络探针', () => {
+  test('使用当前 Windows 用户的系统代理，并只返回可达状态', async () => {
+    let captured
+    const network = createLocalReadinessDeps({
+      platform: 'win32',
+      home: 'C:\\Users\\test',
+      env: { WINDIR: 'C:\\Windows' },
+      spawnImpl: (file, args, options) => {
+        const child = new EventEmitter()
+        const stdout = new EventEmitter()
+        stdout.setEncoding = () => {}
+        child.stdout = stdout
+        child.stdin = { end: (input) => {
+          captured = { file, args, options, input }
+          queueMicrotask(() => {
+            stdout.emit('data', 'reachable\r\n')
+            child.emit('close', 0)
+          })
+        } }
+        child.kill = () => {}
+        return child
+      },
+    })
+
+    assert.equal(await network.httpHead('https://chatgpt.com'), 'reachable')
+    assert.ok(captured.file.toLowerCase().endsWith('powershell.exe'))
+    assert.ok(captured.args.includes('-EncodedCommand'))
+    assert.equal(captured.options.windowsHide, true)
+    assert.equal(captured.options.env.LEGION_READINESS_PROBE_URL, undefined, 'URL 不放进子进程环境变量')
+    assert.equal(captured.input, '"https://chatgpt.com"\n', 'URL 只通过 stdin 传给探针')
+    const script = Buffer.from(captured.args.at(-1), 'base64').toString('utf16le')
+    assert.match(script, /DefaultWebProxy/, 'Windows 请求必须使用当前用户系统代理')
+    assert.match(script, /Console\]::In\.ReadLine.*ConvertFrom-Json/, 'URL 通过 stdin 作为 JSON 数据读取，不作为命令执行')
+    assert.doesNotMatch(script, /Write-Output\s+\$response|ResponseContent/, '不得输出响应内容')
+  })
+
+  test('系统代理调用失败时返回不可达，不把异常细节带入读数', async () => {
+    const network = createLocalReadinessDeps({
+      platform: 'win32',
+      env: { WINDIR: 'C:\\Windows' },
+      spawnImpl: () => { throw new Error('private process detail') },
+    })
+
+    assert.equal(await network.httpHead('https://chatgpt.com'), 'unreachable')
+  })
+})
 
 /** 造一份**全绿**的假依赖，逐项可覆写。 */
 function deps(over = {}) {
@@ -227,6 +276,34 @@ describe('缓存壳子（纪律 ②：绝不阻塞心跳）', () => {
     nowMs = 5000
     cache.snapshot(['a']); await cache.settled()
     assert.equal(calls, 2, '过期后应当重新探测')
+  })
+
+  test('no_network 和 unknown 只短暂缓存，网络恢复后自动重探', async () => {
+    for (const transientState of [READINESS_STATE.NO_NETWORK, READINESS_STATE.UNKNOWN]) {
+      let nowMs = 0
+      let calls = 0
+      const cache = createReadinessCache({
+        probe: async () => {
+          calls += 1
+          return {
+            codex: { state: calls === 1 ? transientState : READINESS_STATE.READY },
+            spawn: { state: READINESS_STATE.READY },
+          }
+        },
+        ttlMs: 10 * 60 * 1000,
+        transientFailureTtlMs: 30_000,
+        now: () => nowMs,
+      })
+
+      cache.snapshot(['codex', 'spawn']); await cache.settled()
+      assert.equal(cache.snapshot(['codex', 'spawn']).codex.state, transientState)
+      assert.equal(calls, 1)
+
+      nowMs = 30_001
+      cache.snapshot(['codex', 'spawn']); await cache.settled()
+      assert.equal(calls, 2, `${transientState} 不应沿用成功读数的 10 分钟 TTL`)
+      assert.equal(cache.snapshot(['codex', 'spawn']).codex.state, READINESS_STATE.READY)
+    }
   })
 
   test('探测抛错不把心跳带崩：缓存保持原值，错误交给 onError', async () => {

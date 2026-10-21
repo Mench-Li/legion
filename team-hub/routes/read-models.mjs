@@ -89,11 +89,16 @@ export function createReadModelsRoutes({
       match: 'exact',
       path: '/api/board',
       async run(req, res, { url }) {
+        const compactParam = url.searchParams.get('compact')
+        const compact = compactParam === '1' || compactParam === 'true'
+        const compactWorkbench = compactParam === 'workbench'
         const rows = listTasks({
           status: url.searchParams.get('status') ?? undefined,
           soldier: url.searchParams.get('soldier') ?? undefined,
           role: url.searchParams.get('role') ?? undefined,
           scope: url.searchParams.get('scope') ?? undefined,
+          ...(compact ? { compact: 'mobile' } : {}),
+          ...(compactWorkbench ? { compact: 'workbench' } : {}),
         })
         // ★ `?compact=1`：只回看板渲染需要的那几个字段。
         //
@@ -109,7 +114,6 @@ export function createReadModelsRoutes({
         //   合并进来的 `attempt`，见 workbench/mobile/board.mjs），所以这里用**白名单**：
         //   宁可少给，也不要哪天又有个大字段悄悄长回来（黑名单会随字段增加而失效）。
         //   默认（不带 compact）**逐字不变** —— 桌面与既有判据都还在用完整形状。
-        const compact = url.searchParams.get('compact') === '1' || url.searchParams.get('compact') === 'true'
         json(res, 200, compact ? rows.map(compactBoardTask) : rows)
       },
     },

@@ -32,6 +32,113 @@ test('启动只传文本、父会话与取消信号，不伪造外部 provider �
   assert.deepEqual(Object.keys(f.calls[0].request).sort(), ['label', 'parent', 'prompt', 'signal'])
 })
 
+test('兼容当前 DSH provider.start API，并把已核验的父工作目录传给 provider', async () => {
+  const calls = []
+  const run = {
+    id: 'external-run-current-api',
+    result: Promise.resolve({ stopReason: 'completed', output: [{ type: 'text', text: 'done' }] }),
+    async dispose() {},
+  }
+  const provider = {
+    name: 'codex',
+    config: { permissionMode: 'approve-for-me' },
+    capabilities: { agentOptions: false, outputSchema: false, depthLimit: false, toolFilter: false, persona: false },
+    async start(request) {
+      calls.push(request)
+      return run
+    },
+  }
+  const subagents = { getProvider(name) { return name === provider.name ? provider : undefined } }
+  const out = await executeExternalAgent({
+    subagents,
+    providerName: 'codex',
+    parent,
+    workdir: process.cwd(),
+    prompt: 'review this change',
+    policyPreflightPassed: true,
+    expectedPermissionMode: 'approve-for-me',
+  })
+
+  assert.equal(out.ok, true)
+  assert.equal(out.output, 'done')
+  assert.equal(calls.length, 1)
+  assert.equal(calls[0].cwd, parent.session.header.cwd)
+  assert.deepEqual(calls[0].prompt, [{ type: 'text', text: 'review this change' }])
+  assert.equal(calls[0].parent, parent)
+  assert.equal(calls[0].signal?.aborted, false)
+})
+
+test('外部 provider 只声明实际核验的能力时仍可启动', async () => {
+  let started = 0
+  const provider = {
+    name: 'claude-code',
+    config: { permissionMode: 'acceptEdits' },
+    capabilities: { outputSchema: false, toolFilter: false },
+    async start() {
+      started += 1
+      return {
+        id: 'claude-run-1',
+        result: Promise.resolve({ stopReason: 'completed', output: [{ type: 'text', text: 'done' }] }),
+        async dispose() {},
+      }
+    },
+  }
+  const subagents = { getProvider(name) { return name === provider.name ? provider : undefined } }
+  const out = await executeExternalAgent({
+    subagents, providerName: 'claude-code', parent, workdir: process.cwd(), prompt: 'clarify requirements',
+    policyPreflightPassed: true, expectedCapabilities: { outputSchema: false, toolFilter: false },
+    expectedPermissionMode: 'acceptEdits', returnRun: true,
+  })
+
+  assert.equal(out.ok, true)
+  assert.equal(out.run.id, 'claude-run-1')
+  assert.equal(started, 1)
+})
+
+test('冻结配置不需要的能力未透出时按不支持处理，仍可启动', async () => {
+  let started = 0
+  const provider = {
+    name: 'claude-code',
+    config: { permissionMode: 'acceptEdits' },
+    async start() {
+      started += 1
+      return {
+        id: 'claude-run-without-capability-projection',
+        result: Promise.resolve({ stopReason: 'completed', output: [{ type: 'text', text: 'done' }] }),
+        async dispose() {},
+      }
+    },
+  }
+  const subagents = { getProvider(name) { return name === provider.name ? provider : undefined } }
+  const out = await executeExternalAgent({
+    subagents, providerName: 'claude-code', parent, workdir: process.cwd(), prompt: 'clarify requirements',
+    policyPreflightPassed: true, expectedCapabilities: { outputSchema: false, toolFilter: false },
+    expectedPermissionMode: 'acceptEdits', returnRun: true,
+  })
+
+  assert.equal(out.ok, true)
+  assert.equal(out.run.id, 'claude-run-without-capability-projection')
+  assert.equal(started, 1)
+})
+
+test('冻结配置要求的能力未透出时仍拒绝启动', async () => {
+  const provider = {
+    name: 'claude-code',
+    config: { permissionMode: 'acceptEdits' },
+    capabilities: { toolFilter: false },
+    async start() { assert.fail('缺少能力声明时不能启动 provider') },
+  }
+  const subagents = { getProvider(name) { return name === provider.name ? provider : undefined } }
+  const out = await executeExternalAgent({
+    subagents, providerName: 'claude-code', parent, workdir: process.cwd(), prompt: 'clarify requirements',
+    policyPreflightPassed: true, expectedCapabilities: { outputSchema: true, toolFilter: false },
+    expectedPermissionMode: 'acceptEdits',
+  })
+
+  assert.equal(out.code, EXTERNAL_AGENT_CODES.PROVIDER_MISSING)
+  assert.match(out.message, /outputSchema 能力描述/)
+})
+
 test('cwd 不匹配时不启动 provider', async () => {
   const f = fixture()
   const out = await executeExternalAgent({ subagents: f.subagents, providerName: 'codex', parent, workdir: `${process.cwd()}-other`, prompt: 'task', policyPreflightPassed: true, expectedPermissionMode: 'approve-for-me' })

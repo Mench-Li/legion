@@ -78,6 +78,16 @@ describe('面板分层：什么必须始终可见', () => {
     assert.ok(outside.includes('bundleRemedy'), '缺 bundle 的修法要在折叠区之外')
   })
 
+  test('标准闭环配置公开独立测试命令，并把它保存到实现岗位', () => {
+    const saveBlock = SRC.slice(SRC.indexOf('const save = async'), SRC.indexOf('const publishDefinition = async'))
+    assert.ok(outside.includes('标准闭环独立测试命令'), '测试命令配置必须在标准闭环表单中可见')
+    assert.ok(saveBlock.includes('testRunner:'), '闭环保存载荷必须包含 testRunner')
+    assert.match(saveBlock, /\[roles\.implementationRole\]:\s*\{[\s\S]*?testRunner:/,
+      'testRunner 必须绑定到实现岗位，而不是设计或审查岗位')
+    assert.ok(outside.includes('testExecutable') && outside.includes('testArgs') && outside.includes('testTimeoutMs'),
+      '闭环测试命令应包含 executable、argv 和超时')
+  })
+
   test('★ 高级区确实存在，且把"不常用但有用"的那些装进去了', () => {
     const bodies = detailsBodies(SRC)
     assert.ok(bodies.length >= 1, '要有折叠区')
@@ -95,10 +105,29 @@ describe('面板分层：什么必须始终可见', () => {
   })
 
   test('★ 高级区的标题要**列出里面有什么**（否则用户不知道点开值不值）', () => {
-    const summary = SRC.slice(SRC.indexOf('<summary'), SRC.indexOf('</summary>'))
+    const summary = [...SRC.matchAll(/<summary[^>]*>([\s\S]*?)<\/summary>/g)]
+      .map(match => match[1])
+      .find(value => value.includes('高级设置：执行节点说明')) ?? ''
+    assert.ok(summary !== '', '要找到包含高级配置的主折叠标题')
     for (const part of ['能力声明', 'DAG', '发布为可复用工作流版本']) {
       assert.ok(summary.includes(part), `summary 里应当提到「${part}」`)
     }
+  })
+})
+
+describe('DAG 表单布局', () => {
+  test('表单框占满等分列、统一高度，说明文字排在框下方', () => {
+    assert.match(SRC, /const graphFieldLabelStyle = \{[^}]*width: '100%'/s, '每个字段标签应占满自己的网格列')
+    assert.match(SRC, /const graphControlStyle = \{[^}]*height: 40/s, 'DAG 控件应统一高度')
+    assert.match(SRC, /gridTemplateColumns: '105px repeat\(3, minmax\(0, 1fr\)\)'/, '三列岗位框应等宽')
+
+    const modelFieldStart = SRC.lastIndexOf('<div style={graphFieldLabelStyle}>', SRC.indexOf('<span>模型覆盖</span>'))
+    const modelFieldEnd = SRC.indexOf('<label style={graphFieldLabelStyle}>执行节点', modelFieldStart)
+    const modelField = SRC.slice(modelFieldStart, modelFieldEnd)
+    const statusBoxEnd = modelField.indexOf('</div>}')
+    const hintStart = modelField.indexOf('<small style={graphFieldHintStyle}>')
+    assert.ok(statusBoxEnd >= 0 && hintStart > statusBoxEnd, '模型状态说明应位于状态框下方')
+    assert.ok(modelField.includes("? '不适用'"), '不支持模型覆盖时，框内只显示简短状态')
   })
 })
 

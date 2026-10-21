@@ -1,0 +1,79 @@
+From 194eae5b6eb9ad8ee0b6a0251f6780f053dd6823 Mon Sep 17 00:00:00 2001
+From: Mench-Li <1115043055@qq.com>
+Date: Wed, 21 Oct 2026 11:16:15 +0800
+Subject: [PATCH] fix(subagent-claude-code): accept terminal assistant text
+
+---
+ .../subagent/subagent-claude-code/src/run.ts  | 20 ++++++++++++++++++-
+ .../tests/subagent-claude-code.spec.ts        | 17 ++++++++++++++++
+ 2 files changed, 36 insertions(+), 1 deletion(-)
+
+diff --git a/packages/subagent/subagent-claude-code/src/run.ts b/packages/subagent/subagent-claude-code/src/run.ts
+index 41c2ee6509..a643d06de2 100644
+--- a/packages/subagent/subagent-claude-code/src/run.ts
++++ b/packages/subagent/subagent-claude-code/src/run.ts
+@@ -239,14 +239,32 @@ export async function consumeClaudeQuery(
+   onResult?: () => void,
+ ): Promise<SubagentResult> {
+   let answer: string | undefined
++  let assistantText: string[] = []
+   for await (const message of query) {
+     if (message.type === 'system' && message.subtype === 'permission_denied') {
+       onPermissionDenied?.()
+       continue
+     }
++    if (message.type === 'assistant' && message.parent_tool_use_id === null) {
++      assistantText.push(...message.message.content
++        .filter((block): block is Extract<typeof block, { type: 'text' }> => block.type === 'text')
++        .map(block => block.text))
++      continue
++    }
+     if (message.type !== 'result') continue
+     onResult?.()
+-    answer = successfulResult(message)
++    if (
++      message.subtype === 'success'
++      && !message.is_error
++      && message.result.trim().length === 0
++      && message.stop_reason === 'end_turn'
++    ) {
++      const fallback = assistantText.join('')
++      answer = fallback.trim().length > 0 ? fallback : undefined
++    } else {
++      answer = successfulResult(message)
++    }
++    assistantText = []
+   }
+   if (answer === undefined) {
+     throw new ClaudeCodeFailure({
+diff --git a/packages/subagent/subagent-claude-code/tests/subagent-claude-code.spec.ts b/packages/subagent/subagent-claude-code/tests/subagent-claude-code.spec.ts
+index cce9e35bda..76f3c2ea50 100644
+--- a/packages/subagent/subagent-claude-code/tests/subagent-claude-code.spec.ts
++++ b/packages/subagent/subagent-claude-code/tests/subagent-claude-code.spec.ts
+@@ -1026,6 +1026,23 @@ describe('query options and result mapping', () => {
+     })
+     expect(onPermissionDenied).toHaveBeenCalledOnce()
+   })
++
++  it('uses final assistant text when a successful end-turn result is empty', async () => {
++    const finalAssistant = {
++      type: 'assistant',
++      parent_tool_use_id: null,
++      message: {
++        content: [{ type: 'text', text: 'final assistant answer' }],
++        stop_reason: null,
++      },
++    } as SDKMessage
++    const emptyResult = { ...success(''), stop_reason: 'end_turn' } as SDKResultMessage
++
++    await expect(consumeClaudeQuery(queryFrom([finalAssistant, emptyResult]))).resolves.toEqual({
++      output: [{ type: 'text', text: 'final assistant answer' }],
++      stopReason: 'completed',
++    })
++  })
+ })
+ 
+ describe('run publication, cancellation, and settlement', () => {
+-- 
+2.55.0.windows.5
+

@@ -11,8 +11,8 @@
 // ============================================================================
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { readFileSync } from 'node:fs'
-import { fileURLToPath } from 'node:url'
+import { existsSync, readFileSync } from 'node:fs'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 import { dirname, join } from 'node:path'
 
 import {
@@ -22,6 +22,33 @@ import {
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const read = (f) => readFileSync(join(HERE, f), 'utf8')
+
+/**
+ * 从本文件往上找**仓库根**（`scripts/lib/code-only.mjs` 所在处），再 import 它。
+ *
+ * ★ 为什么不写 `'../../../scripts/lib/code-only.mjs'`：本仓的工作区建在仓库
+ *   **里面**（`.legion-worktrees/<id>/`），从 `workbench/mobile/` 上去是 **4** 层；
+ *   而建在仓库**外面**（`/tmp/wt`）时是 **3** 层。写死层数的后果不是"判据红了"，
+ *   而是**整支套件 import 不到、直接跑不起来** —— 换个布局就从绿变成跑不了。
+ *
+ *   > 一个"在某种工作区布局下 import 不到依赖"的判据，
+ *   > 与一个"真的发现问题的"判据，在 CI 上都是红的 ——
+ *   > 只不过前者在任何布局下都不该红。
+ */
+const REPO_ROOT = (() => {
+  let dir = HERE
+  for (let i = 0; i < 8; i += 1) {
+    if (existsSync(join(dir, 'scripts', 'lib', 'code-only.mjs'))) return dir
+    const up = dirname(dir)
+    if (up === dir) break
+    dir = up
+  }
+  throw new Error('找不到仓库根（scripts/lib/code-only.mjs）')
+})()
+// 剥注释用仓库里那一份（别再写第二个：两份实现迟早分家，而分家的表现是
+// "判据在某个文件上莫名红了/绿了"）。
+const { codeOnly } = await import(pathToFileURL(join(REPO_ROOT, 'scripts', 'lib', 'code-only.mjs')).href)
+
 const HTML = read('index.html')
 /** 参与覆盖率判据的源文件（用户可见文案住在这里）。 */
 const SOURCES = ['app.mjs', 'board.mjs', 'popup.mjs', 'timeline.mjs', 'notice.mjs', 'notify-plan.mjs', 'screen-plan.mjs',
@@ -1042,4 +1069,62 @@ test('★★★ index.html 必须有语言切换入口，且进入主界面后�
 test('★ html[lang] 必须跟着语言走（读屏与字体选择都靠它）', () => {
   const app = read('app.mjs')
   assert.match(app, /documentElement\.lang/, '切换语言时要同步 <html lang>')
+})
+
+// ── ⑧ `t` 是**保留名**：不许被任何局部绑定遮蔽 ──────────────────────────────
+//
+// ★★★ 这一条是 2026-10-14 一次**真登录的活体走查**换来的，而它抓到的 bug 从
+// 2026-10-06（`3244deb9`）一直活到那天，期间所有判据都是绿的：
+//
+//   `taskCard` 的形参曾经叫 `t`，而 `t` 是本模块的翻译函数，于是函数体里的
+//   `t(taskLine(t))` 变成**把任务对象当函数调用** ⇒ `TypeError: t is not a function`
+//   ⇒ `renderBoard` 整个中断 ⇒ 手机上「任务」页签**永远**显示
+//   「这个空间还没有任务」，而接口明明返回了任务。
+//
+// 为什么一条判据都没有红：
+//   · 现有判据测的是**投影层**（`taskLine` / `taskMeta` / `boardColumns` /
+//     覆盖率 / 生产者），没有一条真的去**渲染**一张卡；
+//   · `mobile-live-check.mjs` **从不登录**，所以它 40 条全绿也照不出这个；
+//   · 错误只落在 console 里，界面上什么都不说 —— 用户看到的是"这里没有任务"。
+//
+//   > 一批"对着投影函数断言"的判据，与一批"真的把界面画出来"的判据，
+//   > 在被渲染的那一层出错时是同一个东西 ——
+//   > 只不过前者永远绿，而用户看到的是"这里没有任务"。
+//
+// ★ 说清边界：这是一条**源码形状**判据，它只守"遮蔽"这一个成因，
+//   不是渲染测试。真正的渲染验证是活体走查（见 DEPLOY.md §19）。两层都要有。
+test('★★★ `t` 是翻译函数，源码里不许把 `t` 用作形参 / 循环变量 / 局部名', () => {
+  // 只在**引入了 i18n 的 t** 的文件里查 —— 别的模块里局部叫 `t` 是它自己的事。
+  const files = ['app.mjs']
+  const PATTERNS = [
+    ['函数形参', /\bfunction\s+[A-Za-z_$][\w$]*\s*\(\s*t\s*[,)]/g],
+    ['箭头形参', /\(\s*t\s*[,)]\s*=>/g],
+    ['for-of 循环变量', /\bfor\s*\(\s*(?:const|let|var)\s+t\s+of\b/g],
+    ['局部声明', /\b(?:const|let|var)\s+t\s*=/g],
+  ]
+  const problems = []
+  for (const f of files) {
+    const src = read(f)
+    assert.match(src, /from '\.\/i18n\.mjs'/, f + ' 应当 import i18n（否则这条判据找错了文件）')
+    // ★ 先剥注释：注释里写 `t(...)` 作示例是**允许**的（上面那段说明就在注释里）。
+    //   不剥的话这条判据会被自己的说明文字判红 —— 那种判据会被当成噪音删掉。
+    const code = codeOnly(src)
+    for (const [what, re] of PATTERNS) {
+      for (const hit of code.matchAll(re)) {
+        const line = code.slice(0, hit.index).split('\n').length
+        problems.push(`${f} 约 L${line} 用「${what}」绑定了 t：${code.slice(hit.index, hit.index + 56).split('\n')[0].trim()}`)
+      }
+    }
+  }
+  assert.deepEqual(problems, [],
+    '`t` 是本模块的翻译函数；用它当变量名会让同一作用域里的 t(...) 变成"把变量当函数调用"，\n'
+    + '而那种错误只落在 console 里、界面上通常表现为"这里是空的"。请改用 task / item 等名字。')
+})
+
+test('★★ 反例守卫：上面那条判据**真的**能抓住遮蔽（不是恒真）', () => {
+  const RE = /\bfunction\s+[A-Za-z_$][\w$]*\s*\(\s*t\s*[,)]/g
+  const bug = 'function taskCard(t) {\n  s.textContent = t(taskLine(t))\n}\n'
+  assert.equal([...codeOnly(bug).matchAll(RE)].length, 1, '老写法必须被判据抓住')
+  const fixed = 'function taskCard(task) {\n  s.textContent = t(taskLine(task))\n}\n'
+  assert.equal([...codeOnly(fixed).matchAll(RE)].length, 0, '修好之后不该再命中')
 })

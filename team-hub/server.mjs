@@ -104,6 +104,8 @@ import { createRunStore, RunError } from './run-store.mjs'
 import { Worker } from 'node:worker_threads'
 import { resolveRepoIdentity } from '../packages/shared/src/repo-identity.mjs'
 import { runGit as runDeliveryGit } from './git-plumbing.mjs'
+import { commitAcceptedWorkflowArtifacts } from './accepted-workflow-checkpoint.mjs'
+import { WORKFLOW_CHECKPOINT_EVIDENCE_PREFIX } from '../runtime/contracts/agent-workflow-checkpoints.mjs'
 import { judgeFileDomain, ignoredFileDomainEntries } from './file-domain-guard.mjs'
 import { MODEL_ERRORS, ModelError, createModelStore, ensureModelSchema } from './model-store.mjs'
 import { createProviderStore } from './provider-store.mjs'
@@ -2412,8 +2414,59 @@ function listTasks(filter = {}) {
   if (filter.soldier) { where.push('soldier = $soldier'); params.soldier = filter.soldier }
   if (filter.role) { where.push('role = $role'); params.role = filter.role }
   if (filter.scope) { where.push('scope = $scope'); params.scope = filter.scope }
-  const sql = `SELECT * FROM tasks${where.length ? ' WHERE ' + where.join(' AND ') : ''} ORDER BY id`
+  const mobileFields = 'id,title,status,role,soldier,priority,scope,blockedBy,hold,version'
+  const workbenchFields = [
+    'id', 'title', 'description', 'acceptance', 'boundary', 'hold', 'priority', 'status', 'version',
+    'soldier', 'claimedAt', 'parent', 'role', 'scope', 'blocks', 'blockedBy', 'comments', 'evidence',
+    'artifacts', 'fixOf', 'fixCount', 'goalId', 'createdAt', 'updatedAt',
+    'CASE WHEN patches IS NOT NULL AND json_valid(patches) THEN json_array_length(patches) ELSE 0 END AS patchesCount',
+  ].join(',')
+  const fields = filter.compact === 'mobile' ? mobileFields : filter.compact === 'workbench' ? workbenchFields : '*'
+  const sql = `SELECT ${fields} FROM tasks${where.length ? ' WHERE ' + where.join(' AND ') : ''} ORDER BY id`
   const rows = db.prepare(sql).all(params)
+  if (filter.compact === 'mobile') {
+    return rows.map((row) => ({
+      id: row.id,
+      title: row.title,
+      status: row.status,
+      role: row.role,
+      soldier: row.soldier,
+      priority: row.priority,
+      scope: row.scope,
+      blockedBy: parseJson(row.blockedBy, []),
+      hold: row.hold === 1,
+      version: row.version,
+    }))
+  }
+  if (filter.compact === 'workbench') {
+    return rows.map((row) => ({
+      id: row.id,
+      title: row.title,
+      description: row.description,
+      acceptance: parseJson(row.acceptance, []),
+      boundary: parseJson(row.boundary, { do: [], dont: [] }),
+      hold: row.hold === 1,
+      priority: row.priority,
+      status: row.status,
+      version: row.version,
+      soldier: row.soldier,
+      claimedAt: row.claimedAt,
+      parent: row.parent,
+      role: row.role,
+      scope: row.scope,
+      blocks: parseJson(row.blocks, []),
+      blockedBy: parseJson(row.blockedBy, []),
+      comments: parseJson(row.comments, []),
+      evidence: parseJson(row.evidence, []),
+      patchesCount: Number(row.patchesCount) || 0,
+      artifacts: parseJson(row.artifacts, []),
+      fixOf: row.fixOf ?? null,
+      fixCount: row.fixCount ?? 0,
+      goalId: row.goalId ?? null,
+      createdAt: row.createdAt,
+      updatedAt: row.updatedAt,
+    }))
+  }
   return rows.map(rowToTask)
 }
 
@@ -6306,6 +6359,49 @@ function assertIntegratedBeforeDone(taskId) {
   }
 }
 
+/**
+ * Human acceptance can finish a workflow design/implementation stage whose
+ * external provider produced files but no verifiable terminal Attempt. Freeze
+ * only registered, digest-matching files so the next isolated stage can import
+ * the same Git checkpoint as it would after a normal worker completion.
+ */
+function freezeHumanAcceptedWorkflowStage(task) {
+  const snapshot = task?.agentSelectionSnapshot
+  if (snapshot?.source !== 'goal-agent-workflow') return null
+  const stageId = snapshot.workflowStageId
+  const workflow = snapshot.reviewWorkflow
+  const stage = typeof stageId === 'string' ? workflow?.stageDefinitionsById?.[stageId] : null
+  const successors = stage?.nextStageIds
+  const hasSuccessor = Array.isArray(successors) ? successors.length > 0 : typeof successors === 'string' && successors.trim() !== ''
+  if (!hasSuccessor) return null // terminal/review stages do not hand off a Git checkpoint
+
+  const evidence = Array.isArray(task.evidence) ? task.evidence : []
+  for (const entry of evidence) {
+    if (typeof entry?.text !== 'string' || !entry.text.startsWith(WORKFLOW_CHECKPOINT_EVIDENCE_PREFIX)) continue
+    try {
+      const checkpoint = JSON.parse(entry.text.slice(WORKFLOW_CHECKPOINT_EVIDENCE_PREFIX.length))
+      if (checkpoint?.stageId === stageId && /^[0-9a-f]{40,64}$/i.test(checkpoint.sourceCommit ?? '')) return null
+    } catch { /* malformed historical evidence is not a valid checkpoint */ }
+  }
+
+  const workspaceDir = join(ROOT, '.legion-worktrees', task.id)
+  const checkpoint = commitAcceptedWorkflowArtifacts({
+    taskId: task.id,
+    stageId,
+    artifacts: task.artifacts,
+    workspaceDir,
+    resolveArtifact: (taskId, recordPath) => resolveArtifactReadTarget(taskId, recordPath, ROOT),
+    runGit: runDeliveryGit,
+  })
+  return {
+    by: 'general',
+    at: now(),
+    text: `${WORKFLOW_CHECKPOINT_EVIDENCE_PREFIX}${JSON.stringify({
+      stageId, sourceCommit: checkpoint.sourceCommit, artifactPaths: checkpoint.paths, acceptedBy: 'general',
+    })}`,
+  }
+}
+
 function transitionTask(id, to, by, ifVersion, force, confirmedStopped = false) {
   const result = withTx(() => {
     const t = getTask(id)
@@ -6351,10 +6447,12 @@ function transitionTask(id, to, by, ifVersion, force, confirmedStopped = false) 
       // 开工/认领统一记 claimedAt：避免「in_progress 但无认领时间」的孤儿任务无法被租约回收
       if (by) db.prepare('UPDATE tasks SET soldier=?, claimedAt=?, claimedRound=NULL WHERE id=?').run(by, now(), id)
     }
+    let acceptedWorkflowCheckpoint = null
     if (to === 'done') {
       if (t.status !== 'in_review') throw new Error('只有 in_review 可完成；先迁移到 in_review')
       if (by !== 'general') throw new Error('只有将军（by=general）能在用户接受后把任务移到 done')
       assertIntegratedBeforeDone(id)
+      acceptedWorkflowCheckpoint = freezeHumanAcceptedWorkflowStage(t)
     }
     if (to === 'in_review' && by && t.soldier !== null && t.soldier !== by) {
       throw new Error(`任务 ${t.id} 由 ${t.soldier} 负责，不能由 ${by} 提交验收`)
@@ -6368,7 +6466,13 @@ function transitionTask(id, to, by, ifVersion, force, confirmedStopped = false) 
     if (to === 'todo') {
       db.prepare('UPDATE tasks SET soldier=NULL, claimedAt=NULL, claimedRound=NULL WHERE id=?').run(id)
     }
-    db.prepare('UPDATE tasks SET status=?, version=version+1, updatedAt=? WHERE id=?').run(to, now(), id)
+    if (acceptedWorkflowCheckpoint !== null) {
+      const evidence = Array.isArray(t.evidence) ? [...t.evidence, acceptedWorkflowCheckpoint] : [acceptedWorkflowCheckpoint]
+      db.prepare('UPDATE tasks SET evidence=?, status=?, version=version+1, updatedAt=? WHERE id=?')
+        .run(JSON.stringify(evidence), to, now(), id)
+    } else {
+      db.prepare('UPDATE tasks SET status=?, version=version+1, updatedAt=? WHERE id=?').run(to, now(), id)
+    }
     if (to === 'done') finishTaskReservationInTx(id)
     if (to === 'canceled') finishTaskReservationInTx(id, { cancelled: true })
     // ── BUG-009-c：进 in_review 就**释放**写入预约 ──────────────────────────────────

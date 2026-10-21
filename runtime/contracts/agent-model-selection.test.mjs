@@ -13,13 +13,13 @@ test('冻结模型快照只生成不含凭据的 DSH agentOptions', () => {
   }), { provider: 'custom-ds', model: 'coder-v4', reasoningEffort: 'high' })
 })
 
-test('DeepSeek V4 不支持的 medium 档位映射到最近的受支持 low 档位', () => {
+test('DeepSeek V4 未声明可用 effort 时省略冻结的通用 medium 档位', () => {
   assert.deepEqual(agentOptionsForFrozenModel({
     modelRef: ref,
     resolvedModel: { ...ref, provider: 'fjd-ds', model: 'deepseek-v4-flash-openai', reasoningEffort: 'medium' },
     agentToolConfig: nativeTool,
     providerCapabilities: { agentOptions: true },
-  }), { provider: 'fjd-ds', model: 'deepseek-v4-flash-openai', reasoningEffort: 'low' })
+  }), { provider: 'fjd-ds', model: 'deepseek-v4-flash-openai' })
 })
 
 test('没有模型引用时不注入任何运行参数', () => {

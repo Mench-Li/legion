@@ -2640,7 +2640,8 @@ function spaceWorker(ctx: AppContext, config: Config): void {
           if (resolvedModel !== null && modelAgentOptions !== null
             && typeof resolvedModel.reasoningEffort === 'string'
             && resolvedModel.reasoningEffort !== modelAgentOptions.reasoningEffort) {
-            const compatibilityNote = `冻结模型 ${resolvedModel.provider}/${resolvedModel.model} 的 reasoningEffort=${resolvedModel.reasoningEffort} 不受 DSH 支持；本次按模型目录使用 ${modelAgentOptions.reasoningEffort}`
+            const effectiveEffort = modelAgentOptions.reasoningEffort ?? 'DSH 模型默认值（省略参数）'
+            const compatibilityNote = `冻结模型 ${resolvedModel.provider}/${resolvedModel.model} 的 reasoningEffort=${resolvedModel.reasoningEffort} 不受 DSH 支持；本次使用 ${effectiveEffort}`
             log(`${t.id} ${compatibilityNote}`)
             activity('dispatch', t.id, compatibilityNote)
           }

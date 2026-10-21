@@ -1,6 +1,6 @@
-// plugins/tests/subagent-start.test.mjs —— 子代理启动的**两代 API** 契约
+// runtime/adapters/dsh/subagent-start.test.mjs —— 子代理启动适配层的**两代 API** 契约
 //
-// 为什么要这个文件（真实故障，2026-10-20）：
+// 为什么这个文件存在（真实故障，2026-10-20）：
 //   和 Agent 对话报 `TypeError: ctx.subagents.start is not a function`。
 //   编译用的 `@deepseek-ai/dsh-subagent` 是 0.2.1-alpha.1（服务上有 `start`），
 //   而装在这台机器上、真正加载的是 0.2.1-rc.2（服务上只有 `startActivation`）。
@@ -10,12 +10,16 @@
 //   · 只给 `startActivation`（新）——必须走通，且 id/result/dispose 都归一正确；
 //   · 只给 `start`（旧）——必须照样走通；
 //   · 两个都没有 ——必须抛一条**说清有什么**的错误，而不是 `xxx is not a function`。
-// 运行：node plugins/tests/subagent-start.test.mjs（需先构建 plugins/lib）
+//
+// 运行：node --test runtime/adapters/dsh/subagent-start.test.mjs
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import {
-  callableMembers, startChildAgent, subagentStartApi,
-} from '../lib/subagentStart.js'
+import { readFileSync } from 'node:fs'
+import { join, resolve, dirname } from 'node:path'
+import { fileURLToPath } from 'node:url'
+import { callableMembers, startChildAgent, subagentStartApi } from './subagent-start.mjs'
+
+const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..', '..')
 
 /** 造一个只有新 API 的服务（rc 版本形状）。 */
 function modernService(log = []) {
@@ -66,7 +70,7 @@ test('① 新 API（只有 startActivation）：走通，且 childId→id、resu
   assert.equal(result.stopReason, 'completed')
   assert.deepEqual(result.structured, { ok: true })
   await run.dispose()
-  assert.deepEqual(log.map(entry => entry.api), ['startActivation', 'disposed'])
+  assert.deepEqual(log.map((entry) => entry.api), ['startActivation', 'disposed'])
 
   const spec = log[0].spec
   assert.equal(spec.provider, 'spawn')
@@ -131,7 +135,6 @@ test('⑤ dispose 恒不抛：清理失败不许盖住"子 Agent 已经跑完"�
   }
   const run = await startChildAgent(service, 'spawn', REQUEST)
   await run.dispose()  // 不抛
-  // 没有 dispose 的句柄也不许抛
   const bare = await startChildAgent({ async startActivation() { return { childId: 'd', result: Promise.resolve({ stopReason: 'completed' }) } } }, 'spawn', REQUEST)
   await bare.dispose()
 })
@@ -142,13 +145,14 @@ test('⑥ delivery 可显式覆盖（需要父通知时）', async () => {
   assert.equal(log[0].spec.delivery, 'parent')
 })
 
-test('⑦ 插件源码不许再直接调 ctx.subagents.start（回归防线）', async () => {
-  const { readFileSync } = await import('node:fs')
-  const { join } = await import('node:path')
-  const root = new URL('..', import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, '$1')
-  const source = readFileSync(join(root, 'src', 'index.ts'), 'utf8')
-  const hits = source.match(/ctx\.subagents\.start\s*\(/g) ?? []
-  assert.equal(hits.length, 0, '必须统一走 startChildAgent（两代 API 的差异只在一处吸收）')
-  const calls = source.match(/startChildAgent\(/g) ?? []
-  assert.equal(calls.length, 4, '四处派工/改写/对话/单发都必须走兼容层（少一处就有一处会崩）')
+test('⑦ 产品层不许再直接调执行面（回归防线：两代差异只许在这一处吸收）', async () => {
+  const source = readFileSync(join(ROOT, 'plugins', 'src', 'index.ts'), 'utf8')
+  // 产品层直接调用 `ctx.subagents.start(...)` 就是这条缺陷的原始形态
+  assert.equal((source.match(/ctx\.subagents\.start\s*\(/g) ?? []).length, 0,
+    '必须统一走适配层的 startChildAgent（两代差异只在一处吸收）')
+  assert.equal((source.match(/startChildAgent\(/g) ?? []).length, 4,
+    '四处派工/改写/对话/单发都必须走兼容层（少一处就有一处会崩）')
+  // 适配层才是唯一碰执行面的地方
+  const adapter = readFileSync(join(ROOT, 'runtime', 'adapters', 'dsh', 'subagent-start.mjs'), 'utf8')
+  assert.match(adapter, /export async function startChildAgent/)
 })

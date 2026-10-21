@@ -1,0 +1,51 @@
+{
+  "schema": 1,
+  "patchDir": "patches/dsh",
+  "origin": {
+    "repo": "https://github.com/deepseek-ai/deepseek-harness.git",
+    "note": "上游官方仓库：我们无法推分支，所以补丁只能由 Legion 持有（见 patches/dsh/README.md）"
+  },
+  "patches": [
+    {
+      "slug": "subagent-claude-code-terminal-text",
+      "file": "0001-subagent-claude-code-accept-terminal-assistant-text.patch",
+      "summary": "subagent-claude-code：success 但 result 为空时回退到累积的 assistant 文本，避免把成功判成无结果",
+      "upstream": {
+        "baseCommit": "687f282e8625c6b8d11ff58211a90524be2e4317",
+        "baseVersion": "0.2.1-rc.2",
+        "sourceBranch": "legion/compat-claude-provider",
+        "legacyLocalCommit": "194eae5b6eb9ad8ee0b6a0251f6780f053dd6823"
+      },
+      "deployed": {
+        "package": "dsh-subagent-claude-code",
+        "markers": [
+          "assistantText",
+          "end_turn"
+        ]
+      },
+      "sha256": "86222b0b6b72e6af990c6caaef64ea550b3971425fb3949e0d715dd65dc6dd27",
+      "bytes": 3116,
+      "targets": [
+        "packages/subagent/subagent-claude-code/src/run.ts",
+        "packages/subagent/subagent-claude-code/tests/subagent-claude-code.spec.ts"
+      ],
+      "branch": "legion/compat-claude-provider"
+    }
+  ],
+  "installed": {
+    "asarPath": "D:\\software\\dsh\\resources\\app.asar",
+    "appVersion": "0.2.1-rc.2",
+    "asarSha256": "47874618bf5b3011fcaac10cd4c85f69da333e70d4f99b921207c78d0999512a"
+  },
+  "deployed": {
+    "profileRoot": "C:\\Users\\11150\\.dsh\\profiles\\desktop",
+    "version": "0.2.1-rc.2",
+    "libPath": "C:\\Users\\11150\\.dsh\\profiles\\desktop\\node_modules\\@deepseek-ai\\dsh-subagent-claude-code\\lib\\index.js",
+    "libSha256": "9a12934acbd23ffbd3e58a215d4e1699f783cb16b9bbceaab1733b7d83edc035",
+    "markersPresent": [
+      "assistantText",
+      "end_turn"
+    ]
+  },
+  "recordedAt": "2026-10-21T03:56:00.582Z"
+}

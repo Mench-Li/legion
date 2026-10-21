@@ -38,9 +38,10 @@ import { artifactFailureComment, rebuildMergedArtifacts, type ArtifactBuildRecei
 import { buildNormSections, type NormFile } from './norms.js'
 import { buildChatAnswerPrompt, chatIdentityFor, type ChatCtxMsg } from './chatResponder.js'
 import { classifyChatError } from './chatErrorClassifier.js'
-// ★ 子代理启动走**兼容层**：编译期类型（dsh-subagent 0.2.1-alpha.1）与运行期服务
-//   （0.2.1-rc.2 只有 startActivation）不是同一代 —— 见 subagentStart.ts 文件头。
-import { startChildAgent, type ChildRun } from './subagentStart.js'
+// ★ 子代理启动走**适配层**：编译期类型与运行期服务可能不是同一代（0.2.1-alpha 只有
+//   `start`、0.2.1-rc 只有 `startActivation`）—— 两代差异只在适配层吸收一次，
+//   见 runtime/adapters/dsh/subagent-start.mjs 文件头。产品层不出现执行面记号（PRT-108）。
+import { startChildAgent, type ChildRun } from '../../runtime/adapters/dsh/subagent-start.mjs'
 import { gatherChatContext, type AttachmentRef, type ChatContextBundle } from './chatContext.js'
 import { pluginConfigLogLines } from './config.js'
 import {

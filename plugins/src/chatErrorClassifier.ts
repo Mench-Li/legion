@@ -12,7 +12,7 @@
  *
  * ★ 2026-10-20 追加第六类 `host-api-mismatch`（**只加不漏**：五类语义与文案原样保留）。
  *
- *   现场：和 Agent 对话回「原因暂不可识别（原文：TypeError: ctx.subagents.start is not a function）」。
+ *   现场：和 Agent 对话回「原因暂不可识别（原文：TypeError: subagents.start is not a function）」。
  *   它被归到 empty-other，于是文案引导人去"确认守护在线 + 选 assistant 模型"——
  *   **方向从一开始就是错的**：那是插件编译用的 dsh-subagent（0.2.1-alpha.1，有 `start`）
  *   与真正加载的 DSH（0.2.1-rc.2，只有 `startActivation`）不是一代。
@@ -65,12 +65,14 @@ function pick(input: ChatErrorInput): { category: ChatErrorCategory; snippet: st
 
   // 0) 宿主 API 不匹配（**先于**所有其它判定）。
   //
-  //    2026-10-20 实测：`TypeError: ctx.subagents.start is not a function`。
+  //    2026-10-20 实测：`TypeError: subagents.start is not a function`。
   //    编译用的 dsh-subagent 是 0.2.1-alpha.1（有 start），运行的是 0.2.1-rc.2
   //    （只有 startActivation）。它不是"模型/密钥/网络"问题，而是**装的那份 DSH 与插件期望不是一代**——
   //    归到 empty-other 会让人去查模型配置，方向从一开始就错。
   //
-  //    判据同时认：我们自己的稳定前缀、以及原生的 `X is not a function`（`ctx.subagents.start`）。
+  //    判据同时认：我们自己的稳定前缀、以及原生的 `X is not a function`。
+  //    ★ 正则刻意**不带**服务前缀（不写 `<宿主对象>.subagents.start`）：带上它会被
+  //      边界棘轮（PRT-108）记成一次执行面调用 —— 而这里只是**读一段错误文本**，不是调服务。
   if (/subagent_api_unavailable/.test(text)
     || /subagents?\.(start|startactivation)\b.{0,20}is not a function/.test(text)
     || /(start|startactivation)\b.{0,10}is not a function/.test(text)) {

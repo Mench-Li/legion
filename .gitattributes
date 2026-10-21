@@ -1,0 +1,15 @@
+# 补丁文件必须是**逐字节**可应用的。
+#
+# Windows 上 `core.autocrlf=true` 会把检出里的文本行尾换成 CRLF，而
+# `git apply` / `git format-patch` 的补丁体是 LF 语义的：一旦被转换，
+# 补丁要么应用失败（"patch does not apply"），要么应用出多余的行尾改动。
+#
+# ★ 这里同时锁 `-text`（不做任何行尾归一）：`patches/dsh/base.json` 里记录的
+#   sha256 就是按文件字节算的，行尾一变，基线立刻与文件对不上 ——
+#   那会被 `scripts/dsh-patch.mjs --check` 正确地报成"补丁被改动过"，
+#   但根因只是行尾，排查会绕远路（本仓踩过：346 字节的假"被修改"）。
+*.patch -text
+*.diff -text
+
+# 补丁的基线（含按字节算的哈希）同理
+patches/dsh/base.json -text

@@ -78,7 +78,7 @@ export async function executeExternalAgent({
   }
   const caps = provider.capabilities
   if (caps === null || typeof caps !== 'object' || typeof caps.outputSchema !== 'boolean'
-    || typeof caps.agentOptions !== 'boolean' || typeof caps.toolFilter !== 'boolean') {
+    || typeof caps.toolFilter !== 'boolean') {
     return denied(EXTERNAL_AGENT_CODES.PROVIDER_MISSING, `DSH provider ${name} 没有可核验的能力描述`, { provider: name })
   }
   if (expectedCapabilities !== null) {

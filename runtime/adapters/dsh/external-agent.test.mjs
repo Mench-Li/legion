@@ -68,6 +68,33 @@ test('兼容当前 DSH provider.start API，并把已核验的父工作目录传
   assert.equal(calls[0].signal?.aborted, false)
 })
 
+test('外部 provider 只声明实际核验的能力时仍可启动', async () => {
+  let started = 0
+  const provider = {
+    name: 'claude-code',
+    config: { permissionMode: 'acceptEdits' },
+    capabilities: { outputSchema: false, toolFilter: false },
+    async start() {
+      started += 1
+      return {
+        id: 'claude-run-1',
+        result: Promise.resolve({ stopReason: 'completed', output: [{ type: 'text', text: 'done' }] }),
+        async dispose() {},
+      }
+    },
+  }
+  const subagents = { getProvider(name) { return name === provider.name ? provider : undefined } }
+  const out = await executeExternalAgent({
+    subagents, providerName: 'claude-code', parent, workdir: process.cwd(), prompt: 'clarify requirements',
+    policyPreflightPassed: true, expectedCapabilities: { outputSchema: false, toolFilter: false },
+    expectedPermissionMode: 'acceptEdits', returnRun: true,
+  })
+
+  assert.equal(out.ok, true)
+  assert.equal(out.run.id, 'claude-run-1')
+  assert.equal(started, 1)
+})
+
 test('cwd 不匹配时不启动 provider', async () => {
   const f = fixture()
   const out = await executeExternalAgent({ subagents: f.subagents, providerName: 'codex', parent, workdir: `${process.cwd()}-other`, prompt: 'task', policyPreflightPassed: true, expectedPermissionMode: 'approve-for-me' })

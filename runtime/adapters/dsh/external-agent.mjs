@@ -76,10 +76,16 @@ export async function executeExternalAgent({
   if (provider === undefined || provider.name !== name) {
     return denied(EXTERNAL_AGENT_CODES.PROVIDER_MISSING, `DSH provider 未注册：${name}`, { provider: name })
   }
-  const caps = provider.capabilities
-  if (caps === null || typeof caps !== 'object' || typeof caps.outputSchema !== 'boolean'
-    || typeof caps.toolFilter !== 'boolean') {
-    return denied(EXTERNAL_AGENT_CODES.PROVIDER_MISSING, `DSH provider ${name} 没有可核验的能力描述`, { provider: name })
+  const declaredCaps = provider.capabilities
+  const caps = {}
+  for (const key of ['outputSchema', 'toolFilter']) {
+    const value = declaredCaps !== null && typeof declaredCaps === 'object' ? declaredCaps[key] : undefined
+    if (typeof value === 'boolean') caps[key] = value
+    // A missing capability declaration cannot grant a capability. When the
+    // frozen workflow explicitly requires `false`, treat it as unsupported;
+    // required capabilities still need an explicit `true` declaration.
+    else if (expectedCapabilities?.[key] === false) caps[key] = false
+    else return denied(EXTERNAL_AGENT_CODES.PROVIDER_MISSING, `DSH provider ${name} 没有可核验的 ${key} 能力描述`, { provider: name, capability: key })
   }
   if (expectedCapabilities !== null) {
     for (const key of ['outputSchema', 'toolFilter']) {

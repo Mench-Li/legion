@@ -88,6 +88,7 @@ import { createWorkspace, type SpaceBinding } from './workspace.js'
 // ★ BUG-027：派工用哪个模型 —— 判定是纯函数（`plugins/tests/dispatch-model.test.mjs` 守着），
 //   这里只负责取数与落读数（日志 / 派工活动）。
 import { decideDispatchModel, parseBindingResolution, type BindingReading } from './dispatchModel.js'
+import { dshWorkflowCapabilityMismatch } from './workflowCapabilities.js'
 import { createAcceptance } from './acceptance.js'
 import { createHandoff, isSliceTesterTask } from './handoff.js'
 import { createSliceOrchestration } from './sliceOrchestration.js'
@@ -2618,11 +2619,13 @@ function spaceWorker(ctx: AppContext, config: Config): void {
             const registered = subagentProvider(ctx, selectedProvider)
             if (registered === undefined) throw new Error(`冻结配置指定的 DSH provider 未注册：${selectedProvider}`)
             nativeProviderCapabilities = registered.capabilities
-            if (registered.capabilities.outputSchema !== frozenConfig.capabilities.outputSchema
-              || registered.capabilities.toolFilter !== frozenConfig.capabilities.toolFilter
-              || frozenConfig.capabilities.outputSchema !== true
-              || (config.denyTools.length > 0 && frozenConfig.capabilities.toolFilter !== true)) {
-              throw new Error(`冻结配置与 DSH provider ${selectedProvider} 的结构化输出/工具过滤能力不一致`)
+            const capabilityMismatch = dshWorkflowCapabilityMismatch(
+              registered.capabilities,
+              frozenConfig.capabilities,
+              config.denyTools.length > 0,
+            )
+            if (capabilityMismatch !== null) {
+              throw new Error(`冻结配置与 DSH provider ${selectedProvider} 的能力不一致：${capabilityMismatch}`)
             }
           }
           let modelAgentOptions: Record<string, string> | null = null
@@ -4623,3 +4626,4 @@ function superviseSpaces(ctx: AppContext, config: Config): void {
 
   ctx.logger?.info?.(`[${name}] 多空间监督者启动（scopes=${config.scopes === 'auto' ? 'auto' : (Array.isArray(config.scopes) ? config.scopes.join(',') : String(config.scopes))}，每 ${period}ms 对齐，主 scope=${config.scope}）`)
 }
+

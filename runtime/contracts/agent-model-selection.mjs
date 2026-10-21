@@ -18,10 +18,18 @@ export function agentOptionsForFrozenModel({ modelRef, resolvedModel, agentToolC
   if (providerCapabilities?.agentOptions !== true) {
     throw new TypeError('所选 DSH provider 不支持 agentOptions，拒绝忽略冻结模型')
   }
+  // DSH's DeepSeek V4 model catalog accepts off/low/high/max, not the generic
+  // profile default `medium`. Keep existing frozen tasks runnable by mapping
+  // that one unsupported generic value to the nearest supported effort.
+  const reasoningEffort = resolvedModel.provider === 'fjd-ds'
+    && /^deepseek-v4-/i.test(resolvedModel.model)
+    && resolvedModel.reasoningEffort === 'medium'
+    ? 'low'
+    : resolvedModel.reasoningEffort
   return Object.freeze({
     provider: resolvedModel.provider,
     model: resolvedModel.model,
-    ...(typeof resolvedModel.reasoningEffort === 'string' && resolvedModel.reasoningEffort !== ''
-      ? { reasoningEffort: resolvedModel.reasoningEffort } : {}),
+    ...(typeof reasoningEffort === 'string' && reasoningEffort !== ''
+      ? { reasoningEffort } : {}),
   })
 }

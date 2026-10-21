@@ -2637,6 +2637,13 @@ function spaceWorker(ctx: AppContext, config: Config): void {
           } catch (error) {
             throw new Error(`冻结模型配置不可用于 provider ${selectedProvider}：${String(error)}`)
           }
+          if (resolvedModel !== null && modelAgentOptions !== null
+            && typeof resolvedModel.reasoningEffort === 'string'
+            && resolvedModel.reasoningEffort !== modelAgentOptions.reasoningEffort) {
+            const compatibilityNote = `冻结模型 ${resolvedModel.provider}/${resolvedModel.model} 的 reasoningEffort=${resolvedModel.reasoningEffort} 不受 DSH 支持；本次按模型目录使用 ${modelAgentOptions.reasoningEffort}`
+            log(`${t.id} ${compatibilityNote}`)
+            activity('dispatch', t.id, compatibilityNote)
+          }
           // ★★ BUG-027：没有冻结模型时，按 **(空间, 岗位)** 去中枢读绑定。
           //
           //    判定的顺序与措辞**全在纯模块里**（`dispatchModel.ts`）：冻结优先、

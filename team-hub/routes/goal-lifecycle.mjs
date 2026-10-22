@@ -72,6 +72,9 @@ export function createGoalLifecycleRoutes({
           // 省略/空串 = **不绑定**（默认，语义与今天一致）；给了就必须是已登记且就绪的节点，
           // 否则发布即拒（三条纪律见 publishGoalRecord）。
           const agentNodeId = typeof body.agentNodeId === 'string' && body.agentNodeId.trim() !== '' ? body.agentNodeId.trim() : null
+          // 2026-10-21：body.orchestration —— 默认 pipeline（阶段来自流水线，编排只决定分配）；
+          // `custom-dag` 是唯一保留「按定义拓扑建链」的出口，必须显式选择。
+          const orchestration = body.orchestration === 'custom-dag' ? 'custom-dag' : 'pipeline'
           return publishGoalRecord(
             targetScope,
             objective,
@@ -80,6 +83,7 @@ export function createGoalLifecycleRoutes({
             docSync,
             body.workflowDefinition ?? null,
             agentNodeId,
+            orchestration,
           )
         })
       },

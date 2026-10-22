@@ -214,7 +214,7 @@ const drive = async (router, path, body) => {
 test('⑤ ★★★ 发布时**作用域回落**：`body.scope` 有就用（trim），没有就用 hub 给的那个', async () => {
   const { router, calls } = spyRouter()
   await drive(router, '/api/goal', { by: 'general', objective: 'O' })
-  assert.deepEqual(calls.publish[0], ['scope-from-hub', 'O', 'chain', 'general', false, null, null],
+  assert.deepEqual(calls.publish[0], ['scope-from-hub', 'O', 'chain', 'general', false, null, null, 'pipeline'],
     '★★★ 没有 body.scope 时必须回落到 handleWrite 递进来的 scope')
   await drive(router, '/api/goal', { by: 'general', objective: 'O', scope: '  other  ' })
   assert.equal(calls.publish[1][0], 'other', '★★ 给了 scope 就用它，且要去空白')
@@ -257,6 +257,19 @@ test('⑤ ★★★ 发布时**作用域回落**：`body.scope` 有就用（trim
     await drive(router, '/api/goal', { by: 'general', objective: 'O', agentNodeId: v })
     assert.equal(calls.publish.at(-1)[6], null,
       `★★ agentNodeId=${JSON.stringify(v)} 必须当作"不绑定"（null），不当成绑定空串`)
+  }
+
+  // ★★ 2026-10-21：publishGoalRecord 的**第 8 个位置**是 orchestration（编排语义）。
+  //    默认必须是 `pipeline`（阶段来自流水线、Agent 配置只决定分配）——这是本次拆开的
+  //    那条语义反转，缺省值写错会让每个没显式选择的发布都退回旧行为。
+  //    只有显式 `custom-dag` 才按具名定义的拓扑建链。
+  assert.equal(calls.publish[0][7], 'pipeline', '★ 没给 orchestration ⇒ 默认 pipeline（阶段来自流水线）')
+  await drive(router, '/api/goal', { by: 'general', objective: 'O', orchestration: 'custom-dag' })
+  assert.equal(calls.publish.at(-1)[7], 'custom-dag', '★★ 显式 custom-dag 必须原样搬过去')
+  for (const v of ['pipeline', 'dag', 'CUSTOM-DAG', 1, true, null, {}]) {
+    await drive(router, '/api/goal', { by: 'general', objective: 'O', orchestration: v })
+    assert.equal(calls.publish.at(-1)[7], 'pipeline',
+      `★★ orchestration=${JSON.stringify(v)} 必须是 pipeline（只认字面量 custom-dag）`)
   }
 })
 

@@ -182,6 +182,9 @@ import { createContextSource, SOURCE_TRUST } from '../runtime/contracts/context.
 // 与运行仓储里用的是**同一个**函数：两处各写一遍判定，迟早会出现
 // "接口说有下一岗位、交接时却按链尾收口"这种不一致。
 import { resolveNextPost } from '../orchestrator/pipeline/index.mjs'
+// 「软件流水线 × Agent 分配」的解耦层：阶段集合由流水线决定，编排配置只决定
+// 每个岗位由哪个 Agent / 模型 / 节点执行。纯函数，不碰数据库。
+import { isGoalPlan, planGoal } from '../orchestrator/assignment/index.mjs'
 import { columnExists as columnExistsImpl, ensureColumn as ensureColumnImpl } from './schema-util.mjs'
 import { createEventDeliveryStore } from './event-delivery.mjs'
 import {
@@ -2032,6 +2035,19 @@ ensureColumn('goal', 'docSync', 'docSync INTEGER DEFAULT 0')
 //    ★ 默认必须是 NULL：绑定是硬绑定（认领方必须带同一个 agentNodeId），
 //      对没配 agentNodeId 的守护来说，绑定等于"这条链一件都领不走"。
 ensureColumn('goal', 'agentNodeId', 'agentNodeId TEXT DEFAULT NULL')
+// 8) 「软件流水线 × Agent 分配」的冻结列（2026-10-21）。
+//
+//    为什么在 goal 上而不是只靠任务快照：任务快照是**每一环**的读数，
+//    而「这条目标当时是一条什么样的流水线、每个岗位归谁」是一个**目标级**事实。
+//    只读任务快照时，一个被取消/重建的任务链会让这个事实变得不可回答。
+//
+//    orchestration：pipeline（阶段来自流水线 + 审查闭环）/ custom-dag（显式按定义拓扑）/
+//    none（没配审查闭环的普通链，workflow_snapshot 为 NULL）。
+//    NULL = 本列上线前发布的目标，按任务快照派生（有 reviewWorkflow → custom-dag）。
+ensureColumn('goal', 'orchestration', 'orchestration TEXT DEFAULT NULL')
+ensureColumn('goal', 'pipeline_snapshot', 'pipeline_snapshot TEXT DEFAULT NULL')
+ensureColumn('goal', 'assignment_snapshot', 'assignment_snapshot TEXT DEFAULT NULL')
+ensureColumn('goal', 'workflow_snapshot', 'workflow_snapshot TEXT DEFAULT NULL')
 ensureColumn('tasks', 'docSync', 'docSync INTEGER DEFAULT 0')
 ensureColumn('tasks', 'fileDomain', 'fileDomain TEXT')
 // 6) 并行任务文件冲突治理：写入调度状态（unplanned/waiting-file/reserved/reconciling/released）
@@ -2220,9 +2236,17 @@ function normalizeAgentWorkflow(scope, raw, stages) {
   }
   const suppliedTools = raw.stageTools ?? {}
   const selectedRoleSet = new Set([designRole, implementationRole, reviewRole])
-  const unknownToolRoles = Object.keys(suppliedTools).filter((role) => !selectedRoleSet.has(role))
-  if (unknownToolRoles.length > 0) throw new Error(`workflow.stageTools 包含未选择的阶段：${unknownToolRoles.join('、')}`)
-  for (const role of [designRole, implementationRole, reviewRole]) {
+  // ★ 2026-10-21：`stageTools` 现在可以覆盖**任意流水线岗位**，不再只限审查闭环的三个角色。
+  //   理由：本页只决定「每个岗位由谁执行」，那么测试、部署、拆解这些岗位同样需要能配
+  //   （否则"未配置 = DSH 默认"之外，用户没有办法把 tester 换成别的 Agent）。
+  //   仍然拒绝**流水线里没有**的岗位：那种配置永远不会被用到，存下来只会让人以为配好了。
+  const unknownToolRoles = Object.keys(suppliedTools).filter((role) => !byRole.has(role))
+  if (unknownToolRoles.length > 0) {
+    throw new Error(`workflow.stageTools 包含流水线里没有的岗位：${unknownToolRoles.join('、')}`)
+  }
+  // 三个闭环角色即使没显式给，也要生成一条（沿用阶段自己的配置），
+  // 这样下游读 `stageTools[role]` 的地方不必处理"缺这一条"。
+  for (const role of new Set([...selectedRoleSet, ...Object.keys(suppliedTools)])) {
     const configured = suppliedTools[role]
     if (configured !== undefined && (configured === null || typeof configured !== 'object' || Array.isArray(configured))) {
       throw new Error(`workflow.stageTools.${role} 必须是对象`)
@@ -2603,7 +2627,7 @@ function nextGoalId() {
  * 目标级分析文档命名空间：新目标分配 docsDir = `docs/<goalId>`（阶段产物文档进目标独立目录，
  * 跨目标分析前缀可安全并行）；本列上线前已发布的目标 docsDir=NULL，沿用根 docs/ 固定槽位（旧链兼容）。
  */
-function publishGoalRecord(targetScope, objective, mode = 'chain', by = 'general', docSync = false, workflowDefinitionRef = null, agentNodeId = null) {
+function publishGoalRecord(targetScope, objective, mode = 'chain', by = 'general', docSync = false, workflowDefinitionRef = null, agentNodeId = null, orchestration = 'pipeline') {
   return withTx(() => {
     const rawMode = mode === 'slice' ? 'slice' : 'chain'
     let workflowDefinition = null
@@ -2650,18 +2674,65 @@ function publishGoalRecord(targetScope, objective, mode = 'chain', by = 'general
     //   > 在**配置恰好一致**的时候是同一个东西 —— 区别只在它不一致的那次，
     //   > 而那次失败要等到认领才显形。
     //
+    // ── 「流水线决定阶段、编排决定分配」（2026-10-21）──────────────────────
+    //
+    // 旧实现在这里读 `effectiveWorkflow`，然后让 `createGoalChain` 把**整条链**
+    // 换成工作流定义里的阶段列表 —— 于是 T-212 只冻结了「需求 → 编码 → 审查」，
+    // 空间里启用的测试执行与部署根本没有进入这条链。
+    //
+    //   > 一个「编排定义决定阶段集合」的实现，
+    //   > 与一个「流水线决定阶段集合、编排只决定谁执行」的实现，
+    //   > 在定义恰好等于流水线的时候是同一个东西 ——
+    //   > 区别只在它们不一致的那次，而那次表现为「测试和部署凭空消失了」。
+    //
+    // 现在：`planGoal()` 先按流水线算出阶段集合，再把编排配置当成**按岗位的
+    // 分配覆盖项**叠上去；未覆盖的岗位显式记为 dsh-default。
+    // `orchestration === 'custom-dag'` 是唯一保留旧语义的出口（必须显式选择）。
+    const pipeline = readPipeline(targetScope)
+    const roster = db.prepare('SELECT role, name, kind, avatar FROM roster WHERE scope = ? ORDER BY sort, role').all(targetScope)
+    let plan = null
+    let effectiveWorkflow = null
+    if (rawMode === 'chain' && orchestration !== 'custom-dag') {
+      const profile = workflowDefinition !== null
+        ? definitionAsAssignmentProfile(workflowDefinition)
+        : (pipeline.workflow ?? null)
+      plan = planGoal({
+        pipeline,
+        roster,
+        profile,
+        profileSource: workflowDefinition !== null ? 'definition' : 'space-review-workflow',
+        agentNodeId: boundNodeId,
+      })
+      for (const warning of plan.warnings) console.error(`[team-hub] 目标编排提示：${warning.message}`)
+      // 工作流实例的每一环都要求独立 worktree（worker 侧硬要求，见 plugins/src/index.ts）。
+      // 在发布时就说清楚，好过等第一环认领时才发现"这个空间的 isolate 关着"。
+      if (plan.workflow !== null && pipeline.runtime.isolate === false) {
+        throw Object.assign(
+          new Error('该空间关闭了 worktree 隔离（runtime.isolate=false），而审查闭环的每个阶段都必须在独立 worktree 里执行；请先开启隔离'),
+          { code: 'AGENT_WORKFLOW_REQUIRES_ISOLATION', statusCode: 409 },
+        )
+      }
+    } else if (orchestration === 'custom-dag') {
+      if (workflowDefinition === null) {
+        throw Object.assign(new Error('custom-dag 编排必须指定一个具名工作流定义；普通目标请使用默认的 pipeline 编排'), {
+          code: 'AGENT_WORKFLOW_DEFINITION_REQUIRED', statusCode: 400,
+        })
+      }
+      // 具名 DAG 保留旧语义：阶段来自定义拓扑（并行/汇合都能表达）。
+      effectiveWorkflow = workflowDefinition
+    }
+
     // 两种来源的形状不同，所以要分别取：
-    //   · 具名定义     ⇒ `stages[].nodeId`
-    //   · 空间级工作流 ⇒ `stageTools[role].nodeId`
-    //   （第一版还漏了空间级这一支 —— 而它才是默认形态。见下面 effectiveWorkflow 的注释。）
-    const effectiveWorkflow = workflowDefinition !== null
-      ? workflowDefinition
-      : (rawMode === 'chain' ? (readPipeline(targetScope).workflow ?? null) : null)
-    const rawNodeIds = effectiveWorkflow === null || effectiveWorkflow === undefined
-      ? []
-      : (Array.isArray(effectiveWorkflow.stages)
-        ? effectiveWorkflow.stages.map((stage) => stage?.nodeId)
-        : Object.values(effectiveWorkflow.stageTools ?? {}).map((tool) => tool?.nodeId))
+    //   · 计划           ⇒ 已收敛的唯一节点（`effectiveNodeId`）
+    //   · 具名定义 DAG   ⇒ `stages[].nodeId`
+    //   · 空间级工作流   ⇒ `stageTools[role].nodeId`
+    const rawNodeIds = plan !== null
+      ? (plan.effectiveNodeId === null ? [] : [plan.effectiveNodeId])
+      : (effectiveWorkflow === null
+        ? Object.values(pipeline.workflow?.stageTools ?? {}).map((tool) => tool?.nodeId)
+        : (Array.isArray(effectiveWorkflow.stages)
+          ? effectiveWorkflow.stages.map((stage) => stage?.nodeId)
+          : Object.values(effectiveWorkflow.stageTools ?? {}).map((tool) => tool?.nodeId)))
     const stageNodeIds = [...new Set(rawNodeIds
       .map((id) => (typeof id === 'string' && id.trim() !== '' ? id.trim() : null))
       .filter((id) => id !== null))]
@@ -2686,11 +2757,29 @@ function publishGoalRecord(targetScope, objective, mode = 'chain', by = 'general
 
     const t = now()
     const goalId = nextGoalId()
-    db.prepare('INSERT INTO goal (id, scope, objective, status, version, mode, createdAt, updatedAt, endedAt, docsDir, docSync, agentNodeId) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)')
-      .run(goalId, targetScope, objective.trim(), 'active', 1, rawMode, t, t, null, `docs/${goalId}`, docSync === true ? 1 : 0, boundNodeId)
-    const chain = createGoalChain(goalId, targetScope, objective.trim(), rawMode, workflowDefinition)
+    // 冻结三件事（2026-10-21）：这一版流水线、每个岗位归谁、以及（如果配了）审查闭环。
+    // 三者分开落列，读的人不必从任务快照里反推「当时这条目标是什么形状」。
+    const frozenOrchestration = plan !== null ? 'pipeline' : (effectiveWorkflow !== null ? 'custom-dag' : 'none')
+    db.prepare(`INSERT INTO goal
+      (id, scope, objective, status, version, mode, createdAt, updatedAt, endedAt, docsDir, docSync, agentNodeId,
+       orchestration, pipeline_snapshot, assignment_snapshot, workflow_snapshot)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+      .run(
+        goalId, targetScope, objective.trim(), 'active', 1, rawMode, t, t, null, `docs/${goalId}`,
+        docSync === true ? 1 : 0, boundNodeId,
+        frozenOrchestration,
+        JSON.stringify({ version: pipeline.version, mode: rawMode, stages: plan?.pipeline.stages ?? pipeline.stages.map((s) => ({ role: s.role, label: s.label, next: s.next, gate: s.gate, artifact: s.artifact, sort: s.sort })) }),
+        plan === null ? null : JSON.stringify({ stages: plan.assignments, effectiveNodeId: plan.effectiveNodeId, review: plan.review }),
+        // 先留空：真正要冻的是**解析后**的那一份（含工具注册项、能力位、模型解析结果），
+        // 它在 createGoalChain 里才生成；见下面那次 UPDATE。
+        null,
+      )
+    const chain = createGoalChain(goalId, targetScope, objective.trim(), rawMode, plan ?? effectiveWorkflow, frozenOrchestration === 'custom-dag' ? 'custom-dag' : 'pipeline')
     if (chain.workflowSnapshot !== null && chain.workflowSnapshot !== undefined) {
       const createdAtMs = new Date(t).getTime()
+      // ★ 目标级快照与实例快照必须是**同一份**：两处各算一次，迟早会出现
+      //   「目标说 A 版本、实例说 B 版本」这种无法回答"当时到底跑的哪个"的局面。
+      db.prepare('UPDATE goal SET workflow_snapshot=? WHERE id=?').run(JSON.stringify(chain.workflowSnapshot), goalId)
       db.prepare(`INSERT INTO agent_workflow_instances
         (id, scope, goal_id, definition_id, definition_version, snapshot_json, status, created_at_ms, updated_at_ms)
         VALUES (?, ?, ?, ?, ?, ?, 'active', ?, ?)`)
@@ -2757,12 +2846,13 @@ function publishGoalRecord(targetScope, objective, mode = 'chain', by = 'general
         } : {}),
       })),
       note: chain.workflowSnapshot
-        ? `目标创建时冻结跨 Agent 工作流（${chain.workflowSnapshot.workflowDefinitionSnapshot?.name ?? `${chain.workflowSnapshot.designRole} → ${chain.workflowSnapshot.implementationRole} → ${chain.workflowSnapshot.reviewRole}`}，${chain.count} 个阶段）`
+        ? `目标创建时冻结${frozenOrchestration === 'custom-dag' ? '跨 Agent 工作流' : '软件流水线 + Agent 分配'}（${chain.workflowSnapshot.workflowDefinitionSnapshot?.name ?? `${chain.workflowSnapshot.designRole} → ${chain.workflowSnapshot.implementationRole} → ${chain.workflowSnapshot.reviewRole}`}，${chain.count} 个阶段）`
         : `目标创建时冻结（编队 ∩ 流水线，${chain.mode} 模式，${chain.count} 个阶段）`,
     }, { scope: targetScope, actor: by })
 
     audit(by, targetScope, 'goal:publish', goalId, {
       goal: goalId, objective: objective.trim(), mode: chain.mode, stages: chain.count,
+      orchestration: frozenOrchestration,
       workflowDefinition: workflowDefinition === null ? null : { id: workflowDefinition.id, version: workflowDefinition.version },
     }, goalId)
     return {
@@ -2770,9 +2860,21 @@ function publishGoalRecord(targetScope, objective, mode = 'chain', by = 'general
       stages: chain.count,
       mode: chain.mode,
       objective: objective.trim(),
+      orchestration: frozenOrchestration,
       workflowDefinition: workflowDefinition === null ? null : { id: workflowDefinition.id, version: workflowDefinition.version },
       // 冻结结果的引用：调用方与验收用例要能一眼看到"计划被冻住了、冻的是第几版"。
       teamPlan: { id: frozen.plan.id, version: frozen.plan.version, stages: frozen.plan.stages.length },
+      // 这一条链**为什么长这样**：阶段来自流水线，每一环归谁在 assignment 里，
+      // 有没有审查闭环看 review。发布弹窗与验收用例共用这一份读数。
+      frozen: {
+        pipelineVersion: plan?.pipeline.version ?? pipeline.version,
+        stages: (plan?.pipeline.stages ?? pipeline.stages).map((stage) => stage.role),
+        assignments: plan === null ? null : Object.fromEntries(
+          Object.entries(plan.assignments).map(([role, item]) => [role, { source: item.source, agentToolConfig: item.agentToolConfig?.id ?? null }]),
+        ),
+        review: plan?.review ?? null,
+        effectiveNodeId: plan?.effectiveNodeId ?? null,
+      },
     }
   })
 }
@@ -4985,6 +5087,8 @@ function submitAgentWorkflowReview({ taskId, by, scope, findings, summary, evide
     }
     db.prepare('UPDATE tasks SET agent_selection_snapshot=? WHERE id=?').run(JSON.stringify(nextSnapshot), reworkTask.id)
     const generatedStageTaskIds = [reworkTask.id]
+    /** 本次返工重建出的「阶段 → 新任务 id」。线性实例要把下游重指到这里。 */
+    const taskByStageId = new Map([[targetStageId, reworkTask.id]])
     if (workflow.workflowDefinitionSnapshot !== null && workflow.workflowDefinitionSnapshot !== undefined) {
       const outgoingByStageId = new Map(workflow.workflowDefinitionSnapshot.stages.map((stage) => [stage.id, []]))
       for (const edge of workflow.workflowDefinitionSnapshot.edges) outgoingByStageId.get(edge.from).push(edge.to)
@@ -4996,7 +5100,26 @@ function submitAgentWorkflowReview({ taskId, by, scope, findings, summary, evide
         descendants.add(stageId)
         pending.push(...(outgoingByStageId.get(stageId) ?? []))
       }
-      const taskByStageId = new Map([[targetStageId, reworkTask.id]])
+      // ★ 线性流水线实例（`kind === 'pipeline'`）：只重建「返工目标 → 审查」这一段。
+      //
+      //   旧逻辑对任何带 `workflowDefinitionSnapshot` 的实例都会重建目标阶段的**全部**下游。
+      //   在三阶段定义里下游只有 review，所以看不出问题；但八阶段流水线实例里
+      //   `coder` 的下游是 reviewer → tester → devops —— 重建会**复制出第二套测试与部署**，
+      //   而它们等的其实还是同一次审查。
+      //
+      //   审查之后的阶段不重建，改为把它们的 `blockedBy` 从**旧审查任务**指向**新审查任务**
+      //   （见下面「下游重指」）。这样它们既不会抢在返工之前开跑，也不会多出一份。
+      const pipelineInstance = workflow.kind === 'pipeline'
+      const order = Array.isArray(workflow.topologicalStageIds) ? workflow.topologicalStageIds : []
+      const reviewStageId = workflow.reviewStageId ?? workflow.reviewRole
+      const reviewIndex = order.indexOf(reviewStageId)
+      const targetIndex = order.indexOf(targetStageId)
+      if (pipelineInstance) {
+        for (const stageId of [...descendants]) {
+          const index = order.indexOf(stageId)
+          if (index < 0 || index <= targetIndex || (reviewIndex >= 0 && index > reviewIndex)) descendants.delete(stageId)
+        }
+      }
       const existingTasks = db.prepare('SELECT * FROM tasks WHERE scope=? AND goalId=? ORDER BY createdAt, rowid')
         .all(task.scope, task.goalId)
         .map(rowToTask)
@@ -5052,6 +5175,30 @@ function submitAgentWorkflowReview({ taskId, by, scope, findings, summary, evide
         db.prepare('UPDATE tasks SET agent_selection_snapshot=? WHERE id=?').run(JSON.stringify(stageSnapshot), created.id)
         taskByStageId.set(stageId, created.id)
         generatedStageTaskIds.push(created.id)
+      }
+    }
+    // ── 下游重指（仅线性流水线实例）────────────────────────────────────────
+    //
+    // 返工审查任务已经预建，但下游（tester / devops …）的 `blockedBy` 仍然指着
+    // **旧审查任务**。不重指的话有两条后果，而且方向完全相反：
+    //   · 旧审查任务下面马上会被置 done ⇒ 下游在返工还没做完时就解锁（测的是被返工的版本）；
+    //   · 若旧审查不置 done，下游就永远等一个不会再有结论的任务。
+    //
+    // 重指之后语义是：下游等的是**这一代**审查通过。
+    if (workflow.kind === 'pipeline') {
+      const reviewStageId = workflow.reviewStageId ?? workflow.reviewRole
+      const newReviewTaskId = taskByStageId.get(reviewStageId) ?? reworkTask.id
+      if (newReviewTaskId !== task.id) {
+        const downstreamRows = db.prepare('SELECT * FROM tasks WHERE scope=? AND goalId=? ORDER BY createdAt, rowid')
+          .all(task.scope, task.goalId)
+        for (const row of downstreamRows) {
+          if (row.id === task.id || generatedStageTaskIds.includes(row.id)) continue
+          const blockedBy = parseJson(row.blockedBy, [])
+          if (!Array.isArray(blockedBy) || !blockedBy.includes(task.id)) continue
+          const next = blockedBy.map((id) => (id === task.id ? newReviewTaskId : id))
+          db.prepare('UPDATE tasks SET blockedBy=?, version=version+1, updatedAt=? WHERE id=?')
+            .run(JSON.stringify(next), now(), row.id)
+        }
       }
     }
     assertIntegratedBeforeDone(task.id)
@@ -5471,17 +5618,43 @@ function insertGoalTask({ title, description, acceptance, boundary, role, scope,
 }
 
 /**
- * 发布目标 → 任务链。两种模式：
- * - chain（默认，v2 现状）：按空间编队全串阶段链（blockedBy=[prev]）；
- * - slice（v3 切片流水线）：只生成「分析前缀链」（需求→方案→拆解→用例设计，到 test-designer 为止），
- *   并带 [slice-mode] 标记；test-designer done 后由守护解析 TASK_BREAKDOWN.md →
- *   POST /api/goal/slices 展开「编码切片束」（coder_Si→tester_Si 微链 + devops 目标级收尾），
- *   切片之间无依赖 → coder_Si+1 编码与 tester_Si 测试天然并行（架构见 docs/ORCHESTRATION-V3.md）。
+ * 把一份具名工作流定义读成**按岗位的分配模板**（2026-10-21）。
  *
- * 多目标并发：本函数**只新建**给定目标（goalId）自己的链，链任务全部挂 goalId；
- * **不再取消**该空间其他目标/历史链的任务——目标并存、各自推进、互不干扰
- * （将军可在指挥台按目标 暂停/恢复/取消 收尾）。
+ * 在 `pipeline` 编排下，具名定义不再决定阶段集合，只贡献三件事：
+ * 每个岗位用哪个工具/模型/节点/testRunner，以及审查闭环的三个角色与返工上限。
+ *
+ * ★ 这里刻意**不**做阶段合并或删减：定义里多出来的岗位由 `resolveAssignments`
+ *   忽略并告警，流水线里没被覆盖的岗位走 dsh-default。两种情况都不改变链的形状。
  */
+function definitionAsAssignmentProfile(definition) {
+  const stageById = new Map(definition.stages.map((stage) => [stage.id, stage]))
+  const designStage = stageById.get(definition.reviewRoutes?.design)
+  const implementationStage = stageById.get(definition.reviewRoutes?.implementation)
+  const reviewStage = stageById.get(definition.reviewStageId)
+  if (designStage === undefined || implementationStage === undefined || reviewStage === undefined) {
+    throw Object.assign(new Error('工作流审查阶段或返工目标引用了不存在的阶段'), { code: 'AGENT_WORKFLOW_GRAPH_INVALID', statusCode: 409 })
+  }
+  const stageTools = {}
+  for (const stage of definition.stages) {
+    // 同一岗位出现多个阶段时取拓扑序第一个（定义已按声明顺序保存），
+    // 与 `resolveAssignments` 的「同 role 取第一个」保持一致。
+    if (stageTools[stage.role] !== undefined) continue
+    stageTools[stage.role] = {
+      agentToolConfig: stage.agentToolConfig ?? null,
+      modelConfig: stage.modelConfig ?? null,
+      nodeId: stage.nodeId ?? null,
+      testRunner: stage.testRunner ?? null,
+    }
+  }
+  return {
+    designRole: designStage.role,
+    implementationRole: implementationStage.role,
+    reviewRole: reviewStage.role,
+    maxReworkRounds: definition.maxReworkRounds,
+    stageTools,
+  }
+}
+
 function workflowDefinitionForChain(definition) {
   for (const stage of definition.stages) {
     for (const [direction, contract] of [['input', stage.inputContract], ['output', stage.outputContract]]) {
@@ -5584,7 +5757,7 @@ function executionNodeSnapshotFor(scope, nodeId) {
   }
 }
 
-function createGoalChain(goalId, scope, objective, mode = 'chain', workflowDefinition = null) {
+function createGoalChain(goalId, scope, objective, mode = 'chain', planOrDefinition = null, orchestration = 'pipeline') {
   return withTx(() => {
     const goal = getGoal(goalId)
     if (goal.scope !== scope) throw new Error(`目标 ${goalId} 不属于空间 ${scope}`)
@@ -5594,9 +5767,25 @@ function createGoalChain(goalId, scope, objective, mode = 'chain', workflowDefin
     if (mode === 'slice' && pipeline.workflow !== null && pipeline.workflow !== undefined) {
       throw new Error('已启用跨 Agent 三阶段工作流的空间暂不支持 slice 目标；请关闭其中一种编排后再发布目标')
     }
-    const configuredWorkflow = mode === 'chain'
-      ? workflowDefinition === null ? pipeline.workflow : workflowDefinitionForChain(workflowDefinition)
+    // 第五个参数有两种身份，必须分清：
+    //   · `planGoal()` 的产物 ⇒ 阶段与分配都已经解析好（发布路径，冻结的就是这一份）；
+    //   · 具名工作流定义     ⇒ 用户显式选择了 custom-dag 编排，保留旧拓扑语义。
+    // 直接调用（如用例里的 `createGoalChain(g, scope, objective)`）走 null 分支，
+    // 在函数内按当前流水线现算一份计划——与发布路径同一套规则，不留第二份真相。
+    const plan = orchestration === 'pipeline' && mode === 'chain'
+      ? (isGoalPlan(planOrDefinition)
+        ? planOrDefinition
+        : planGoal({
+          pipeline,
+          roster,
+          profile: planOrDefinition === null ? (pipeline.workflow ?? null) : definitionAsAssignmentProfile(planOrDefinition),
+          profileSource: planOrDefinition === null ? 'space-review-workflow' : 'definition',
+          agentNodeId: goal.agentNodeId ?? null,
+        }))
       : null
+    const configuredWorkflow = plan !== null
+      ? plan.workflow
+      : (planOrDefinition === null ? null : workflowDefinitionForChain(planOrDefinition))
     const workflowStagePlan = configuredWorkflow === null || configuredWorkflow === undefined ? null
       : configuredWorkflow.workflowDefinitionSnapshot
         ? configuredWorkflow.topologicalStageIds.map((stageId) => configuredWorkflow.workflowDefinitionSnapshot.stages.find((stage) => stage.id === stageId))
@@ -5689,26 +5878,38 @@ function createGoalChain(goalId, scope, objective, mode = 'chain', workflowDefin
         // 用独立的 `source`（`goal-node-binding`）而不是冒充 `goal-agent-workflow`：
         // 读的人要能一眼看出这条任务**没有**冻结工作流，只是被钉在了一台机器上。
         agentSelectionSnapshot: (() => {
-          const boundNodeSnapshot = executionNodeSnapshotFor(scope, goal.agentNodeId)
+          // 计划已经收敛出唯一节点时，用它；否则退回目标级绑定。
+          // 两者都为空 ⇒ 不绑定（任一在线执行服务都能认领）。
+          const effectiveNodeSnapshot = plan !== null && plan.effectiveNodeId !== null
+            ? executionNodeSnapshotFor(scope, plan.effectiveNodeId)
+            : executionNodeSnapshotFor(scope, goal.agentNodeId)
           if (frozenWorkflow !== null) {
+            const perStageNode = frozenWorkflow.stageToolsById?.[workflowStageId]?.executionNode
+              ?? frozenWorkflow.stageTools[r.role]?.executionNode
+              ?? null
             return {
               source: 'goal-agent-workflow',
+              // ★ 阶段集合来自流水线（pipeline）还是用户画的 DAG（custom-dag），
+              //   运行期必须分得开：前者可以按角色解释，后者只能按定义拓扑解释。
+              orchestration: plan !== null ? 'pipeline' : 'custom-dag',
               pipelineVersion: frozenWorkflow.pipelineVersion,
               stageRole: r.role,
               workflowStageId,
               agentToolConfig: frozenWorkflow.stageToolsById?.[workflowStageId]?.agentToolConfig ?? frozenWorkflow.stageTools[r.role]?.agentToolConfig ?? null,
               modelConfig: frozenWorkflow.stageToolsById?.[workflowStageId]?.modelConfig ?? frozenWorkflow.stageTools[r.role]?.modelConfig ?? null,
               resolvedModelConfig: frozenWorkflow.stageToolsById?.[workflowStageId]?.resolvedModelConfig ?? frozenWorkflow.stageTools[r.role]?.resolvedModelConfig ?? null,
-              executionNode: frozenWorkflow.stageToolsById?.[workflowStageId]?.executionNode ?? frozenWorkflow.stageTools[r.role]?.executionNode ?? null,
+              // ★ 每个阶段都带同一个节点：只给「配了 nodeId 的那一环」写节点，
+              //   会让别的阶段被另一台机器领走，然后下一环在认领时 409。
+              executionNode: perStageNode ?? effectiveNodeSnapshot,
               reviewWorkflow: frozenWorkflow,
               workflowContext: { designArtifacts: [], implementation: null },
             }
           }
-          if (boundNodeSnapshot === null) return null
+          if (effectiveNodeSnapshot === null) return null
           return {
             source: 'goal-node-binding',
             stageRole: r.role,
-            executionNode: boundNodeSnapshot,
+            executionNode: effectiveNodeSnapshot,
           }
         })(),
       })
@@ -5960,6 +6161,46 @@ function resolveAgentWorkflowContextSnapshot(workflowOrPipeline, taskId) {
   } else if (taskStageId === reviewStageId) {
     const implementationTask = findWorkflowStageAncestor(taskId, workflow, implementationStageId)
     if (implementationTask !== null) {
+      // A general may accept an implementation whose external Attempt never
+      // produced a verifiable test receipt. The acceptance checkpoint is a
+      // separate provenance path: it freezes registered files and a Git commit,
+      // but it must never be presented as a passed independent test run.
+      const acceptedCheckpoint = implementationTask.status === 'done'
+        ? [...(implementationTask.evidence ?? [])].reverse().find((item) => {
+          if (item?.by !== 'general' || typeof item.text !== 'string'
+            || !item.text.startsWith(WORKFLOW_CHECKPOINT_EVIDENCE_PREFIX)) return false
+          try {
+            const value = JSON.parse(item.text.slice(WORKFLOW_CHECKPOINT_EVIDENCE_PREFIX.length))
+            const registeredPaths = new Set((implementationTask.artifacts ?? [])
+              .filter((artifact) => isRelativeWorkflowFileArtifact(artifact))
+              .map((artifact) => artifact.path.replaceAll('\\', '/')))
+            return value?.stageId === implementationStageId && value.acceptedBy === 'general'
+              && /^[0-9a-f]{40,64}$/i.test(value.sourceCommit ?? '')
+              && Array.isArray(value.artifactPaths) && value.artifactPaths.length > 0
+              && value.artifactPaths.every((path) => typeof path === 'string' && registeredPaths.has(path))
+          } catch { return false }
+        })
+        : null
+      if (acceptedCheckpoint) {
+        const checkpoint = JSON.parse(acceptedCheckpoint.text.slice(WORKFLOW_CHECKPOINT_EVIDENCE_PREFIX.length))
+        const frozenRunner = implementationTask.agentSelectionSnapshot?.reviewWorkflow
+          ?.stageDefinitionsById?.[implementationStageId]?.testRunner
+        const manualEvidence = [...(implementationTask.evidence ?? [])].reverse().find((item) =>
+          item?.by === 'general' && typeof item.text === 'string'
+          && !item.text.startsWith(WORKFLOW_CHECKPOINT_EVIDENCE_PREFIX))
+        implementation = {
+          taskId: implementationTask.id,
+          sourceCommit: checkpoint.sourceCommit,
+          stageAttemptId: null,
+          providerRunId: null,
+          acceptanceMode: 'human',
+          testCommand: frozenRunner
+            ? [frozenRunner.executable, ...(frozenRunner.args ?? [])].join(' ') : '(未配置冻结测试命令)',
+          testSummary: '人工验收；未获得自动独立测试通过回执，审查时必须核查测试缺口。',
+          testEvidence: manualEvidence?.text ?? '将军人工验收了已登记产物；自动测试状态未获确认。',
+          testVerification: null,
+        }
+      }
       const evidence = [...(implementationTask.evidence ?? [])].reverse().find((item) => typeof item?.text === 'string' && item.text.startsWith('agent-workflow-implementation:'))
       let payload = null
       try { payload = evidence ? JSON.parse(evidence.text.slice('agent-workflow-implementation:'.length)) : null } catch { /* 缺失证据会在下方 fail closed */ }

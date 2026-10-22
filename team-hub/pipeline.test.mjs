@@ -485,12 +485,15 @@ describe('TC-SP-P0-01/02 读写：空态 → 写入 → 回读 → version 指�
     const scope = 'space-independent-agent-workflow'
     await post('/api/spaces', { id: scope, name: '独立 Agent 工作流空间', localDir: process.cwd(), by: 'general' })
     const roster = [
-      ['designer', 'Claude 设计师', 0], ['analyst', '普通分析岗', 1],
-      ['coder', 'DSH 实现者', 2], ['tester', '并行验证员', 3], ['reviewer', 'Codex 审查员', 4],
+      ['designer', 'Claude 设计师', 0], ['coder', 'DSH 实现者', 2], ['reviewer', 'Codex 审查员', 4],
     ]
     const insertRoster = mod.db.prepare('INSERT INTO roster (scope, role, name, kind, avatar, sort) VALUES (?, ?, ?, ?, ?, ?)')
     for (const [role, name, sort] of roster) insertRoster.run(scope, role, name, 'agent', '🤖', sort)
-    const roles = ['designer', 'analyst', 'coder', 'tester', 'reviewer']
+    // ★ 2026-10-21：这里的流水线只保留闭环覆盖的三岗。旧样本故意多放 analyst/tester
+    //   来证明「阶段集合由工作流定义决定」——那正是本次拆掉的耦合。
+    //   「流水线比分配模板长」这一侧（未覆盖岗位走 DSH 默认）由 assignment 套件与
+    //   下面「八岗位流水线 + 三岗分配模板」用例覆盖。
+    const roles = ['designer', 'coder', 'reviewer']
     const stages = roles.map((role, index) => ({
       role, label: role, prompt: role, next: roles[index + 1] ?? null,
       agentToolConfig: { id: `ordinary.${role}`, version: 7 },
@@ -586,6 +589,9 @@ describe('TC-SP-P0-01/02 读写：空态 → 写入 → 回读 → version 指�
     assert.equal(savedDefinition.status, 200, savedDefinition.text)
     const namedGoal = await post('/api/goal', {
       scope, objective: '通过命名定义执行 Claude → DSH → Codex', by: 'general',
+      // ★ 2026-10-21：具名定义默认只当「按岗位的分配模板」；要按定义拓扑建链必须显式选择
+      //   `orchestration: 'custom-dag'`。这一条用例考的就是拓扑实例化，所以显式选它。
+      orchestration: 'custom-dag',
       workflowDefinition: { id: namedDefinition.id, version: namedDefinition.version },
     })
     assert.equal(namedGoal.status, 200, namedGoal.text)
@@ -617,6 +623,7 @@ describe('TC-SP-P0-01/02 读写：空态 → 写入 → 回读 → version 指�
     const staleGoalCount = mod.db.prepare('SELECT COUNT(*) AS n FROM goal WHERE scope=?').get(scope).n
     const staleGoal = await post('/api/goal', {
       scope, objective: '拒绝使用已变化的模型档案版本', by: 'general',
+      orchestration: 'custom-dag',
       workflowDefinition: { id: namedDefinition.id, version: 2 },
     })
     assert.equal(staleGoal.status, 409, staleGoal.text)
@@ -635,6 +642,7 @@ describe('TC-SP-P0-01/02 读写：空态 → 写入 → 回读 → version 指�
     const externalGoalCount = mod.db.prepare('SELECT COUNT(*) AS n FROM goal WHERE scope=?').get(scope).n
     const externalOverrideGoal = await post('/api/goal', {
       scope, objective: '外部 Agent 模型覆盖应具名拒绝', by: 'general',
+      orchestration: 'custom-dag',
       workflowDefinition: { id: 'workflow.external-model-override', version: 1 },
     })
     assert.equal(externalOverrideGoal.status, 409, externalOverrideGoal.text)
@@ -656,6 +664,7 @@ describe('TC-SP-P0-01/02 读写：空态 → 写入 → 回读 → version 指�
     assert.equal(parallelDefinition.status, 200, parallelDefinition.text)
     const dagGoal = await post('/api/goal', {
       scope, objective: 'DAG 分支汇合目标', by: 'general',
+      orchestration: 'custom-dag',
       workflowDefinition: { id: 'workflow.parallel-dag', version: 1 },
     })
     assert.equal(dagGoal.status, 200, dagGoal.text)

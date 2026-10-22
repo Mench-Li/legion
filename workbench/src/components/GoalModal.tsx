@@ -110,7 +110,10 @@ export function GoalModal({ scope, spaceName, activeCount = 0, onClose, onPublis
             />
           </div>
           <div className="field">
-            <label>跨 Agent 工作流</label>
+            {/* ★ 2026-10-21：这个下拉框选的是**分配模板**，不是编排。
+                选它会改「这些岗位由哪个 Agent 执行」，但链上仍然跑完整流水线；
+                要按定义的并行/汇合拓扑建链，必须显式用 custom-dag（当前由 API 调用方指定）。 */}
+            <label>Agent 分配模板（不改变阶段）</label>
             <select value={selectedDefinition} onChange={event => setSelectedDefinition(event.target.value)} disabled={busy || !definitionsLoaded}>
               <option value="">沿用空间当前设置</option>
               {workflowOptions.map(option => <option key={option.value} value={option.value}>
@@ -123,7 +126,7 @@ export function GoalModal({ scope, spaceName, activeCount = 0, onClose, onPublis
                 : definitionsError
                   ? <>读取失败：{definitionsError} <button type="button" className="btn ghost" onClick={() => setDefinitionsReload(value => value + 1)}>重试</button></>
                   : workflowOptions.length > 0
-                    ? '工作流配置统一在「Agent 工作流」设置页维护；这里仅显示每条工作流最新发布的版本。新目标使用所选版本，已发布目标保留创建时的版本。'
+                    ? '阶段集合由空间流水线决定，这里只选择各岗位由哪个 Agent 执行；未覆盖的岗位沿用 DSH 默认。工作流配置统一在「Agent 工作流」设置页维护；这里仅显示每条工作流最新发布的版本。新目标使用所选版本，已发布目标保留创建时的版本。'
                     : '当前空间还没有已发布的 Agent 工作流；可继续使用空间当前设置。'}
             </span>
           </div>

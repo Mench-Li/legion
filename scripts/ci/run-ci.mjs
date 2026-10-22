@@ -2009,6 +2009,12 @@ async function stageTest() {
     { label: 'agent-panel-wiring（C2 死代码复活判据：面板真被挂载 + 类都有样式 + 不是第二个聊天界面）', files: ['workbench/scripts/agent-panel-wiring.test.mjs'], cwd: ROOT },
     { label: 'spaces（空间删除级联）', files: ['team-hub/spaces.test.mjs'], cwd: ROOT },
     { label: 'pipeline（空间流水线：编队即流水线 SP-P0）', files: ['team-hub/pipeline.test.mjs'], cwd: ROOT },
+    // 2026-10-21：「软件流水线 × Agent 分配」解耦的端到端判据。
+    // 只问一件事：**分配模板能不能删掉流水线的阶段**（T-212 现场：八岗空间只建出三环）。
+    // 外加返工收敛（测试/部署不得被复制、也不得在返工途中抢跑）与 custom-dag 的显式选择。
+    { label: 'goal-orchestration（流水线定阶段、Agent 配置定分配；返工只重建审查环）', files: ['team-hub/goal-orchestration.test.mjs'], cwd: ROOT },
+    // 解耦层的纯函数判据：优先级、未覆盖岗位 = DSH 默认、节点收敛、合成工作流形状。
+    { label: 'agent-assignment（分配解析：流水线 ∩ 编队、优先级、dsh-default、节点收敛）', files: ['orchestrator/assignment/index.test.mjs'], cwd: ROOT },
     { label: 'goal（目标生命周期）', files: ['team-hub/goal.test.mjs', 'team-hub/goal-closed.test.mjs'], cwd: ROOT },
     // 2026-10-12：看板**往回拖**（已完成/待验收 → 重做/打回）的语义判定与接线。
     // 这条路径此前是**静默**的两种坏结局（卡片拖不动 / 拖动了但下游一条都不重跑），

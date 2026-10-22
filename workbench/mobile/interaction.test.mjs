@@ -12,8 +12,8 @@ import assert from 'node:assert/strict'
 
 import {
   SWIPE_MIN_DX, SWIPE_EDGE_GUARD, SWIPE_AXIS_SLOP, SWIPE_ANIM_MS, READ_BOTTOM_PX,
-  UNKNOWN_PAGE_ID, UNKNOWN_PAGE_TITLE, gestureAxis, boardPages, clampPageIndex, decideSwipe,
-  pageAnnouncement, distanceToBottom, nearBottom, timelineScrollPlan,
+  UNKNOWN_PAGE_ID, UNKNOWN_PAGE_TITLE, gestureAxis, boardPages, boardScrollRestore,
+  clampPageIndex, decideSwipe, pageAnnouncement, distanceToBottom, nearBottom, timelineScrollPlan,
 } from './interaction.mjs'
 import { BOARD_COLUMNS } from './board.mjs'
 import { EN, DYNAMIC_KEYS, t } from './i18n.mjs'
@@ -137,6 +137,33 @@ test('★★★ 这个模块产出的每一条中文，英文表里都查得到'
   assert.ok(Object.keys(DYNAMIC_KEYS).includes('@newMessages'))
   assert.ok(Object.keys(DYNAMIC_KEYS).includes('@sheetWhere'))
   assert.ok(EN['查看与操作'] !== undefined)
+})
+
+// ── 切页签回来时的看板位置 ──────────────────────────────────────────────────
+
+test('★★★ 同一列：用离开那一刻的 tasksScrollTop（不是从没同步过的 columnScroll）', () => {
+  // 现场：全部看板当前列滚到 360px，切到对话再切回。
+  // 修复前读的是 columnScroll["in_review"] —— 那一列从没切走过，值是 0。
+  assert.equal(boardScrollRestore({
+    savedTop: 360, savedPageId: 'in_review', pageId: 'in_review', columnTop: 0,
+  }), 360)
+})
+
+test('★★ 列已经变了（刷新把当前列清空、页索引被夹取）：退回该列自己的位置', () => {
+  assert.equal(boardScrollRestore({
+    savedTop: 360, savedPageId: 'in_review', pageId: 'todo', columnTop: 120,
+  }), 120)
+  // 该列也没有记录 → 回顶，而不是拿另一列的像素位置硬套。
+  assert.equal(boardScrollRestore({
+    savedTop: 360, savedPageId: 'in_review', pageId: 'todo', columnTop: undefined,
+  }), 0)
+})
+
+test('★ 没离开过 / 坏读数：不猜，落回 0', () => {
+  assert.equal(boardScrollRestore(), 0)
+  assert.equal(boardScrollRestore({ savedTop: NaN, savedPageId: 'a', pageId: 'a', columnTop: NaN }), 0)
+  assert.equal(boardScrollRestore({ savedTop: -20, savedPageId: 'a', pageId: 'a' }), 0, '负偏移夹到 0')
+  assert.equal(boardScrollRestore({ savedTop: 240, savedPageId: null, pageId: 'a', columnTop: 80 }), 80)
 })
 
 // ── 对话阅读位置 ────────────────────────────────────────────────────────────

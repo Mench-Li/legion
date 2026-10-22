@@ -142,6 +142,31 @@ export function decideSwipe({
 }
 
 /**
+ * 从别的页签切回「任务」时该滚到哪。
+ *
+ * ★ 为什么不能只看 `columnScroll`：那个表只在**切列**时写入，当前列最近一次
+ *   纵向滚动从来没同步过 —— 于是「看全部看板 → 切到对话 → 切回任务」会回到 0。
+ *   修复前的实测：当前列滚到 360px，切回来是 0；若那列曾切走过，还会恢复到一个
+ *   更旧的值（比"回到顶部"更难解释，因为它看起来像随机）。
+ *
+ * 判据：离开时记下的位置**只对同一列有效**；列已经换过（刷新把当前列清空导致
+ * 页索引夹取）时，退回该列自己存的位置。两者都没有就回顶。
+ *
+ * @param {{savedTop?:number, savedPageId?:string|null, pageId?:string|null,
+ *          columnTop?:number}} input
+ * @returns {number} 非负滚动位置
+ */
+export function boardScrollRestore({
+  savedTop = 0, savedPageId = null, pageId = null, columnTop = 0,
+} = {}) {
+  const top = Number(savedTop)
+  const samePage = savedPageId !== null && pageId !== null && savedPageId === pageId
+  if (samePage && Number.isFinite(top)) return Math.max(0, top)
+  const column = Number(columnTop)
+  return Number.isFinite(column) ? Math.max(0, column) : 0
+}
+
+/**
  * 页码指示的**键 + 变量**（不是拼好的句子）。
  *
  * ★ 拼好的句子永远查不到英文 —— 这条在本仓已经踩过两次（`outbox` 横幅、

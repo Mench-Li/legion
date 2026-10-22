@@ -472,7 +472,10 @@ test('★★★ 离线标记按**当前视图**切换（否则它说的是一句
   assert.ok(/state\.view === 'tasks' \? 'board' : 'messages'/.test(fn),
     'renderOfflineNote 必须按 state.view 选 kind —— 说"消息是旧的"而用户在看板，是一句没人会读的话')
   // 切视图时要重画（否则从消息切到看板会继续显示那句话）。
-  const showView = APP.slice(APP.indexOf('function showView('), APP.indexOf('function showView(') + 700)
+  // ★ 窗口从 700 放宽到 1400：`showView` 在 T-212 里多了"记住/还原每个页签的
+  //   滚动位置"那几句（R-08），函数变长了 —— 而这条判据问的是"有没有调用"，
+  //   不是"在第几个字符处调用"。窗口太小会让它在实现正确时莫名其妙地红。
+  const showView = APP.slice(APP.indexOf('function showView('), APP.indexOf('function showView(') + 1400)
   assert.ok(showView.includes('renderOfflineNote()'), 'showView 必须重画离线标记')
 })
 

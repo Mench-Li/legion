@@ -245,6 +245,8 @@ function makePage({ send: rawSend, on: rawOn, sessionId }) {
     async tap(selector) {
       const c = await page.centerOf(selector)
       await send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [{ x: c.x, y: c.y, id: 1, radiusX: 14, radiusY: 14, force: .5 }] })
+      // Give Chrome one input frame to recognise a tap after a drag gesture.
+      await sleep(70)
       await send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] })
       return c
     },
@@ -291,10 +293,16 @@ const TASKS = [
 ]
 // 非空状态列 = 受阻/待验收/进行中/待办/未排期/已完成 + 未知 = 7 页。
 const PAGE_COUNT = 7
-const messages = [
-  { id: 1, seq: 1, role: 'agent', author: 'Coder', body: '第一条消息', createdAt: new Date().toISOString() },
-  { id: 2, seq: 2, role: 'user', author: '将军', body: '收到', createdAt: new Date().toISOString() },
-]
+// 历史必须长到真的能向上阅读；两条短消息在手机视口里距底为 0，
+// 无法验证「正在读历史时新消息不把视图拽到底」这条行为。
+const messages = Array.from({ length: 16 }, (_, index) => ({
+  id: index + 1,
+  seq: index + 1,
+  role: index % 2 === 0 ? 'agent' : 'user',
+  author: index % 2 === 0 ? 'Coder' : '将军',
+  body: `第 ${index + 1} 条历史消息`,
+  createdAt: new Date().toISOString(),
+}))
 let messageSeq = messages.length
 
 const MIME = {
@@ -499,11 +507,18 @@ try {
   await swipe(6, 500, 170, 505)
   const afterEdge = await currentPage()
   check('★★ 起点在左边缘 20px 内不接手势（让系统返回手势通过）', afterEdge === 0, `page=${afterEdge}`)
-
+  // A tap during the browser's inertial scroll cancels that scroll instead of clicking.
+  // Let the vertical/edge gesture settle before checking button navigation.
+  await sleep(750)
   await page.tap('#board-next')
+  await page.waitFor(() => document.querySelector('.board-page[aria-hidden="false"]')?.dataset.page === '1',
+    { timeoutMs: 2000, label: 'next button changed board page' })
   const afterNext = await currentPage()
   check('★ 左右按钮同样能切列（滑动的替代路径）', afterNext === 1, `page=${afterNext}`)
   await page.tap('#board-prev')
+  await page.waitFor(() => document.querySelector('.board-page[aria-hidden="false"]')?.dataset.page === '0',
+    { timeoutMs: 2000, label: 'previous button changed board page' })
+  await sleep(260)
 
   // ── E. 卡片 → 详情层 ─────────────────────────────────────────────────────
   const t0 = Date.now()
@@ -533,11 +548,20 @@ try {
 
   // ── F. 对话：向上读历史时不被拽到底 ───────────────────────────────────────
   await page.tap('#tab-chat')
-  await page.waitFor(() => document.querySelectorAll('#timeline .msg').length >= 2, { timeoutMs: 10000, label: 'timeline rendered' })
+  await page.waitFor(() => document.querySelectorAll('#timeline .msg').length >= 16, { timeoutMs: 10000, label: 'timeline rendered' })
+  // Clear any initial-load indicator before testing only the five incoming messages.
+  const initialPillVisible = await page.evaluate(() => !document.getElementById('new-msg-pill').classList.contains('hidden'))
+  if (initialPillVisible) await page.tap('#new-msg-jump')
   await page.evaluate(() => { document.getElementById('main').scrollTop = 0 })
   await sleep(120)
+  const historyDistance = await page.evaluate(() => {
+    const m = document.getElementById('main')
+    return Math.round(m.scrollHeight - m.scrollTop - m.clientHeight)
+  })
+  check('检查用的历史消息足够长，顶部距底部超过 40px', historyDistance > 40,
+    `distance=${historyDistance}`)
   // 桩 Hub 多条新消息 + 点刷新（= 一次 SSE/轮询刷新）。
-  await fetch(`${BASE.replace('/mobile/', '')}__ctl/messages?n=5`)
+  await fetch(new URL('/__ctl/messages?n=5', BASE))
   await page.tap('#btn-refresh')
   await sleep(1000)
   const timeline = await page.evaluate(() => {
@@ -551,17 +575,19 @@ try {
   })
   check('★★ 距底 >40px 时刷新**不**把视图拽到底（scrollTop 仍在 0 附近）',
     timeline.scrollTop <= 4 && timeline.msgs >= 7, `scrollTop=${timeline.scrollTop} msgs=${timeline.msgs}`)
-  check('★ 出现「N 条新消息」入口', timeline.pillVisible && /新消息/.test(timeline.pillText), timeline.pillText)
-  await page.tap('#new-msg-jump')
-  await sleep(350)
-  const jumped = await page.evaluate(() => {
-    const m = document.getElementById('main')
-    return {
-      distance: Math.round(m.scrollHeight - m.scrollTop - m.clientHeight),
-      hidden: document.getElementById('new-msg-pill').classList.contains('hidden'),
-    }
-  })
-  check('★ 点「新消息」回到底部并清零', jumped.distance <= 4 && jumped.hidden, JSON.stringify(jumped))
+  check('★ 出现「5 条新消息」入口', timeline.pillVisible && /5\s*条新消息/.test(timeline.pillText), timeline.pillText)
+  if (timeline.pillVisible) {
+    await page.tap('#new-msg-jump')
+    await sleep(350)
+    const jumped = await page.evaluate(() => {
+      const m = document.getElementById('main')
+      return {
+        distance: Math.round(m.scrollHeight - m.scrollTop - m.clientHeight),
+        hidden: document.getElementById('new-msg-pill').classList.contains('hidden'),
+      }
+    })
+    check('★ 点「新消息」回到底部并清零', jumped.distance <= 4 && jumped.hidden, JSON.stringify(jumped))
+  }
 
   // ── A（续）/ B（续）：主界面在七个宽度下同样不溢出、命中区达标 ─────────────
   await page.tap('#tab-tasks')

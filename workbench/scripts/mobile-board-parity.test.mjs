@@ -222,20 +222,39 @@ describe('手机端：SSE 票据', () => {
 
 describe('手机端：网络恢复时的读数', () => {
   const app = readFileSync(resolve(ROOT, 'workbench/mobile/app.mjs'), 'utf8')
+  /**
+   * 取某个 `window.addEventListener('<name>', …)` 的**整个回调体**（按行尾无关的方式）。
+   *
+   * ★ 原来这里取的是"这一行的剩余部分"，然后断言回调体里的内容 —— 而监听器
+   *   从来都不是一行写完的（`() => {` 在第一行，真正要做的事在下面几行）。
+   *   于是这两条判据**在任何行尾下都是红的**，报出来的却是"网络恢复没去问"
+   *   这种看起来像产品缺陷的话。
+   *
+   *   > 一条"取错了观测范围"的判据，与一条"真的发现问题"的判据，
+   *   > 报的是同一句断言失败 —— 只不过前者永远红，而人会因此学会忽略它。
+   */
+  const listenerBody = (name) => {
+    const start = app.indexOf(`window.addEventListener('${name}'`)
+    if (start < 0) return ''
+    const end = app.indexOf('\n}', start)
+    const body = app.slice(start, end < 0 ? app.length : end + 2)
+    return body.replace(/\r\n/g, '\n')
+  }
 
   test('★ 网络恢复要**去问**，不能重置成"未知"', () => {
     // 原来写的是 setConnection({ hubReachable: true, nodeOnline: null })，
     // 而 nodeOnline: null 渲染出来正是「电脑状态未知」。手机切一次 WiFi↔4G
     // 就会触发，然后一直停在"未知"——一个凭空出现、又迟迟不走的读数。
-    const line = /window\.addEventListener\('online'[^\n]*/.exec(app)?.[0] ?? ''
-    assert.ok(line.length > 0, '找不到 online 监听器')
-    assert.doesNotMatch(line, /nodeOnline: null/, '网络恢复不该把读数重置成未知')
-    assert.match(line, /refreshLoop\.now\(\)/, '网络恢复应当重新去问')
+    const body = listenerBody('online')
+    assert.ok(body.length > 0, '找不到 online 监听器')
+    assert.doesNotMatch(body, /nodeOnline: null/, '网络恢复不该把读数重置成未知')
+    assert.match(body, /refreshLoop\.now\(\)/, '网络恢复应当重新去问')
   })
 
   test('离线仍然如实说"不可达"（那是事实，不是猜）', () => {
-    const line = /window\.addEventListener\('offline'[^\n]*/.exec(app)?.[0] ?? ''
-    assert.match(line, /hubReachable: false/)
+    const body = listenerBody('offline')
+    assert.ok(body.length > 0, '找不到 offline 监听器')
+    assert.match(body, /hubReachable: false/)
   })
 })
 

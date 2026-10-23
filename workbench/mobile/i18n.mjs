@@ -71,6 +71,10 @@ export const DYNAMIC_KEYS = Object.freeze({
   '@popupWithReason': { zh: '{base} —— {reason}', en: '{base} — {reason}' },
   // 多个空间时的下拉框标题（`空间：s1（owner）`）。
   '@spaceLabel': { zh: '空间：{id}（{role}）', en: 'Space: {id} ({role})' },
+  // ★ 下面两条是 T-212 的新交互：状态列分页的页码播报、以及轻量详情层的"所属列"。
+  //   它们都**带变量**（页码/列名/条数），拼好再查表必然落空，所以是显式键。
+  '@newMessages': { zh: '{n} 条新消息', en: '{n} new messages' },
+  '@sheetWhere': { zh: '所属列：{column} · 视角：{view}', en: 'Column: {column} · View: {view}' },
 })
 
 /**
@@ -285,6 +289,16 @@ export const EN = Object.freeze({
   '这台设备要先「添加到主屏幕」，之后才能开启系统提醒。': 'On this device, add Legion to your Home Screen first, then system notifications can be enabled.',
   '会话已过期，请重新登录。': 'Your session expired. Please sign in again.',
   '请填写用户名与口令': 'Enter a username and password',
+
+  // ── 手机端交互（T-212）：状态列分页、轻量详情、移动端命名 ──────────────────
+  '第 {index}/{pageCount} 页 · {title} {count}': 'Page {index}/{pageCount} · {title} {count}',
+  '查看与操作': 'View and act',
+  '任务不存在或无权访问': 'Task not found or no access to it',
+  '切换状态列': 'Switch status column',
+  '上一列': 'Previous column',
+  '下一列': 'Next column',
+  '任务看板': 'Task board',
+  '关闭详情': 'Close details',
 })
 
 // ── 语言状态（模块级，唯一的可变处）────────────────────────────────────────

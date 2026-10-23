@@ -898,6 +898,11 @@ describe('TC-SP-P0-01/02 读写：空态 → 写入 → 回读 → version 指�
       title: '设计方案', digest: 'c'.repeat(64), by: 'claude-code', scope,
     })
     assert.equal(designArtifact.status, 200, designArtifact.text)
+    const revisedDesignArtifact = await post('/api/artifact', {
+      id: tasks[0].id, kind: 'file', path: 'docs/agent-workflow-independent/design.md',
+      title: '设计方案（修订）', digest: 'd'.repeat(64), by: 'claude-code', scope,
+    })
+    assert.equal(revisedDesignArtifact.status, 200, revisedDesignArtifact.text)
     const designReview = await post('/api/transition', { id: tasks[0].id, to: 'in_review', by: 'claude-code', scope, force: true })
     assert.equal(designReview.status, 200, designReview.text)
     const designDone = await post('/api/advance', { id: tasks[0].id, by: 'designer', scope })
@@ -906,12 +911,12 @@ describe('TC-SP-P0-01/02 读写：空态 → 写入 → 回读 → version 指�
     assert.equal(implementationClaim.status, 200, implementationClaim.text)
     assert.equal(implementationClaim.json.task.agentSelectionSnapshot.agentToolConfig.providerName, 'deepseek')
     assert.deepEqual(implementationClaim.json.task.agentSelectionSnapshot.workflowContext.designArtifacts, [{
-      taskId: tasks[0].id, path: 'docs/agent-workflow-independent/design.md', digest: 'c'.repeat(64), title: '设计方案',
+      taskId: tasks[0].id, path: 'docs/agent-workflow-independent/design.md', digest: 'd'.repeat(64), title: '设计方案（修订）',
     }])
     const designUpstream = implementationClaim.json.task.agentSelectionSnapshot.workflowContext.upstreamStages
       .find(stage => stage.taskId === tasks[0].id)
     assert.deepEqual(designUpstream.artifacts.map(({ kind, path, digest }) => ({ kind, path, digest })), [{
-      kind: 'file', path: 'docs/agent-workflow-independent/design.md', digest: 'c'.repeat(64),
+      kind: 'file', path: 'docs/agent-workflow-independent/design.md', digest: 'd'.repeat(64),
     }], 'invalid absolute file artifact paths are excluded from the frozen upstream workflow context')
     const implementationAttempt = storeImplementationAttempt(tasks[1].id, {
       testCommand: 'node --test', testSummary: 'tests passed', testEvidence: 'node --test: passed', sourceCommit: 'd'.repeat(40),

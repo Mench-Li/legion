@@ -6075,6 +6075,17 @@ function isRelativeWorkflowFileArtifact(item) {
   return /^[0-9a-f]{64}$/.test(item.digest ?? '')
 }
 
+function latestWorkflowArtifactsByPath(artifacts) {
+  const seenFiles = new Set()
+  return [...artifacts].reverse().filter((item) => {
+    if (item?.kind !== 'file' || typeof item.path !== 'string') return true
+    const path = item.path.replaceAll('\\', '/')
+    if (seenFiles.has(path)) return false
+    seenFiles.add(path)
+    return true
+  }).reverse()
+}
+
 function resolveAgentWorkflowContextSnapshot(workflowOrPipeline, taskId) {
   const workflow = workflowOrPipeline !== null && typeof workflowOrPipeline === 'object'
     && Object.hasOwn(workflowOrPipeline, 'workflow')
@@ -6107,7 +6118,8 @@ function resolveAgentWorkflowContextSnapshot(workflowOrPipeline, taskId) {
       stageId: upstreamStageId(upstream),
       taskId: upstream.id,
       role: upstream.role,
-      artifacts: (upstream.artifacts ?? []).filter((item) => item?.kind !== 'file' || isRelativeWorkflowFileArtifact(item)),
+      artifacts: latestWorkflowArtifactsByPath(upstream.artifacts ?? [])
+        .filter((item) => item?.kind !== 'file' || isRelativeWorkflowFileArtifact(item)),
       evidence: upstream.evidence ?? [],
       workflowContext: upstream.agentSelectionSnapshot?.workflowContext ?? null,
     }))
@@ -6115,7 +6127,7 @@ function resolveAgentWorkflowContextSnapshot(workflowOrPipeline, taskId) {
   if (taskStageId === implementationStageId || taskStageId === reviewStageId) {
     const designTask = findWorkflowStageAncestor(taskId, workflow, designStageId)
     if (designTask !== null) {
-      designArtifacts = (designTask.artifacts ?? [])
+      designArtifacts = latestWorkflowArtifactsByPath(designTask.artifacts ?? [])
         .filter(isRelativeWorkflowFileArtifact)
         .map((item) => ({ taskId: designTask.id, path: item.path, digest: item.digest, title: item.title ?? '' }))
     }

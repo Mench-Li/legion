@@ -5035,9 +5035,9 @@ function submitAgentWorkflowReview({ taskId, by, scope, findings, summary, evide
       throw Object.assign(new Error('冻结审查工作流缺少 instanceId'), { code: 'AGENT_WORKFLOW_INSTANCE_MISSING', statusCode: 409 })
     }
     const completedRounds = Number(db.prepare('SELECT COUNT(*) AS n FROM agent_workflow_reviews WHERE workflow_instance_id=?').get(rootId)?.n ?? 0)
-    if (completedRounds >= workflow.maxReworkRounds) {
-      return { kind: 'rework-limit', round: completedRounds, maxReworkRounds: workflow.maxReworkRounds, nextTaskId: null }
-    }
+    // `maxReworkRounds` remains in old snapshots for compatibility/history only.
+    // Mandatory review findings must continue through implementation and review;
+    // a numeric cap used to strand the workflow in `in_review` without fixing them.
     const targetConfig = workflow.stageToolsById?.[targetStageId] ?? workflow.stageTools?.[targetRole]
     if (targetConfig === undefined) {
       throw Object.assign(new Error(`冻结工作流缺少返工阶段配置：${targetRole}`), { code: 'AGENT_WORKFLOW_TARGET_MISSING', statusCode: 409 })
@@ -5053,7 +5053,7 @@ function submitAgentWorkflowReview({ taskId, by, scope, findings, summary, evide
     const reworkTask = createTaskInTx({
       title: `【${targetStage.label}·审查返工第${round}轮】${task.title.replace(/^【[^】]*】/, '').slice(0, 48)}`,
       description: [
-        `[agent-workflow-rework] 工作流 ${rootId} 第 ${round}/${workflow.maxReworkRounds} 轮返工。`,
+        `[agent-workflow-rework] 工作流 ${rootId} 第 ${round} 轮返工；审查会持续到通过。`,
         `审查任务 ${task.id}：${summary ?? ''}`,
         `审查证据：${evidence ?? ''}`,
         `Codex findings（混合问题已按设计优先选择 ${targetRole}）：\n${findingText}`,
@@ -5145,7 +5145,7 @@ function submitAgentWorkflowReview({ taskId, by, scope, findings, summary, evide
         const created = createTaskInTx({
           title: `【${stage.label}·返工第${round}轮】${task.title.replace(/^【[^】]*】/, '').slice(0, 40)}`,
           description: [
-            `[agent-workflow-rework] 工作流 ${rootId} 第 ${round}/${workflow.maxReworkRounds} 轮下游阶段。`,
+            `[agent-workflow-rework] 工作流 ${rootId} 第 ${round} 轮下游阶段。`,
             `本阶段：${stage.id}（${stage.role}）。由阶段 ${targetStageId} 返工完成后按冻结 DAG 自动推进。`,
             `本阶段输入契约：${JSON.stringify(stage.inputContract ?? {})}`,
             `本阶段输出契约：${JSON.stringify(stage.outputContract ?? {})}`,
@@ -5202,7 +5202,7 @@ function submitAgentWorkflowReview({ taskId, by, scope, findings, summary, evide
       }
     }
     assertIntegratedBeforeDone(task.id)
-    const comments = [...task.comments, { by, at: now(), text: `✓ 审查发现 ${findings.length} 项问题，按 ${selectedKind} 返回 ${targetRole}（第 ${round}/${workflow.maxReworkRounds} 轮）。` }]
+    const comments = [...task.comments, { by, at: now(), text: `✓ 审查发现 ${findings.length} 项问题，按 ${selectedKind} 返回 ${targetRole}（第 ${round} 轮；审查通过前继续返工）。` }]
     db.prepare("UPDATE tasks SET status='done', comments=?, version=version+1, updatedAt=? WHERE id=?")
       .run(JSON.stringify(comments), now(), task.id)
     finishTaskReservationInTx(task.id)
@@ -5212,7 +5212,7 @@ function submitAgentWorkflowReview({ taskId, by, scope, findings, summary, evide
       VALUES (?, ?, ?, ?, ?, ?, ?)`)
       .run(task.id, rootId, round, selectedKind, JSON.stringify(result), reworkTask.id, Date.now())
     audit(by, task.scope, 'agent-workflow:review-rework', task.id, { workflowInstanceId: rootId, round, kind: selectedKind, nextTaskId: reworkTask.id, generatedStageTaskIds }, task.goalId)
-    return { kind: 'rework', reworkKind: selectedKind, round, maxReworkRounds: workflow.maxReworkRounds, nextTaskId: reworkTask.id, generatedStageTaskIds, result }
+    return { kind: 'rework', reworkKind: selectedKind, round, maxReworkRounds: null, nextTaskId: reworkTask.id, generatedStageTaskIds, result }
   })
 }
 

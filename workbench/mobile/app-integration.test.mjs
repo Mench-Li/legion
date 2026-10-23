@@ -424,6 +424,7 @@ function createHarness() {
     root,
     fetchCalls,
     pointer,
+    pointerListeners(type) { return [...(documentListeners.get(type) ?? [])] },
     gateBoard() {
       if (boardGate.promise === null) {
         boardGate.promise = new Promise((resolve) => { boardGate.release = resolve })
@@ -634,6 +635,38 @@ test('★★★ 恢复落地前快速往返页签：聊天位置不许覆盖看�
   assert.equal(main.scrollTop, 360, '数据刷新后的恢复点仍是 360px，不是聊天位置的 200px')
 })
 
+test('★★★ 看板响应等待期间用户滚动后切走：保留最新看板位置，后台响应不改写聊天滚动', async () => {
+  const h = createHarness()
+  const { app, main } = h
+  app.state.view = 'tasks'
+  app.state.boardView = 'all'
+  app.state.boardPage = 0
+  app.state.scope = 's1'
+  app.state.agentId = 'a1'
+  app.state.tasks = h.tasks()
+  main.scrollHeight = 2400
+  main.clientHeight = 500
+  app.renderBoard()
+  main.scrollTop = 360
+  app.showView('chat')
+  main.scrollTop = 200
+  h.gateBoard()
+
+  app.showView('tasks')
+  main.scrollTop = 520 // 数据还没回来时，用户继续读看板
+  app.showView('chat') // 切走时必须保存 520，而不是旧的 360
+  assert.equal(app.state.tasksScrollTop, 520)
+
+  main.scrollTop = 200
+  h.releaseBoard()
+  await settle()
+  assert.equal(main.scrollTop, 200, '隐藏看板刷新不能挪动聊天视图的滚动位置')
+  assert.equal(app.state.tasksScrollTop, 520, '隐藏看板刷新不能覆盖已保存的看板位置')
+
+  app.showView('tasks')
+  assert.equal(main.scrollTop, 520, '再次进入看板恢复到响应等待期间的最新位置')
+})
+
 test('★★ 数据回来前用户自己滚过：跟着用户，不拿旧恢复点拽回去', async () => {
   const h = createHarness()
   const { app, main } = h
@@ -723,6 +756,23 @@ test('★★★ 多指：第一指在看板外，第二指（非主触点）不�
   root.emit('pointerup', h.pointer(2, 200, 300, target, { isPrimary: false }))
   assert.equal(app.state.boardPage, 0, '非主触点不许切列')
   assert.equal(track.style.getPropertyValue('--drag'), '0px', '不许留下跟手位移')
+})
+
+test('★★★ 多指：第二根手指落在看板外也应取消看板手势', () => {
+  const h = gestureSetup()
+  const { app, root } = h
+  const track = h.doc.getElementById('board-track')
+  const target = h.cardTarget()
+  root.emit('pointerdown', h.pointer(1, 300, 300, target))
+  root.emit('pointermove', h.pointer(1, 200, 300, target))
+  // 第二根手指在看板区域外，事件不会到 root。窗口级指针监听仍应发现多指
+  // 并取消第一根手指已经开始的横向预览。
+  for (const fn of h.pointerListeners('pointerdown')) fn(h.pointer(2, 700, 300, target, { isPrimary: false }))
+  assert.equal(app.state.gesture, null, '看板外的第二指也应立即使当前手势作废')
+  assert.equal(track.style.getPropertyValue('--drag'), '0px')
+  root.emit('pointerup', h.pointer(1, 200, 300, target))
+  for (const fn of h.pointerListeners('pointerup')) fn(h.pointer(2, 700, 300, target, { isPrimary: false }))
+  assert.equal(app.state.boardPage, 0, '多指不切列')
 })
 
 test('★★★ 多指：第一指纵向放弃后，第二指也不许接管', () => {

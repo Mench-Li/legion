@@ -466,17 +466,18 @@ describe('TC-SP-P0-01/02 读写：空态 → 写入 → 回读 → version 指�
     addReviewAttempt('typed-review-limit-round')
     const limited = await post('/api/agent-workflow/review', {
       taskId: 'typed-review-limit-round', by: 'codex', scope,
-      findings: [{ kind: 'implementation', summary: '仍有实现遗漏' }], summary: '返工上限验证', evidence: 'review.md#L30',
+      findings: [{ kind: 'implementation', summary: '仍有实现遗漏' }], summary: '超过旧配置轮数仍继续修复', evidence: 'review.md#L30',
     })
     assert.equal(limited.status, 200, limited.text)
-    assert.equal(limited.json.task.kind, 'rework-limit')
-    assert.equal(limited.json.task.round, 2)
-    assert.equal(mod.db.prepare('SELECT COUNT(*) AS n FROM tasks WHERE parent=?').get('typed-review-limit-round').n, 0)
+    assert.equal(limited.json.task.kind, 'rework')
+    assert.equal(limited.json.task.round, 3, '旧快照 maxReworkRounds=2 不得中断必改项闭环')
+    assert.equal(limited.json.task.nextTaskId !== null, true)
+    assert.equal(mod.db.prepare('SELECT COUNT(*) AS n FROM tasks WHERE parent=?').get('typed-review-limit-round').n, 1)
 
     const history = await get(`/api/agent-workflow/history?taskId=${encodeURIComponent(taskId)}&scope=${encodeURIComponent(scope)}`)
     assert.equal(history.status, 200, history.text)
     assert.equal(history.json.workflowId, rootId)
-    assert.deepEqual(history.json.reviews.map((review) => review.kind), ['design', 'implementation'])
+    assert.deepEqual(history.json.reviews.map((review) => review.kind), ['design', 'implementation', 'implementation'])
     assert.ok(history.json.tasks.some((item) => item.id === taskId))
     assert.ok(history.json.tasks.some((item) => item.id === implementationReturn.json.task.nextTaskId))
   })
@@ -1403,7 +1404,7 @@ it('Agent 工作流快照与 typed review 台账在 team-hub 重启后可恢复'
 
   const before = await get('/api/agent-workflow/history?taskId=typed-review-source&scope=space-reviewflow')
   assert.equal(before.status, 200, before.text)
-  assert.equal(before.json.reviews.length, 2)
+  assert.equal(before.json.reviews.length, 3, '旧返工上限之后的新返工也要进入可恢复审计历史')
   const reworkId = before.json.reviews[0].nextTaskId
 
   mod.server.closeAllConnections?.()

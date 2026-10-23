@@ -559,8 +559,8 @@ function renderBoard() {
     $('page-indicator').textContent = ''
     state.boardPage = 0
     const anchor = state.tasksRestoreAnchor
-    const moved = anchor !== null && Math.abs(keepScroll - anchor) > 2
-    applyBoardScroll(restore && !moved ? state.tasksScrollTop : keepScroll)
+    const moved = state.view === 'tasks' && anchor !== null && Math.abs(keepScroll - anchor) > 2
+    if (state.view === 'tasks') applyBoardScroll(restore && !moved ? state.tasksScrollTop : keepScroll)
     state.scrollRestorePending = null
     state.tasksRestorePending = false
     state.tasksRestoreAnchor = null
@@ -578,7 +578,7 @@ function renderBoard() {
     frag.appendChild(p)
     root.replaceChildren(frag)
     $('page-indicator').textContent = ''
-    applyBoardScroll(restore ? state.tasksScrollTop : keepScroll)
+    if (state.view === 'tasks') applyBoardScroll(restore ? state.tasksScrollTop : keepScroll)
     state.scrollRestorePending = null
     state.tasksRestorePending = false
     state.tasksRestoreAnchor = null
@@ -600,7 +600,7 @@ function renderBoard() {
   //   会在进入任务页的那一刻留下锚点，隔了两像素以上就说明手指动过 ——
   //   这时该跟着用户，而不是拿旧恢复点把他拽回去。
   const anchor = state.tasksRestoreAnchor
-  const userScrolled = anchor !== null && Math.abs(keepScroll - anchor) > 2
+  const userScrolled = state.view === 'tasks' && anchor !== null && Math.abs(keepScroll - anchor) > 2
   const target = restore
     ? userScrolled
       ? keepScroll
@@ -611,9 +611,11 @@ function renderBoard() {
           columnTop: state.columnScroll[entering.id],
         })
     : keepScroll
-  applyBoardScroll(target)
+  // `#main` 是对话与看板共用的滚动容器。异步刷新可能在用户已切回对话后完成，
+  // 后台重画看板只能更新 DOM 与状态，不能移动对话的 scrollTop。
+  if (state.view === 'tasks') applyBoardScroll(target)
   // 刚恢复到的位置就是"当前位置"：下次离开时不必再猜一次。
-  if (restore && entering !== undefined) state.columnScroll[entering.id] = target
+  if (restore && entering !== undefined && state.view === 'tasks') state.columnScroll[entering.id] = target
   state.scrollRestorePending = null
   state.tasksRestorePending = false
   state.tasksRestoreAnchor = null
@@ -1072,7 +1074,10 @@ function saveTasksScroll() {
   //   置了恢复标记，真正按新数据还原要等 `refreshTasks` → `renderBoard`）。
   //   这时保存 = 用聊天位置覆盖看板位置；而用户完全可能只是快速点了一下
   //   任务页签又切回来。等恢复完成（`renderBoard` 会清掉这个标记）再允许保存。
-  if (state.tasksRestorePending === true) return
+  // 切换处理发生在 `state.view` 更新前：如果此刻任务页正显示给用户，当前
+  // scrollTop 就是他刚读到的位置，即使刷新还没返回也必须保存。隐藏看板的后台
+  // 刷新则不能把共用滚动容器里的聊天位置当成看板位置。
+  if (state.tasksRestorePending === true && state.view !== 'tasks') return
   const main = $('main')
   state.tasksScrollTop = main.scrollTop
   state.tasksScrollPageId = null
@@ -2349,9 +2354,28 @@ function bindBoardGestures() {
     if (activePointers.size === 0) multiTouchRound = false
   }
 
+  // 只监听 task-groups 会漏掉落在看板外的第二根手指；第一根仍会被识别成
+  // 单指横滑并切列。文档捕获阶段能观察本轮所有触点，手势状态在所有触点结束前
+  // 一直作废。root 内的 start/finish 保留兜底，以便旧浏览器与测试桩正常工作。
+  const observeTouchDown = (ev) => {
+    if (ev.pointerType !== 'touch' || activePointers.has(ev.pointerId)) return
+    activePointers.add(ev.pointerId)
+    if (activePointers.size > 1) {
+      multiTouchRound = true
+      cancelBoardGesture()
+    }
+  }
+  const observeTouchEnd = (ev) => {
+    if (ev.pointerType === 'touch') forgetPointer(ev.pointerId)
+  }
+  document.addEventListener('pointerdown', observeTouchDown, true)
+  document.addEventListener('pointerup', observeTouchEnd, true)
+  document.addEventListener('pointercancel', observeTouchEnd, true)
+
   const start = (ev) => {
     if (state.boardView !== 'all') return
     if (ev.pointerType === 'mouse' && ev.buttons !== 1) return
+    if (ev.pointerType === 'touch') observeTouchDown(ev)
     // ★ 非主触点 = 这根手指按下时已经有别的触点按着（哪怕那根在看板外）：
     //   这一次多指操作不接管，并把整轮标记成作废（修复前会创建新手势切列）。
     if (ev.isPrimary === false) {
@@ -2422,7 +2446,7 @@ function bindBoardGestures() {
 
   const finish = (ev) => {
     // 触点抬起 → 从本轮集合里移除；最后一个抬起时解除多指作废。
-    forgetPointer(ev.pointerId)
+    if (ev.pointerType === 'touch') forgetPointer(ev.pointerId)
     const g = state.gesture
     if (g === null || g.id !== ev.pointerId) return
     state.gesture = null
@@ -2452,7 +2476,7 @@ function bindBoardGestures() {
   //   必须只回弹、不提交（REQUIREMENTS 7.3）。修复前两者共用一个 finish，
   //   于是一次被系统取消的滑动仍然会翻页。
   const cancel = (ev) => {
-    forgetPointer(ev.pointerId)
+    if (ev.pointerType === 'touch') forgetPointer(ev.pointerId)
     const gesture = state.gesture
     if (gesture === null || gesture.id !== ev.pointerId) return
     cancelBoardGesture()

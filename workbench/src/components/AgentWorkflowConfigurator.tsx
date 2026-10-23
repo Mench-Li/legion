@@ -131,7 +131,8 @@ export function AgentWorkflowConfigurator({ scope }: Props): React.JSX.Element {
   // ★ 默认填 DSH 注册的那个 provider 名（`plugins/src/index.ts` 的 config.provider 默认 'spawn'），
   //   不留空 —— 留空 + 发布时必填 = 用户必须先去读 DSH 源码才发得出去。
   const [dshProvider, setDshProvider] = useState<string>(DEFAULT_NATIVE_PROVIDER)
-  const [maxReworkRounds, setMaxReworkRounds] = useState(2)
+  // 服务端仍接收此旧字段以读取已发布的历史快照，但不再将其当作停止条件。
+  const legacyReworkRounds = 2
   const [testExecutable, setTestExecutable] = useState('node')
   const [testArgs, setTestArgs] = useState('["--test"]')
   const [testTimeoutMs, setTestTimeoutMs] = useState(900000)
@@ -173,7 +174,6 @@ export function AgentWorkflowConfigurator({ scope }: Props): React.JSX.Element {
         implementationRole: workflow?.implementationRole ?? defaultRoleFor(nextPipeline.stages, 'implementationRole'),
         reviewRole: workflow?.reviewRole ?? defaultRoleFor(nextPipeline.stages, 'reviewRole'),
       })
-      setMaxReworkRounds(workflow?.maxReworkRounds ?? 2)
       const implementationRole = workflow?.implementationRole ?? defaultRoleFor(nextPipeline.stages, 'implementationRole')
       const savedTestRunner = workflow?.stageTools?.[implementationRole]?.testRunner
       setTestExecutable(savedTestRunner?.executable ?? 'node')
@@ -342,7 +342,7 @@ export function AgentWorkflowConfigurator({ scope }: Props): React.JSX.Element {
         scope,
         stages: pipeline.stages,
         runtime: pipeline.runtime,
-        workflow: { ...roles, maxReworkRounds, stageTools },
+        workflow: { ...roles, maxReworkRounds: legacyReworkRounds, stageTools },
       })
       const latest = await fetchSpacePipeline(scope)
       setPipeline(latest)
@@ -420,7 +420,7 @@ export function AgentWorkflowConfigurator({ scope }: Props): React.JSX.Element {
         id, version, name: definitionName.trim(), description: `由 ${scope} 空间配置生成的跨 Agent DAG 工作流。`,
         stages, edges: graphEdges,
         entryStageIds, terminalStageIds, reviewStageId,
-        reviewRoutes: { design: reviewDesignRoute, implementation: reviewImplementationRoute }, maxReworkRounds,
+        reviewRoutes: { design: reviewDesignRoute, implementation: reviewImplementationRoute }, maxReworkRounds: legacyReworkRounds,
       }
       await registerAgentWorkflowDefinition(scope, definition)
       setGraphStages(current => current.map(stage => {
@@ -440,7 +440,6 @@ export function AgentWorkflowConfigurator({ scope }: Props): React.JSX.Element {
   const loadDefinitionDraft = (definition: AgentWorkflowDefinition): void => {
     setDefinitionId(definition.id)
     setDefinitionName(definition.name)
-    setMaxReworkRounds(definition.maxReworkRounds)
     setReviewStageId(definition.reviewStageId)
     setReviewDesignRoute(definition.reviewRoutes.design)
     setReviewImplementationRoute(definition.reviewRoutes.implementation)
@@ -735,7 +734,7 @@ export function AgentWorkflowConfigurator({ scope }: Props): React.JSX.Element {
                 ★ 折叠区里**不含**任何会拦下发布的错误：那些在折叠区外（见上面那处注释）。 */}
             <details style={{ marginTop: 10 }}>
               <summary style={{ cursor: 'pointer', color: 'var(--muted-2)', fontSize: 11 }}>
-                ⚙ 高级设置：执行节点说明 · DSH 执行服务注册名 · 能力声明 · 审查路由与返工上限 · 自定义交接链 DAG · 发布为可复用工作流版本
+                ⚙ 高级设置：执行节点说明 · DSH 执行服务注册名 · 能力声明 · 审查路由与返工策略 · 自定义交接链 DAG · 发布为可复用工作流版本
               </summary>
               <div style={{ marginTop: 8 }}>
             <div style={{ color: 'var(--muted-2)', marginTop: 8 }}>
@@ -832,8 +831,8 @@ export function AgentWorkflowConfigurator({ scope }: Props): React.JSX.Element {
               </div>
             </div>}
             <div style={{ marginTop: 10 }}>
-              <label>审查返工上限 <input type="number" min={0} max={20} value={maxReworkRounds} onChange={e => setMaxReworkRounds(Number(e.target.value))} style={{ width: 70 }} /> 轮</label>
-              <div style={{ color: 'var(--muted-2)' }}>设计问题退回 Claude Code；实现问题退回编码岗位；混合问题先修订设计，再重新实现和审查。</div>
+              <div>审查返工策略</div>
+              <div style={{ color: 'var(--muted-2)' }}>有必改项时会按审查路由继续返工，直到 Codex 复审通过。旧工作流里的轮数上限只保留作历史信息，不再中断修复。</div>
             </div>
             <section style={{ marginTop: 12, padding: 12, border: '1px solid var(--line)', borderRadius: 8 }}>
               <b>可复用工作流 DAG</b>

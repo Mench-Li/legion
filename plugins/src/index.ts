@@ -2047,7 +2047,7 @@ function spaceWorker(ctx: AppContext, config: Config): void {
         ? [
             '本阶段是 Codex 风格的独立审查。只审查，不修改代码或设计产物；逐条给出可复现依据。',
             '最终只输出一个完整 WorkerReport JSON 对象；review 必须是顶层字段，与 status、summary、evidence、blocker、artifact 同级，不能把 review JSON 写进 evidence/summary，也不能写成 review= 前缀。通过示例：{"status":"done","summary":"审查通过","evidence":"核对了设计、实现与测试","blocker":"","artifact":null,"review":{"passed":true,"findings":[]}}。发现问题示例：{"status":"done","summary":"发现实现问题","evidence":"src/example.js:12 与设计不一致","blocker":"","artifact":null,"review":{"passed":false,"findings":[{"kind":"implementation","summary":"问题","evidence":"文件/行号/可复现依据"}]}}。finding.kind 只能是 implementation 或 design。',
-            `实现问题回到 ${reviewWorkflow?.implementationRole ?? '实现阶段'}；设计问题回到 ${reviewWorkflow?.designRole ?? '设计阶段'}；混合问题必须同时分类，系统会优先退回设计。返工上限：${reviewWorkflow?.maxReworkRounds ?? 0} 轮。`,
+            `实现问题回到 ${reviewWorkflow?.implementationRole ?? '实现阶段'}；设计问题回到 ${reviewWorkflow?.designRole ?? '设计阶段'}；混合问题必须同时分类，系统会优先退回设计。存在必改项时继续返工，直到复审通过。`,
             '无法归类、证据不足或结论矛盾时不要声称通过；写入 blocker 并停在待澄清状态。',
             '',
           ]
@@ -2964,13 +2964,13 @@ function spaceWorker(ctx: AppContext, config: Config): void {
             evidence: report.evidence,
           }) as Record<string, unknown>
           if (outcome.kind === 'rework') {
-            await safeComment(t.id, `✓ 已按审查结论创建返工任务 ${String(outcome.nextTaskId ?? '')}（${String(outcome.reworkKind ?? '')}，第 ${String(outcome.round ?? '')}/${String(outcome.maxReworkRounds ?? '')} 轮）；审查任务已结算。`, scope)
+            await safeComment(t.id, `✓ 已按审查结论创建返工任务 ${String(outcome.nextTaskId ?? '')}（${String(outcome.reworkKind ?? '')}，第 ${String(outcome.round ?? '')} 轮；复审通过前继续返工）；审查任务已结算。`, scope)
             activity('done', t.id, `审查触发 ${String(outcome.reworkKind ?? '')} 返工 ${String(outcome.nextTaskId ?? '')}`)
             return
           }
           await transitionTo(t.id, 'in_review')
           const reason = outcome.kind === 'rework-limit'
-            ? `自动返工已达到上限（${String(outcome.round ?? '')}/${String(outcome.maxReworkRounds ?? '')} 轮）`
+            ? '中枢仍在运行旧版返工上限逻辑，请重启 team-hub 后重新提交审查'
             : String(outcome.reason ?? '审查结果需要补充说明')
           await safeComment(t.id, `⚠ ${reason}。问题已保留，请人工裁定后续处理：\n${findings.map(f => `- [${f.kind}] ${f.summary}`).join('\n')}`, scope)
           activity('gate', t.id, `审查返工未自动派发：${reason}`)

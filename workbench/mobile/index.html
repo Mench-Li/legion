@@ -3,8 +3,14 @@
 <head>
 <meta charset="utf-8" />
 <!-- 手机端：viewport 必须带 viewport-fit=cover，否则刘海屏两侧留白，
-     而消息流的左右边距会被安全区挤掉。 -->
-<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+     而消息流的左右边距会被安全区挤掉。
+     ★ 不写 maximum-scale / user-scalable=no：锁死缩放会让"看不清"的人
+       永远看不清（R-03 明确禁止）。防 iOS 聚焦缩放靠**16px 输入字号**，
+       而不是靠禁止缩放。
+     ★ interactive-widget=resizes-content：软键盘弹起时让**布局视口**跟着缩，
+       这是 Android Chrome 上与 visualViewport 配合的那一半（iOS 由 JS 的
+       --vvh 补足）。 -->
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content" />
 <meta name="theme-color" content="#0a0e16" />
 <meta name="color-scheme" content="dark" />
 <title>Legion</title>
@@ -20,129 +26,235 @@
  *   > 在功能上一模一样——用户说不出哪里不对，只觉得要重新学一遍。
  *
  * 只留深色：桌面指挥台是深色的，手机端跟随它；`color-scheme: dark` 让输入框、
- * 滚动条的**原生**部分也跟着暗，不必给每个控件写一遍。 */
+ * 滚动条的**原生**部分也跟着暗，不必给每个控件写一遍。
+ *
+ * ⚠ 新增的只有**布局令牌**（安全区、间距、圆角、命中区、可读宽度）与一个
+ *   移动端局部可访问色 `--muted-2-a`；**不改**任何桌面令牌的值（R-09 / RK-6）。
+ *   `--muted-2` 在 12px 小字上对 `--panel` 只有约 4.3:1，不到正文 4.5:1 的门槛；
+ *   手机端的小字改用 `--muted-2-a`（约 5.6:1），桌面端不受影响。 */
 :root {
   --bg: #0a0e16; --panel: #0d1220; --panel-2: #131a2b;
   --line: #1f2940; --line-2: #26334e;
   --text: #e8edf7; --muted: #8b98b0; --muted-2: #6b7a94;
   --accent: #93c5fd; --accent-2: #5b8cff;
   --green: #40ffa0; --yellow: #ffd54a; --red: #ff8f8f;
+  /* 移动端局部可访问色：只用于 12px 及以下的小字（对比度 ≥ 4.5:1）。 */
+  --muted-2-a: #7f8da6;
+  /* 四边安全区。此前只有 top/bottom —— 横屏时左右内容会被圆角/刘海裁切。 */
   --safe-top: env(safe-area-inset-top, 0px);
   --safe-bottom: env(safe-area-inset-bottom, 0px);
+  --safe-left: env(safe-area-inset-left, 0px);
+  --safe-right: env(safe-area-inset-right, 0px);
+  /* 布局令牌：命中区、间距、圆角、可读宽度、动效时长。 */
+  --tap: 44px;               /* 有效命中区下限（R-04） */
+  /* 相邻可点目标之间的最小间距（R-04 要求 ≥ 8px，所以最小的那一档就是 8px）。 */
+  --gap-1: 8px; --gap-2: 10px; --gap-3: 14px;
+  --radius-card: 14px; --radius-sheet: 18px; --radius-pill: 999px;
+  --content-max: 720px;      /* 平板/横屏的可读宽度上限（R-01/R-14） */
+  --anim-ms: 220ms;          /* 切页/抽屉 180–250ms（R-10） */
+  /* 软键盘高度（JS 从 visualViewport 写；0 = 键盘没弹）。 */
+  --kb-h: 0px;
 }
 * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
-html, body { margin:0; height:100%; background:var(--bg); color:var(--text);
-  font: 14px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", "Noto Sans CJK SC", sans-serif; }
+html { height:100%; background:var(--bg); }
+body { margin:0; height:100vh; height: var(--vvh, 100dvh);
+  background:var(--bg); color:var(--text);
+  font: 15px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", "Noto Sans CJK SC", sans-serif; }
 body { display:flex; flex-direction:column; overscroll-behavior-y: contain; }
 
+/* 控件基线：**命中区 44px 起**。视觉尺寸可以更小，但 44px 是手指点得准的下限。 */
 button { font: inherit; color: inherit; background: var(--panel-2); border:1px solid var(--line);
-  border-radius: 8px; padding: 8px 12px; min-height: 40px; }
+  border-radius: 10px; padding: 8px 12px; min-height: var(--tap); min-width: var(--tap); }
 button:active { opacity:.75; }
 button.primary { background: var(--accent-2); border-color: var(--accent-2); color:#06101f; font-weight:600; }
 button[disabled] { opacity:.45; }
+button[aria-disabled="true"] { opacity:.6; }
 input, textarea, select { font: inherit; color: var(--text); background: var(--panel-2);
-  border:1px solid var(--line); border-radius:8px; padding:8px 10px; width:100%; min-height:40px; }
-input:focus, textarea:focus, select:focus { outline:none; border-color: var(--line-2); }
+  border:1px solid var(--line); border-radius:10px; padding:8px 10px; width:100%; min-height: var(--tap); }
+/* ★ 16px 是 iOS Safari 不自动缩放的分界线。把输入框做成 14px，聚焦时会整页放大，
+   而用户不会认为那是"页面在缩放"，只会觉得"这个页面怪怪的"。 */
+input, textarea, select { font-size: 16px; }
+input:focus, textarea:focus, select:focus { outline:none; border-color: var(--accent-2); }
+/* 焦点可见：键盘 Tab 时必须有环。触屏点按不显示（:focus-visible 的语义）。 */
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 
 /* ── 顶栏：标题 / 状态 / 两个页签 ─────────────────────────────────────────── */
-header { padding: calc(var(--safe-top) + 8px) 12px 0; background: var(--panel);
-  border-bottom:1px solid var(--line); position: sticky; top:0; z-index:5; }
-header .row { display:flex; align-items:center; gap:8px; }
+header { padding: calc(var(--safe-top) + 6px) calc(var(--safe-right) + 10px) 0 calc(var(--safe-left) + 10px);
+  background: var(--panel); border-bottom:1px solid var(--line); position: sticky; top:0; z-index:5; }
+header .row { display:flex; align-items:center; gap: var(--gap-1); }
 header h1 { font-size:16px; margin:0; flex:1; min-width:0; overflow:hidden;
   text-overflow:ellipsis; white-space:nowrap; font-weight:600; letter-spacing:.3px; }
-header .icon-btn { min-height:32px; padding:4px 10px; font-size:12px; border-radius:6px; }
-#status { margin-top:6px; font-size:12px; display:flex; gap:7px; align-items:baseline; }
+/* 头部图标按钮：44×44 命中区。320px 下四个按钮 + 标题仍不横向溢出
+   （标题用省略号让位；标题完整内容在登录后的页面里不承载操作信息）。 */
+header .icon-btn { min-width: var(--tap); min-height: var(--tap); padding:0 8px; font-size:13px;
+  border-radius:10px; display:inline-flex; align-items:center; justify-content:center; }
+#status { margin-top:4px; font-size:13px; display:flex; gap:7px; align-items:baseline; }
 #status .dot { width:7px; height:7px; border-radius:50%; flex:none; margin-top:5px; }
 #status .dot.ok{background:var(--green)} #status .dot.warn{background:var(--yellow)}
 #status .dot.error{background:var(--red)} #status .dot.busy{background:var(--accent-2)} #status .dot.muted{background:var(--muted-2)}
-#status .detail { color: var(--muted-2); }
+#status .detail { color: var(--muted-2-a); }
 
 /* 页签：与 web 的 tab 同一形状（下划线选中），不用胶囊——
    胶囊在窄屏上会挤成两坨，而下划线永远只占一行。 */
-#tabs { display:flex; gap:2px; margin-top:6px; }
-#tabs button { flex:1; min-height:38px; padding:6px 8px; font-size:14px; position:relative;
+#tabs { display:flex; gap: var(--gap-1); margin-top:2px; }
+#tabs button { flex:1; min-height: var(--tap); padding:6px 8px; font-size:15px; position:relative;
   background:transparent; border:none; border-bottom:2px solid transparent; border-radius:0;
   color:var(--muted); }
 #tabs button[aria-selected="true"] { color:var(--text); border-bottom-color:var(--accent-2); font-weight:600; }
-#tabs button .badge { position:absolute; top:2px; right:8px; background:var(--yellow); color:#2a2000;
-  border-radius:999px; font-size:10px; font-weight:700; padding:0 5px; line-height:15px; min-width:15px; }
+#tabs button .badge { position:absolute; top:6px; right:10px; background:var(--yellow); color:#2a2000;
+  border-radius:var(--radius-pill); font-size:10px; font-weight:700; padding:0 5px; line-height:15px; min-width:15px; }
 
-main { flex:1; overflow-y:auto; -webkit-overflow-scrolling:touch; padding: 10px 12px 6px; }
+main { flex:1; overflow-y:auto; overflow-x:hidden; -webkit-overflow-scrolling:touch;
+  padding: 10px calc(var(--safe-right) + 12px) calc(var(--safe-bottom) + 8px) calc(var(--safe-left) + 12px);
+  width:100%; max-width: var(--content-max); margin-inline:auto; }
 
 /* ── 对话：与 web 的 .chat-bubble 同一形状 ───────────────────────────────── */
 #timeline { display:flex; flex-direction:column; }
-.msg { margin: 0 0 8px; max-width: 82%; display:flex; flex-direction:column; }
+.msg { margin: 0 0 10px; max-width: 86%; display:flex; flex-direction:column; }
 .msg[data-source="user"] { margin-left:auto; align-items:flex-end; }
-.msg .meta { font-size:11px; color:var(--muted-2); margin-bottom:3px; display:flex; gap:6px; align-items:center; }
-.msg .body { background: var(--panel-2); border:1px solid var(--line); border-radius:10px;
-  padding:8px 12px; font-size:13px; line-height:1.7; white-space: pre-wrap; overflow-wrap:anywhere; }
+.msg .meta { font-size:12px; color:var(--muted-2-a); margin-bottom:3px; display:flex; gap:6px; align-items:center; flex-wrap:wrap; }
+.msg .body { background: var(--panel-2); border:1px solid var(--line); border-radius:12px;
+  padding:9px 12px; font-size:15px; line-height:1.7; white-space: pre-wrap; overflow-wrap:anywhere; }
 .msg[data-source="user"] .body { background: rgba(91,140,255,.16); border-color: rgba(91,140,255,.5); }
 /* 来源仍然只靠**边框与标签**区分，不靠位置——补投的历史条目可能落在任何地方。 */
 .msg[data-source="progress"] .body { border-left:2px solid var(--accent-2); }
 .msg[data-source="command"] .body { border-left:2px solid var(--yellow); }
-.tag { font-size:10px; padding:0 6px; border-radius:999px; border:1px solid var(--line);
-  color:var(--muted-2); line-height:16px; }
+.tag { font-size:11px; padding:0 6px; border-radius:var(--radius-pill); border:1px solid var(--line);
+  color:var(--muted-2-a); line-height:18px; }
 .tag.progress{color:var(--accent);border-color:var(--line-2)}
 .tag.command{color:var(--yellow);border-color:var(--line-2)}
 .tag.create_task{color:var(--green);border-color:var(--line-2)}
-.taskref { color: var(--accent); text-decoration:none; }
+/* 任务号链接：文字只有 12px，但**有效命中区**用伪元素补到 44px 高、左右各 10px。
+   视觉上仍是行内链接（不撑高消息头），手指点上去够得着。 */
+.taskref { color: var(--accent); text-decoration:none; position:relative; display:inline-block; }
+.taskref::after { content:''; position:absolute; left:-10px; right:-10px; top:-13px; bottom:-13px; }
 
-.hint { font-size:12px; color:var(--muted-2); }
+.hint { font-size:13px; color:var(--muted-2-a); }
 .groups { display:flex; flex-direction:column; gap:8px; }
-.group h2 { font-size:12px; color:var(--muted); margin:0 0 6px; font-weight:600;
-  display:flex; align-items:baseline; gap:6px; text-transform:none; }
+/* 平铺列表（视角不是「全部」时）的分组标题。分页看板的列头是 .col-head，另一套。 */
+.group h2 { font-size:13px; color:var(--muted); margin:0 0 8px; font-weight:600;
+  display:flex; align-items:baseline; gap:6px; }
 .group h2 .n { color:var(--text); }
 
-/* 任务卡：与 web 的 .task-card 同族（面板底 + 左边一条状态色） */
-.task { background:var(--panel); border:1px solid var(--line); border-radius:10px;
-  padding:9px 11px; margin-bottom:8px; }
-.task .t { font-weight:600; font-size:13.5px; overflow-wrap:anywhere; }
-.task .s { font-size:12px; color:var(--muted); margin-top:3px; }
-.task .m { font-size:11px; color:var(--muted-2); margin-top:2px; }
-.task .acts { display:flex; gap:6px; margin-top:8px; }
-.task .acts button { min-height:30px; padding:3px 10px; font-size:12px; border-radius:6px; }
+/* ── 看板：一屏一列（卡片滑动式的**主口径**）────────────────────────────────
+ *
+ * 轨道横向排列所有非空状态列，用 `transform` 平移；当前页由 `--page` 决定。
+ * `overflow-x: clip`（不是 hidden）是必须的：hidden 会成为滚动容器，
+ * 列头的 `position: sticky` 就再也粘不住 #main 的滚动。 */
+#task-groups { overflow-x: clip; touch-action: pan-y; }
+.board-nav { display:flex; align-items:center; gap: var(--gap-1); margin: 0 0 8px; }
+.board-nav button { width: var(--tap); min-width: var(--tap); min-height: var(--tap); padding:0;
+  font-size:18px; line-height:1; border-radius:12px; }
+#page-indicator { flex:1; min-width:0; text-align:center; font-size:13px; color: var(--muted);
+  overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.board-track { display:flex; align-items:flex-start; width:100%;
+  transform: translate3d(calc(var(--page, 0) * -100% + var(--drag, 0px)), 0, 0); }
+.board-track.animate { transition: transform var(--anim-ms) cubic-bezier(.22,.61,.36,1); }
+.board-page { flex: 0 0 100%; min-width:0; }
+/* 列头随该列纵向滚动时保持可见：用户滑到第 20 条还知道自己在哪一列。 */
+.col-head { position: sticky; top: 0; z-index: 2; display:flex; align-items:baseline; gap:8px;
+  padding: 10px 2px 8px; background: linear-gradient(var(--bg) 76%, rgba(10,14,22,0)); }
+.col-head h2 { font-size:13px; color:var(--muted); margin:0; font-weight:600; }
+.col-head h2 .n { color:var(--text); margin-left:6px; }
+.col-head .swipe-hint { margin-left:auto; font-size:11.5px; color:var(--muted-2-a); }
+
+/* 任务卡：与 web 的 .task-card 同族（面板底 + 左边一条状态色）。
+ * 状态**颜色 + 文字**双重编码：色盲用户读 taskLine 也分得出受阻/待验收。 */
+.task { position:relative; background:var(--panel); border:1px solid var(--line);
+  border-left:3px solid var(--tone, var(--line-2)); border-radius: var(--radius-card);
+  padding:11px 12px; margin-bottom:10px; min-height: var(--tap); cursor:pointer;
+  transition: background var(--anim-ms) ease, border-color var(--anim-ms) ease; }
+.task[data-tone="warn"] { --tone: var(--yellow); }
+.task[data-tone="busy"] { --tone: var(--accent-2); }
+.task[data-tone="muted"] { --tone: var(--muted-2); }
+.task[data-tone="ok"] { --tone: var(--green); }
+.task:active { background: var(--panel-2); }
+.task .t { font-weight:600; font-size:14.5px; line-height:1.45; overflow-wrap:anywhere;
+  display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; overflow:hidden; }
+.task .s { font-size:13px; color:var(--muted); margin-top:4px; }
+.task .m { font-size:12px; color:var(--muted-2-a); margin-top:3px; }
+.task .more { margin-top:6px; font-size:12px; color:var(--accent); }
+
+/* ── 任务详情（轻量抽屉）─────────────────────────────────────────────────────
+ * 只收现有字段 + 现有动作；不是桌面 TaskDetailModal 的复刻（R-07 / A6）。
+ * 从底部升起：拇指可达，且"我从哪来"由遮罩与卡片高亮回答。 */
+#task-sheet { position: fixed; inset:0; z-index:60; display:flex; flex-direction:column; justify-content:flex-end; }
+#task-sheet .sheet-backdrop { position:absolute; inset:0; background: rgba(2,6,12,.66); }
+#task-sheet .sheet { position:relative; width:100%; max-width: var(--content-max);
+  margin-inline:auto; max-height: min(78dvh, 640px); display:flex; flex-direction:column; gap:8px;
+  background:var(--panel); border-top:1px solid var(--line-2);
+  border-radius: var(--radius-sheet) var(--radius-sheet) 0 0;
+  padding: 10px 14px calc(var(--safe-bottom) + 14px); animation: sheet-in var(--anim-ms) ease; }
+#task-sheet .sheet::before { content:''; width:38px; height:4px; border-radius:var(--radius-pill);
+  background: var(--line-2); align-self:center; flex:none; }
+#task-sheet .sheet-head { display:flex; align-items:flex-start; gap:10px; }
+#sheet-title { font-size:16px; font-weight:600; margin:0; flex:1; min-width:0; overflow-wrap:anywhere; }
+#sheet-close { flex:none; }
+#sheet-status { margin:0; font-size:14px; color:var(--text); }
+#sheet-meta, #sheet-where { margin:0; font-size:12.5px; color:var(--muted-2-a); }
+#sheet-acts { display:flex; flex-direction:column; gap:8px; margin-top:4px; }
+#sheet-acts button { width:100%; }
+#sheet-body { overflow-y:auto; display:flex; flex-direction:column; gap:8px; min-height:0; }
+@keyframes sheet-in { from { transform: translateY(18px); opacity:0; } to { transform:none; opacity:1; } }
+
+/* 「N 条新消息」浮标：用户向上读历史时，新消息不拽他，而是给一个**入口**。 */
+#new-msg-pill { position: fixed; left:0; right:0; z-index:35; pointer-events:none;
+  bottom: calc(var(--safe-bottom) + 120px + var(--kb-h)); display:flex; justify-content:center; }
+#new-msg-pill button { pointer-events:auto; min-height: var(--tap); padding:0 18px;
+  border-radius:var(--radius-pill); background: var(--accent-2); border-color: var(--accent-2);
+  color:#06101f; font-weight:600; font-size:13.5px; box-shadow:0 8px 24px rgba(0,0,0,.5); }
 
 /* ── 底部输入区 ───────────────────────────────────────────────────────────── */
-footer { padding: 8px 12px calc(var(--safe-bottom) + 8px); background: var(--panel);
-  border-top:1px solid var(--line); }
+/* ★ `flex-direction: column` 这一条是必须的：`body[data-screen="app"] #composer`
+   只给 `display:flex`，方向默认是 **row** —— 于是意图条、提示、目标下拉、输入行
+   会全部并排在一行里（横向溢出、输入框被压成一条缝）。
+   它在本轮之前就是这样，只是没人把它当成"布局 bug"看。 */
+footer { display:flex; flex-direction: column;
+  padding: 8px calc(var(--safe-right) + 12px) calc(var(--safe-bottom) + 8px) calc(var(--safe-left) + 12px);
+  background: var(--panel); border-top:1px solid var(--line); }
+footer > * { width:100%; max-width: var(--content-max); margin-inline:auto; }
 footer .row { display:flex; gap:8px; align-items:flex-end; }
-footer textarea { resize:none; max-height:110px; font-size:14px; }
-#intents { display:flex; gap:6px; margin-bottom:7px; }
-#intents button { flex:1; min-height:30px; padding:3px 6px; font-size:12.5px; border-radius:6px; }
+footer textarea { resize:none; min-height: var(--tap); max-height: 132px; font-size:16px; }
+#intents { display:flex; gap: var(--gap-1); margin-bottom:7px; }
+#intents button { flex:1; min-height: var(--tap); padding:4px 6px; font-size:13px; border-radius:10px; }
 #intents button[aria-pressed="true"] { background:var(--accent-2); border-color:var(--accent-2); color:#06101f; font-weight:600; }
-#intent-hint { font-size:11.5px; color:var(--muted-2); margin-bottom:6px; }
+#intent-hint { font-size:12px; color:var(--muted-2-a); margin-bottom:6px; }
 #target-row { display:flex; gap:8px; margin-bottom:7px; }
-#target-row select { flex:1; min-height:36px; }
+#target-row select { flex:1; min-height: var(--tap); }
+#btn-send { min-width:72px; min-height: var(--tap); flex:none; }
 
 /* 任务页签下的视角筛选 */
-#board-views { display:flex; gap:6px; overflow-x:auto; padding-bottom:7px; margin-bottom:2px;
+#board-views { display:flex; gap: var(--gap-1); overflow-x:auto; padding-bottom:7px; margin-bottom:2px;
   scrollbar-width:none; -webkit-overflow-scrolling:touch; }
 #board-views::-webkit-scrollbar { display:none; }
-#board-views button { flex:none; min-height:30px; padding:3px 11px; font-size:12.5px;
-  border-radius:999px; white-space:nowrap; }
+#board-views button { flex:none; min-height: var(--tap); padding:4px 13px; font-size:13px;
+  border-radius:var(--radius-pill); white-space:nowrap; }
 #board-views button[aria-selected="true"] { background:var(--accent-2); border-color:var(--accent-2); color:#06101f; font-weight:600; }
-.viewtitle { font-size:12px; color:var(--muted-2); margin:0 0 7px; display:flex; align-items:center; gap:6px; }
-.viewtitle select { width:auto; min-height:30px; padding:2px 8px; font-size:12.5px; }
+.viewtitle { font-size:13px; color:var(--muted-2-a); margin:0 0 7px; display:flex; align-items:center; gap:6px; }
+.viewtitle select { width:auto; min-height: var(--tap); padding:2px 8px; font-size:14px; }
 
 /* 成员选择：头像药丸条。<option> 只能渲染纯文本，图形化成员选择只能放这里。 */
-.agent-chips { display:flex; gap:6px; overflow-x:auto; padding:2px 0 7px; scrollbar-width:none; -webkit-overflow-scrolling:touch; }
+.agent-chips { display:flex; gap: var(--gap-1); overflow-x:auto; padding:2px 0 7px; scrollbar-width:none; -webkit-overflow-scrolling:touch; }
 .agent-chips::-webkit-scrollbar { display:none; }
-.agent-chip { flex:none; display:inline-flex; align-items:center; gap:5px; min-height:32px;
-  padding:3px 9px 3px 4px; border-radius:999px; font-size:12px; white-space:nowrap; }
+.agent-chip { flex:none; display:inline-flex; align-items:center; gap:5px; min-height: var(--tap);
+  padding:4px 11px 4px 5px; border-radius:var(--radius-pill); font-size:13px; white-space:nowrap; }
 .agent-chip.selected { background:var(--accent-2); border-color:var(--accent-2); color:#06101f; font-weight:600; }
-.agent-chip .agent-avatar-svg { width:20px; height:20px; border-radius:50%; }
+.agent-chip .agent-avatar-svg { width:22px; height:22px; border-radius:50%; }
 .agent-picker-avatar { display:inline-flex; align-items:center; margin-right:3px; }
-.agent-picker-avatar .agent-avatar-svg { width:24px; height:24px; border-radius:50%; }
+.agent-picker-avatar .agent-avatar-svg { width:26px; height:26px; border-radius:50%; }
 
 /* ── 登录 / 注册（进不来的人看到的唯一一页）────────────────────────────── */
-#screen-login { padding: 20px 16px; display:flex; flex-direction:column; gap:11px; }
-#screen-login h2 { margin:0; font-size:19px; }
-#screen-login label { display:block; font-size:12px; color:var(--muted); }
+#screen-login { padding: calc(var(--safe-top) + 16px) calc(var(--safe-right) + 16px)
+    calc(var(--safe-bottom) + 20px) calc(var(--safe-left) + 16px);
+  display:flex; flex-direction:column; gap:11px; flex:1; overflow-y:auto;
+  width:100%; max-width: 520px; margin-inline:auto; align-self:center; }
+#screen-login h2 { margin:0; font-size:20px; }
+#screen-login label { display:block; font-size:13px; color:var(--muted); }
 #screen-login label input { margin-top:4px; }
 .error-box { background: rgba(255,92,92,.10); border:1px solid rgba(255,92,92,.34); color:var(--red);
-  padding:9px 11px; border-radius:8px; font-size:13px; }
+  padding:9px 11px; border-radius:10px; font-size:14px; }
 .notice-box { background: rgba(64,255,160,.08); border:1px solid rgba(64,255,160,.30); color:var(--green);
-  padding:9px 11px; border-radius:8px; font-size:13px; }
+  padding:9px 11px; border-radius:10px; font-size:14px; }
 .hidden { display:none !important; }
 
 /* ── 三块屏：由 `body[data-screen]` 决定显示哪一块 ──────────────────────────
@@ -159,6 +271,8 @@ body[data-screen="boot"] #boot { display:block; }
 body[data-screen="login"] #screen-login { display:flex; }
 body[data-screen="app"] #main { display:block; }
 body[data-screen="app"] #composer { display:flex; }
+#boot { padding: 18px calc(var(--safe-right) + 16px) 0 calc(var(--safe-left) + 16px);
+  width:100%; max-width: var(--content-max); margin-inline:auto; }
 /* 头部那组动作（页签 / 刷新 / 退出 / 语言）只在主界面出现 —— 登录页上画着它们
    等于给出一组看得见、点不动的控件。 */
 body:not([data-screen="app"]) #tabs,
@@ -180,61 +294,22 @@ body:not([data-screen="app"]) #btn-lang { display:none; }
  *
  * 与 `#popup-host` 同一套定位思路（输入区上方＝拇指活动区、视线落点），
  * 但它是**更强**的一层：错误与回执必须比"提醒"更靠近焦点，所以 z-index 更高、
- * 并且带动作按钮。堆叠顺序：`#popup-host`（30）< `#toast-host`（40）。
+ * 并且带动作按钮。堆叠顺序：`#popup-host`（30）< `#new-msg-pill`（35）< `#toast-host`（40）。
  *
  * `role="alert"` + `aria-live="assertive"`：错误要**立刻**被读屏播报；
  * 而"提醒"（`#popup-host`）用的是 `polite` —— 它可以让位给用户手上的事，
  * 错误不行。
  *
- * ★ `bottom` 比 `#popup-host`（+74px）高一个弹框身位，两者同时出现时不叠在一起：
- *   一个"提醒"压在一条"错误"上面，用户会只看到上面那条。 */
-/* ── 离线读标记（`read-cache.mjs`）──────────────────────────────────────────
- *
- * ★ 样式上它比待发横幅**更安静**（没有按钮、边框更淡），因为它不需要用户做
- *   任何事 —— 它只是"你正在看的东西是旧的"这一句告知。
- *   一个长得像"需要你处理"的标记会让人去找一个不存在的动作。
- * ★ 但看板那条（`.error`）要**显眼**：它说的是"照着做可能做错"。 */
-#offline-note { margin:0 0 8px; padding:8px 11px; border-radius:9px;
-  background:var(--panel-2); border:1px dashed rgba(255,196,0,.4);
-  font-size:12.5px; line-height:1.5; }
-#offline-note.error { border:1px solid rgba(255,92,92,.5); }
-#offline-text { font-weight:600; }
-.offline-detail { margin:4px 0 0; color:var(--muted-2); font-size:12px; }
-
-/* ── 离线待发横幅（`outbox.mjs`）────────────────────────────────────────────
- *
- * ★ 它**不是浮层**，而是 `#main` 顶部的一段普通内容（`position:static`）。
- *   理由：浮层会盖住时间线，而用户此时最想看的恰恰是"我刚才说了什么、
- *   哪些还在等"。把它做成浮层，等于让"确认自己说了话"这个动作变得要抢。
- *
- * 空队列时整个元素 `hidden` —— 一块常驻的"0 条待发"会让用户学会忽略这里。 */
-#outbox { margin:0 0 8px; padding:9px 11px; border-radius:9px;
-  background:var(--panel-2); border:1px solid rgba(255,196,0,.45);
-  font-size:12.5px; line-height:1.5; }
-/* 永久失败要用**错误**的调子，不是警告 —— 它不会自己好，要人动手。 */
-#outbox.error { border-color: rgba(255,92,92,.55); }
-.outbox-row { display:flex; align-items:center; gap:8px; }
-#outbox-text { flex:1; min-width:0; font-weight:600; }
-/* 「查看 / 重试」是**文字按钮**，不是大按钮：它们不该比"发送"更抢眼。 */
-.link-btn { min-height:28px; padding:0 8px; font-size:12px; border-radius:6px;
-  background:transparent; border:1px solid var(--line, rgba(255,255,255,.18)); color:var(--text); }
-.outbox-detail { margin:5px 0 0; color:var(--muted-2); font-size:12px; }
-.outbox-list { list-style:none; margin:7px 0 0; padding:0;
-  max-height:34vh; overflow-y:auto; }
-.outbox-list li { display:flex; align-items:flex-start; gap:7px; padding:5px 0;
-  border-top:1px solid var(--line, rgba(255,255,255,.1)); font-size:12px; }
-.outbox-list .ob-body { flex:1; min-width:0; word-break:break-word; }
-.outbox-list .ob-err { color:var(--muted-2); font-size:11.5px; }
-.outbox-list button { flex:none; min-height:26px; padding:0 7px; font-size:11.5px; border-radius:6px; }
-
-#toast-host { position:fixed; left:10px; right:10px;
-  bottom: calc(var(--safe-bottom) + 132px); display:flex; align-items:center; gap:8px;
-  z-index:40; padding:10px 12px; border-radius:10px; font-size:13px; line-height:1.5;
+ * ★ `bottom` 里带上 `--kb-h`：软键盘弹起时提示浮层跟着上移，否则它会被键盘
+ *   遮住 —— 而"键盘弹起时正好有一条错误要说"是最需要它可见的一刻。 */
+#toast-host { position:fixed; left: calc(var(--safe-left) + 10px); right: calc(var(--safe-right) + 10px);
+  bottom: calc(var(--safe-bottom) + 132px + var(--kb-h)); display:flex; align-items:center; gap:8px;
+  z-index:40; padding:10px 12px; border-radius:12px; font-size:14px; line-height:1.5;
   background:var(--panel-2); border:1px solid rgba(255,92,92,.55); color:var(--text);
   box-shadow:0 10px 30px rgba(0,0,0,.55); animation: popup-in .18s ease; }
 #toast-host.notice { border-color: rgba(64,255,160,.45); }
 #toast-host #toast-text { flex:1; min-width:0; }
-#toast-host button { min-height:32px; padding:0 10px; font-size:12.5px; border-radius:7px; }
+#toast-host button { min-height: var(--tap); padding:0 12px; font-size:13px; border-radius:10px; }
 
 /* ── 提醒弹框（BUG-021）────────────────────────────────────────────────────
  *
@@ -244,16 +319,84 @@ body:not([data-screen="app"]) #btn-lang { display:none; }
  *
  * 卡片是 `<button>`：整块可点（去任务详情）。触摸目标按 44px 起步，
  * 一个"看得见但点不准"的提醒，用户点两次就不再点了。 */
-#popup-host { position:fixed; left:10px; right:10px;
-  bottom: calc(var(--safe-bottom) + 74px); display:flex; flex-direction:column; gap:8px;
+#popup-host { position:fixed; left: calc(var(--safe-left) + 10px); right: calc(var(--safe-right) + 10px);
+  bottom: calc(var(--safe-bottom) + 74px + var(--kb-h)); display:flex; flex-direction:column; gap:8px;
   z-index:30; pointer-events:none; }
-#popup-host .popup { pointer-events:auto; width:100%; text-align:left; min-height:44px;
-  padding:10px 13px; border-radius:10px; font-size:13.5px; line-height:1.5;
+#popup-host .popup { pointer-events:auto; width:100%; text-align:left; min-height: var(--tap);
+  padding:10px 13px; border-radius:12px; font-size:14px; line-height:1.5;
   background:var(--panel-2); border:1px solid rgba(96,165,250,.55); color:var(--text);
   box-shadow:0 10px 30px rgba(0,0,0,.5); animation: popup-in .18s ease; }
 #popup-host .popup.plain { border-color:var(--line-2); }
 #popup-host .popup:active { opacity:.8; }
 @keyframes popup-in { from { opacity:0; transform: translateY(8px); } to { opacity:1; transform:none; } }
+
+/* ── 离线读标记（`read-cache.mjs`）──────────────────────────────────────────
+ *
+ * ★ 样式上它比待发横幅**更安静**（没有按钮、边框更淡），因为它不需要用户做
+ *   任何事 —— 它只是"你正在看的东西是旧的"这一句告知。
+ *   一个长得像"需要你处理"的标记会让人去找一个不存在的动作。
+ * ★ 但看板那条（`.error`）要**显眼**：它说的是"照着做可能做错"。 */
+#offline-note { margin:0 0 8px; padding:9px 12px; border-radius:12px;
+  background:var(--panel-2); border:1px dashed rgba(255,196,0,.4);
+  font-size:13px; line-height:1.5; }
+#offline-note.error { border:1px solid rgba(255,92,92,.5); }
+#offline-text { font-weight:600; }
+.offline-detail { margin:4px 0 0; color:var(--muted-2-a); font-size:12.5px; }
+
+/* ── 离线待发横幅（`outbox.mjs`）────────────────────────────────────────────
+ *
+ * ★ 它**不是浮层**，而是 `#main` 顶部的一段普通内容（`position:static`）。
+ *   理由：浮层会盖住时间线，而用户此时最想看的恰恰是"我刚才说了什么、
+ *   哪些还在等"。把它做成浮层，等于让"确认自己说了话"这个动作变得要抢。
+ *
+ * 空队列时整个元素 `hidden` —— 一块常驻的"0 条待发"会让用户学会忽略这里。 */
+#outbox { margin:0 0 8px; padding:9px 12px; border-radius:12px;
+  background:var(--panel-2); border:1px solid rgba(255,196,0,.45);
+  font-size:13px; line-height:1.5; }
+/* 永久失败要用**错误**的调子，不是警告 —— 它不会自己好，要人动手。 */
+#outbox.error { border-color: rgba(255,92,92,.55); }
+.outbox-row { display:flex; align-items:center; gap:8px; }
+#outbox-text { flex:1; min-width:0; font-weight:600; }
+/* 「查看 / 重试」是**文字按钮**，不是大按钮：它们不该比"发送"更抢眼。
+   但命中区仍然 44px（视觉小、可点区域不小）。 */
+.link-btn { min-height: var(--tap); padding:0 10px; font-size:13px; border-radius:10px;
+  background:transparent; border:1px solid var(--line, rgba(255,255,255,.18)); color:var(--text); }
+.outbox-detail { margin:5px 0 0; color:var(--muted-2-a); font-size:12.5px; }
+.outbox-list { list-style:none; margin:7px 0 0; padding:0;
+  max-height:34vh; overflow-y:auto; }
+.outbox-list li { display:flex; align-items:flex-start; gap:7px; padding:5px 0;
+  border-top:1px solid var(--line, rgba(255,255,255,.1)); font-size:13px; }
+.outbox-list .ob-body { flex:1; min-width:0; word-break:break-word; }
+.outbox-list .ob-err { color:var(--muted-2-a); font-size:12px; }
+.outbox-list button { flex:none; min-height: var(--tap); padding:0 10px; font-size:12.5px; border-radius:10px; }
+
+/* ── 平板 / 横屏（R-01 / R-14）───────────────────────────────────────────────
+ *
+ * 平板只要求"可用、不破版"，不要求桌面级双栏。做法是**限制可读宽度并居中**：
+ * 768px 以上把整屏宽的卡片拉到 720px 是"把手机布局放大"，读起来更累。 */
+@media (min-width: 768px) {
+  :root { --content-max: 720px; }
+  header h1 { font-size:17px; }
+  main { padding-left: calc(var(--safe-left) + 18px); padding-right: calc(var(--safe-right) + 18px); }
+  .msg { max-width: 78%; }
+}
+/* 横屏（高度很小）：压低纵向留白，保证输入区与列头仍在视线内。 */
+@media (max-height: 480px) and (orientation: landscape) {
+  header { padding-top: calc(var(--safe-top) + 4px); }
+  #status { display:none; }
+  #boot { padding-top: 10px; }
+  .skeleton { margin-top:8px; }
+}
+
+/* ── 减少动态（R-10）────────────────────────────────────────────────────────
+ * 切页/抽屉在用户要求"减少动态"时**直接切换**（无位移、无缩放）。
+ * 不是把时长调短：一段短动画仍然是一次位移。 */
+@media (prefers-reduced-motion: reduce) {
+  .board-track, .board-track.animate { transition: none; }
+  #task-sheet .sheet { animation: none; }
+  #toast-host, #popup-host .popup { animation: none; }
+  .task { transition: none; }
+}
 </style>
 </head>
 <body>
@@ -358,7 +501,15 @@ body:not([data-screen="app"]) #btn-lang { display:none; }
   <div id="view-tasks" class="hidden">
     <p class="viewtitle" id="board-scope"></p>
     <div id="board-views" role="tablist" aria-label="任务视角" data-i18n-attr="aria-label"></div>
-    <div id="task-groups" class="groups"></div>
+    <!-- 状态列导航：滑动的**可见替代**（R-05 / R-11）。以前一页、后一页两个
+         44px 按钮 + 一句"第 N/M 页 · 标题 n"（`aria-live` 播报）组成。
+         键盘左右键同样可用（`#task-groups` 可聚焦）。 -->
+    <div id="board-nav" class="board-nav hidden" role="group" aria-label="切换状态列" data-i18n-attr="aria-label">
+      <button id="board-prev" type="button" aria-label="上一列" data-i18n-attr="aria-label">‹</button>
+      <span id="page-indicator" role="status" aria-live="polite"></span>
+      <button id="board-next" type="button" aria-label="下一列" data-i18n-attr="aria-label">›</button>
+    </div>
+    <div id="task-groups" class="groups" role="group" aria-label="任务看板" tabindex="0" data-i18n-attr="aria-label"></div>
   </div>
 </main>
 
@@ -379,6 +530,29 @@ body:not([data-screen="app"]) #btn-lang { display:none; }
      它必须**盖在输入区之上**——用户正在打字时来一条"有任务等你验收"，
      被输入区挡住就等于没弹。 -->
 <div id="popup-host" class="hidden" role="status" aria-live="polite"></div>
+
+<!-- 「N 条新消息」浮标（R-08）：用户向上读历史时，新消息不拽他，给一个入口。 -->
+<div id="new-msg-pill" class="hidden" role="status" aria-live="polite">
+  <button id="new-msg-jump" type="button"></button>
+</div>
+
+<!-- 任务详情（轻量抽屉，R-07）。只显示现有字段与现有动作；
+     焦点进入/退出、Esc、遮罩点击关闭都在 `app.mjs` 里。 -->
+<div id="task-sheet" class="hidden" aria-hidden="true">
+  <div class="sheet-backdrop" data-sheet-close></div>
+  <section class="sheet" role="dialog" aria-modal="true" aria-labelledby="sheet-title">
+    <div class="sheet-head">
+      <h2 id="sheet-title"></h2>
+      <button id="sheet-close" type="button" aria-label="关闭详情" data-i18n-attr="aria-label" data-i18n>关闭</button>
+    </div>
+    <div id="sheet-body">
+      <p id="sheet-status"></p>
+      <p id="sheet-meta"></p>
+      <p id="sheet-where"></p>
+      <div id="sheet-acts"></div>
+    </div>
+  </section>
+</div>
 
 <!-- 全局提示（错误 / 回执）。
      ★ 为什么它必须在 `#screen-login` **之外**：

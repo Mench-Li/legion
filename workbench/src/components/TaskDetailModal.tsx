@@ -469,7 +469,7 @@ export function TaskDetailModal({ taskId, onClose, onChanged, onContactAgent }: 
               <div className="td-section">
                 <div className="td-section-title">🔁 跨 Agent 阶段交接 · {agentWorkflowHistory.workflowId}</div>
                 <div style={{ fontSize: 12, lineHeight: 1.7 }}>
-                  <div>流程版本：<b>{agentWorkflowHistory.pipelineVersion}</b> · 返工轮数上限：{agentWorkflowHistory.maxReworkRounds}</div>
+                  <div>流程版本：<b>{agentWorkflowHistory.pipelineVersion}</b> · 返工策略：有必改项时继续处理，直到审查通过</div>
                   <div>岗位链：{agentWorkflowHistory.designRole}（设计） → {agentWorkflowHistory.implementationRole}（实现） → {agentWorkflowHistory.reviewRole}（审查）</div>
                   {(() => {
                     const context = t.agentSelectionSnapshot?.workflowContext

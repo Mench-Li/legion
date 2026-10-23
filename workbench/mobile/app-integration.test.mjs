@@ -314,6 +314,9 @@ function createHarness() {
     async json() { return value },
   })
 
+  // 看板响应闸门：T-215 finding 1 的复现需要"数据还在飞"的那个时序。
+  // gateBoard() 之后的 /api/board 会挂起，直到 releaseBoard() 放行。
+  const boardGate = { promise: null, release: null }
   const fetchStub = async (url, opts = {}) => {
     const parsed = new URL(String(url))
     const path = parsed.pathname
@@ -322,7 +325,10 @@ function createHarness() {
     if (path === '/api/events/ticket') return response({ ticket: 'ticket-1' })
     if (path === '/api/chat/messages') return response({ messages: data.messages })
     if (path === '/api/identity/me') return response({ user: { userId: 'u1', name: 'U' }, roles: data.roles })
-    if (path === '/api/board') return response(data.tasks)
+    if (path === '/api/board') {
+      if (boardGate.promise !== null) await boardGate.promise
+      return response(data.tasks)
+    }
     if (path === '/api/agents') return response({ agents: data.agents })
     if (path === '/api/devices/presence') return response({ presence: [] })
     if (path === '/api/activity') return response({ items: [] })
@@ -394,15 +400,19 @@ function createHarness() {
   }
   main.clientHeight = 500
 
-  const pointer = (pointerId, clientX, clientY, target) => ({
+  const pointer = (pointerId, clientX, clientY, target, extra = {}) => ({
     pointerId,
     pointerType: 'touch',
     buttons: 0,
+    // 真机上第一根手指是 primary，后续手指是 false。默认 true 让既有用例
+    // 仍按"单指"语义跑；多指用例用 extra 显式标 false。
+    isPrimary: true,
     clientX,
     clientY,
     target,
     preventDefault() { },
     stopPropagation() { },
+    ...extra,
   })
 
   return {
@@ -414,6 +424,19 @@ function createHarness() {
     root,
     fetchCalls,
     pointer,
+    gateBoard() {
+      if (boardGate.promise === null) {
+        boardGate.promise = new Promise((resolve) => { boardGate.release = resolve })
+      }
+      return boardGate
+    },
+    releaseBoard() {
+      if (boardGate.promise === null) return
+      const release = boardGate.release
+      boardGate.promise = null
+      boardGate.release = null
+      release()
+    },
     cardTarget() { return doc.createElement('article') },
     messages(count) {
       data.messages = Array.from({ length: count }, (_, i) => ({
@@ -438,6 +461,13 @@ function createHarness() {
       return data.tasks
     },
   }
+}
+
+// 让挂起的 fetch 与 showView 里的 void refreshTasks() 跑完再断言。
+function settle(rounds = 3) {
+  return rounds <= 0
+    ? Promise.resolve()
+    : new Promise((resolve) => setTimeout(resolve, 0)).then(() => settle(rounds - 1))
 }
 
 // ── ① 新会话必须滚底，历史不算“新消息” ────────────────────────────────────
@@ -571,6 +601,66 @@ test('★★ 恢复时列已经变了：退回该列自己的位置，不硬套�
   assert.equal(main.scrollTop, 120, '页索引夹到 todo 时用 todo 的位置')
 })
 
+test('★★★ 恢复落地前快速往返页签：聊天位置不许覆盖看板位置（T-215 finding 1）', async () => {
+  const h = createHarness()
+  const { app, main } = h
+  app.state.view = 'tasks'
+  app.state.boardView = 'all'
+  app.state.boardPage = 0
+  app.state.scope = 's1'
+  app.state.agentId = 'a1'
+  app.state.tasks = h.tasks()
+  main.scrollHeight = 2400
+  main.clientHeight = 500
+  app.renderBoard()
+  main.scrollTop = 360 // 看板停在第 12 条附近
+
+  app.showView('chat')
+  assert.equal(app.state.tasksScrollTop, 360, '离开任务页时保存看板位置')
+  main.scrollTop = 200 // 对话停在另一处
+  h.gateBoard() // /api/board 延迟返回：复现审查里的时序
+
+  app.showView('tasks')
+  assert.equal(main.scrollTop, 360, '进入任务页应立即还回看板位置，不等数据刷新')
+  app.showView('chat') // 数据回来之前又切走
+  assert.equal(app.state.tasksScrollTop, 360, '聊天偏移不许覆盖 tasksScrollTop')
+  assert.equal(app.state.columnScroll.in_review, 360, '当前列的恢复点也不许被覆盖')
+
+  h.releaseBoard()
+  await settle()
+  app.showView('tasks')
+  assert.equal(main.scrollTop, 360, '再进任务页仍回到看板原来的位置')
+  app.renderBoard()
+  assert.equal(main.scrollTop, 360, '数据刷新后的恢复点仍是 360px，不是聊天位置的 200px')
+})
+
+test('★★ 数据回来前用户自己滚过：跟着用户，不拿旧恢复点拽回去', async () => {
+  const h = createHarness()
+  const { app, main } = h
+  app.state.view = 'tasks'
+  app.state.boardView = 'all'
+  app.state.boardPage = 0
+  app.state.scope = 's1'
+  app.state.agentId = 'a1'
+  app.state.tasks = h.tasks()
+  main.scrollHeight = 2400
+  main.clientHeight = 500
+  app.renderBoard()
+  main.scrollTop = 360
+  app.showView('chat')
+  main.scrollTop = 200
+  h.gateBoard()
+
+  app.showView('tasks')
+  assert.equal(main.scrollTop, 360)
+  main.scrollTop = 520 // 加载期间用户自己往下滚
+  h.releaseBoard()
+  await settle()
+  app.renderBoard()
+  assert.equal(main.scrollTop, 520, '用户的手比旧恢复点新')
+  assert.equal(app.state.columnScroll.in_review, 520, '当前位置成为该列新的恢复点')
+})
+
 // ── ③ 手势取消 / 多指：回弹且无副作用 ──────────────────────────────────────
 
 function gestureSetup() {
@@ -619,6 +709,52 @@ test('★★★ 多指：第二根手指按下即作废，两个手指结束都�
   root.emit('pointercancel', h.pointer(1, 200, 300, target))
   root.emit('pointerup', h.pointer(2, 260, 300, target))
   assert.equal(app.state.boardPage, 0, '多指操作无副作用')
+})
+
+test('★★★ 多指：第一指在看板外，第二指（非主触点）不许接管切列', () => {
+  const h = gestureSetup()
+  const { app, root } = h
+  const track = h.doc.getElementById('board-track')
+  const target = h.cardTarget()
+  // 第一根手指按在看板外（事件不经过 root），只有第二根落在看板上：
+  // 真机上它的 isPrimary 是 false。修复前这会开出一段全新的横向手势。
+  root.emit('pointerdown', h.pointer(2, 300, 300, target, { isPrimary: false }))
+  root.emit('pointermove', h.pointer(2, 200, 300, target, { isPrimary: false }))
+  root.emit('pointerup', h.pointer(2, 200, 300, target, { isPrimary: false }))
+  assert.equal(app.state.boardPage, 0, '非主触点不许切列')
+  assert.equal(track.style.getPropertyValue('--drag'), '0px', '不许留下跟手位移')
+})
+
+test('★★★ 多指：第一指纵向放弃后，第二指也不许接管', () => {
+  const h = gestureSetup()
+  const { app, root } = h
+  const track = h.doc.getElementById('board-track')
+  const target = h.cardTarget()
+  root.emit('pointerdown', h.pointer(1, 300, 300, target))
+  root.emit('pointermove', h.pointer(1, 302, 360, target)) // 纵向占优 → 主动放弃
+  assert.equal(app.state.gesture, null, '纵向手势已放弃')
+  root.emit('pointerdown', h.pointer(2, 300, 300, target, { isPrimary: false }))
+  root.emit('pointermove', h.pointer(2, 200, 300, target, { isPrimary: false }))
+  root.emit('pointerup', h.pointer(2, 200, 300, target, { isPrimary: false }))
+  root.emit('pointerup', h.pointer(1, 302, 360, target))
+  assert.equal(app.state.boardPage, 0, '第二指不许把放弃的滚动变成切列')
+  assert.equal(track.style.getPropertyValue('--drag'), '0px')
+})
+
+test('★★ 多指这一轮结束后，下一次单指滑动恢复正常（不是永久禁用）', () => {
+  const h = gestureSetup()
+  const { app, root } = h
+  const target = h.cardTarget()
+  root.emit('pointerdown', h.pointer(1, 300, 300, target))
+  root.emit('pointerdown', h.pointer(2, 300, 300, target, { isPrimary: false }))
+  root.emit('pointerup', h.pointer(2, 300, 300, target, { isPrimary: false }))
+  root.emit('pointerup', h.pointer(1, 300, 300, target))
+  assert.equal(app.state.boardPage, 0, '多指这一轮无副作用')
+
+  root.emit('pointerdown', h.pointer(3, 300, 300, target))
+  root.emit('pointermove', h.pointer(3, 200, 300, target))
+  root.emit('pointerup', h.pointer(3, 200, 300, target))
+  assert.equal(app.state.boardPage, 1, '触点全部抬起后，单指滑动照常提交')
 })
 
 test('★★ 正常 pointerup 仍然提交（取消修复不许把功能一起关掉）', () => {

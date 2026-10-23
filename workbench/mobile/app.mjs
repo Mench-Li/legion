@@ -183,6 +183,22 @@ const state = {
   tasksScrollTop: 0,
   /** `tasksScrollTop` 属于哪一列（列变了就不能拿它当恢复点）。 */
   tasksScrollPageId: null,
+  /**
+   * 看板位置正在等一次恢复（刚进入任务页、`renderBoard` 还没落地）。
+   *
+   * ★ 这期间 `#main` 的 scrollTop **不能**被当成看板位置：那是聊天与看板共用的
+   *   滚动容器，数据刷新前它可能还是对话的偏移。用户在看板数据回来之前又切回
+   *   对话时，`saveTasksScroll` 会把这个偏移写进 `tasksScrollTop` / `columnScroll`
+   *   —— 两个页签的位置一起丢。见 `showView` 与 `restoreTasksScrollFromDom`。
+   */
+  tasksRestorePending: false,
+  /**
+   * 上一次"按现有 DOM 还原"落在哪个像素（`null` = 没有可比的锚点）。
+   *
+   * 数据回来时用它判断**用户有没有在这期间自己滚过**：滚过就尊重他当前位置，
+   * 不再拿旧恢复点把他拽回去。
+   */
+  tasksRestoreAnchor: null,
   /** 下一次渲染要恢复到哪个视图的滚动位置（`null` = 跟随当前 DOM）。 */
   scrollRestorePending: null,
   /** 详情层打开前焦点所在的元素（关闭后要还回去）。 */
@@ -542,8 +558,12 @@ function renderBoard() {
     $('board-nav').classList.add('hidden')
     $('page-indicator').textContent = ''
     state.boardPage = 0
-    applyBoardScroll(restore ? state.tasksScrollTop : keepScroll)
+    const anchor = state.tasksRestoreAnchor
+    const moved = anchor !== null && Math.abs(keepScroll - anchor) > 2
+    applyBoardScroll(restore && !moved ? state.tasksScrollTop : keepScroll)
     state.scrollRestorePending = null
+    state.tasksRestorePending = false
+    state.tasksRestoreAnchor = null
     return
   }
 
@@ -560,6 +580,8 @@ function renderBoard() {
     $('page-indicator').textContent = ''
     applyBoardScroll(restore ? state.tasksScrollTop : keepScroll)
     state.scrollRestorePending = null
+    state.tasksRestorePending = false
+    state.tasksRestoreAnchor = null
     return
   }
   const track = document.createElement('div')
@@ -574,18 +596,27 @@ function renderBoard() {
   const entering = pages[state.boardPage]
   // ★ 恢复点要区分"同一列"与"列已经变了"：刷新可能把当前列清空并夹取页索引，
   //   这时 tasksScrollTop 描述的是**另一列**的像素位置，拿它恢复会跳错地方。
+  // ★ 数据回来时先看**用户有没有在这期间自己滚过**：`restoreTasksScrollFromDom`
+  //   会在进入任务页的那一刻留下锚点，隔了两像素以上就说明手指动过 ——
+  //   这时该跟着用户，而不是拿旧恢复点把他拽回去。
+  const anchor = state.tasksRestoreAnchor
+  const userScrolled = anchor !== null && Math.abs(keepScroll - anchor) > 2
   const target = restore
-    ? boardScrollRestore({
-        savedTop: state.tasksScrollTop,
-        savedPageId: state.tasksScrollPageId,
-        pageId: entering.id,
-        columnTop: state.columnScroll[entering.id],
-      })
+    ? userScrolled
+      ? keepScroll
+      : boardScrollRestore({
+          savedTop: state.tasksScrollTop,
+          savedPageId: state.tasksScrollPageId,
+          pageId: entering.id,
+          columnTop: state.columnScroll[entering.id],
+        })
     : keepScroll
   applyBoardScroll(target)
   // 刚恢复到的位置就是"当前位置"：下次离开时不必再猜一次。
   if (restore && entering !== undefined) state.columnScroll[entering.id] = target
   state.scrollRestorePending = null
+  state.tasksRestorePending = false
+  state.tasksRestoreAnchor = null
 }
 
 /** 一列 = 一页。列头 sticky，卡片沿用同一套任务卡。 */
@@ -1037,6 +1068,11 @@ function chooseTaskForFeedback(taskId) {
  * 就直接用它，避免恢复到一个与屏幕无关的旧值。
  */
 function saveTasksScroll() {
+  // ★ 恢复还没落地时 #main 里可能还是对话的偏移（`showView('tasks')` 只是
+  //   置了恢复标记，真正按新数据还原要等 `refreshTasks` → `renderBoard`）。
+  //   这时保存 = 用聊天位置覆盖看板位置；而用户完全可能只是快速点了一下
+  //   任务页签又切回来。等恢复完成（`renderBoard` 会清掉这个标记）再允许保存。
+  if (state.tasksRestorePending === true) return
   const main = $('main')
   state.tasksScrollTop = main.scrollTop
   state.tasksScrollPageId = null
@@ -1046,6 +1082,40 @@ function saveTasksScroll() {
   if (current === undefined) return
   state.columnScroll[current.id] = main.scrollTop
   state.tasksScrollPageId = current.id
+}
+
+/**
+ * 切回任务页时，**先用现有 DOM** 把滚动位置还回去。
+ *
+ * ★ 为什么不能只等 `renderBoard`：`#main` 是聊天与看板共用的滚动容器，
+ *   而 `showView('tasks')` 之后还要异步拉一次看板数据。在数据回来之前，
+ *   它仍是聊天留下的偏移；用户此时切回对话，`saveTasksScroll` 就会把聊天
+ *   偏移当成看板位置保存（T-215 finding 1 的复现形状）。
+ *
+ *   这里先按**屏幕上已有的**列与页面状态还原一次，于是"任务页可见时的
+ *   scrollTop"立刻就是看板自己的位置；数据刷新后 `renderBoard` 再按新数据
+ *   还原一次（列可能被清空，那时它自己会把页索引夹回来）。
+ */
+function restoreTasksScrollFromDom() {
+  if (state.boardView !== 'all') {
+    applyBoardScroll(state.tasksScrollTop)
+    state.tasksRestoreAnchor = $('main').scrollTop
+    return
+  }
+  const pages = boardPages(applyView(state.tasks, state.boardView))
+  const current = pages[state.boardPage]
+  const target = current === undefined
+    ? state.tasksScrollTop
+    : boardScrollRestore({
+        savedTop: state.tasksScrollTop,
+        savedPageId: state.tasksScrollPageId,
+        pageId: current.id,
+        columnTop: state.columnScroll[current.id],
+      })
+  applyBoardScroll(target)
+  state.tasksRestoreAnchor = $('main').scrollTop
+  // 刚还原到的位置就是"当前位置"：离开时不必再猜一次。
+  if (current !== undefined) state.columnScroll[current.id] = target
 }
 
 /**
@@ -1085,7 +1155,13 @@ function showView(view) {
     main.scrollTop = state.chatScrollTop
     state.scrollRestorePending = null
   }
-  if (switching && view === 'tasks') state.scrollRestorePending = 'tasks'
+  if (switching && view === 'tasks') {
+    state.scrollRestorePending = 'tasks'
+    // ★ 先用现有 DOM 把看板自己的位置还回去（见 restoreTasksScrollFromDom）：
+    //   数据还在飞的时候，#main 里不能继续留着对话的偏移。
+    state.tasksRestorePending = true
+    restoreTasksScrollFromDom()
+  }
   updateNewMessagePill()
   if (view === 'tasks') void refreshTasks()
 }
@@ -1379,6 +1455,8 @@ async function switchScope(scope) {
   state.columnScroll = {}
   state.tasksScrollTop = 0
   state.tasksScrollPageId = null
+  state.tasksRestorePending = false
+  state.tasksRestoreAnchor = null
   state.scrollRestorePending = null
   // 手势可能正卡在半路（切空间也可能由通知深链触发）：走同一条清理路径。
   cancelBoardGesture()
@@ -2256,14 +2334,45 @@ function bindBoardGestures() {
   // 一次横向滑动之后浏览器仍会补一个 click；不掐掉的话"滑到卡上"会顺手打开详情。
   let suppressClick = false
 
+  /**
+   * 这一轮触摸里按下过的触点，以及"这一轮已判成多指"的标记。
+   *
+   * ★ 只清 `state.gesture` 不够：第一根手指可能**根本没被接管**（按在看板外，
+   *   或纵向滑动后主动放弃），这时 `state.gesture` 本来就是 null，第二根
+   *   手指仍会被当成一次全新的横向手势 —— 一次双指缩放就顺手切了列。
+   *   多指作废必须**持续到这一轮所有触点都抬起**（REQUIREMENTS 7.3）。
+   */
+  const activePointers = new Set()
+  let multiTouchRound = false
+  const forgetPointer = (pointerId) => {
+    activePointers.delete(pointerId)
+    if (activePointers.size === 0) multiTouchRound = false
+  }
+
   const start = (ev) => {
     if (state.boardView !== 'all') return
     if (ev.pointerType === 'mouse' && ev.buttons !== 1) return
+    // ★ 非主触点 = 这根手指按下时已经有别的触点按着（哪怕那根在看板外）：
+    //   这一次多指操作不接管，并把整轮标记成作废（修复前会创建新手势切列）。
+    if (ev.isPrimary === false) {
+      activePointers.add(ev.pointerId)
+      multiTouchRound = true
+      cancelBoardGesture()
+      return
+    }
     if (pagesNow().length <= 1) return
+    activePointers.add(ev.pointerId)
     // ★ 第二个手指按下 = 多指手势：这一次**整个作废**，不覆盖也不提交。
     //   修复前这里直接覆盖 state.gesture，第一根手指抬起时按"半截位移"切了列，
     //   而且第二根的手指 id 让 pointerup 匹配不上 —— 轨道偏移留在屏幕上。
-    if (state.gesture !== null) { cancelBoardGesture(); return }
+    //   现在同时看"本轮触点集合"：第一指在看板外或已纵向放弃时也能拦住。
+    if (activePointers.size > 1) {
+      multiTouchRound = true
+      cancelBoardGesture()
+      return
+    }
+    // 这一轮已经被判成多指（还有别的手指没抬起）：等它们全部结束再重新开始。
+    if (multiTouchRound === true) { cancelBoardGesture(); return }
     const el = ev.target instanceof Element ? ev.target : null
     // ★ 起点在**控件**上就不接管（按钮/链接/输入框自己处理这次拖动）。
     //
@@ -2312,6 +2421,8 @@ function bindBoardGestures() {
   }
 
   const finish = (ev) => {
+    // 触点抬起 → 从本轮集合里移除；最后一个抬起时解除多指作废。
+    forgetPointer(ev.pointerId)
     const g = state.gesture
     if (g === null || g.id !== ev.pointerId) return
     state.gesture = null
@@ -2341,6 +2452,7 @@ function bindBoardGestures() {
   //   必须只回弹、不提交（REQUIREMENTS 7.3）。修复前两者共用一个 finish，
   //   于是一次被系统取消的滑动仍然会翻页。
   const cancel = (ev) => {
+    forgetPointer(ev.pointerId)
     const gesture = state.gesture
     if (gesture === null || gesture.id !== ev.pointerId) return
     cancelBoardGesture()

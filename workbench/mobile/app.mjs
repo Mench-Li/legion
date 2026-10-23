@@ -431,8 +431,9 @@ function applyTimelineScroll({ before, incoming, forceFollow }) {
   // ★ 新会话的第一次渲染**无条件跟到底**，不管此刻 main 上是什么读数：
   //   那个读数来自上一个会话的 DOM，用它判断"用户是不是在看最新"没有意义。
   const follow = forceFollow === true || state.chatFollowPending === true
-  if (state.view !== 'chat') {
-    // 对话现在不可见：把滚动留到它真正可见时再做（隐藏元素量不出高度）。
+  if (state.view !== 'chat' || currentScreen() !== 'app') {
+    // 对话页签或整个应用屏幕还不可见：把滚动留到落屏后再做。
+    // 首次登录会在 boot 屏后台预载消息，此时即使 view=chat 也量不出真实高度。
     if (follow) {
       state.pendingNewMessages = 0
       state.chatFollowPending = true
@@ -1074,15 +1075,14 @@ function showView(view) {
   //   会继续显示那句话 —— 一句与屏幕无关的话，用户读两次之后就再也不读了。
   renderOfflineNote()
   // 切回来时把位置还回去；看板的还原点交给 `renderBoard`（它要等列表重新画完）。
-  if (switching && view === 'chat') {
-    if (state.chatFollowPending === true) {
-      // 新会话在任务页签后台加载完：**这里**才是它第一次可见，滚到底。
-      main.scrollTop = main.scrollHeight
-      state.pendingNewMessages = 0
-      state.chatFollowPending = false
-    } else {
-      main.scrollTop = state.chatScrollTop
-    }
+  if (view === 'chat' && state.chatFollowPending === true && currentScreen() === 'app') {
+    // 新会话在任务页签或启动屏后台加载完：首次真正可见时滚到底。
+    main.scrollTop = main.scrollHeight
+    state.pendingNewMessages = 0
+    state.chatFollowPending = false
+    state.scrollRestorePending = null
+  } else if (switching && view === 'chat') {
+    main.scrollTop = state.chatScrollTop
     state.scrollRestorePending = null
   }
   if (switching && view === 'tasks') state.scrollRestorePending = 'tasks'

@@ -10,26 +10,26 @@
 | P1 | 切 Agent 沿用旧滚动位置，并把历史算成新消息 | `resetConversationView()` + `chatFollowPending` + `refreshTimeline` 的 `firstLoad` | `app-integration.test.mjs` 前 3 条 |
 | P2 | 全部看板切页签丢当前列滚动 | `saveTasksScroll()` + `interaction.mjs` 的 `boardScrollRestore()` | `app-integration.test.mjs` 第 4/5 条 + `interaction.test.mjs` 新增 3 条 |
 | P2 | 手势取消仍提交切列、多指遗留轨道偏移 | `cancelBoardGesture()` + `pointercancel` 独立处理 + 多指作废 | `app-integration.test.mjs` 后 4 条 |
+| P1 补充 | 启动屏后台预载历史时提前消耗首次滚底，首屏把旧消息算作新消息 | `applyTimelineScroll()` 等待应用屏可见；`showView()` 落屏后执行首次滚底 | `app-integration.test.mjs` 启动屏回归判据 + Chrome UI 检查 |
 
 顺带（审查 P3 建议）：更正 `docs/MOBILE-ACCESS-RUNBOOK.md` 与 `docs/FEATURES.md` 里
 「下拉关闭详情」这句不实的文案；`scripts/qa/mobile-ui-check.mjs` 原来**主动点掉**首载浮标，
 把「首载把历史算成新消息」这个缺陷抹平了，现改为断言。
 
-## 2. 命令与结果（本机 Node v24.19.0，worktree `w/T-214`）
+## 2. 命令与结果（worktree `w/T-214`）
 
 ```text
-node workbench/mobile/<每个>.test.mjs            # 14 个套件逐个执行（本沙箱 node --test 派生子进程被拒，改同进程跑）
-node workbench/scripts/{mobile-board-parity,sw-shell,task-order,doc-render,no-classic-board}.test.mjs
-npx tsc --noEmit                                  # workbench/：exit 0
-npm run build                                     # tsc 通过；vite 阶段被沙箱拒绝（esbuild spawn EPERM）
+node --test --test-reporter=tap <14 个 mobile 测试文件及 5 个 workbench/scripts 测试文件>
+npm run build --prefix workbench
+node scripts/qa/mobile-ui-check.mjs
 ```
 
-结果：**19 个套件 350 条判据全部通过**（mobile 296 + scripts 54），0 失败。
-其中本轮新增 12 条（`app-integration` 9 条 + `interaction` 3 条）。
+结果：**19 个套件 351 条判据全部通过**，0 失败；TypeScript 与 Vite 构建成功。
+真实 Chrome 的移动设备仿真 UI 检查全部通过，包括 7 档宽度无横向溢出、
+点击命中区、看板手势、详情焦点、首次载入历史不显示新消息提示，及后续 5 条新消息的计数和返回底部。
+其中本轮新增 13 条（`app-integration` 10 条 + `interaction` 3 条）。
 
-`npm run build` 的失败与本轮改动无关：`vite build` 需要 esbuild 起子进程，
-本会话文件沙箱不允许（`Error: spawn EPERM` at `esbuild/lib/main.js`）。
-`tsc --noEmit` 已单独跑通；本轮未改任何 TypeScript，移动端是零构建静态资源。
+先前受限执行环境中的 `esbuild spawn EPERM` 不再出现，本次本地构建 exit 0。
 
 ## 3. 破坏性验证（判据真的抓得住缺陷）
 
@@ -41,9 +41,8 @@ npm run build                                     # tsc 通过；vite 阶段被�
 
 ## 4. 没做到的（不冒充）
 
-- **真机/Chrome 走查未执行**：`scripts/qa/mobile-ui-check.mjs` 需要真实 Chrome 且会写截图，
-  本会话沙箱不允许（写文件与子进程）。脚本改动只做了 `node --check` 语法校验。
-  上一轮（T-212）的人工真机证据见任务记录，本轮不重复声称。
+- **实体手机走查未执行**：上述 UI 检查在真实 Chrome 的移动设备仿真中执行，
+  不等同于实体手机的触屏和软键盘检查。
 - **根目录 `node --test`** 的失败/超时仍是上游已披露缺口，本轮未触碰。
 - 软键盘/地址栏变化、200% 缩放、读屏走查仍缺设备证据（与 T-213 的观察一致）。
 

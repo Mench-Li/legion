@@ -236,6 +236,7 @@ function createHarness() {
   }
 
   const doc = {
+    body: new FakeElement('body'),
     documentElement: new FakeElement('html'),
     get activeElement() { return active },
     set activeElement(v) { active = v },
@@ -260,6 +261,7 @@ function createHarness() {
     },
     removeEventListener() { },
   }
+  doc.body.dataset.screen = 'app'
 
   // 状态条渲染会 querySelector('.dot'/'.label'/'.detail')，先把它们挂好。
   const status = doc.getElementById('status')
@@ -439,6 +441,27 @@ function createHarness() {
 }
 
 // ── ① 新会话必须滚底，历史不算“新消息” ────────────────────────────────────
+
+test('★★★ 启动屏预加载历史：落主界面后才滚底，历史不计新消息', async () => {
+  const h = createHarness()
+  const { app, doc, main } = h
+  doc.body.dataset.screen = 'boot'
+  app.state.view = 'chat'
+  app.state.scope = 's1'
+  app.state.agentId = 'a1'
+  app.state.agents = h.agents(false)
+  h.messages(16)
+
+  await app.openConversation()
+  assert.equal(app.state.pendingNewMessages, 0, '启动屏预载的历史不算新消息')
+  assert.equal(app.state.chatFollowPending, true, '隐藏时还不能消耗首次跟底')
+
+  doc.body.dataset.screen = 'app'
+  app.showView('chat')
+  assert.equal(app.state.chatFollowPending, false)
+  assert.equal(main.scrollTop, main.scrollHeight, '落屏后首次可见应在最新消息')
+  assert.equal(app.state.pendingNewMessages, 0)
+})
 
 test('★★★ 切换 Agent：清旧 DOM、滚到底、历史不计入 pending', async () => {
   const h = createHarness()

@@ -550,8 +550,19 @@ try {
   await page.tap('#tab-chat')
   await page.waitFor(() => document.querySelectorAll('#timeline .msg').length >= 16, { timeoutMs: 10000, label: 'timeline rendered' })
   // Clear any initial-load indicator before testing only the five incoming messages.
-  const initialPillVisible = await page.evaluate(() => !document.getElementById('new-msg-pill').classList.contains('hidden'))
-  if (initialPillVisible) await page.tap('#new-msg-jump')
+  // ★ 首屏载入的**历史**不是新消息：新会话必须落在最新一条，且**不**该有浮标。
+  //   修复前这里要先把浮标点掉才能继续测 —— 那一步顺手把「首次载入把整段历史
+  //   算成新消息」这个真实缺陷抹平了。现在改成断言（改动见 app.mjs 的
+  //   resetConversationView 与 refreshTimeline 的 firstLoad）。
+  const initialLoad = await page.evaluate(() => {
+    const m = document.getElementById('main')
+    return {
+      distance: Math.round(m.scrollHeight - m.scrollTop - m.clientHeight),
+      pillVisible: !document.getElementById('new-msg-pill').classList.contains('hidden'),
+    }
+  })
+  check('★★ 首次载入落在最新一条，且没有「N 条新消息」浮标（历史不是新消息）',
+    initialLoad.distance <= 4 && initialLoad.pillVisible === false, JSON.stringify(initialLoad))
   await page.evaluate(() => { document.getElementById('main').scrollTop = 0 })
   await sleep(120)
   const historyDistance = await page.evaluate(() => {

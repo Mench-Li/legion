@@ -82,7 +82,7 @@ import {
 // 可测 —— 本文件在 Node 里不可 import（顶层读 `sessionStorage`），
 // 而这三件事恰好都是"只在手机上错"的那一类。
 import {
-  boardPages, clampPageIndex, decideSwipe, gestureAxis, pageAnnouncement,
+  boardPages, boardScrollRestore, clampPageIndex, decideSwipe, gestureAxis, pageAnnouncement,
   timelineScrollPlan, nearBottom, SWIPE_EDGE_GUARD, UNKNOWN_PAGE_TITLE,
 } from './interaction.mjs'
 
@@ -170,8 +170,19 @@ const state = {
   gesture: null,
   /** 切换页签时记住的聊天滚动位置（切回来要回到原处，R-08）。 */
   chatScrollTop: 0,
+  /**
+   * 新会话还没在屏幕上落过底（切 Agent / 切空间 / 首次载入）。
+   *
+   * ★ 不能只靠 `chatScrollTop = 0`：那个数是**旧 DOM** 的滚动读数，
+   *   而新会话第一次渲染时旧 DOM 还在，据此算出的"离底部多远"完全是假的。
+   *   真机上表现为"换了一个 Agent，界面停在上一个 Agent 的半截位置，
+   *   并且把 200 条历史全部标成新消息"。见 `resetConversationView`。
+   */
+  chatFollowPending: true,
   /** 切换页签时记住的看板滚动位置（用于"回来时回到原处"）。 */
   tasksScrollTop: 0,
+  /** `tasksScrollTop` 属于哪一列（列变了就不能拿它当恢复点）。 */
+  tasksScrollPageId: null,
   /** 下一次渲染要恢复到哪个视图的滚动位置（`null` = 跟随当前 DOM）。 */
   scrollRestorePending: null,
   /** 详情层打开前焦点所在的元素（关闭后要还回去）。 */
@@ -417,15 +428,24 @@ function renderTimeline({ forceFollow = false, incoming = 0 } = {}) {
  */
 function applyTimelineScroll({ before, incoming, forceFollow }) {
   const main = $('main')
-  if (state.view !== 'chat') {
-    if (forceFollow) state.pendingNewMessages = 0
+  // ★ 新会话的第一次渲染**无条件跟到底**，不管此刻 main 上是什么读数：
+  //   那个读数来自上一个会话的 DOM，用它判断"用户是不是在看最新"没有意义。
+  const follow = forceFollow === true || state.chatFollowPending === true
+  if (state.view !== 'chat' || currentScreen() !== 'app') {
+    // 对话页签或整个应用屏幕还不可见：把滚动留到落屏后再做。
+    // 首次登录会在 boot 屏后台预载消息，此时即使 view=chat 也量不出真实高度。
+    if (follow) {
+      state.pendingNewMessages = 0
+      state.chatFollowPending = true
+    }
     updateNewMessagePill()
     return
   }
-  const plan = timelineScrollPlan({ ...before, incoming, forceFollow })
+  const plan = timelineScrollPlan({ ...before, incoming, forceFollow: follow })
   if (plan.follow) {
     main.scrollTop = main.scrollHeight
     state.pendingNewMessages = 0
+    state.chatFollowPending = false
   } else {
     state.pendingNewMessages += plan.pending
   }
@@ -551,10 +571,20 @@ function renderBoard() {
   root.replaceChildren(frag)
   renderBoardPageState(pages)
   syncBoardTransform(false)
+  const entering = pages[state.boardPage]
+  // ★ 恢复点要区分"同一列"与"列已经变了"：刷新可能把当前列清空并夹取页索引，
+  //   这时 tasksScrollTop 描述的是**另一列**的像素位置，拿它恢复会跳错地方。
   const target = restore
-    ? (state.columnScroll[pages[state.boardPage].id] ?? 0)
+    ? boardScrollRestore({
+        savedTop: state.tasksScrollTop,
+        savedPageId: state.tasksScrollPageId,
+        pageId: entering.id,
+        columnTop: state.columnScroll[entering.id],
+      })
     : keepScroll
   applyBoardScroll(target)
+  // 刚恢复到的位置就是"当前位置"：下次离开时不必再猜一次。
+  if (restore && entering !== undefined) state.columnScroll[entering.id] = target
   state.scrollRestorePending = null
 }
 
@@ -787,6 +817,8 @@ function detailTask() {
  * 那是桌面的活（A6），手机上做等于把验收降级成误触。
  */
 function openTaskSheet(taskId) {
+  // 手势不许在详情层下面继续跑：它会在关闭时把看板留在半路。
+  cancelBoardGesture()
   const task = state.tasks.find((x) => x.id === taskId)
   if (task === undefined) {
     showNotice(t('任务不存在或无权访问'))
@@ -844,6 +876,8 @@ function renderTaskSheet(task) {
 
 /** 关闭详情层：焦点**回到触发卡片**（否则键盘/读屏用户会掉到页面顶部）。 */
 function closeTaskSheet({ restoreFocus = true } = {}) {
+  // 关闭详情与切页签同一条纪律：横向手势状态一律清掉（REQUIREMENTS 7.2 不变式）。
+  cancelBoardGesture()
   if (state.detailTaskId === null) return
   state.detailTaskId = null
   const host = $('task-sheet')
@@ -993,6 +1027,28 @@ function chooseTaskForFeedback(taskId) {
 // ── 视图切换 ────────────────────────────────────────────────────────────────
 
 /**
+ * 离开任务页前，把**当前列**的位置同步进 `columnScroll`（R-08 的页签往返）。
+ *
+ * ★ 修复前这里只存 `tasksScrollTop`，而 `columnScroll` 只在**切列**时写入。
+ *   于是「全部看板 → 对话 → 任务」读到的是当前列最近一次**切走时**的旧值；
+ *   如果这一列从没切走过，就是 0 —— 用户滚到一半的位置凭空消失。
+ *
+ * `tasksScrollTop` 还额外记下"这是哪一列"，回来时若列没变（没有被刷新夹走）
+ * 就直接用它，避免恢复到一个与屏幕无关的旧值。
+ */
+function saveTasksScroll() {
+  const main = $('main')
+  state.tasksScrollTop = main.scrollTop
+  state.tasksScrollPageId = null
+  if (state.boardView !== 'all') return
+  const pages = boardPages(applyView(state.tasks, state.boardView))
+  const current = pages[state.boardPage]
+  if (current === undefined) return
+  state.columnScroll[current.id] = main.scrollTop
+  state.tasksScrollPageId = current.id
+}
+
+/**
  * 两个视图：**Agent** 与 **任务**。
  *
  * 手机端此前有三个（看板 / 对话 / 我的）。砍掉「我的」不是因为它没用，
@@ -1005,8 +1061,10 @@ function showView(view) {
   const main = $('main')
   const previous = state.view
   const switching = previous !== view
+  // ★ 跨页签不收手势，切回来时轨道还停在半路 —— 真机上表现为"整列错位"。
+  if (switching) cancelBoardGesture()
   if (switching && previous === 'chat') state.chatScrollTop = main.scrollTop
-  if (switching && previous === 'tasks') state.tasksScrollTop = main.scrollTop
+  if (switching && previous === 'tasks') saveTasksScroll()
   state.view = view
   $('view-chat').classList.toggle('hidden', view !== 'chat')
   $('view-tasks').classList.toggle('hidden', view !== 'tasks')
@@ -1017,7 +1075,13 @@ function showView(view) {
   //   会继续显示那句话 —— 一句与屏幕无关的话，用户读两次之后就再也不读了。
   renderOfflineNote()
   // 切回来时把位置还回去；看板的还原点交给 `renderBoard`（它要等列表重新画完）。
-  if (switching && view === 'chat') {
+  if (view === 'chat' && state.chatFollowPending === true && currentScreen() === 'app') {
+    // 新会话在任务页签或启动屏后台加载完：首次真正可见时滚到底。
+    main.scrollTop = main.scrollHeight
+    state.pendingNewMessages = 0
+    state.chatFollowPending = false
+    state.scrollRestorePending = null
+  } else if (switching && view === 'chat') {
     main.scrollTop = state.chatScrollTop
     state.scrollRestorePending = null
   }
@@ -1069,16 +1133,37 @@ function renderAuth() {
   $('auth-switch').textContent = canRegister ? '' : ''
 }
 
+/**
+ * 换 Agent / 换空间 = **新会话**（R-08）：把**视图**按新会话摆好。
+ *
+ * 会话**数据**（`timeline` / `cursor`）由调用方清 —— 这里只管屏幕上那部分：
+ *   · **清掉旧会话的 DOM**。不清的话，新会话第一次渲染前后读到的
+ *     scrollTop/scrollHeight 还是上一个会话的，据此算出的"离底部多远"完全是假的；
+ *   · 标记"下次可见时要跟到底"，这样在任务页签后台加载完也会滚到底部；
+ *   · 新消息计数归零（历史不是新消息）。
+ *
+ * 修复前的实测：旧 DOM scrollHeight=1800、clientHeight=500、scrollTop=200，
+ * 切换 Agent 后返回 20 条历史，界面仍是 scrollTop=200、pending=20、不跟随 ——
+ * 既停在上一个会话的半截位置，又把全部历史都算成"新消息"。
+ */
+function resetConversationView() {
+  state.pendingNewMessages = 0
+  state.chatScrollTop = 0
+  state.chatFollowPending = true
+  state.scrollRestorePending = null
+  const root = $('timeline')
+  if (root !== null) root.replaceChildren()
+  updateNewMessagePill()
+}
+
 async function selectAgent(agentId) {
   if (agentId === state.agentId) return
   state.agentId = agentId
   localStorage.setItem(LS_AGENT, agentId)
+  // 换 Agent = 换一段对话：数据与视图两半都要按新会话摆好（R-08）。
   state.timeline = []
   state.cursor = null
-  // 换 Agent = 换一段对话：新消息计数与阅读位置都从头开始（R-08 明说这是新会话）。
-  state.pendingNewMessages = 0
-  state.chatScrollTop = 0
-  updateNewMessagePill()
+  resetConversationView()
   renderTargets()
   await openConversation()
 }
@@ -1107,6 +1192,10 @@ async function refreshTimeline({ forceFollow = false } = {}) {
   if (state.convId === null) return
   const gen = state.scopeGen
   const conv = state.convId
+  // ★ 新会话的**首次**载入不是"增量"：服务端回的 200 条历史一条都不是新消息。
+  //   原来按"合并后条数 - 渲染前条数"算，切 Agent 时渲染前是 0，于是整段历史
+  //   都被记成 new messages。首载一律 incoming=0 + 强制跟底。
+  const firstLoad = state.chatFollowPending === true
   // 读当前投影（**不是**从事件流拼出来）：事件只是通知，真相在 Hub。
   //
   // ★ 离线回退：失败时回落到上次缓存，并**标出它的年龄**。
@@ -1122,7 +1211,7 @@ async function refreshTimeline({ forceFollow = false } = {}) {
     // 切了空间或换了会话 → 这批缓存已经不属于当前界面，丢掉。
     if (gen !== state.scopeGen || conv !== state.convId) return
     state.timeline = cached.payload
-    renderTimeline({ forceFollow })
+    renderTimeline({ forceFollow: forceFollow || firstLoad })
     markOffline('messages', cached.ageMs)
     return
   }
@@ -1133,7 +1222,8 @@ async function refreshTimeline({ forceFollow = false } = {}) {
   //   它们不该把视图拽走，而是累计到「N 条新消息」浮标上（R-08）。
   const previousCount = state.timeline.length
   const merged = mergeTimeline(state.timeline, entries)
-  const incoming = Math.max(0, merged.entries.length - previousCount)
+  // 首载的历史不算新消息（见上面的 `firstLoad`）。
+  const incoming = firstLoad ? 0 : Math.max(0, merged.entries.length - previousCount)
   state.timeline = merged.entries
   state.cursor = merged.cursor
   markOffline('messages', null)
@@ -1141,7 +1231,7 @@ async function refreshTimeline({ forceFollow = false } = {}) {
   //   用户离线时想看到的是他刚才在屏幕上看到的完整时间线，
   //   而不是"上一次请求恰好返回的那 200 条"。`packPayload` 自己会截到上限。
   putReadCache('messages', state.timeline, conv)
-  renderTimeline({ incoming, forceFollow })
+  renderTimeline({ incoming, forceFollow: forceFollow || firstLoad })
 }
 
 /**
@@ -1287,11 +1377,16 @@ async function switchScope(scope) {
   // 换空间 = 换一整套看板与对话：分页、每列滚动位置、新消息计数、详情层全部重置。
   state.boardPage = 0
   state.columnScroll = {}
-  state.pendingNewMessages = 0
-  state.chatScrollTop = 0
-  state.gesture = null
+  state.tasksScrollTop = 0
+  state.tasksScrollPageId = null
+  state.scrollRestorePending = null
+  // 手势可能正卡在半路（切空间也可能由通知深链触发）：走同一条清理路径。
+  cancelBoardGesture()
+  // ★ 对话位也必须按"**新会话**"处理：清 DOM + 标记跟底。
+  //   原来只把 chatScrollTop 设为 0，切回对话时恢复成"顶部"——而 R-08 说
+  //   换空间是新会话，应该落在最新一条上。
+  resetConversationView()
   closeTaskSheet({ restoreFocus: false })
-  updateNewMessagePill()
   // ★ 换空间换一把弹框游标：否则新空间的第一批历史会被当成"刚发生的"弹出来。
   state.popupSeq = readPopupSeq(scope)
   // 上一个空间的提醒不该留在屏幕上（它属于另一个空间的任务）。
@@ -2119,6 +2214,32 @@ async function handleTaskHash() {
 }
 
 /**
+ * 收掉当前横向手势：**只回弹，不提交**。
+ *
+ * 三种情形共用它（REQUIREMENTS 7.3「取消 → 回弹，无副作用」）：
+ *   · `pointercancel`：浏览器夺走手势（系统返回、来电、通知下拉）；
+ *   · 第二个手指按下：多指操作一律不切列；
+ *   · 切页签 / 开关详情：手势状态不许跨上下文残留。
+ *
+ * ★ 一定要复位 `--drag`：少这一步，真机上轨道会停在一个**不属于任何一页**的
+ *   偏移上（看着像整列被裁掉一截），而且它会一直留到下次拖拽。
+ */
+function cancelBoardGesture() {
+  const gesture = state.gesture
+  state.gesture = null
+  const root = $('task-groups')
+  if (gesture !== null && root !== null
+    && typeof root.hasPointerCapture === 'function' && root.hasPointerCapture(gesture.id)) {
+    try { root.releasePointerCapture(gesture.id) } catch { /* 已经释放 */ }
+  }
+  const track = $('board-track')
+  if (track !== null) {
+    track.classList.add('animate')
+    track.style.setProperty('--drag', '0px')
+  }
+}
+
+/**
  * 看板横向手势：滑动切换状态列（R-05 的核心）。
  *
  * ★ 用 Pointer Events + CSS `touch-action: pan-y`：纵向滚动交给浏览器
@@ -2139,6 +2260,10 @@ function bindBoardGestures() {
     if (state.boardView !== 'all') return
     if (ev.pointerType === 'mouse' && ev.buttons !== 1) return
     if (pagesNow().length <= 1) return
+    // ★ 第二个手指按下 = 多指手势：这一次**整个作废**，不覆盖也不提交。
+    //   修复前这里直接覆盖 state.gesture，第一根手指抬起时按"半截位移"切了列，
+    //   而且第二根的手指 id 让 pointerup 匹配不上 —— 轨道偏移留在屏幕上。
+    if (state.gesture !== null) { cancelBoardGesture(); return }
     const el = ev.target instanceof Element ? ev.target : null
     // ★ 起点在**控件**上就不接管（按钮/链接/输入框自己处理这次拖动）。
     //
@@ -2212,6 +2337,15 @@ function bindBoardGestures() {
     setBoardPage(decision.pageIndex, { animate: true })
   }
 
+  // ★ `pointercancel` **不是** `pointerup`：它是"这次手势被取消了"，
+  //   必须只回弹、不提交（REQUIREMENTS 7.3）。修复前两者共用一个 finish，
+  //   于是一次被系统取消的滑动仍然会翻页。
+  const cancel = (ev) => {
+    const gesture = state.gesture
+    if (gesture === null || gesture.id !== ev.pointerId) return
+    cancelBoardGesture()
+  }
+
   // 捕获阶段拦下"滑动之后的那一次 click"。
   root.addEventListener('click', (ev) => {
     if (suppressClick !== true) return
@@ -2221,7 +2355,7 @@ function bindBoardGestures() {
   root.addEventListener('pointerdown', start)
   root.addEventListener('pointermove', move)
   root.addEventListener('pointerup', finish)
-  root.addEventListener('pointercancel', finish)
+  root.addEventListener('pointercancel', cancel)
 }
 
 // ── 事件流 ──────────────────────────────────────────────────────────────────

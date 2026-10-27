@@ -2336,7 +2336,10 @@ function spaceWorker(ctx: AppContext, config: Config): void {
     const requiredInputs = stageContractArtifacts(stage, 'input')
     const upstreamArtifacts = (context?.upstreamStages ?? []).flatMap((upstream) => upstream.artifacts)
     const availableInputs = artifactLabels(upstreamArtifacts)
-    if ((context?.implementation?.sourceCommit ?? '') !== '') availableInputs.add('commit')
+    if ((context?.implementation?.sourceCommit ?? '') !== '') {
+      availableInputs.add('commit')
+      availableInputs.add('implementation-commit')
+    }
     if ((context?.implementation?.testEvidence ?? '').trim() !== '') availableInputs.add('test-evidence')
     if ((context?.implementation?.testSummary ?? '').trim() !== '') availableInputs.add('test-results')
     const missingInputs = requiredInputs.filter((name) => !availableInputs.has(name.toLowerCase()))

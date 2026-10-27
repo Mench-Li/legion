@@ -46,6 +46,12 @@ node scripts/dsh-patch.mjs --check --source=D:/project/DSH/dsh/deepseek-harness
 # 应用到检出（自动建/切 legion/… 分支，绝不在 master/main 上动）
 node scripts/dsh-patch.mjs --apply --source=D:/project/DSH/dsh/deepseek-harness
 
+# ★ 从源码构建那一个包（tsc -b --force + tsdown 单包打包）
+node scripts/dsh-patch.mjs --build --source=D:/project/DSH/dsh/deepseek-harness
+
+# ★ 装进 profile（只覆盖 lib/index.js，先备份；不动 package.json 与依赖解析）
+node scripts/dsh-patch.mjs --install --source=D:/project/DSH/dsh/deepseek-harness
+
 # 撤下（分支保留，便于追溯）
 node scripts/dsh-patch.mjs --revert --source=D:/project/DSH/dsh/deepseek-harness
 
@@ -66,9 +72,34 @@ node scripts/dsh-patch.mjs --record
 对应地，`base.json` 里的 `deployed.markers` 存的是**内容**（例如 `assistantText`），
 不是哈希 —— 它回答的是"修复到底在不在"，而不是"文件变没变"。
 
+## 为什么是"构建源码"，而不是"手改已装产物"
+
+补丁打在 `src/*.ts` 上，必须由 DSH 自己的构建链编出 `lib/`，再装进 profile。手改已装的
+`lib/index.js` 看着更快，但那是把债从"看得见的提交"换成"看不见的 JS 差异"：
+产物不可读、升级即丢，而且与这里的 `.patch` 形成两轨、迟早漂移。
+
+构建只做**一个包**（整仓 200+ 包没必要）：
+
+1. `tsc -b packages/<area>/<name> --force` → `lib/types/`
+2. `tsdown -c patches/dsh/single-package.tsdown.config.mts`（cwd = 包目录）→ `lib/index.js`
+
+`single-package.tsdown.config.mts` 里那三个参数都是实测踩出来的，改之前请先读它的注释：
+
+| 参数 | 不写它会怎样 |
+| --- | --- |
+| `process.cwd()` 基准 | 相对 `entry` 以**配置文件所在目录**解析 ⇒ `UNRESOLVED_ENTRY` |
+| `outExtensions: .js` | 默认产出 `index.mjs`，而包 `main` 指向 `lib/index.js` ⇒ 宿主加载不到 |
+| `external` 用**函数**而非正则 | 正则会把相对模块也判成外部包 ⇒ 产物 3.2KB、补丁根本没合并进去（**而构建仍报成功**） |
+
+判据因此不看"exit 0"，而是看三件事同时成立：字节量级（20KB 量级，不是 3KB 也不是 2.26MB）、
+依赖仍然外置（保留 8 条 `import`）、补丁标记在产物里
+（`scripts/ci/dsh-patch.test.mjs` ⑮）。
+
 ## 注意
 
 - **改完要重启 DSH 宿主**才会生效（profile 里的 `lib/` 是宿主启动时加载的）。
 - 补丁只含**代码与测试**，不含 `README.i18n.yaml` 那类派生文档哈希：那些由 DSH 自己的
   工具生成，写进补丁会让补丁只能落在**那一版**上游上（`scripts/ci/dsh-patch.test.mjs` ③ 守着这条）。
 - 上游一旦自己修了这个问题，**先删补丁再升级**，不要两条路一起走。
+- 安装只覆盖 `lib/index.js` 并先备份（`index.js.bak-legion-<时间戳>`）：
+  package.json 与依赖解析保持原样，所以这次安装不可能破坏运行中的宿主，也能一键回退。

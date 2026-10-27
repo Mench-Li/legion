@@ -41,11 +41,11 @@
     "profileRoot": "C:\\Users\\11150\\.dsh\\profiles\\desktop",
     "version": "0.2.1-rc.2",
     "libPath": "C:\\Users\\11150\\.dsh\\profiles\\desktop\\node_modules\\@deepseek-ai\\dsh-subagent-claude-code\\lib\\index.js",
-    "libSha256": "9a12934acbd23ffbd3e58a215d4e1699f783cb16b9bbceaab1733b7d83edc035",
+    "libSha256": "3cd278f0043f1c8c1a954c784d61328c956cf0f57ffbc13def6151795632c134",
     "markersPresent": [
       "assistantText",
       "end_turn"
     ]
   },
-  "recordedAt": "2026-10-21T03:56:00.582Z"
+  "recordedAt": "2026-10-21T09:42:43.545Z"
 }

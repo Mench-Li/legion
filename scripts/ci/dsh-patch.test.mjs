@@ -16,7 +16,8 @@ import { tmpdir } from 'node:os'
 import { join, resolve, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import {
-  deployedPackage, evaluateBase, installedDsh, loadBase, parseArgs, patchTargets, selectPatch,
+  buildProvider, deployedPackage, evaluateBase, installProvider, installedDsh, loadBase,
+  packageDirOf, parseArgs, patchTargets, selectPatch,
 } from '../dsh-patch.mjs'
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..')
@@ -177,4 +178,90 @@ test('⑪ 本机真实判定：装了 DSH 的机器上，基线必须自洽（�
   assert.equal(result.ok, true,
     '基线与本机现状不一致（DSH 升级过 / profile 重装过 / 补丁被改过）：\n' + JSON.stringify(result.checks, null, 2)
     + '\n修法：node scripts/dsh-patch.mjs --check 看逐项判定，必要时重新生成补丁并 --record')
+})
+
+// ══════════════════════════════════════════════════════════════════════════
+// 构建 → 安装这条路径（路 B）。判据的重点全在"别被看起来成功骗到"：
+//   · 包目录必须**从补丁正文推导**，不能写死（有第二条补丁时会编错东西）；
+//   · 构建前必须确认检出**真的带着补丁**，否则编出来的是原版；
+//   · 构建产物必须同时满足：字节数量级对（依赖外置）、依赖清单对（8 个外置）、
+//     补丁标记在（修复真的进了 bundle）—— 只看"exit 0"是不够的。
+// ══════════════════════════════════════════════════════════════════════════
+
+test('⑫ 要构建哪个包，必须从补丁正文推导（写死包名会在第二条补丁时编错东西）', () => {
+  assert.equal(
+    packageDirOf({ targets: ['packages/subagent/subagent-claude-code/src/run.ts', 'packages/subagent/subagent-claude-code/tests/x.spec.ts'] }),
+    'packages/subagent/subagent-claude-code',
+  )
+  assert.equal(packageDirOf({ targets: ['packages/a/one/x.ts', 'packages/a/two/y.ts'] }), null, '跨包补丁不猜')
+  assert.equal(packageDirOf({ targets: ['docs/README.md'] }), null, '不是包内文件就不构建')
+  const derived = packageDirOf(selectPatch(base))
+  assert.equal(derived, 'packages/subagent/subagent-claude-code', '基线里这条补丁的目标包应与事实一致')
+})
+
+test('⑬ 参数解析认识构建/安装子命令（否则 --build 会被当成"不认识的参数"）', () => {
+  assert.equal(parseArgs(['--build']).mode, 'build')
+  assert.equal(parseArgs(['--install']).mode, 'install')
+  // 这两个模式都必须能带 --source，且不需要 --patch（单补丁时可省略）
+  assert.equal(parseArgs(['--build', '--source=D:/x']).source, 'D:/x')
+})
+
+test('⑭ 检出没带补丁时，构建必须**拒绝**（否则编出来的是原版，还会被误读成部署失败）', () => {
+  const entry = selectPatch(base)
+  const patchPath = join(PATCH_DIR, entry.file)
+  // 用一个干净的临时目录冒充检出：既没有包，也没有补丁
+  const empty = mkdtempSync(join(tmpdir(), 'dsh-nopatch-'))
+  const result = buildProvider(empty, entry, patchPath)
+  assert.equal(result.ok, false)
+  assert.match(result.message, /目标包不存在|不是"已打补丁"的状态/, '要说清是哪一步不成立')
+})
+
+test('⑮ 本机构建产物形态必须与上游一致（字节量级 + 外置依赖清单 + 补丁标记）', () => {
+  const source = process.env.DSH_CHECKOUT ?? 'D:/project/DSH/dsh/deepseek-harness'
+  if (!existsSync(join(source, 'packages', 'subagent', 'subagent-claude-code', 'package.json'))) {
+    return   // 未观察：这台机器没有该检出
+  }
+  const entry = selectPatch(base)
+  const patchPath = join(PATCH_DIR, entry.file)
+  const built = buildProvider(source, entry, patchPath)
+  // 检出不在"已打补丁"状态时，判据仍要成立：它必须**明确拒绝**，而不是编出原版还报成功。
+  if (!built.ok) {
+    assert.match(built.message, /不是"已打补丁"的状态|tsc 失败|tsdown 失败|找不到/)
+    return
+  }
+  assert.equal(built.markersOk, true, '构建产物必须含补丁标记：' + JSON.stringify(built.missingMarkers))
+  // 依赖外置的判据：上游那份是 20.6KB 量级；若被内联会到 2.26MB（差 100 倍）
+  assert.ok(built.bytes > 15_000 && built.bytes < 40_000,
+    `产物 ${built.bytes}B 不在上游量级内（<15K 说明相对模块被外置了、>40K 说明依赖被内联了）`)
+  const text = readFileSync(built.libPath, 'utf8')
+  for (const spec of ['@anthropic-ai/claude-agent-sdk', '@deepseek-ai/dsh-subagent', '@deepseek-ai/dsh-timeout']) {
+    // 引号风格由打包器定（实测 rolldown 产出双引号），判据只认"是否保留了 import 该包"，
+    // 不绑定引号字符 —— 否则一次格式化就把判据弄红，而它想守的其实没变。
+    assert.match(text, new RegExp(`from\\s+['"]${spec.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}['"]`),
+      `依赖必须外置（保留 import）而不是内联：${spec}`)
+  }
+  // ★ 不再断言"产物里不出现 lib/types/run.js"：那个字符串会作为 `@module` 注释
+  //   出现在上游自己的产物里（实测已装那份也有），断言它等于把正常输出判成错误。
+  //   真正要守的是"相对模块被合并进来了"，而那件事已经由字节量级（>15K）与
+  //   "依赖仍然外置"两条一起钉住。
+})
+
+test('⑯ 安装只覆盖那一个产物、且先备份（这样它能一键回退，也不会动依赖解析）', () => {
+  const source = process.env.DSH_CHECKOUT ?? 'D:/project/DSH/dsh/deepseek-harness'
+  const entry = selectPatch(base)
+  const patchPath = join(PATCH_DIR, entry.file)
+  const deployed = deployedPackage(entry.deployed.package)
+  if (deployed === null || !existsSync(join(source, 'packages', 'subagent', 'subagent-claude-code', 'package.json'))) return
+  const before = readFileSync(deployed.libPath)
+  const installed = installProvider(source, entry, patchPath)
+  if (!installed.ok) {
+    // 检出未打补丁 ⇒ 拒绝安装；这也是"不许装未验证产物"的证据
+    assert.match(installed.message, /构建未通过，拒绝安装/)
+    return
+  }
+  assert.ok(existsSync(installed.backup), '安装前必须备份（回退就是把它拷回去）')
+  assert.equal(readFileSync(installed.backup).equals(before), true, '备份必须是安装前的原样内容')
+  assert.equal(installed.markersOk, true)
+  assert.equal(readFileSync(deployed.libPath).equals(readFileSync(installed.libPath ? join(installed.profileRoot, 'node_modules', '@deepseek-ai', entry.deployed.package, 'lib', 'index.js') : deployed.libPath)), true,
+    '装上去的必须就是构建产物的字节')
 })

@@ -92,6 +92,11 @@ scrum/pending-goals.json
 # main-source.zip 16MB + team-before-main-*.db 29MB），一次全量 CI 的 boundary 阶段
 # 因此报了 30+ 条**与提交内容无关**的 FAIL。
 reports/*/
+# ★ 上面那条只挡子目录。根下的散装机器产物（如
+# `reports/web-desktop-full-comparison-2026-10-02.txt`，1.5MB 逐项对比 dump）
+# 会漏过去。2026-10-05 的 95ec3495 加过这条、又被 171789ef 作为"误提交的附带改动"
+# 一并还原；现在补回来——它挡的是**生成物**，不是某条工作线的内容。
+reports/*.txt
 
 # 桌面版的构建产物（可再生成，**绝不能入库**）。
 #

@@ -98,6 +98,11 @@ reports/*/
 # 一并还原；现在补回来——它挡的是**生成物**，不是某条工作线的内容。
 reports/*.txt
 
+# 参考稿截图是**生成物**：`docs/prototypes/check-legion-reference.cjs` 用
+# `page.screenshot()` 写出这两张图，改设计后重跑即得。
+# 与 `workbench/mobile/make-icons.mjs` 的「图标是可重复的产物，不是源文件」同一原则。
+docs/prototypes/legion-reference-*.png
+
 # 桌面版的构建产物（可再生成，**绝不能入库**）。
 #
 # 这两条是补的，补之前**没有任何规则忽略它们**，而实测它们加起来 **1.8 GB**

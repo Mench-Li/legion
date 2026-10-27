@@ -19,7 +19,10 @@ export const DELIVERY_LABELS: Record<string, string> = Object.freeze({
   'awaiting-acceptance': '⏳ 待裁决',
   ready: '🚀 待集成',
   preparing: '📦 集成准备中',
-  validating: '🔁 集成后验证中',
+  // ★ T3.1（2026-10-27）：原来写的是「集成后验证中」，但验证跑在**候选合并提交**上、
+  //   fast-forward **之前**（`integration-worker.mjs`），应用之后只核对 ancestor。
+  //   名字说成"集成后"会让人以为合入的那一版又被验了一遍。
+  validating: '🔁 合并前验证中',
   'needs-review': '⚠ 待复验',
   integrated: '✅ 已集成',
   abandoned: '🗑 已放弃',

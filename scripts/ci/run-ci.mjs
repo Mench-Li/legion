@@ -2267,6 +2267,22 @@ async function stageTest() {
     //   所以判据是两半：**合入后必须重建产物**，且**重建失败不算交付完成**（停 in_review）。
     { label: 'artifact-delivery（BUG-037：合入后必须重建主工作区产物；重建失败不算交付完成）', files: ['plugins/tests/artifact-delivery.test.mjs'], cwd: ROOT, nodeArgs: ['--experimental-strip-types'] },
     { label: 'delivery-ui（S7 交付/调度徽标前端纯函数）', files: ['workbench/scripts/delivery-ui.test.mjs'], cwd: ROOT, nodeArgs: ['--experimental-strip-types'] },
+    // 2026-10-27（T1.2 / T1.4 / T2.1 / T2.3）：发布面与运行面的四个纯投影层。
+    //   每一个都对应一次"界面上本来该看见、但看不见"的缺口：
+    //     · goal-plan-view     发布前看不见阶段/执行者/来源；
+    //     · goal-publish-wiring 发布与预览共用同一段参数（两套实现的分叉结构上不存在）；
+    //     · run-events-view     运行明细早已落库、端点一直在，但 UI 从未调用；
+    //     · waiting-on-user     ❓ 判据曾在详情与看板各写一遍、零单测。
+    { label: 'goal-plan-view（发布计划预览：来源/就绪三态/blockers 分工）', files: ['workbench/scripts/goal-plan-view.test.mjs'], cwd: ROOT, nodeArgs: ['--experimental-strip-types'] },
+    { label: 'goal-publish-wiring（预览与发布同源、编排模式与分配层真的接线）', files: ['workbench/scripts/goal-publish-wiring.test.mjs'], cwd: ROOT, nodeArgs: ['--experimental-strip-types'] },
+    { label: 'run-events-view（运行明细投影：known=false 不许被丢掉）', files: ['workbench/scripts/run-events-view.test.mjs'], cwd: ROOT, nodeArgs: ['--experimental-strip-types'] },
+    { label: 'waiting-on-user（❓ 待确认判据唯一化：详情与看板同口径）', files: ['workbench/scripts/waiting-on-user.test.mjs'], cwd: ROOT, nodeArgs: ['--experimental-strip-types'] },
+    { label: 'timeline-summary（T2.2 时间线摘要/增量去重/实时接线）', files: ['workbench/scripts/timeline-summary.test.mjs'], cwd: ROOT, nodeArgs: ['--experimental-strip-types'] },
+    // 2026-10-27 七项决策：#1 返工连续同因升级、#6 失败分类只读归一化。
+    //   两个都是纯层模块（不查库、不写库），判据盯的是"保护会不会静默失效"：
+    //   evidence 进指纹会让升级永不触发；把"等上游/返工"算成失败会让指标说谎。
+    { label: 'rework-escalation（决策 #1：连续同因升级，evidence 不许进指纹）', files: ['orchestrator/state-machine/rework-escalation.test.mjs'], cwd: ROOT },
+    { label: 'failure-kind（决策 #6：等待/返工不是失败，分母口径）', files: ['orchestrator/state-machine/failure-kind.test.mjs'], cwd: ROOT },
     // `dual-write-smoke` 守「两个进程同时启动、迁移同一新库」的**行为**，
     // 并在第 3 个锚点里按**源码**禁掉两种坏写法（自己 exec ALTER / try-catch 吞掉 ALTER）。
     // `schema-util.test.mjs` 守的是那个并发原语**自己**的两种调用形态：

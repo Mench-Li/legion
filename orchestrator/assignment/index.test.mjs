@@ -210,3 +210,97 @@ test('⑫ 计划是深冻结的：调用方改不动"已经冻住的那一版"',
 test('⑬ buildPipelineWorkflow 在没有审查闭环时返回 null（不伪造一个实例）', () => {
   assert.equal(buildPipelineWorkflow({ stages: [stage('a')], assignments: {}, review: null }), null)
 })
+
+// ── 目标级 Agent 与发布时逐节点覆盖（2026-10-27）────────────────────────
+// 这一组问的是"整目标一个 Agent"与"只对这个目标改某一环"两件事，能不能
+// 在不改写空间配置的前提下成立，以及优先级是不是**逐字段**的。
+
+/** 三岗链 + 模板只覆盖 a。 */
+function threeStageWithTemplate() {
+  const pipeline = {
+    scope: 's', version: 'v', workflow: null,
+    stages: [stage('a'), stage('b'), stage('c')],
+  }
+  const profile = {
+    designRole: 'a', implementationRole: 'b', reviewRole: 'c', maxReworkRounds: 1,
+    stageTools: {
+      a: { agentToolConfig: { id: 'tool.profile-a', version: 1 }, modelConfig: { id: 'model.a', version: 1 }, nodeId: null, testRunner: null },
+      b: { agentToolConfig: { id: 'tool.profile-b', version: 1 }, modelConfig: null, nodeId: null, testRunner: { executable: 'node', args: ['--test'], timeoutMs: 1000 } },
+    },
+  }
+  return { pipeline, profile, roster: ['a', 'b', 'c'].map(rosterRole) }
+}
+
+test('⑭ 目标级 Agent：整条链都换成它，且 source 全是 goal-agent（压过模板）', () => {
+  const { pipeline, profile, roster } = threeStageWithTemplate()
+  const plan = planGoal({
+    pipeline, roster, profile, profileSource: 'definition',
+    goalAgent: { agentToolConfig: { id: 'tool.codex', version: 3 } },
+  })
+  for (const role of ['a', 'b', 'c']) {
+    assert.equal(plan.assignments[role].source, ASSIGNMENT_SOURCES.GOAL_AGENT, `${role} 应是目标级`)
+    assert.equal(plan.assignments[role].agentToolConfig.id, 'tool.codex')
+  }
+  // ★ testRunner 不受目标级影响：它只从模板来。
+  assert.deepEqual(plan.assignments.b.testRunner, { executable: 'node', args: ['--test'], timeoutMs: 1000 })
+  assert.deepEqual(plan.goalAgent, { agentToolConfig: { id: 'tool.codex', version: 3 } })
+})
+
+test('⑮ 发布时覆盖优先于目标级，且**逐字段独立**（只改工具不动模型）', () => {
+  const { pipeline, profile, roster } = threeStageWithTemplate()
+  const plan = planGoal({
+    pipeline, roster, profile, profileSource: 'definition',
+    goalAgent: { agentToolConfig: { id: 'tool.codex', version: 3 }, modelConfig: { id: 'model.goal', version: 1 } },
+    stageOverrides: { a: { agentToolConfig: { id: 'tool.claude', version: 2 } } },
+  })
+  assert.equal(plan.assignments.a.source, ASSIGNMENT_SOURCES.PUBLISH_OVERRIDE)
+  assert.equal(plan.assignments.a.agentToolConfig.id, 'tool.claude', '覆盖压过目标级')
+  assert.equal(plan.assignments.a.modelConfig.id, 'model.goal', '没覆盖的字段仍从目标级来')
+  assert.equal(plan.assignments.b.source, ASSIGNMENT_SOURCES.GOAL_AGENT, '别的阶段不受影响')
+  assert.equal(plan.assignments.b.modelConfig.id, 'model.goal')
+})
+
+test('⑯ 显式 `null` = 清空并遮住下层；"没写这个字段" = 回落下层', () => {
+  const { pipeline, profile, roster } = threeStageWithTemplate()
+  const plan = planGoal({
+    pipeline, roster, profile, profileSource: 'definition',
+    stageOverrides: { a: { agentToolConfig: null } },
+  })
+  assert.equal(plan.assignments.a.agentToolConfig, null, '★ 显式 null 必须真的清空')
+  assert.equal(plan.assignments.a.source, ASSIGNMENT_SOURCES.PUBLISH_OVERRIDE, '清空也是一次显式选择')
+  assert.equal(plan.assignments.a.modelConfig.id, 'model.a', '没写的字段仍回落到模板')
+})
+
+test('⑰ `testRunner` 出现即拒绝（目标级与覆盖都算）——忽略会让用户以为改成了', () => {
+  const { pipeline, profile, roster } = threeStageWithTemplate()
+  const stages = resolvePipelineStages({ pipeline, roster }).stages
+  assert.throws(
+    () => resolveAssignments({ stages, profile, stageOverrides: { b: { testRunner: { executable: 'true', args: [], timeoutMs: 1 } } } }),
+    (error) => error.code === PLAN_CODES.OVERRIDE_TEST_RUNNER && /验收契约/.test(error.message),
+  )
+  assert.throws(
+    () => resolveAssignments({ stages, profile, goalAgent: { testRunner: { executable: 'true', args: [], timeoutMs: 1 } } }),
+    (error) => error.code === PLAN_CODES.OVERRIDE_TEST_RUNNER,
+  )
+})
+
+test('⑱ 覆盖项点名不存在的岗位：忽略并给专门的告警码', () => {
+  const { pipeline, profile, roster } = threeStageWithTemplate()
+  const stages = resolvePipelineStages({ pipeline, roster }).stages
+  const out = resolveAssignments({ stages, profile, stageOverrides: { ghost: { agentToolConfig: { id: 'tool.ghost', version: 1 } } } })
+  assert.equal(out.assignments.ghost, undefined)
+  assert.deepEqual(out.warnings.map((item) => item.code), [PLAN_WARNINGS.PUBLISH_OVERRIDE_STAGE_UNKNOWN],
+    '不存在的覆盖岗位必须有自己的告警码，不能混进"模板"那条')
+})
+
+test('⑲ 目标级只给模型时，工具仍逐层回落（不整条替换）', () => {
+  const { pipeline, profile, roster } = threeStageWithTemplate()
+  const stages = resolvePipelineStages({ pipeline, roster }).stages
+  const out = resolveAssignments({ stages, profile, profileSource: 'definition', goalAgent: { modelConfig: { id: 'model.goal', version: 1 } } })
+  assert.equal(out.assignments.a.agentToolConfig.id, 'tool.profile-a', '工具回落到模板')
+  assert.equal(out.assignments.a.modelConfig.id, 'model.goal', '模型来自目标级')
+  // ★ source 描述的是"这个 Agent 从哪来"：a 的工具仍来自模板，就不能标成 goal-agent。
+  assert.equal(out.assignments.a.source, ASSIGNMENT_SOURCES.DEFINITION)
+  assert.equal(out.assignments.c.source, ASSIGNMENT_SOURCES.GOAL_AGENT, 'c 没有工具来源，目标是它唯一被指定的层')
+  assert.equal(out.assignments.c.agentToolConfig, null, 'c 的工具仍是 DSH 默认')
+})

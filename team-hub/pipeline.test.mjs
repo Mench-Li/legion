@@ -482,6 +482,111 @@ describe('TC-SP-P0-01/02 读写：空态 → 写入 → 回读 → version 指�
     assert.ok(history.json.tasks.some((item) => item.id === implementationReturn.json.task.nextTaskId))
   })
 
+  it('★★★ 决策 #1：同一 finding 连续 3 轮仍在 ⇒ 升级给人（in_review + hold），不再自动开下一轮', async () => {
+    // ★ 用**独立**工作流实例：升级会往 `agent_workflow_reviews` 写台账，
+    //   借 space-reviewflow 那条实例会污染后面「重启后可恢复」用例的轮次断言
+    //   （那条断言的是"3 条历史"，而它是另一个用例的事实）。
+    const scope = 'space-escalation'
+    await post('/api/spaces', { id: scope, name: '返工升级验证空间', localDir: process.cwd(), by: 'general' })
+    const roles = ['designer', 'coder', 'reviewer']
+    mod.db.prepare('INSERT INTO roster (scope, role, name, kind, avatar, sort) VALUES (?, ?, ?, ?, ?, ?)')
+      .run(scope, 'reviewer', '审查员', 'agent', '🤖', 0)
+    const toolIds = []
+    for (const role of roles) {
+      const saved = await post('/api/agent-tools/configs', {
+        by: 'general', id: `esc.${role}`, version: 1, providerName: role, adapter: 'dsh-native',
+        permissionProfile: 'dsh-native', workspacePolicy: 'attempt-worktree-parent-cwd',
+        capabilities: { textInput: true, textOutput: true, outputSchema: true, toolFilter: true, localAgent: true, sessionResume: false, cancellation: true },
+      })
+      assert.equal(saved.status, 200, saved.text)
+      toolIds.push(`esc.${role}`)
+    }
+    const instanceId = 'escalation-instance'
+    // 自带一份最小 reviewWorkflow 快照（引擎只要求 reviewStageId / stageToolsById / stageDefinitionsById 对得上）。
+    const stageToolsById = Object.fromEntries(roles.map((role) => [role, {
+      agentToolConfig: { id: `esc.${role}`, version: 1 }, modelConfig: null, nodeId: null,
+      testRunner: role === 'coder' ? { executable: 'node', args: ['--test'], timeoutMs: 300000 } : null,
+    }]))
+    const snapshot = {
+      source: 'goal-agent-workflow', pipelineVersion: 'esc-v1', stageRole: 'reviewer', workflowStageId: 'reviewer',
+      agentToolConfig: { id: 'esc.reviewer', version: 1 }, modelConfig: null, resolvedModelConfig: null,
+      executionNode: null,
+      reviewWorkflow: {
+        kind: 'pipeline', workflowDefinitionRef: null, pipelineVersion: 'esc-v1',
+        designRole: 'designer', implementationRole: 'coder', reviewRole: 'reviewer',
+        designStageId: 'designer', implementationStageId: 'coder', reviewStageId: 'reviewer',
+        reviewRoutes: { design: 'designer', implementation: 'coder' },
+        maxReworkRounds: null,
+        stageIdByRole: { designer: 'designer', coder: 'coder', reviewer: 'reviewer' },
+        stageTools: stageToolsById, stageToolsById,
+        stageDefinitionsById: Object.fromEntries(roles.map((role) => [role, {
+          id: role, role, label: role,
+          previousStageIds: role === 'designer' ? [] : [roles[roles.indexOf(role) - 1]],
+          nextStageIds: role === 'reviewer' ? [] : [roles[roles.indexOf(role) + 1]],
+        }])),
+        topologicalStageIds: roles, instanceId,
+      },
+      workflowContext: { designArtifacts: [], implementation: null, upstreamStages: [] },
+    }
+    const implementationId = 'escalation-implementation'
+
+    // 判据分两半，缺一不可：
+    //   ① 「每轮都推进一点」不许被拦——那是健康的长链路（space-reviewflow 用例已覆盖 round 1..3）；
+    //   ② 「同一个问题原样还在 3 轮」必须停下来。若只有 ①，这条保护实际上不存在。
+    //
+    // ★ 三个轮次用**完全相同的 summary**，但 evidence 每轮不同：
+    //   指纹必须只由 kind|file|summary 决定，evidence 一旦进指纹就永远不连续。
+    const reviewRound = async (id, summary, evidence) => {
+      mod.db.prepare("INSERT INTO tasks (id, title, priority, status, role, scope, soldier, agent_selection_snapshot) VALUES (?, ?, 'high', 'in_progress', 'reviewer', ?, 'codex', ?)")
+        .run(id, `Escalation review ${id}`, scope, JSON.stringify(snapshot))
+      return post('/api/agent-workflow/review', {
+        taskId: id, by: 'codex', scope,
+        findings: [{ kind: 'implementation', file: 'src/a.mjs', summary }],
+        summary: '同一问题反复', evidence,
+      })
+    }
+
+    const sameSummary = '空值检查仍然缺失'
+    // 该实例此前 0 轮：第 1、2 轮必须照常返工。
+    const fourth = await reviewRound('escalate-r1', sameSummary, 'review.md#L10')
+    assert.equal(fourth.status, 200, fourth.text)
+    assert.equal(fourth.json.task.kind, 'rework', '第 1 轮：连续 1 轮 < 3，仍应自动返工')
+
+    const fifth = await reviewRound('escalate-r2', sameSummary, 'review.md#L20 行号变了')
+    assert.equal(fifth.status, 200, fifth.text)
+    assert.equal(fifth.json.task.kind, 'rework', '第 2 轮：连续 2 轮 < 3')
+
+    const sixth = await reviewRound('escalate-r3', sameSummary, 'review.md#L30 又变了')
+    assert.equal(sixth.status, 200, sixth.text)
+    assert.equal(sixth.json.task.kind, 'escalated', sixth.text)
+    assert.equal(sixth.json.task.streak, 3, '★★ 连续 3 轮同一指纹 ⇒ 升级（evidence 变了不影响）')
+    assert.equal(sixth.json.task.nextTaskId, null, '★★ 升级时**不建**返工任务')
+
+    // 审查任务停在 in_review 且被 hold：守护不再自动认领，将军放行即可续。
+    const escalatedTask = mod.db.prepare('SELECT status, hold, comments FROM tasks WHERE id=?').get('escalate-r3')
+    assert.equal(escalatedTask.status, 'in_review', '★ 不是 done——这件事等人决定')
+    assert.equal(escalatedTask.hold, 1, '★ hold 挡住自动认领（复用既有拦截列，不新增状态）')
+    const escalatedComments = JSON.parse(escalatedTask.comments)
+    assert.match(escalatedComments.at(-1).text, /返工升级/)
+    assert.match(escalatedComments.at(-1).text, /连续 3 轮/)
+    assert.match(escalatedComments.at(-1).text, /空值检查仍然缺失/, '★ 评论要写明反复出现的是哪一条')
+
+    // 台账里记 'escalated'，且不指下一环（没有下一环）。
+    const ledger = mod.db.prepare('SELECT kind, next_task_id FROM agent_workflow_reviews WHERE source_review_task_id=?').get('escalate-r3')
+    assert.equal(ledger.kind, 'escalated')
+    assert.equal(ledger.next_task_id, null)
+
+    // 审计留痕（"为什么停下来"要可查）。
+    const escalAudit = mod.db.prepare("SELECT detail FROM audit WHERE action='agent-workflow:review-escalated' AND taskId='escalate-r3'").get()
+    assert.ok(escalAudit !== undefined, '★ 升级必须落审计')
+    assert.match(String(escalAudit.detail), /streak/)
+
+    // ★★ 反例守卫：换一个 summary 就不该升级——那是新问题，不是同一个修不好。
+    const different = await reviewRound('escalate-r4', '另一处：日志缺上下文', 'review.md#L40')
+    assert.equal(different.status, 200, different.text)
+    assert.equal(different.json.task.kind, 'rework', '★★ 换了 summary 就是另一件事：不许累积成升级')
+  })
+
   it('跨 Agent 目标按冻结工作流拓扑建链，不受空间 next 顺序和后续配置变化影响', async () => {
     const scope = 'space-independent-agent-workflow'
     await post('/api/spaces', { id: scope, name: '独立 Agent 工作流空间', localDir: process.cwd(), by: 'general' })

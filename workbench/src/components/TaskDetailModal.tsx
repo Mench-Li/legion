@@ -1,6 +1,9 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type { CSSProperties } from 'react'
-import { approveTaskDelivery, confirmTaskWorkerStopped, execRequest, fetchAgentWorkflowHistory, fetchHubActivity, fetchHubCalendarByLink, fetchHubDocContent, fetchHubOverlaps, fetchHubTask, fetchHubTasks, fetchRepoContention, fetchTaskContention, fetchTaskDelivery, fetchTaskWriteIntent, hubClaim, hubComment, hubHold, hubReassign, hubReviewNote, hubTransition, reconcileAgentWorkflowAttempt, rejectTask, setTaskWriteIntent } from '../api'
+import { approveTaskDelivery, confirmTaskWorkerStopped, execRequest, fetchAgentWorkflowHistory, fetchHubActivity, fetchHubCalendarByLink, fetchHubDocContent, fetchHubOverlaps, fetchHubTask, fetchHubTasks, fetchRepoContention, fetchRunEvents, fetchTaskContention, fetchTaskDelivery, fetchTaskWriteIntent, hubClaim, hubComment, hubHold, hubReassign, hubReviewNote, hubTransition, reconcileAgentWorkflowAttempt, rejectTask, setTaskWriteIntent, subscribeHubAudit } from '../api'
+import { runEventsHeadline, runEventsSection } from '../runEventsView'
+import { askPointCount, pendingAskComment } from '../waitingOnUser'
+import { belongsToTask, mergeTimeline, summarizeTimeline, timelineHeadline } from '../timelineSummary'
 import type { AgentWorkflowHistory, LiveDelivery, LiveIntegrationEvent, LiveReservation, LiveTaskContention, LiveWriteIntent } from '../api'
 import type { AuditPatch, HubActivity, HubDocContent, HubTask, OverlapGroup, ReviewNote } from '../types'
 import type { LinkedCalendarEvent } from '../api'
@@ -132,17 +135,9 @@ function runAgentOf(c: HubTask): string {
   return c.soldier ?? c.role ?? 'general'
 }
 
-/** ❓ 待将军确认：最后一条评论以 ❓ 开头（守护标记待答复；将军答复后该标记自动消失）。 */
+/** ❓ 待将军确认：判据只有一处（`waitingOnUser.ts`）——看板与详情必须给出同一个结论。 */
 function pendingAskOf(t: HubTask) {
-  const cs = t.comments ?? []
-  if (cs.length === 0) return null
-  const last = cs[cs.length - 1]
-  return (last.text ?? '').startsWith('❓') ? last : null
-}
-
-/** ❓ 原文里逐条提问的点数（每条以 ❓ 开头；供答复框提示「含 N 个待确认点」）。 */
-function askPointCount(text: string): number {
-  return text.split('\n').filter(l => l.trim().startsWith('❓')).length
+  return pendingAskComment(t)
 }
 
 /** 从描述中读取显式「波次：N」标记；若未标记，从 blockedBy 深度计算。 */
@@ -163,8 +158,25 @@ function childDeps(c: HubTask): string {
 export function TaskDetailModal({ taskId, onClose, onChanged, onContactAgent }: TaskDetailModalProps): React.JSX.Element {
   const [task, setTask] = useState<HubTask | null>(null)
   const [agentWorkflowHistory, setAgentWorkflowHistory] = useState<AgentWorkflowHistory | null>(null)
+  /**
+   * 运行明细（T2.1）：每个**阶段 Attempt** 的 `run_events`。
+   *
+   * 它一直落库、也一直有只读端点，但此前面上一个字都看不到——用户只能看到
+   * "第 N 次、completed"这一行摘要，看不到这次运行到底调了什么工具、哪个失败了。
+   *
+   * `undefined` = 还没拉；`{ rows: null, reason }` = **读取失败**（与"没有事件"分得开）。
+   */
+  const [runEventsByAttempt, setRunEventsByAttempt] = useState<Record<string, { rows: unknown[] | null; reason: string | null }>>({})
+  const [runEventsOpen, setRunEventsOpen] = useState<Record<string, boolean>>({})
   const [attemptReconciliationDrafts, setAttemptReconciliationDrafts] = useState<Record<string, { disposition: 'confirmed-stopped' | 'still-running' | 'unable-to-confirm'; note: string }>>({})
   const [timeline, setTimeline] = useState<HubActivity[]>([])
+  /**
+   * 时间线默认只画多少条（`null` = 全部）。
+   *
+   * ★ 这个上限**只砍可折叠项**（`summarizeTimeline` 里保证关键事件一条不丢）：
+   *   一条跑过多轮的任务有几百条心跳，而用户回来看时间线是为了找返工与判词。
+   */
+  const [timelineLimit, setTimelineLimit] = useState<number | null>(40)
   const [children, setChildren] = useState<HubTask[]>([])
   const [err, setErr] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
@@ -201,6 +213,19 @@ export function TaskDetailModal({ taskId, onClose, onChanged, onContactAgent }: 
         try { setAgentWorkflowHistory(await fetchAgentWorkflowHistory(taskId, t.scope)) }
         catch { setAgentWorkflowHistory(null) }
       } else setAgentWorkflowHistory(null)
+      // 运行明细按需加载：只拉**已终结**的尝试（运行中的还在写，拉到的是一份会变短的快照）。
+      // ★ 失败要记成 `{rows: null, reason}`，不能记成空数组——那会把"问不到"显示成"很干净"。
+      if (workflow && t.scope) {
+        try {
+          const history = await fetchAgentWorkflowHistory(taskId, t.scope)
+          const settled = history.stageAttempts.filter(a => a.state !== 'running' && a.state !== 'starting')
+          const entries = await Promise.all(settled.map(async attempt => {
+            try { return [attempt.id, { rows: await fetchRunEvents(attempt.id), reason: null }] as const }
+            catch (error) { return [attempt.id, { rows: null, reason: error instanceof Error ? error.message : String(error) }] as const }
+          }))
+          setRunEventsByAttempt(Object.fromEntries(entries))
+        } catch { setRunEventsByAttempt({}) }
+      } else setRunEventsByAttempt({})
       if (t.scope) {
         try {
           const all = await fetchHubTasks(t.scope, { compact: true })
@@ -212,7 +237,10 @@ export function TaskDetailModal({ taskId, onClose, onChanged, onContactAgent }: 
         setChildren([])
       }
       try {
-        setTimeline(await fetchHubActivity({ taskId }))
+        // T2.2：首次拉取是**权威历史**；SSE 增量只是"我可能还没看到这一条"。
+        // 合并时按 seq 去重（先来的那份优先），见 `timelineSummary.mergeTimeline`。
+        const fetched = await fetchHubActivity({ taskId })
+        setTimeline(current => mergeTimeline(current, fetched))
       } catch {
         setTimeline([])
       }
@@ -255,6 +283,31 @@ export function TaskDetailModal({ taskId, onClose, onChanged, onContactAgent }: 
   useEffect(() => {
     void load()
   }, [load])
+
+  /**
+   * T2.2：时间线的实时增量。
+   *
+   * 弹层此前只在挂载/操作后拉一次，于是"我点了派工、它开始跑了"必须关掉再打开才看得见。
+   *
+   * ★ 这里用的是**既有订阅原语** `subscribeHubAudit`（`/api/events` 那一条流），
+   *   与 ChatView / NotifyView / TaskCenterView 完全同一个模式——不新增第二种事件源。
+   *   ★ 不重拉整表：只把**属于本任务**的事件按 seq 并进去（`mergeTimeline` 负责去重与排序）。
+   *     重拉整表会让"正在读时间线"的人在每次事件到来时被重置一次滚动位置。
+   */
+  useEffect(() => {
+    // 中枢模式下才订阅；`task.scope` 未就绪时先不订阅（scope 级流必须带对作用域）。
+    if (!task?.scope) return undefined
+    let off: (() => void) | null = null
+    try {
+      off = subscribeHubAudit(event => {
+        if (!belongsToTask(event, taskId)) return
+        setTimeline(current => mergeTimeline(current, [event]))
+      }, { scope: task.scope })
+    } catch {
+      off = null
+    }
+    return () => { off?.() }
+  }, [task?.scope, taskId])
 
   // 同一弹层实例会被不同任务复用：切任务时清空两类草稿
   useEffect(() => {
@@ -512,6 +565,45 @@ export function TaskDetailModal({ taskId, onClose, onChanged, onContactAgent }: 
                         {attempt.stopReason ? ` · 终止原因：${attempt.stopReason}` : ''}
                       </div>
                       <div style={{ color: 'var(--muted-2)', fontSize: 11 }}>执行工作区：<code>{attempt.workspaceDir}</code></div>
+                      {(() => {
+                        // 运行明细（T2.1）：折叠默认收起，头部就给出"多少条、几个工具、失败几次"。
+                        const entry = runEventsByAttempt[attempt.id]
+                        if (entry === undefined) {
+                          return attempt.state === 'running' || attempt.state === 'starting'
+                            ? <div style={{ color: 'var(--muted-2)', fontSize: 11 }}>运行明细：本次运行尚未结束，结束后可展开</div>
+                            : <div style={{ color: 'var(--muted-2)', fontSize: 11 }}>运行明细：尚未读取</div>
+                        }
+                        const section = runEventsSection(entry.rows as never, entry.reason)
+                        const open = runEventsOpen[attempt.id] === true
+                        return <div style={{ marginTop: 4 }}>
+                          <button
+                            type="button"
+                            className="btn ghost"
+                            style={{ fontSize: 11, padding: '2px 6px' }}
+                            onClick={() => setRunEventsOpen(current => ({ ...current, [attempt.id]: !open }))}
+                          >
+                            {open ? '▾' : '▸'} 运行明细 · {runEventsHeadline(section)}
+                          </button>
+                          {open && section.state === 'ok' && <div style={{ marginTop: 4, padding: 6, border: '1px solid var(--line)', borderRadius: 6, fontSize: 11 }}>
+                            {section.counts.length > 0 && <div style={{ color: 'var(--muted-2)' }}>
+                              {section.counts.map(item => `${item.label} ${item.count}`).join(' · ')}
+                            </div>}
+                            <div style={{ marginTop: 4, maxHeight: 220, overflow: 'auto' }}>
+                              {section.events.map((event, index) => <div key={`${event.seq ?? 'x'}:${index}`} style={{ borderTop: index === 0 ? 'none' : '1px solid var(--line)', paddingTop: 2, marginTop: 2 }}>
+                                <span style={{ color: 'var(--muted-2)' }}>{event.seq ?? '—'}</span>
+                                {' · '}<b style={{ color: event.known ? undefined : 'var(--yellow)' }}>{event.label}</b>
+                                {event.summary ? <> · {event.summary}</> : null}
+                              </div>)}
+                            </div>
+                          </div>}
+                          {open && section.state === 'empty' && <div style={{ color: 'var(--muted-2)', fontSize: 11, marginTop: 2 }}>
+                            本次运行没有记录到事件（与「读取失败」不同：这是真的没有）
+                          </div>}
+                          {open && section.state === 'unreadable' && <div style={{ color: 'var(--red)', fontSize: 11, marginTop: 2 }}>
+                            {runEventsHeadline(section)}
+                          </div>}
+                        </div>
+                      })()}
                       {attempt.result?.summary ? <div>{attempt.result.summary}</div> : null}
                       {attempt.result?.review ? <div style={{ marginTop: 4, padding: 6, border: '1px solid var(--line)', borderRadius: 6 }}>
                         <b>结构化审查：{attempt.result.review.passed ? '通过' : '未通过'}</b>
@@ -924,24 +1016,36 @@ export function TaskDetailModal({ taskId, onClose, onChanged, onContactAgent }: 
               )}
             </div>
 
-            {/* 状态时间线 */}
-            {timeline.length > 0 && (
-              <div className="td-section">
-                <div className="td-section-title">⏱ 进展时间线</div>
-                <div className="timeline">
-                  {timeline.map(a => (
-                    <div key={a.seq} className="tl-item">
-                      <span className="tl-time">{fmt(a.ts)}</span>
-                      <span className="tl-act">
-                        {ACTION_TEXT[a.action] ?? a.action}
-                        {a.action === 'transition' && typeof a.detail?.to === 'string' ? ` → ${STATUS_CN[a.detail.to] ?? a.detail.to}` : ''}
-                      </span>
-                      <span className="tl-by">· {a.member}</span>
-                    </div>
-                  ))}
+            {/* 状态时间线（T2.2：摘要 + SSE 增量；关键事件一条不折叠） */}
+            {timeline.length > 0 && (() => {
+              const entries = summarizeTimeline(timeline, timelineLimit)
+              return (
+                <div className="td-section">
+                  <div className="td-section-title">
+                    ⏱ 进展时间线
+                    <span style={{ color: 'var(--muted-2)', fontSize: 11, marginLeft: 6 }}>{timelineHeadline(entries)}</span>
+                    {entries.length < summarizeTimeline(timeline).length && (
+                      <button type="button" className="btn ghost" style={{ fontSize: 11, marginLeft: 6 }} onClick={() => setTimelineLimit(null)}>
+                        显示全部
+                      </button>
+                    )}
+                  </div>
+                  <div className="timeline">
+                    {entries.map(entry => (
+                      <div key={entry.seq} className="tl-item">
+                        <span className="tl-time">{fmt(entry.ts)}</span>
+                        <span className="tl-act">
+                          {ACTION_TEXT[entry.action] ?? entry.action}
+                          {entry.action === 'transition' && typeof entry.raw.detail?.to === 'string' ? ` → ${STATUS_CN[entry.raw.detail.to] ?? entry.raw.detail.to}` : ''}
+                          {entry.repeat > 1 ? ` ×${entry.repeat}` : ''}
+                        </span>
+                        <span className="tl-by">· {entry.member}</span>
+                      </div>
+                    ))}
+                  </div>
                 </div>
-              </div>
-            )}
+              )
+            })()}
 
             {t.description && (
               <div className="td-section">

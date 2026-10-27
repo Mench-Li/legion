@@ -327,6 +327,14 @@ test('⑥ 审计留痕且**不含密钥**：只记金额、模型 id、价目表
   const text = JSON.stringify(rows)
   assert.ok(!/sk-[A-Za-z0-9]{10,}/.test(text), `审计泄露密钥：${text}`)
   assert.ok(!text.includes('secretRef'), '审计不得含 secretRef')
+  // ★★ T2.4（2026-10-27）：`taskId` 列必须放**真的任务号**，attemptId 进 detail。
+  //    改之前适配器写的是 `attemptId ?? taskId ?? '*'`，于是按任务号查时间线
+  //    永远查不到"这次运行因超预算被请求取消"——而按 attemptId 查又能查到。
+  const cancelAudit = rows.find((r) => r.action === 'budget.cancel-requested')
+  assert.ok(cancelAudit !== undefined, '缺 cancel-requested 审计')
+  assert.equal(cancelAudit.taskId, 'T-1', '★★ audit.taskId 必须是任务号，不是 attemptId')
+  assert.match(String(cancelAudit.detail), /att:T-1:1/, '★ attemptId 必须仍在 detail 里（两个 ID 都要能查到）')
+  assert.equal(JSON.parse(cancelAudit.detail).attemptId, 'att:T-1:1')
   // 预留审计要能回答"上限多少、什么币种、哪版价"
   const reserveAudit = rows.find((r) => r.action === 'budget.reserve')
   const detail = JSON.parse(reserveAudit.detail)

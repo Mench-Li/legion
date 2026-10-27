@@ -31,6 +31,10 @@ export const ASSIGNMENT_SOURCES = Object.freeze({
   SPACE_REVIEW_WORKFLOW: 'space-review-workflow',
   SPACE_STAGE: 'space-stage',
   DSH_DEFAULT: 'dsh-default',
+  /** 本目标整条链由同一个 Agent 执行（发布时的目标级选择）。 */
+  GOAL_AGENT: 'goal-agent',
+  /** 发布时对这一环的显式覆盖（只影响本次发布）。 */
+  PUBLISH_OVERRIDE: 'publish-override',
 })
 
 /** 计划错误码（发布目标时直接进 HTTP 400/409 的具名码）。 */
@@ -43,6 +47,15 @@ export const PLAN_CODES = Object.freeze({
   IMPLEMENTATION_TEST_RUNNER_MISSING: 'AGENT_PLAN_TEST_RUNNER_MISSING',
   /** 不同阶段把链钉到了不同的执行节点（跨节点 workspace/Git 交接尚未实现）。 */
   NODE_CONFLICT: 'AGENT_NODE_WORKSPACE_MISMATCH',
+  /**
+   * 目标级或发布时的覆盖项试图指定 `testRunner`。
+   *
+   * 独立测试命令属于「验收」，不属于「谁执行」。允许发布时改它，
+   * 等于允许一次点击把验收改成永远通过——所以这里**拒绝**，而不是忽略。
+   */
+  OVERRIDE_TEST_RUNNER: 'AGENT_PLAN_OVERRIDE_TEST_RUNNER',
+  /** 覆盖项/目标级的形状不合法（不是对象、字段类型不对）。 */
+  OVERRIDE_INVALID: 'AGENT_PLAN_OVERRIDE_INVALID',
 })
 
 /** 计划警告码（不拦发布，但要能在回执里看见）。 */
@@ -53,6 +66,8 @@ export const PLAN_WARNINGS = Object.freeze({
   PROFILE_STAGE_UNKNOWN: 'AGENT_PLAN_PROFILE_STAGE_UNKNOWN',
   /** 同一个岗位在分配模板里出现多次：取拓扑序第一个。 */
   PROFILE_ROLE_DUPLICATED: 'AGENT_PLAN_PROFILE_ROLE_DUPLICATED',
+  /** 发布时的逐节点覆盖点名了流水线没有的岗位：忽略那一条。 */
+  PUBLISH_OVERRIDE_STAGE_UNKNOWN: 'AGENT_PLAN_OVERRIDE_STAGE_UNKNOWN',
 })
 
 const PLAN_MARKER = 'legion.goal-plan'
@@ -144,20 +159,60 @@ export function resolvePipelineStages({ pipeline, roster } = {}) {
   })
 }
 
+/** 一个覆盖层只允许这三项：`testRunner` 属于验收，不在"谁执行"的范围内。 */
+const ASSIGNMENT_FIELDS = Object.freeze(['agentToolConfig', 'modelConfig', 'nodeId'])
+
+/**
+ * 把「目标级 Agent」/「发布时逐节点覆盖」归一成只含合法字段的冻结对象。
+ *
+ * 两条判据：
+ *   · `testRunner` **出现即拒绝**（不是忽略）。忽略了会让用户以为自己改成功；
+ *   · 只保留**显式出现**的字段（`Object.hasOwn`）。`null` 是"显式清空"，
+ *     与"没写这一项"是两件事——前者会遮住下层，后者会回落下层。
+ */
+function normalizeAssignmentLayer(value, label) {
+  if (value === null || value === undefined) return null
+  if (typeof value !== 'object' || Array.isArray(value)) {
+    throw planError(PLAN_CODES.OVERRIDE_INVALID, `${label} 必须是对象`, 400)
+  }
+  if (Object.hasOwn(value, 'testRunner')) {
+    throw planError(
+      PLAN_CODES.OVERRIDE_TEST_RUNNER,
+      `${label} 不能指定 testRunner：独立测试命令属于验收契约，请在「Agent 工作流」的分配模板里改`,
+      400,
+    )
+  }
+  const layer = {}
+  for (const field of ASSIGNMENT_FIELDS) {
+    if (Object.hasOwn(value, field)) layer[field] = value[field] ?? null
+  }
+  return layer
+}
+
 /**
  * 分配覆盖项：按岗位匹配的 Agent 工具 / 模型 / 节点 / testRunner。
  *
- * 优先级（后者覆盖前者）：
- *   1. DSH 默认（没有配置）
- *   2. `space_stages.agent_tool_config` / `model_config`（既有数据面）
+ * 优先级（从高到低；高层的**显式字段**遮住低层，未写的字段回落低层）：
+ *   1. `stageOverrides[role]` —— 发布时对这一环的显式覆盖（只影响本次发布）
+ *   2. `goalAgent`          —— 目标级：整条链由同一个 Agent 执行
  *   3. 分配模板（具名定义或空间级审查闭环）的 `stageTools[role]`
- *   4. 发布时显式覆盖（本版**未开放**，字段只做预留）
+ *   4. `space_stages.agent_tool_config` / `model_config`（既有数据面）
+ *   5. DSH 默认（没有配置）
+ *
+ * ★ `testRunner` **只从第 3 层取**：它决定"怎么验证"，不决定"谁执行"。
+ *   第 1、2 层带它一律拒绝（见 `PLAN_CODES.OVERRIDE_TEST_RUNNER`）。
  *
  * ★ 「没配」与「没读到」必须分得开：未覆盖的岗位也显式记一条 `dsh-default`，
  *   而不是留 `undefined`。留空会让「这个岗位用了 DSH 默认」与「这个岗位的配置
  *   没被写进快照」在读数上长得一模一样。
  */
-export function resolveAssignments({ stages, profile, profileSource = ASSIGNMENT_SOURCES.SPACE_REVIEW_WORKFLOW } = {}) {
+export function resolveAssignments({
+  stages,
+  profile,
+  profileSource = ASSIGNMENT_SOURCES.SPACE_REVIEW_WORKFLOW,
+  goalAgent = null,
+  stageOverrides = null,
+} = {}) {
   const list = Array.isArray(stages) ? stages : []
   const warnings = []
   const source = profileSource === ASSIGNMENT_SOURCES.DEFINITION
@@ -169,6 +224,17 @@ export function resolveAssignments({ stages, profile, profileSource = ASSIGNMENT
     if (tool === null || typeof tool !== 'object') continue
     byRole.set(role, tool)
   }
+  const goal = normalizeAssignmentLayer(goalAgent, '目标级 Agent')
+  const overrides = new Map()
+  if (stageOverrides !== null && stageOverrides !== undefined) {
+    if (typeof stageOverrides !== 'object' || Array.isArray(stageOverrides)) {
+      throw planError(PLAN_CODES.OVERRIDE_TEST_RUNNER, 'stageOverrides 必须是按岗位索引的对象', 400)
+    }
+    for (const [role, value] of Object.entries(stageOverrides)) {
+      if (value === null || value === undefined) continue
+      overrides.set(role, normalizeAssignmentLayer(value, `stageOverrides.${role}`))
+    }
+  }
   const knownRoles = new Set(list.map((stage) => stage.role))
   for (const role of byRole.keys()) {
     if (!knownRoles.has(role)) {
@@ -178,24 +244,63 @@ export function resolveAssignments({ stages, profile, profileSource = ASSIGNMENT
       })
     }
   }
+  for (const role of overrides.keys()) {
+    if (!knownRoles.has(role)) {
+      warnings.push({
+        code: PLAN_WARNINGS.PUBLISH_OVERRIDE_STAGE_UNKNOWN,
+        message: `发布时的逐节点覆盖点名了岗位 ${role}，但它不在本空间流水线（或已停用），已忽略该条`,
+      })
+    }
+  }
   const assignments = {}
   for (const stage of list) {
     const stageTool = byRole.get(stage.role)
-    const agentRef = stageTool?.agentToolConfig ?? stage.agentToolConfig ?? null
-    const modelRef = stageTool?.modelConfig ?? stage.modelConfig ?? null
-    const nodeId = typeof stageTool?.nodeId === 'string' && stageTool.nodeId.trim() !== '' ? stageTool.nodeId.trim() : null
-    const testRunner = stageTool?.testRunner ?? null
-    const fromProfile = stageTool !== undefined
-    const fromSpaceStage = !fromProfile && (stage.agentToolConfig != null || stage.modelConfig != null)
+    const override = overrides.get(stage.role) ?? null
+    /** 取一个字段：按 1→5 找第一个**显式出现**它的层。 */
+    const pick = (field) => {
+      if (override !== null && Object.hasOwn(override, field)) {
+        return { value: override[field] ?? null, from: ASSIGNMENT_SOURCES.PUBLISH_OVERRIDE }
+      }
+      if (goal !== null && Object.hasOwn(goal, field)) {
+        return { value: goal[field] ?? null, from: ASSIGNMENT_SOURCES.GOAL_AGENT }
+      }
+      if (stageTool !== undefined && Object.hasOwn(stageTool, field)) {
+        return { value: stageTool[field] ?? null, from: source }
+      }
+      // 空间阶段只有 agentToolConfig / modelConfig 两个字段，且"非空"才算命中。
+      if ((field === 'agentToolConfig' || field === 'modelConfig') && stage[field] != null) {
+        return { value: stage[field], from: ASSIGNMENT_SOURCES.SPACE_STAGE }
+      }
+      return { value: null, from: ASSIGNMENT_SOURCES.DSH_DEFAULT }
+    }
+    const tool = pick('agentToolConfig')
+    const model = pick('modelConfig')
+    const node = pick('nodeId')
+    // 诊断用的单一来源，优先描述**"这个 Agent 从哪来"**（也就是工具那一列）：
+    //   · 工具非空 ⇒ 就是它的层；
+    //   · 工具被显式清空（覆盖/目标级写了 null）⇒ 也算那一层：用户确实动过手；
+    //   · 否则模板点名过这个岗位 ⇒ 模板；再否则看模型/节点；全无 ⇒ dsh-default。
+    const explicit = (item) => item.from === ASSIGNMENT_SOURCES.PUBLISH_OVERRIDE || item.from === ASSIGNMENT_SOURCES.GOAL_AGENT
+    let assignmentSource
+    if (tool.value !== null) assignmentSource = tool.from
+    else if (explicit(tool)) assignmentSource = tool.from
+    else if (explicit(model)) assignmentSource = model.from
+    else if (explicit(node)) assignmentSource = node.from
+    else if (stageTool !== undefined) assignmentSource = source
+    else {
+      const other = [model, node].find((item) => item.from !== ASSIGNMENT_SOURCES.DSH_DEFAULT)
+      assignmentSource = other?.from ?? ASSIGNMENT_SOURCES.DSH_DEFAULT
+    }
+    const rawNode = node.value
     assignments[stage.role] = {
-      source: fromProfile ? source : fromSpaceStage ? ASSIGNMENT_SOURCES.SPACE_STAGE : ASSIGNMENT_SOURCES.DSH_DEFAULT,
-      agentToolConfig: agentRef ?? null,
-      modelConfig: modelRef ?? null,
-      nodeId,
-      testRunner,
+      source: assignmentSource,
+      agentToolConfig: tool.value ?? null,
+      modelConfig: model.value ?? null,
+      nodeId: typeof rawNode === 'string' && rawNode.trim() !== '' ? rawNode.trim() : null,
+      testRunner: stageTool?.testRunner ?? null,
     }
   }
-  return deepFreeze({ assignments, warnings })
+  return deepFreeze({ assignments, warnings, goalAgent: goal })
 }
 
 /**
@@ -365,10 +470,15 @@ export function buildPipelineWorkflow({ stages, assignments, review, pipelineVer
  * @param {object|null} input.profile 具名定义或空间级审查闭环；null = 没配
  * @param {'definition'|'space-review-workflow'} [input.profileSource]
  * @param {string|null} [input.agentNodeId] 发布弹窗选的节点
+ * @param {object|null} [input.goalAgent] 目标级执行者：`{agentToolConfig?, modelConfig?, nodeId?}`
+ * @param {object|null} [input.stageOverrides] 发布时逐节点覆盖：`{ [role]: {agentToolConfig?, modelConfig?, nodeId?} }`
  */
-export function planGoal({ pipeline, roster, profile = null, profileSource, agentNodeId = null } = {}) {
+export function planGoal({
+  pipeline, roster, profile = null, profileSource, agentNodeId = null,
+  goalAgent = null, stageOverrides = null,
+} = {}) {
   const resolved = resolvePipelineStages({ pipeline, roster })
-  const assignment = resolveAssignments({ stages: resolved.stages, profile, profileSource })
+  const assignment = resolveAssignments({ stages: resolved.stages, profile, profileSource, goalAgent, stageOverrides })
   const policy = resolveReviewPolicy({ stages: resolved.stages, assignments: assignment.assignments, profile })
   const effectiveNodeId = resolveEffectiveNode({ assignments: assignment.assignments, agentNodeId })
   const workflow = buildPipelineWorkflow({
@@ -394,6 +504,9 @@ export function planGoal({ pipeline, roster, profile = null, profileSource, agen
     assignments: assignment.assignments,
     review: policy.review,
     effectiveNodeId,
+    // 目标级选择的原样保留：发布时写进 `goal.agent_tool_config`，冻结后仍能回答
+    // "这条目标当初选的是谁"。
+    goalAgent: assignment.goalAgent,
     workflow,
     warnings: [...resolved.warnings, ...assignment.warnings, ...policy.warnings],
   })

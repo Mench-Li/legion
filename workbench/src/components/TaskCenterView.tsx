@@ -10,6 +10,7 @@ import { deliveryBadgeOf, schedulingBadgeOf } from '../deliveryBadge.ts'
 import { planDrop } from '../reworkPlan.ts'
 import { sortByMostRecent } from '../taskOrder.ts'
 import { buildGoalFilter, goalFilterLabel, hasRealGoal, matchesGoalFilter, rankGoalOptions } from '../taskGoalFilter.ts'
+import { isWaitingOnUser } from '../waitingOnUser'
 import { ReworkModal } from './ReworkModal'
 import { TaskDetailModal } from './TaskDetailModal'
 
@@ -194,9 +195,8 @@ function bindOf(r: TcRow): string {
 }
 
 function askOpen(r: TcRow): boolean {
-  const cs = r.comments ?? []
-  if (cs.length === 0) return false
-  return (cs[cs.length - 1].text ?? '').startsWith('❓')
+  // 判据只有一处（`waitingOnUser.ts`）：看板与任务详情必须对同一张卡给出同一结论。
+  return isWaitingOnUser(r)
 }
 
 // ★ 原来这里有个 `normId(a,b)`，只服务于「按任务号升序」那一行（已换成 sortByMostRecent）。

@@ -43,17 +43,65 @@
 export function createGoalLifecycleRoutes({
   json,
   handleWrite, publishGoalRecord, setGoalContext,
-  setGoalState,
+  setGoalState, previewGoalPlan,
 }) {
   const deps = { json,
     handleWrite, publishGoalRecord, setGoalContext,
-    setGoalState,
+    setGoalState, previewGoalPlan,
   }
   for (const [k, v] of Object.entries(deps)) {
     if (v === undefined || v === null) throw new TypeError(`createGoalLifecycleRoutes 缺注入项：${k}`)
   }
 
+  /**
+   * 发布时新增的两层分配（2026-10-27）：目标级 Agent 与逐节点覆盖。
+   *
+   * **线上形状**（与前端约定，越简单越好）：
+   *   `agentToolConfig: {id, version}`              —— 目标级选的是"哪个 Agent"
+   *   `stageOverrides: {role: {agentToolConfig?, modelConfig?, nodeId?}}`
+   *
+   * 解析层要的是 `goalAgent: {agentToolConfig, modelConfig, nodeId}`，所以这里把
+   * 顶层的工具引用**包一层**。包在路由层而不是解析层：解析层不该知道 HTTP 的
+   * 简写，而路由层本来就负责"线上形状 → 内部形状"。
+   *
+   * 只做**形状**收敛，不做语义校验（引用是否存在、adapter 与模型是否互斥，
+   * 由 server 的 `assertPublishAssignmentLayers` 统一查）——路由层重复一遍业务
+   * 判断，两条路径迟早会给出不同的答案。
+   */
+  const assignmentInputOf = (body) => {
+    const goalAgent = body.agentToolConfig === undefined || body.agentToolConfig === null
+      ? null
+      : { agentToolConfig: body.agentToolConfig }
+    const stageOverrides = body.stageOverrides === undefined || body.stageOverrides === null ? null : body.stageOverrides
+    return goalAgent === null && stageOverrides === null ? null : { goalAgent, stageOverrides }
+  }
+
   const routes = [
+    {
+      method: 'POST',
+      match: 'exact',
+      path: '/api/goal/plan',
+      async run(req, res) {
+        // ★ 只读：`handleWrite` 本身**不写库**（它只做鉴权 + 读 body + 解析 by/scope），
+        //   真正的写入全在 `run` 的回调里。这里回调只算不写，所以整条路径零副作用
+        //   —— 和 `/api/workflow-packs/preview` 是同一个先例（该路由也曾被误认成写面）。
+        //   `envelope: null` 让响应是扁平的，前端直接拿到 `stages/blockers`。
+        await handleWrite(req, res, (body, _by, scope) => {
+          const targetScope = typeof body.scope === 'string' && body.scope.trim().length > 0 ? body.scope.trim() : scope
+          const agentNodeId = typeof body.agentNodeId === 'string' && body.agentNodeId.trim() !== '' ? body.agentNodeId.trim() : null
+          const orchestration = body.orchestration === 'custom-dag' ? 'custom-dag' : 'pipeline'
+          return previewGoalPlan({
+            targetScope,
+            objective: typeof body.objective === 'string' ? body.objective : '',
+            mode: body.mode === 'slice' ? 'slice' : 'chain',
+            workflowDefinitionRef: body.workflowDefinition ?? null,
+            agentNodeId,
+            orchestration,
+            assignmentInput: assignmentInputOf(body),
+          })
+        }, { envelope: null })
+      },
+    },
     {
       method: 'POST',
       match: 'exact',
@@ -84,6 +132,7 @@ export function createGoalLifecycleRoutes({
             body.workflowDefinition ?? null,
             agentNodeId,
             orchestration,
+            assignmentInputOf(body),
           )
         })
       },

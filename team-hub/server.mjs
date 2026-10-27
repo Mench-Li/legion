@@ -185,6 +185,11 @@ import { resolveNextPost } from '../orchestrator/pipeline/index.mjs'
 // 「软件流水线 × Agent 分配」的解耦层：阶段集合由流水线决定，编排配置只决定
 // 每个岗位由哪个 Agent / 模型 / 节点执行。纯函数，不碰数据库。
 import { isGoalPlan, planGoal } from '../orchestrator/assignment/index.mjs'
+// 决策 #1（2026-10-27）：返工**连续同因**升级。纯层在 orchestrator/state-machine，
+// 这里只负责"取历史 + 落动作"，判据本身可独立测。
+import {
+  ESCALATION_CODES, describeFingerprint, escalateAfterFromEnv, escalateVerdict,
+} from '../orchestrator/state-machine/rework-escalation.mjs'
 import { columnExists as columnExistsImpl, ensureColumn as ensureColumnImpl } from './schema-util.mjs'
 import { createEventDeliveryStore } from './event-delivery.mjs'
 import {
@@ -1228,8 +1233,16 @@ const budgetLedger = createBudgetLedger({
   db,
   clock: () => Date.now(),
   priceTableFor: (version) => budgetPriceTables.get(version),
+  // ★ 2026-10-27（T2.4）：`taskId` 列必须放**真的任务号**，attemptId 进 detail。
+  //
+  //   改之前是 `attemptId ?? taskId ?? '*'` —— 于是 `budget.cancel-requested`
+  //   这一行在 `audit.taskId` 上装的是 attemptId。后果不是报错，而是**更糟的一种**：
+  //   按任务号查时间线（`/api/activity?taskId=T-…`）永远查不到"这次运行因为超预算
+  //   被请求取消"，而按 attemptId 去查又能查到——于是同一件事在不同入口下
+  //   一个存在、一个不存在。
   writeAudit: ({ action, attemptId, scope, taskId, detail }) =>
-    audit('system', scope ?? '*', action, attemptId ?? taskId ?? '*', detail),
+    audit('system', scope ?? '*', action, taskId ?? attemptId ?? '*',
+      { ...(detail ?? {}), ...(attemptId === null || attemptId === undefined ? {} : { attemptId }) }),
 })
 
 /**
@@ -2048,6 +2061,16 @@ ensureColumn('goal', 'orchestration', 'orchestration TEXT DEFAULT NULL')
 ensureColumn('goal', 'pipeline_snapshot', 'pipeline_snapshot TEXT DEFAULT NULL')
 ensureColumn('goal', 'assignment_snapshot', 'assignment_snapshot TEXT DEFAULT NULL')
 ensureColumn('goal', 'workflow_snapshot', 'workflow_snapshot TEXT DEFAULT NULL')
+// 9) goal.agent_tool_config（2026-10-27）——「整条目标由哪个 Agent 执行」。
+//
+//    为什么需要它：`agentNodeId` 只回答"跑在哪台机器"，回答不了"由谁跑"。
+//    在此之前要让一条目标整链改用 Claude Code / Codex，只能在配置页逐岗改，
+//    而那是**空间级**的 —— 会连带影响之后发布的每一个目标。
+//
+//    存的是 JSON：`{"agentToolConfig":{"id":..,"version":..},"modelConfig":?, "nodeId":?}`。
+//    NULL = 没做目标级选择，按「分配模板 → 空间阶段 → DSH 默认」逐层回落。
+//    ★ 它**不携带 testRunner**：独立测试命令属于验收，不允许随"谁执行"一起被改。
+ensureColumn('goal', 'agent_tool_config', 'agent_tool_config TEXT DEFAULT NULL')
 ensureColumn('tasks', 'docSync', 'docSync INTEGER DEFAULT 0')
 ensureColumn('tasks', 'fileDomain', 'fileDomain TEXT')
 // 6) 并行任务文件冲突治理：写入调度状态（unplanned/waiting-file/reserved/reconciling/released）
@@ -2518,6 +2541,11 @@ function rowToGoal(row) {
     docSync: !!row.docSync,
     // 这条链绑定的执行节点；null = 不绑定（任一在线执行服务可认领）。
     agentNodeId: typeof row.agentNodeId === 'string' && row.agentNodeId !== '' ? row.agentNodeId : null,
+    // 目标级执行者（2026-10-27）：整条链由同一个 Agent 执行；null = 逐层回落。
+    agentToolConfig: (() => {
+      const raw = parseJson(row.agent_tool_config, null)
+      return raw !== null && typeof raw === 'object' && !Array.isArray(raw) ? raw : null
+    })(),
     context: row.context ?? '',
     contextVersion: row.contextVersion ?? 0,
     createdAt: row.createdAt,
@@ -2627,7 +2655,289 @@ function nextGoalId() {
  * 目标级分析文档命名空间：新目标分配 docsDir = `docs/<goalId>`（阶段产物文档进目标独立目录，
  * 跨目标分析前缀可安全并行）；本列上线前已发布的目标 docsDir=NULL，沿用根 docs/ 固定槽位（旧链兼容）。
  */
-function publishGoalRecord(targetScope, objective, mode = 'chain', by = 'general', docSync = false, workflowDefinitionRef = null, agentNodeId = null, orchestration = 'pipeline') {
+/**
+ * 校验一个 Agent 工具引用：必须存在且启用。
+ *
+ * 为什么发布时就查、而不是等认领：认领时才失败的用户体验是"任务不动"，
+ * 而那时他已经在猜是哪一环配错了。引用错了在发布这一刻就能说清是哪一层、
+ * 哪一个 id@version。
+ */
+function assertAssignmentToolRef(ref, label) {
+  if (ref === null || ref === undefined) return null
+  if (typeof ref !== 'object' || Array.isArray(ref)
+    || typeof ref.id !== 'string' || ref.id.trim() === ''
+    || !Number.isSafeInteger(ref.version) || ref.version < 1) {
+    throw Object.assign(new Error(`${label} 必须包含 id 与正整数 version`), {
+      code: 'AGENT_TOOL_CONFIG_INVALID', statusCode: 400,
+    })
+  }
+  const registered = harnessStoreForDispatch().getAgentToolConfig({ id: ref.id.trim(), version: ref.version })
+  if (registered === null) {
+    throw Object.assign(new Error(`${label} 引用的 Agent 工具配置不存在或已停用：${ref.id}@${ref.version}`), {
+      code: 'AGENT_TOOL_CONFIG_UNRESOLVED', statusCode: 409,
+    })
+  }
+  return registered
+}
+
+/**
+ * 发布时新增的两层分配（2026-10-27）落地前的检查。
+ *
+ * 两件事在纯解析层看不见、必须在这里查：
+ *   ① 引用是否真的存在（需要读 harness store）；
+ *   ② **外部 Agent 与模型覆盖互斥** —— Claude Code / Codex 按各自原生配置跑，
+ *      阶段级 `modelConfig` 对它们无效（`resolveFrozenAgentModelConfig` 会抛
+ *      `AGENT_MODEL_CONFIG_UNSUPPORTED`）。若不在这里拦，用户会在"整目标选 Codex"
+ *      时才从一句下游报错里得知自己之前选的模型被无视了。
+ */
+function assertPublishAssignmentLayers(plan) {
+  if (plan === null) return
+  const layers = [ASSIGNMENT_SOURCES_FOR_PUBLISH.GOAL_AGENT, ASSIGNMENT_SOURCES_FOR_PUBLISH.PUBLISH_OVERRIDE]
+  const seen = new Set()
+  if (plan.goalAgent !== null && plan.goalAgent !== undefined && plan.goalAgent.agentToolConfig != null) {
+    assertAssignmentToolRef(plan.goalAgent.agentToolConfig, '目标级 Agent')
+  }
+  for (const [role, assignment] of Object.entries(plan.assignments ?? {})) {
+    if (!layers.includes(assignment?.source)) continue
+    const ref = assignment.agentToolConfig
+    if (ref === null || ref === undefined) continue
+    const key = `${ref.id}@${ref.version}`
+    const registered = seen.has(key) ? null : assertAssignmentToolRef(ref, `阶段 ${role} 的 Agent`)
+    if (registered !== null) seen.add(key)
+    const adapter = registered?.adapter ?? null
+    if (adapter !== null && adapter !== 'dsh-native' && assignment.modelConfig !== null && assignment.modelConfig !== undefined) {
+      throw Object.assign(
+        new Error(`阶段 ${role} 选了外部 Agent（${ref.id}@${ref.version}，adapter=${adapter}）又指定了模型配置；`
+          + '外部 Agent 按各自原生模型执行，阶段级模型选择对它无效——请清掉该阶段的模型，或改用 DSH 原生 Agent'),
+        { code: 'AGENT_MODEL_CONFIG_UNSUPPORTED', statusCode: 409 },
+      )
+    }
+  }
+}
+
+/** 上面那个检查只认这两层；与 `ASSIGNMENT_SOURCES` 保持同值，避免两处各写一遍字面量。 */
+const ASSIGNMENT_SOURCES_FOR_PUBLISH = Object.freeze({
+  GOAL_AGENT: 'goal-agent',
+  PUBLISH_OVERRIDE: 'publish-override',
+})
+
+/**
+ * 把「发布时到底会建成什么」算出来，**不写任何东西**（2026-10-27）。
+ *
+ * 发布前预览与真正发布必须走**同一段规划代码**：两份实现会在"恰好一致"的配置上
+ * 看不出区别，只在第一次不一致时表现为"预览说行、发布 409"——而那时用户已经在
+ * 怀疑配置本身了。
+ *
+ * 所以 `publishGoalRecord` 调它，`POST /api/goal/plan` 也调它；差别只在于前者
+ * 接着写库、后者到此为止。
+ *
+ * 返回的 `blockers` 是**发布必然失败**的条件（节点、能力、隔离），与
+ * `planGoal()` 的 `warnings`（可以照跑，只是要看见）分开。
+ */
+function resolveGoalPlan({ targetScope, rawMode, workflowDefinition, pipeline, roster, boundNodeId, orchestration, goalAgent, stageOverrides }) {
+  let plan = null
+  let effectiveWorkflow = null
+  const blockers = []
+  if (rawMode === 'chain' && orchestration !== 'custom-dag') {
+    const profile = workflowDefinition !== null
+      ? definitionAsAssignmentProfile(workflowDefinition)
+      : (pipeline.workflow ?? null)
+    plan = planGoal({
+      pipeline,
+      roster,
+      profile,
+      profileSource: workflowDefinition !== null ? 'definition' : 'space-review-workflow',
+      agentNodeId: boundNodeId,
+      goalAgent,
+      stageOverrides,
+    })
+    // 纯解析层看不到"引用是否真的存在"，也看不到 adapter——这两条在这里查。
+    assertPublishAssignmentLayers(plan)
+    for (const warning of plan.warnings) console.error(`[team-hub] 目标编排提示：${warning.message}`)
+    // 工作流实例的每一环都要求独立 worktree（worker 侧硬要求，见 plugins/src/index.ts）。
+    // 在发布时就说清楚，好过等第一环认领时才发现"这个空间的 isolate 关着"。
+    if (plan.workflow !== null && pipeline.runtime.isolate === false) {
+      blockers.push({
+        code: 'AGENT_WORKFLOW_REQUIRES_ISOLATION',
+        statusCode: 409,
+        message: '该空间关闭了 worktree 隔离（runtime.isolate=false），而审查闭环的每个阶段都必须在独立 worktree 里执行；请先开启隔离',
+      })
+    }
+  } else if (orchestration === 'custom-dag') {
+    if (workflowDefinition === null) {
+      blockers.push({
+        code: 'AGENT_WORKFLOW_DEFINITION_REQUIRED',
+        statusCode: 400,
+        message: 'custom-dag 编排必须指定一个具名工作流定义；普通目标请使用默认的 pipeline 编排',
+      })
+    } else {
+      // 具名 DAG 保留旧语义：阶段来自定义拓扑（并行/汇合都能表达）。
+      effectiveWorkflow = workflowDefinition
+    }
+  }
+
+  // 两种来源的形状不同，所以要分别取：
+  //   · 计划           ⇒ 已收敛的唯一节点（`effectiveNodeId`）
+  //   · 具名定义 DAG   ⇒ `stages[].nodeId`
+  //   · 空间级工作流   ⇒ `stageTools[role].nodeId`
+  const rawNodeIds = plan !== null
+    ? (plan.effectiveNodeId === null ? [] : [plan.effectiveNodeId])
+    : (effectiveWorkflow === null
+      ? Object.values(pipeline.workflow?.stageTools ?? {}).map((tool) => tool?.nodeId)
+      : (Array.isArray(effectiveWorkflow.stages)
+        ? effectiveWorkflow.stages.map((stage) => stage?.nodeId)
+        : Object.values(effectiveWorkflow.stageTools ?? {}).map((tool) => tool?.nodeId)))
+  const stageNodeIds = [...new Set(rawNodeIds
+    .map((id) => (typeof id === 'string' && id.trim() !== '' ? id.trim() : null))
+    .filter((id) => id !== null))]
+  if (stageNodeIds.length > 1) {
+    blockers.push({
+      code: 'AGENT_NODE_WORKSPACE_MISMATCH',
+      statusCode: 409,
+      message: `这条工作流把不同阶段绑到了不同节点（${stageNodeIds.join('、')}）；跨节点 workspace/Git 交接尚未实现，请先在「Agent 工作流」里统一成一个节点`,
+    })
+  }
+
+  if (boundNodeId !== null) {
+    const configured = harnessStoreForDispatch().getAgentNodeConfig({ id: boundNodeId, scope: targetScope })
+    const live = harnessStoreForDispatch().listAgentNodeConfigs({ scope: targetScope }).find((item) => item.id === boundNodeId)
+    if (configured === null || live === undefined) {
+      blockers.push({
+        code: 'AGENT_NODE_NOT_REGISTERED',
+        statusCode: 409,
+        message: `执行节点未登记：${boundNodeId}（先在该空间登记节点，再绑定它）`,
+      })
+    } else if (live.status !== 'ready') {
+      blockers.push({
+        code: 'AGENT_NODE_NOT_READY',
+        statusCode: 409,
+        message: `执行节点未就绪：${boundNodeId}（${live.status}）—— 节点就绪后才能把整条链钉在它上面`,
+      })
+    } else if (stageNodeIds.length === 1 && stageNodeIds[0] !== boundNodeId) {
+      // 用户的选择必须与工作流已绑的那个一致（只能有一个，上面已保证）。
+      blockers.push({
+        code: 'AGENT_NODE_WORKSPACE_MISMATCH',
+        statusCode: 409,
+        message: `你选的节点「${boundNodeId}」与工作流阶段绑定的「${stageNodeIds[0]}」不同；跨节点 workspace/Git 交接尚未实现，两者必须一致`,
+      })
+    }
+  }
+
+  const frozenOrchestration = plan !== null ? 'pipeline' : (effectiveWorkflow !== null ? 'custom-dag' : 'none')
+  // ── 决策 #2（2026-10-27）：自审标注（不拦） ──────────────────────────────
+  //
+  // 「整条目标由一个 Agent 完成」让 design / implementation / review 可能同源 = 自审。
+  // 决策是 **A：接受并显式标注，不阻止**——拦了就等于否掉这个能力本身。
+  //
+  // 要标的是**用户需要知道的那件事**：语义审查不再来自第二个 Agent。
+  // 测试回执仍然独立（Legion 自己跑冻结 runner），所以这句提示必须说清"哪一半还独立"，
+  // 否则用户会以为整个验收都失效了。
+  const selfReview = (() => {
+    if (plan === null) return null
+    // ★ `assignments[role].agentToolConfig` 存的是**引用** `{id, version}`，没有 `providerName`。
+    //   所以按引用回查注册表拿 providerName；查不到就退回用 id 比（同 id = 同一个配置）。
+    const providerOf = (role) => {
+      const ref = plan.assignments?.[role]?.agentToolConfig ?? null
+      if (ref === null || typeof ref?.id !== 'string') return null
+      try {
+        const registered = harnessStoreForDispatch().getAgentToolConfig({ id: ref.id, version: ref.version })
+        if (typeof registered?.providerName === 'string' && registered.providerName !== '') return registered.providerName
+      } catch { /* 回退到 id */ }
+      return ref.id
+    }
+    const implementation = providerOf(plan.review?.implementationRole)
+    const review = providerOf(plan.review?.reviewRole)
+    if (implementation === null || review === null) return null
+    // 只报"审查与实现同源"这一种；设计与审查同源不构成自审（设计不审自己的实现）。
+    if (review !== implementation) return null
+    return {
+      same: review,
+      roles: { designRole: plan.review.designRole, implementationRole: plan.review.implementationRole, reviewRole: plan.review.reviewRole },
+      note: '审查阶段与实现阶段使用同一个 Agent（' + review + '），语义审查不具备交叉验证性质；'
+        + 'Legion 的独立测试回执不受影响（仍由冻结 runner 独立执行）。',
+    }
+  })()
+  return { plan, effectiveWorkflow, blockers, frozenOrchestration, stageNodeIds, selfReview }
+}
+/** 把 `resolveGoalPlan()` 的产物投影成**预览响应**（不含任何新写入）。 */
+function goalPlanPreview({ targetScope, plan, frozenOrchestration, blockers, pipeline, selfReview = null }) {
+  const stages = plan !== null
+    ? plan.pipeline.stages.map((stage) => ({
+      role: stage.role,
+      label: stage.label,
+      gate: stage.gate === true,
+      next: stage.next ?? null,
+      sort: stage.sort,
+      assignment: plan.assignments[stage.role] ?? null,
+    }))
+    : pipeline.stages.map((stage) => ({
+      role: stage.role,
+      label: stage.label,
+      gate: stage.gate === true,
+      next: stage.next ?? null,
+      sort: stage.sort,
+      assignment: null,
+    }))
+  return {
+    ok: true,
+    scope: targetScope,
+    orchestration: frozenOrchestration,
+    pipelineVersion: plan?.pipeline.version ?? pipeline.version ?? null,
+    stages,
+    review: plan?.review ?? null,
+    effectiveNodeId: plan?.effectiveNodeId ?? null,
+    goalAgent: plan?.goalAgent ?? null,
+    // 决策 #2：自审标注（不拦发布，只让用户知道代价）。
+    selfReview,
+    warnings: plan?.warnings ?? [],
+    blockers,
+    // 一个布尔就够前端判断"能不能点发布"，不必自己再推导一遍 blockers 的语义。
+    publishable: blockers.length === 0,
+  }
+}
+
+/**
+ * `POST /api/goal/plan` 的函数体（2026-10-27）：**只读**，不写 goal/audit。
+ *
+ * 它和 `publishGoalRecord` 共用 `resolveGoalPlan()`——同一次发布，两处看到的
+ * 阶段集合、分配与 blockers 必须逐字一致。差别只在这里不落库。
+ */
+function previewGoalPlan({ targetScope, objective = '', mode = 'chain', workflowDefinitionRef = null, agentNodeId = null, orchestration = 'pipeline', assignmentInput = null }) {
+  const rawMode = mode === 'slice' ? 'slice' : 'chain'
+  let workflowDefinition = null
+  if (workflowDefinitionRef !== null && workflowDefinitionRef !== undefined) {
+    if (typeof workflowDefinitionRef !== 'object' || Array.isArray(workflowDefinitionRef)
+      || typeof workflowDefinitionRef.id !== 'string' || !Number.isSafeInteger(workflowDefinitionRef.version)) {
+      throw Object.assign(new Error('workflowDefinition 必须包含 id 与 version'), { code: 'AGENT_WORKFLOW_DEFINITION_INVALID', statusCode: 400 })
+    }
+    workflowDefinition = harnessStoreForDispatch().getAgentWorkflowDefinition({
+      scope: targetScope, id: workflowDefinitionRef.id, version: workflowDefinitionRef.version,
+    })
+    if (workflowDefinition === null) {
+      throw Object.assign(new Error(`工作流定义不存在：${workflowDefinitionRef.id}@${workflowDefinitionRef.version}`), {
+        code: 'AGENT_WORKFLOW_DEFINITION_UNRESOLVED', statusCode: 404,
+      })
+    }
+  }
+  const boundNodeId = typeof agentNodeId === 'string' && agentNodeId.trim() !== '' ? agentNodeId.trim() : null
+  const pipeline = readPipeline(targetScope)
+  const roster = db.prepare('SELECT role, name, kind, avatar FROM roster WHERE scope = ? ORDER BY sort, role').all(targetScope)
+  const goalAgent = orchestration === 'custom-dag' ? null : (assignmentInput?.goalAgent ?? null)
+  const stageOverrides = orchestration === 'custom-dag' ? null : (assignmentInput?.stageOverrides ?? null)
+  const resolved = resolveGoalPlan({
+    targetScope, rawMode, workflowDefinition, pipeline, roster, boundNodeId, orchestration, goalAgent, stageOverrides,
+  })
+  return goalPlanPreview({
+    targetScope,
+    plan: resolved.plan,
+    frozenOrchestration: resolved.frozenOrchestration,
+    blockers: resolved.blockers,
+    pipeline,
+    selfReview: resolved.selfReview,
+  })
+}
+
+function publishGoalRecord(targetScope, objective, mode = 'chain', by = 'general', docSync = false, workflowDefinitionRef = null, agentNodeId = null, orchestration = 'pipeline', assignmentInput = null) {
   return withTx(() => {
     const rawMode = mode === 'slice' ? 'slice' : 'chain'
     let workflowDefinition = null
@@ -2690,69 +3000,18 @@ function publishGoalRecord(targetScope, objective, mode = 'chain', by = 'general
     // `orchestration === 'custom-dag'` 是唯一保留旧语义的出口（必须显式选择）。
     const pipeline = readPipeline(targetScope)
     const roster = db.prepare('SELECT role, name, kind, avatar FROM roster WHERE scope = ? ORDER BY sort, role').all(targetScope)
-    let plan = null
-    let effectiveWorkflow = null
-    if (rawMode === 'chain' && orchestration !== 'custom-dag') {
-      const profile = workflowDefinition !== null
-        ? definitionAsAssignmentProfile(workflowDefinition)
-        : (pipeline.workflow ?? null)
-      plan = planGoal({
-        pipeline,
-        roster,
-        profile,
-        profileSource: workflowDefinition !== null ? 'definition' : 'space-review-workflow',
-        agentNodeId: boundNodeId,
-      })
-      for (const warning of plan.warnings) console.error(`[team-hub] 目标编排提示：${warning.message}`)
-      // 工作流实例的每一环都要求独立 worktree（worker 侧硬要求，见 plugins/src/index.ts）。
-      // 在发布时就说清楚，好过等第一环认领时才发现"这个空间的 isolate 关着"。
-      if (plan.workflow !== null && pipeline.runtime.isolate === false) {
-        throw Object.assign(
-          new Error('该空间关闭了 worktree 隔离（runtime.isolate=false），而审查闭环的每个阶段都必须在独立 worktree 里执行；请先开启隔离'),
-          { code: 'AGENT_WORKFLOW_REQUIRES_ISOLATION', statusCode: 409 },
-        )
-      }
-    } else if (orchestration === 'custom-dag') {
-      if (workflowDefinition === null) {
-        throw Object.assign(new Error('custom-dag 编排必须指定一个具名工作流定义；普通目标请使用默认的 pipeline 编排'), {
-          code: 'AGENT_WORKFLOW_DEFINITION_REQUIRED', statusCode: 400,
-        })
-      }
-      // 具名 DAG 保留旧语义：阶段来自定义拓扑（并行/汇合都能表达）。
-      effectiveWorkflow = workflowDefinition
-    }
-
-    // 两种来源的形状不同，所以要分别取：
-    //   · 计划           ⇒ 已收敛的唯一节点（`effectiveNodeId`）
-    //   · 具名定义 DAG   ⇒ `stages[].nodeId`
-    //   · 空间级工作流   ⇒ `stageTools[role].nodeId`
-    const rawNodeIds = plan !== null
-      ? (plan.effectiveNodeId === null ? [] : [plan.effectiveNodeId])
-      : (effectiveWorkflow === null
-        ? Object.values(pipeline.workflow?.stageTools ?? {}).map((tool) => tool?.nodeId)
-        : (Array.isArray(effectiveWorkflow.stages)
-          ? effectiveWorkflow.stages.map((stage) => stage?.nodeId)
-          : Object.values(effectiveWorkflow.stageTools ?? {}).map((tool) => tool?.nodeId)))
-    const stageNodeIds = [...new Set(rawNodeIds
-      .map((id) => (typeof id === 'string' && id.trim() !== '' ? id.trim() : null))
-      .filter((id) => id !== null))]
-    if (stageNodeIds.length > 1) {
-      throw Object.assign(new Error(`这条工作流把不同阶段绑到了不同节点（${stageNodeIds.join('、')}）；跨节点 workspace/Git 交接尚未实现，请先在「Agent 工作流」里统一成一个节点`), { code: 'AGENT_NODE_WORKSPACE_MISMATCH', statusCode: 409 })
-    }
-
-    if (boundNodeId !== null) {
-      const configured = harnessStoreForDispatch().getAgentNodeConfig({ id: boundNodeId, scope: targetScope })
-      const live = harnessStoreForDispatch().listAgentNodeConfigs({ scope: targetScope }).find((item) => item.id === boundNodeId)
-      if (configured === null || live === undefined) {
-        throw Object.assign(new Error(`执行节点未登记：${boundNodeId}（先在该空间登记节点，再绑定它）`), { code: 'AGENT_NODE_NOT_REGISTERED', statusCode: 409 })
-      }
-      if (live.status !== 'ready') {
-        throw Object.assign(new Error(`执行节点未就绪：${boundNodeId}（${live.status}）—— 节点就绪后才能把整条链钉在它上面`), { code: 'AGENT_NODE_NOT_READY', statusCode: 409 })
-      }
-      // 用户的选择必须与工作流已绑的那个一致（只能有一个，上面已保证）。
-      if (stageNodeIds.length === 1 && stageNodeIds[0] !== boundNodeId) {
-        throw Object.assign(new Error(`你选的节点「${boundNodeId}」与工作流阶段绑定的「${stageNodeIds[0]}」不同；跨节点 workspace/Git 交接尚未实现，两者必须一致`), { code: 'AGENT_NODE_WORKSPACE_MISMATCH', statusCode: 409 })
-      }
+    // 发布时新增的两层（2026-10-27）：目标级 Agent 与逐节点覆盖。
+    // 只对 pipeline 编排生效——custom-dag 的分配来自具名定义本身。
+    const goalAgent = orchestration === 'custom-dag' ? null : (assignmentInput?.goalAgent ?? null)
+    const stageOverrides = orchestration === 'custom-dag' ? null : (assignmentInput?.stageOverrides ?? null)
+    // 规划段已抽到 `resolveGoalPlan()`：`POST /api/goal/plan` 走同一段，
+    // 所以"预览说行、发布 409"这种两套实现的分叉在结构上不存在。
+    const { plan, effectiveWorkflow, blockers, selfReview } = resolveGoalPlan({
+      targetScope, rawMode, workflowDefinition, pipeline, roster, boundNodeId, orchestration, goalAgent, stageOverrides,
+    })
+    if (blockers.length > 0) {
+      const first = blockers[0]
+      throw Object.assign(new Error(first.message), { code: first.code, statusCode: first.statusCode ?? 409 })
     }
 
     const t = now()
@@ -2762,17 +3021,18 @@ function publishGoalRecord(targetScope, objective, mode = 'chain', by = 'general
     const frozenOrchestration = plan !== null ? 'pipeline' : (effectiveWorkflow !== null ? 'custom-dag' : 'none')
     db.prepare(`INSERT INTO goal
       (id, scope, objective, status, version, mode, createdAt, updatedAt, endedAt, docsDir, docSync, agentNodeId,
-       orchestration, pipeline_snapshot, assignment_snapshot, workflow_snapshot)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+       orchestration, pipeline_snapshot, assignment_snapshot, workflow_snapshot, agent_tool_config)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
       .run(
         goalId, targetScope, objective.trim(), 'active', 1, rawMode, t, t, null, `docs/${goalId}`,
         docSync === true ? 1 : 0, boundNodeId,
         frozenOrchestration,
         JSON.stringify({ version: pipeline.version, mode: rawMode, stages: plan?.pipeline.stages ?? pipeline.stages.map((s) => ({ role: s.role, label: s.label, next: s.next, gate: s.gate, artifact: s.artifact, sort: s.sort })) }),
-        plan === null ? null : JSON.stringify({ stages: plan.assignments, effectiveNodeId: plan.effectiveNodeId, review: plan.review }),
+        plan === null ? null : JSON.stringify({ stages: plan.assignments, effectiveNodeId: plan.effectiveNodeId, review: plan.review, goalAgent: plan.goalAgent ?? null }),
         // 先留空：真正要冻的是**解析后**的那一份（含工具注册项、能力位、模型解析结果），
         // 它在 createGoalChain 里才生成；见下面那次 UPDATE。
         null,
+        plan?.goalAgent === null || plan?.goalAgent === undefined ? null : JSON.stringify(plan.goalAgent),
       )
     const chain = createGoalChain(goalId, targetScope, objective.trim(), rawMode, plan ?? effectiveWorkflow, frozenOrchestration === 'custom-dag' ? 'custom-dag' : 'pipeline')
     if (chain.workflowSnapshot !== null && chain.workflowSnapshot !== undefined) {
@@ -2870,10 +3130,23 @@ function publishGoalRecord(targetScope, objective, mode = 'chain', by = 'general
         pipelineVersion: plan?.pipeline.version ?? pipeline.version,
         stages: (plan?.pipeline.stages ?? pipeline.stages).map((stage) => stage.role),
         assignments: plan === null ? null : Object.fromEntries(
-          Object.entries(plan.assignments).map(([role, item]) => [role, { source: item.source, agentToolConfig: item.agentToolConfig?.id ?? null }]),
+          Object.entries(plan.assignments).map(([role, item]) => [role, {
+            source: item.source,
+            agentToolConfig: item.agentToolConfig?.id ?? null,
+            agentToolConfigVersion: item.agentToolConfig?.version ?? null,
+            modelConfig: item.modelConfig?.id ?? null,
+            nodeId: item.nodeId ?? null,
+          }]),
         ),
         review: plan?.review ?? null,
         effectiveNodeId: plan?.effectiveNodeId ?? null,
+        // 目标级选择的回显：用户"整条交给谁"这件事必须能在回执里看到。
+        goalAgent: plan?.goalAgent ?? null,
+        stageOverridesApplied: plan === null ? [] : Object.entries(plan.assignments)
+          .filter(([, item]) => item.source === ASSIGNMENT_SOURCES_FOR_PUBLISH.PUBLISH_OVERRIDE)
+          .map(([role]) => role),
+        // 决策 #2：自审标注冻结进回执与审计（发布不拦，但事后要能回答"当时是不是自审"）。
+        selfReview,
       },
     }
   })
@@ -5042,12 +5315,79 @@ function submitAgentWorkflowReview({ taskId, by, scope, findings, summary, evide
     if (targetConfig === undefined) {
       throw Object.assign(new Error(`冻结工作流缺少返工阶段配置：${targetRole}`), { code: 'AGENT_WORKFLOW_TARGET_MISSING', statusCode: 409 })
     }
+    const round = completedRounds + 1
+    // ── 决策 #1（2026-10-27）：连续同因 ⇒ 升级给人，不再自动返工 ──────────────
+    //
+    // 为什么不恢复轮数上限：上限会把**没修完**的必改项晾在 in_review；
+    // 这里要治的是"同一个问题反复修不好"，不是"轮数多"。
+    //
+    // 判据纯函数在 `orchestrator/state-machine/rework-escalation.mjs`（8 条单测）：
+    // 给每条 finding 算 kind|file|summary 指纹（**刻意不含 evidence**，它每轮都变），
+    // 再从最近一轮往回数连续出现轮数。
+    const escalation = (() => {
+      const limit = escalateAfterFromEnv(process.env)
+      const rows = db.prepare(
+        'SELECT round_no, result_json FROM agent_workflow_reviews WHERE workflow_instance_id=? ORDER BY round_no DESC',
+      ).all(rootId)
+      const verdict = escalateVerdict({
+        currentFindings: findings,
+        priorReviews: rows.map((row) => ({
+          round: Number(row.round_no),
+          findings: parseJson(row.result_json, null)?.findings ?? [],
+        })),
+        limit,
+      })
+      return { ...verdict, limit }
+    })()
+    if (escalation.escalate) {
+      // ★ 不建返工任务、不把审查任务置 done：这件事需要人做决定。
+      //   置 in_review + hold（复用既有拦截列）：守护不再自动认领，将军放行即可续。
+      const repeatedText = escalation.repeated.map((item) => `· ${describeFingerprint(item.fingerprint)}（连续 ${escalation.streak} 轮）`).join('\n')
+      const comments = [...task.comments, {
+        by,
+        at: now(),
+        text: [
+          `⚠ 返工升级：同一问题已连续 ${escalation.streak} 轮仍未解决（阈值 ${escalation.limit} 轮），已停止自动返工，等人工决定。`,
+          '',
+          '反复出现的问题：',
+          repeatedText || '（见审查 findings）',
+          '',
+          '可选处置：① 直接打回并写明要改哪一处（人已看清问题）；② 改设计/验收口径（问题本身可能提错了）；③ 取消该阶段并保留证据。',
+          '本条不是失败：审查结论仍然有效，只是不再自动开下一轮。',
+        ].join('\n'),
+      }]
+      db.prepare("UPDATE tasks SET status='in_review', hold=1, comments=?, version=version+1, updatedAt=? WHERE id=?")
+        .run(JSON.stringify(comments), now(), task.id)
+      const result = {
+        kind: 'escalated',
+        code: ESCALATION_CODES.REPEATED_FINDING,
+        findings,
+        summary: summary ?? '',
+        evidence: evidence ?? '',
+        targetRole,
+        targetStageId,
+        round,
+        streak: escalation.streak,
+        limit: escalation.limit,
+        repeated: escalation.repeated.map((item) => item.fingerprint),
+      }
+      db.prepare(`INSERT INTO agent_workflow_reviews
+        (source_review_task_id, workflow_instance_id, round_no, kind, result_json, next_task_id, at_ms)
+        VALUES (?, ?, ?, ?, ?, NULL, ?)`)
+        .run(task.id, rootId, round, 'escalated', JSON.stringify(result), Date.now())
+      audit(by, task.scope, 'agent-workflow:review-escalated', task.id, {
+        workflowInstanceId: rootId, round, kind: selectedKind, streak: escalation.streak, limit: escalation.limit,
+      }, task.goalId)
+      return {
+        kind: 'escalated', reworkKind: selectedKind, round, nextTaskId: null,
+        streak: escalation.streak, limit: escalation.limit, result,
+      }
+    }
     const targetStage = {
       role: targetRole,
       id: targetStageId,
       label: workflow.stageDefinitionsById?.[targetStageId]?.label ?? workflow.stageLabels?.[targetRole] ?? targetRole,
     }
-    const round = completedRounds + 1
     const workflowGenerationId = `review-rework:${task.id}`
     const findingText = findings.map((finding, index) => `${index + 1}. [${finding.kind}] ${finding.summary}${finding.evidence ? `\n   evidence: ${finding.evidence}` : ''}`).join('\n')
     const reworkTask = createTaskInTx({
@@ -7743,6 +8083,8 @@ const router = createRouter([
     json, readBody, authorized, writeIntentStore, db,
     resolveRepoBinding: resolveDeliveryBinding,
     setSchedulingState: (taskId, state) => { try { db.prepare('UPDATE tasks SET scheduling_state = ? WHERE id = ?').run(state, taskId) } catch { /* 列缺失忽略 */ } },
+    // T2.4：确认停止必须留痕（此前这条路由全程不写 audit，时间线上查不到）。
+    audit: (by, scope, action, taskId, detail) => audit(by, scope, action, taskId, detail),
   }),
   createDeliveryRoutes({ json, readBody, authorized, deliveryStore: taskDeliveryStore, db,
     submitVerifiedDelivery, runIntegrationInThread, recoverIntegrationJob }),
@@ -7973,6 +8315,8 @@ const router = createRouter([
     json,
     handleRun, runStore, requireString,
     getTask, settleGoalsOfScope,
+    // T2.4：验证判词进时间线（此前只在 run_validations，任务时间线上查不到）。
+    audit: (by, scope, action, taskId, detail) => audit(by, scope, action, taskId, detail),
   }),
   createSpaceOperationsRoutes({
     json,
@@ -7985,7 +8329,7 @@ const router = createRouter([
   createGoalLifecycleRoutes({
     json,
     handleWrite, publishGoalRecord, setGoalContext,
-    setGoalState,
+    setGoalState, previewGoalPlan,
   }),
   createTaskRecordsRoutes({
     json,

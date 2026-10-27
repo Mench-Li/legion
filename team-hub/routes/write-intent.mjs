@@ -16,6 +16,16 @@ export function createWriteIntentRoutes({
   json, readBody, authorized, writeIntentStore, db,
   resolveRepoBinding,
   setSchedulingState = null, now = () => Date.now(),
+  /**
+   * 审计落盘（T2.4，2026-10-27）：`confirm-stopped` 此前**全程不写 audit**，
+   * 于是"人工确认进程已停止、占用已释放"这件要紧的事在任务时间线上查不到——
+   * 用户只看到占用没了，看不到是谁在什么时候确认的。
+   *
+   * 可选注入（缺省不写）：`(by, scope, action, taskId, detail) => void`。
+   * ★ 审计失败**不得**让这次确认失败：占用已经真释放了，报一个"确认失败"
+   *   会让人再确认一次，而第二次会撞 `NO_RECONCILING_RESERVATION`。
+   */
+  audit = null,
 }) {
   const handlers = []
   const on = (method, re, run) => handlers.push({ method, re, run })
@@ -182,6 +192,16 @@ export function createWriteIntentRoutes({
     const released = writeIntentStore.release({ repoId: repo.repoId, taskId: task.id, attemptId: row.attemptId, epoch: row.leaseEpoch })
     if (!released.ok) { json(res, 409, released); return }
     mark(task.id, 'released')
+    // ★ 审计写在**释放成功之后**：先记账再释放，会让"确认了但没释放"也留下
+    //   "已确认停止"的记录，而那条记录反过来会让人以为占用已经没了。
+    if (typeof audit === 'function') {
+      try {
+        audit(auth.by, task.scope, 'write-intent:confirm-stopped', task.id, {
+          attemptId: row.attemptId, repoId: repo.repoId, leaseEpoch: row.leaseEpoch,
+          note: '人工确认执行进程已停止，写入占用已释放',
+        })
+      } catch { /* 审计失败不影响已完成的释放（见参数注释） */ }
+    }
     json(res, 200, { ok: true, reservation: released.reservation })
   })
 

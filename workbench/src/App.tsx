@@ -19,7 +19,7 @@ import {
   setGoalStatus,
   subscribeHubAudit,
 } from './api'
-import type { ProvisionCheck } from './api'
+import type { GoalAssignmentInput, ProvisionCheck } from './api'
 import { popupBatch, popupReason, popupText, readPopupSeq, validTaskId, writePopupSeq } from './notify'
 import { notifySystem } from './desktopNotify'
 import type { NotifyItem } from './notify'
@@ -534,9 +534,13 @@ export default function App(): React.JSX.Element {
   }, [scope, loadMissions])
 
   /** 发布目标：写 team-hub 后刷新目标列表。每次发布 = 新建一个目标（与既有目标并存，不取消旧链）。 */
-  const handlePublishGoal = useCallback(async (scopeValue: string, objective: string, workflowDefinition?: { id: string; version: number }, agentNodeId?: string): Promise<void> => {
+  const handlePublishGoal = useCallback(async (scopeValue: string, objective: string, workflowDefinition?: { id: string; version: number }, agentNodeId?: string, extras?: { orchestration?: 'pipeline' | 'custom-dag'; assignment?: GoalAssignmentInput }): Promise<void> => {
     // publishGoal 失败向上抛 → GoalModal 捕获并 toast（弹窗保留，可改后重试）
-    await publishGoal(scopeValue, objective, undefined, workflowDefinition, agentNodeId)
+    // T1.3 / T1.5 / T1.6：编排模式与分配层只影响本次发布，不改写空间配置。
+    await publishGoal(scopeValue, objective, undefined, workflowDefinition, agentNodeId, {
+      orchestration: extras?.orchestration,
+      assignment: extras?.assignment,
+    })
     try {
       const info = await fetchGoal(scopeValue)
       setGoalInfo(info)

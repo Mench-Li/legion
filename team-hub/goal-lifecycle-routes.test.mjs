@@ -181,7 +181,7 @@ test('④c ★★ 缺 `id` ⇒ 400（`id` 排在 `text`/`status` 之前被检查
 
 // ── ★★★ 注入点上的**参数搬运契约**（这三条路由的正文，此前没人看过）────
 const spyRouter = (over = {}) => {
-  const calls = { publish: [], setCtx: [], setState: [] }
+  const calls = { publish: [], setCtx: [], setState: [], plan: [] }
   const router = createGoalLifecycleRoutes({
     json: (res, code, p) => { res.sent = { code, payload: p } },
     // 桩要**照实**：真 `handleWrite` 先查 by，再把回调**包在 try/catch 里**、出错转 400。
@@ -189,11 +189,18 @@ const spyRouter = (over = {}) => {
     //     回调抛的「缺少参数 objective」**直接穿出 dispatch** —— 桩比真东西**严**，
     //     于是一条本该测"命中回 true"的判据，变成了"路由会抛异常"。
     //   （切片 39 的教训是"桩比真东西**宽松**"，本片是反过来的那一面。）
-    handleWrite: async (req, res, fn) => {
+    handleWrite: async (req, res, fn, options = {}) => {
       const body = req.body ?? {}
       if (body.by !== 'general') { res.sent = { code: 400, payload: { error: '缺少操作者身份 by' } }; return }
       try {
-        res.sent = { code: 200, payload: await fn(body, 'general', 'scope-from-hub') }
+        const result = await fn(body, 'general', 'scope-from-hub')
+        // 真 handleWrite 的两种信封：默认 `{ok, task: result}`，`envelope: null` 时扁平展开。
+        res.sent = {
+          code: 200,
+          payload: options.envelope === null
+            ? { ok: true, ...(result !== null && typeof result === 'object' ? result : { result }) }
+            : { ok: true, task: result },
+        }
       } catch (e) {
         res.sent = { code: 400, payload: { error: e instanceof Error ? e.message : String(e) } }
       }
@@ -201,6 +208,9 @@ const spyRouter = (over = {}) => {
     publishGoalRecord: (...a) => { calls.publish.push(a); return { ok: 1 } },
     setGoalContext: (...a) => { calls.setCtx.push(a); return { ok: 1 } },
     setGoalState: (...a) => { calls.setState.push(a); return { ok: 1 } },
+    // ★ 只读计划端点（2026-10-27）：预览必须与发布共用同一个规划函数，
+    //   所以这里只记参数，不在这里重复算一遍。
+    previewGoalPlan: (...a) => { calls.plan.push(a); return { ok: true, stages: [], blockers: [] } },
     ...over,
   })
   return { router, calls }
@@ -214,8 +224,8 @@ const drive = async (router, path, body) => {
 test('⑤ ★★★ 发布时**作用域回落**：`body.scope` 有就用（trim），没有就用 hub 给的那个', async () => {
   const { router, calls } = spyRouter()
   await drive(router, '/api/goal', { by: 'general', objective: 'O' })
-  assert.deepEqual(calls.publish[0], ['scope-from-hub', 'O', 'chain', 'general', false, null, null, 'pipeline'],
-    '★★★ 没有 body.scope 时必须回落到 handleWrite 递进来的 scope')
+  assert.deepEqual(calls.publish[0], ['scope-from-hub', 'O', 'chain', 'general', false, null, null, 'pipeline', null],
+    '★★★ 没有 body.scope 时必须回落到 handleWrite 递进来的 scope（第 9 位是新加的分配层，缺省 null）')
   await drive(router, '/api/goal', { by: 'general', objective: 'O', scope: '  other  ' })
   assert.equal(calls.publish[1][0], 'other', '★★ 给了 scope 就用它，且要去空白')
   await drive(router, '/api/goal', { by: 'general', objective: 'O', scope: '   ' })
@@ -299,8 +309,81 @@ test('⑤c ★★★ `context` / `status` 的参数**按位置**搬：`(id, text
   assert.equal(calls.setState[0][1], 'paused', '★★ status 第 2 个位置是 status')
 })
 
-test('⑤d ★★★ `forceGeneral` **严格 === true** 才算（绕过"仅将军"的那把钥匙）', async () => {
-  const { router, calls } = spyRouter({
+test('⑤e ★★★ 发布时的分配层：目标级 Agent 与逐节点覆盖按**同名同义**搬到第 9 位', async () => {
+  const { router, calls } = spyRouter()
+  // 都没给 ⇒ null（不是 {}）。空对象会被下游当成"给了但全空"，那是两种不同的状态。
+  await drive(router, '/api/goal', { by: 'general', objective: 'O' })
+  assert.equal(calls.publish.at(-1)[8], null, '★ 没给分配层 ⇒ null，不是 {}')
+
+  await drive(router, '/api/goal', {
+    by: 'general', objective: 'O',
+    agentToolConfig: { id: 'tool.codex', version: 2 },
+  })
+  assert.deepEqual(calls.publish.at(-1)[8], { goalAgent: { agentToolConfig: { id: 'tool.codex', version: 2 } }, stageOverrides: null },
+    '★★ 顶层 agentToolConfig 包成 goalAgent.agentToolConfig（线上简写 → 内部形状）')
+
+  await drive(router, '/api/goal', {
+    by: 'general', objective: 'O',
+    stageOverrides: { reviewer: { agentToolConfig: { id: 'tool.codex', version: 1 } } },
+  })
+  assert.deepEqual(calls.publish.at(-1)[8], {
+    goalAgent: null,
+    stageOverrides: { reviewer: { agentToolConfig: { id: 'tool.codex', version: 1 } } },
+  }, '★★ stageOverrides 原样搬过去')
+
+  // 两者可以同时给：叠加语义由解析层负责，胶水层不许自作主张地合并或丢弃。
+  await drive(router, '/api/goal', {
+    by: 'general', objective: 'O',
+    agentToolConfig: { id: 'tool.codex', version: 2 },
+    stageOverrides: { coder: { modelConfig: null } },
+  })
+  assert.deepEqual(calls.publish.at(-1)[8], {
+    goalAgent: { agentToolConfig: { id: 'tool.codex', version: 2 } },
+    stageOverrides: { coder: { modelConfig: null } },
+  }, '★ 两层同时存在时都要搬过去')
+
+  // ★ 形状校验**不在这里**做：引用是否存在、testRunner 是否被塞进来、
+  //   adapter 与模型是否互斥——全都由 server 的 assertPublishAssignmentLayers
+  //   与纯解析层判定。路由层重复一遍会让两条路径迟早给出不同答案。
+  await drive(router, '/api/goal', { by: 'general', objective: 'O', agentToolConfig: { id: 'tool.nonexistent', version: 9 } })
+  assert.deepEqual(calls.publish.at(-1)[8]?.goalAgent?.agentToolConfig, { id: 'tool.nonexistent', version: 9 },
+    '★ 路由层不做语义校验（它没有 harness store），原样转交')
+})
+
+test('⑤f ★★★ `/api/goal/plan` 只读预览：搬参与发布同源，且**从不写库**', async () => {
+  const { router, calls } = spyRouter()
+  const res = await drive(router, '/api/goal/plan', {
+    by: 'general', objective: 'O', scope: '  s1  ', agentNodeId: '  node-a  ',
+    agentToolConfig: { id: 'tool.codex', version: 2 },
+    stageOverrides: { reviewer: { agentToolConfig: null } },
+  })
+  // ★ 这条判据的全部意义：预览走过的参数路径必须与发布**同形**。
+  //   否则"预览说 4 个阶段、发布出来 3 个"会在最不该出错的时刻出现。
+  assert.deepEqual(calls.plan[0], [{
+    targetScope: 's1',
+    objective: 'O',
+    mode: 'chain',
+    workflowDefinitionRef: null,
+    agentNodeId: 'node-a',
+    orchestration: 'pipeline',
+    assignmentInput: {
+      goalAgent: { agentToolConfig: { id: 'tool.codex', version: 2 } },
+      stageOverrides: { reviewer: { agentToolConfig: null } },
+    },
+  }], '★★ 预览的参数形状与发布同源')
+  assert.equal(calls.publish.length, 0, '★★★ 预览**绝不许**调到发布（那就是写库）')
+  assert.equal(res.sent.code, 200)
+  assert.equal(res.sent.payload.ok, true, '★ envelope:null ⇒ 扁平响应')
+
+  // custom-dag 也要原样搬（含 null 定义——由 server 判成 blocker，不在这里 400）
+  await drive(router, '/api/goal/plan', { by: 'general', objective: 'O', orchestration: 'custom-dag' })
+  assert.equal(calls.plan.at(-1)[0].orchestration, 'custom-dag')
+  // 没给 objective 也不许 400：预览可能在用户刚打开弹窗（还没输入）时被调用
+  const empty = await drive(router, '/api/goal/plan', { by: 'general' })
+  assert.equal(empty.sent.code, 200, '★ 空 objective 不是错误——预览要能在打字的第一次按键时就用')
+})
+
+test('⑤d ★★★ `forceGeneral` **严格 === true** 才算（绕过"仅将军"的那把钥匙）', async () => {  const { router, calls } = spyRouter({
     // 桩要照实允许一个非 general 的 by 进来，才能测到第 4 个参数
     handleWrite: async (req, res, fn) => { res.sent = { code: 200, payload: await fn(req.body ?? {}, 'someone', 's') } },
   })
@@ -326,9 +409,13 @@ test('⑥ ★★★ dispatch 契约：看方法、命中回 true、不命中回 
   }
   assert.equal(await router.dispatch({ method: 'POST', body: {} }, {}, ctx('/api/goal/nope')), false)
   assert.equal(await router.dispatch({ method: 'POST', body: {} }, {}, ctx('/api/goalX')), false, '★ exact 不许退化成 startsWith')
+  // ★ 2026-10-27：多了 `POST /api/goal/plan`（只读预览）。它必须是**独立**一条，
+  //   不能被 `/api/goal` 的 exact 匹配顺手吃掉——所以断言的是完整清单而不是"包含"。
   assert.deepEqual(router.routes.map((r) => `${r.method} ${r.match} ${r.path}`), [
-    'POST exact /api/goal', 'POST exact /api/goal/context', 'POST exact /api/goal/status',
+    'POST exact /api/goal/plan', 'POST exact /api/goal', 'POST exact /api/goal/context', 'POST exact /api/goal/status',
   ])
+  assert.equal(await router.dispatch({ method: 'POST', body: { by: 'general' } }, {}, ctx('/api/goal/plan')), true,
+    '★ 计划端点自己能被派发到（别被 /api/goal 吃掉）')
   assert.equal(router.id, 'goal-lifecycle')
 })
 

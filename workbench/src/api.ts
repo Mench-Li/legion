@@ -324,13 +324,57 @@ export function registerAgentWorkflowDefinition(scope: string, definition: Omit<
  * ★ 绑定是硬绑定 —— 认领这条链的执行服务必须配同一个 `agentNodeId`，否则链上每个任务都领不走。
  *   节点必须已登记且就绪，否则 hub 在**发布时**就拒绝（而不是存下来、等认领时才失败）。
  */
-export function publishGoal(scope: string, objective: string, mode?: 'chain' | 'slice', workflowDefinition?: AgentWorkflowDefinitionRef, agentNodeId?: string): Promise<unknown> {
-  return hubPost('/api/goal', {
+/**
+ * 发布时的分配层（T1.5 / T1.6）：`agentToolConfig` = 整条目标一个 Agent；
+ * `stageOverrides` = 逐阶段覆盖（只影响本次发布）。
+ */
+export interface GoalAssignmentInput {
+  agentToolConfig?: AgentWorkflowDefinitionRef
+  stageOverrides?: Record<string, {
+    agentToolConfig?: AgentWorkflowDefinitionRef | null
+    modelConfig?: AgentWorkflowDefinitionRef | null
+    nodeId?: string | null
+  }>
+}
+
+export interface GoalPublishOptions {
+  mode?: 'chain' | 'slice'
+  workflowDefinition?: AgentWorkflowDefinitionRef
+  agentNodeId?: string
+  /** `custom-dag` 才按具名定义的拓扑建链；默认 `pipeline`。 */
+  orchestration?: 'pipeline' | 'custom-dag'
+  assignment?: GoalAssignmentInput
+}
+
+/** 把发布参数归一成 `/api/goal` 与 `/api/goal/plan` **共用**的请求体（两处同形是预览可信的前提）。 */
+function goalPublishBody(scope: string, objective: string, options: GoalPublishOptions = {}): Record<string, unknown> {
+  const { mode, workflowDefinition, agentNodeId, orchestration, assignment } = options
+  return {
     scope, objective,
     ...(mode ? { mode } : {}),
     ...(workflowDefinition ? { workflowDefinition } : {}),
     ...(agentNodeId ? { agentNodeId } : {}),
-  })
+    ...(orchestration && orchestration !== 'pipeline' ? { orchestration } : {}),
+    ...(assignment?.agentToolConfig ? { agentToolConfig: assignment.agentToolConfig } : {}),
+    ...(assignment?.stageOverrides && Object.keys(assignment.stageOverrides).length > 0 ? { stageOverrides: assignment.stageOverrides } : {}),
+  }
+}
+
+/**
+ * 发布前的**只读**计划预览（T1.1）。
+ *
+ * ★ 与 `publishGoal` 共用 `goalPublishBody`，且服务端与发布共用同一段规划代码——
+ *   两份实现只会在"恰好一致"的配置上看不出区别，只在第一次不一致时表现为
+ *   "预览说行、发布 409"。
+ */
+export type GoalPlanResponse = import('./goalPlanView').GoalPlanResponse
+
+export async function previewGoalPlan(scope: string, objective: string, options: GoalPublishOptions = {}): Promise<GoalPlanResponse> {
+  return await hubPost('/api/goal/plan', goalPublishBody(scope, objective, options)) as GoalPlanResponse
+}
+
+export function publishGoal(scope: string, objective: string, mode?: 'chain' | 'slice', workflowDefinition?: AgentWorkflowDefinitionRef, agentNodeId?: string, options: Omit<GoalPublishOptions, 'mode' | 'workflowDefinition' | 'agentNodeId'> = {}): Promise<unknown> {
+  return hubPost('/api/goal', goalPublishBody(scope, objective, { mode, workflowDefinition, agentNodeId, ...options }))
 }
 
 /** 目标状态迁移（POST /api/goal/status）响应：hub 写端点统一信封 `{ ok, task }`，
@@ -669,9 +713,46 @@ export function reconcileAgentWorkflowAttempt(input: {
   return hubPost('/api/agent-workflow/stage-attempts/reconcile', input as unknown as Record<string, unknown>)
 }
 
+/**
+ * 某任务的全部运行尝试（`run_attempts`，与阶段 Attempt 是**两个** ID 空间）。
+ *
+ * 走 `GET /api/runtime/attempt?taskId=`（`team-hub/routes/task-lifecycle.mjs`）。
+ * 它只返回 `history`，不返回事件——事件要按 attemptId 再拉一次，见 `fetchRunEvents`。
+ */
+export async function fetchRunAttempts(taskId: string): Promise<Array<{
+  id: string; taskId: string; state: string; attemptNo?: number
+  startedAtMs?: number | null; finishedAtMs?: number | null
+}>> {
+  const body = await readJson<{ history?: Array<Record<string, unknown>> }>(
+    await hubGet(`/api/runtime/attempt?taskId=${encodeURIComponent(taskId)}`),
+  )
+  const history = Array.isArray(body?.history) ? body.history : []
+  return history.map((row) => ({
+    id: String(row.id ?? ''),
+    taskId: String(row.taskId ?? row.task_id ?? taskId),
+    state: String(row.state ?? 'unknown'),
+    attemptNo: typeof row.attemptNo === 'number' ? row.attemptNo : undefined,
+    startedAtMs: typeof row.startedAtMs === 'number' ? row.startedAtMs : null,
+    finishedAtMs: typeof row.finishedAtMs === 'number' ? row.finishedAtMs : null,
+  }))
+}
+
+/**
+ * 一次运行的逐条事件（13 类 RunEvent，按契约序号升序）。
+ *
+ * ★ 读取失败**抛异常**，由调用方渲染成 `runEventsSection(null, reason)`——
+ *   绝不能吞成空数组：那会让"问不到"显示成"这次运行很干净"。
+ */
+export async function fetchRunEvents(attemptId: string, options: { type?: string; limit?: number } = {}): Promise<unknown[]> {
+  const qs = new URLSearchParams({ attemptId })
+  if (options.type) qs.set('type', options.type)
+  if (typeof options.limit === 'number') qs.set('limit', String(options.limit))
+  const body = await readJson<{ events?: unknown[] }>(await hubGet(`/api/runtime/run-events?${qs.toString()}`))
+  return Array.isArray(body?.events) ? body.events : []
+}
+
 /** team-hub v2：某空间/某任务的审计时间线（进展历史）。taskId 优先，其次 scope；limit 可选（服务端上限 500）。 */
-export async function fetchHubActivity(opts: { scope?: string | null; taskId?: string; goalId?: string | null; limit?: number } = {}): Promise<HubActivity[]> {
-  const qs = new URLSearchParams()
+export async function fetchHubActivity(opts: { scope?: string | null; taskId?: string; goalId?: string | null; limit?: number } = {}): Promise<HubActivity[]> {  const qs = new URLSearchParams()
   if (opts.taskId) qs.set('taskId', opts.taskId)
   else if (opts.goalId) qs.set('goalId', opts.goalId)
   else if (opts.scope) qs.set('scope', opts.scope)

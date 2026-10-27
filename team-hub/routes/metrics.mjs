@@ -5,7 +5,14 @@
 // 口径（设计 §11）：指标按仓库与版本记录；**不可读时返回 available:false + reason，
 // value 不为 0**（把"没有读数"画成 0 会被当成"没有冲突"）。等待时长 P50/P95 必须
 // 给出明确样本窗口与可复算口径。
+//
+// ★ 2026-10-27（决策 #6 方案 B）：失败分类的归一化在
+//   `orchestrator/state-machine/failure-kind.mjs`（只读纯函数，8 条单测）。
+//   本文件只负责"取样本 + 调它"，不重复一套判据——两份判据会在某个角落分叉，
+//   而分叉的表现是"同一个失败在页面和指标里说两件事"。
 // ============================================================================
+
+import { failureKindOf, failureRate } from '../../orchestrator/state-machine/failure-kind.mjs'
 
 function percentile(sorted, p) {
   if (!Array.isArray(sorted) || sorted.length === 0) return null
@@ -56,8 +63,30 @@ export function createMetricsRoutes({ json, authorized, db, writeIntentStore = n
     const integratedEvents = integrationEvents.filter((e) => e.to_state === 'integrated')
     const failedValidations = integrationEvents.filter((e) => e.error_code === 'VALIDATION_FAILED')
     const vDen = integratedEvents.length + failedValidations.length
-    if (vDen === 0) metrics.postIntegrationValidationFailureRate = unavailable('没有集成后验证样本')
-    else metrics.postIntegrationValidationFailureRate = available(failedValidations.length / vDen, { window: { numerator: 'error_code=VALIDATION_FAILED', denominator: vDen } })
+    // ★ 2026-10-27（T3.1）：`postIntegrationValidationFailureRate` 这个名字是错的。
+    //
+    //   验证跑在**候选合并提交**上、fast-forward **之前**（`integration-worker.mjs`），
+    //   应用之后只核对 ancestor 关系——所以"集成**后**验证失败率"这个读法不成立。
+    //
+    //   ★ 两个字段**同时返回且同值**，不是失误：删掉旧字段会让外部消费方静默拿到
+    //     undefined，而"没有读数"与"0"必须区分。所以先加新名 + 标注废弃，删除另立任务。
+    const deprecation = {
+      deprecated: true,
+      deprecatedBy: 'preIntegrationCandidateValidationFailureRate',
+      deprecationNote: '验证发生在候选合并提交上、fast-forward 之前，不是"合入后再验一遍"；请改用 preIntegrationCandidateValidationFailureRate',
+    }
+    if (vDen === 0) {
+      // ★ 没有样本时旧字段**也必须带废弃标记**：否则消费方只能在"有数据"时才被告知改名，
+      //   而那恰好是最不可能踩坑的时刻。
+      metrics.postIntegrationValidationFailureRate = { ...unavailable('没有集成后验证样本'), ...deprecation }
+      metrics.preIntegrationCandidateValidationFailureRate = unavailable('没有候选验证样本')
+    } else {
+      const rate = failedValidations.length / vDen
+      const window = { numerator: 'error_code=VALIDATION_FAILED', denominator: vDen }
+      // 旧字段名保留但带上废弃标记（`unavailable`/`available` 都返回冻结对象，所以标记随构造一起给）。
+      metrics.postIntegrationValidationFailureRate = { ...available(rate, { window }), ...deprecation }
+      metrics.preIntegrationCandidateValidationFailureRate = available(rate, { window })
+    }
 
     if (deliveries.length === 0) metrics.manualDecisionRate = unavailable('没有交付样本')
     else metrics.manualDecisionRate = available(deliveries.filter((d) => d.decisionId).length / deliveries.length, { window: { denominator: deliveries.length } })
@@ -67,6 +96,32 @@ export function createMetricsRoutes({ json, authorized, db, writeIntentStore = n
     const rDen = recovered.length + paused.length
     if (rDen === 0) metrics.integrationRecoverySuccessRate = unavailable('没有恢复/暂停样本')
     else metrics.integrationRecoverySuccessRate = available(recovered.length / rDen, { window: { numerator: 'record-only 恢复', denominator: rDen } })
+
+    // ── 决策 #6：失败分类分布（只读归一化，分母排除"不是失败"的类别）───────────
+    //
+    // 样本从集成事件与写入预约取：这两处是当前能批量拿到具名码的地方。
+    // ★ 没有样本时返回 available:false —— 不返回 0，也不用 0 当"很健康"。
+    const failureSamples = []
+    for (const event of integrationEvents) {
+      const code = typeof event.error_code === 'string' ? event.error_code : null
+      if (code === null) continue
+      failureSamples.push(failureKindOf({ errorCode: code }))
+    }
+    const byKind = {}
+    for (const verdict of failureSamples) byKind[verdict.kind] = (byKind[verdict.kind] ?? 0) + 1
+    const rate = failureRate(failureSamples)
+    if (!rate.available) {
+      metrics.failureKindRate = unavailable('没有可判定的失败样本')
+      metrics.failureKindCounts = unavailable('没有可判定的失败样本')
+    } else {
+      metrics.failureKindRate = available(rate.value, {
+        window: {
+          numerator: 'isFailure=true 的样本', denominator: rate.total,
+          excluded: 'none / waiting / rework（流程正常，不是失败）',
+        },
+      })
+      metrics.failureKindCounts = available(byKind, { window: { sampleSize: rate.total } })
+    }
 
     return metrics
   }

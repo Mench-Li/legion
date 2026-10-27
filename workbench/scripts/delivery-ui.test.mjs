@@ -62,3 +62,11 @@ test('TC-S7-06 标签表覆盖设计中的全部子状态（不漏词）', () =>
     assert.ok(SCHEDULING_LABELS[s], s)
   }
 })
+
+test('★ T3.1：`validating` 的文案必须说"合并前"——验证确实跑在 fast-forward 之前', () => {
+  // 原名是「集成后验证中」。验证实际发生在**候选合并提交**上、应用之前
+  // （`team-hub/integration-worker.mjs`），应用后才核对 ancestor。
+  // 文案说成"集成后"会让人以为合入的那一版又被验了一遍 —— 而它没有。
+  assert.match(DELIVERY_LABELS.validating, /合并前/, '★★ 必须是"合并前"，不是"集成后"')
+  assert.doesNotMatch(DELIVERY_LABELS.validating, /集成后/, '★★ 旧说法不许再出现')
+})

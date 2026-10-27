@@ -81,7 +81,20 @@ test('TC-S4-12/13 发生事件后可读且口径与事件一致；无样本项�
   assert.equal(r.body.ok, true)
   assert.equal(r.body.repoId, repoId)
   const keys = Object.keys(r.body.metrics).sort()
-  assert.deepEqual(keys, ['integrationConflictRate', 'integrationRecoverySuccessRate', 'manualDecisionRate', 'postIntegrationValidationFailureRate', 'sameFileWriteBlocked', 'waitDurationP50', 'waitDurationP95'])
+  assert.deepEqual(keys, ['failureKindCounts', 'failureKindRate', 'integrationConflictRate', 'integrationRecoverySuccessRate', 'manualDecisionRate', 'postIntegrationValidationFailureRate', 'preIntegrationCandidateValidationFailureRate', 'sameFileWriteBlocked', 'waitDurationP50', 'waitDurationP95'])
+  // ★ 决策 #6：失败分类分布走只读归一化；无样本时必须是 available:false（不是 0）。
+  assert.equal(r.body.metrics.failureKindRate.available, false, '★ 无样本不许显示 0——0 会被读成"一次都没失败"')
+  assert.equal(r.body.metrics.failureKindRate.value, null)
+  assert.equal(r.body.metrics.failureKindCounts.available, false)
+  // ★ T3.1（2026-10-27）：旧名仍返回（不静默删字段），但必须标废弃并指向新名。
+  //   验证发生在候选合并提交上、fast-forward 之前，所以"集成后"这个读法本身是错的。
+  assert.equal(r.body.metrics.postIntegrationValidationFailureRate.deprecated, true)
+  assert.equal(r.body.metrics.postIntegrationValidationFailureRate.deprecatedBy, 'preIntegrationCandidateValidationFailureRate')
+  assert.equal(r.body.metrics.preIntegrationCandidateValidationFailureRate.deprecated, undefined, '★ 新名不带废弃标记')
+  assert.equal(r.body.metrics.preIntegrationCandidateValidationFailureRate.available, r.body.metrics.postIntegrationValidationFailureRate.available,
+    '★ 两者是同一批样本，可用性必须一致')
+  assert.equal(r.body.metrics.preIntegrationCandidateValidationFailureRate.value, r.body.metrics.postIntegrationValidationFailureRate.value,
+    '★ 同值时也不能允许"新名算一套、旧名算另一套"')
   assert.equal(r.body.metrics.sameFileWriteBlocked.available, true)
   assert.ok(r.body.metrics.sameFileWriteBlocked.value >= 1)
   assert.equal(r.body.metrics.waitDurationP50.available, true)

@@ -431,6 +431,146 @@ describe('目标编排：流水线决定阶段，Agent 配置只决定分配', (
     assert.match(ghost.text, /流水线里没有的岗位/)
   })
 
+  it('★★★ 预览与发布逐字段一致：`/api/goal/plan` 不许是第二套实现', async () => {
+    const scope = 'space-plan-parity'
+    await seedSoftwareSpace(scope)
+    assert.equal((await post('/api/pipeline', {
+      scope, by: 'general',
+      stages: SOFTWARE_ROLES.map((role, index) => ({
+        role, label: `阶段-${role}`, prompt: role, next: SOFTWARE_ROLES[index + 1] ?? null,
+      })),
+      workflow: shortWorkflow(),
+    })).status, 200)
+
+    const request = {
+      scope, by: 'general', objective: '预览一致性',
+      agentToolConfig: { id: 'tool.codex', version: 1 },
+      stageOverrides: { tester: { agentToolConfig: { id: 'tool.dsh-spawn', version: 1 } } },
+    }
+    const goalsBefore = mod.db.prepare('SELECT COUNT(*) AS n FROM goal').get().n
+    const auditBefore = mod.db.prepare('SELECT COUNT(*) AS n FROM audit').get().n
+
+    const preview = await post('/api/goal/plan', request)
+    assert.equal(preview.status, 200, preview.text)
+    // ★★★ 反例守卫：预览**一行都不许写**。写了 goal 或 audit 就等于"预览也发了一个目标"。
+    assert.equal(mod.db.prepare('SELECT COUNT(*) AS n FROM goal').get().n, goalsBefore, '★★★ 预览不许新建目标')
+    assert.equal(mod.db.prepare('SELECT COUNT(*) AS n FROM audit').get().n, auditBefore, '★★★ 预览不许写审计')
+    assert.equal(preview.json.publishable, true, preview.text)
+    assert.equal(preview.json.stages.length, 8)
+
+    const published = await post('/api/goal', request)
+    assert.equal(published.status, 200, published.text)
+    const frozen = published.json.task.frozen
+
+    // 逐字段比对：阶段集合、每阶段来源、目标级选择。
+    assert.deepEqual(preview.json.stages.map((s) => s.role), frozen.stages, '★★ 阶段集合必须一致')
+    for (const stage of preview.json.stages) {
+      assert.equal(stage.assignment.source, frozen.assignments[stage.role].source,
+        `★★ ${stage.role} 的 source 必须一致（预览说 ${stage.assignment.source}，冻结是 ${frozen.assignments[stage.role].source}）`)
+      assert.equal(stage.assignment.agentToolConfig?.id ?? null, frozen.assignments[stage.role].agentToolConfig,
+        `★★ ${stage.role} 的工具配置必须一致`)
+    }
+    assert.deepEqual(preview.json.goalAgent, frozen.goalAgent, '★ 目标级选择必须一致')
+    assert.deepEqual(preview.json.effectiveNodeId, frozen.effectiveNodeId)
+
+    // 目标级真的生效了：八环全部是 codex，只有显式覆盖的 tester 例外。
+    assert.equal(frozen.assignments.requirement.agentToolConfig, 'tool.codex')
+    assert.equal(frozen.assignments.requirement.source, 'goal-agent')
+    assert.equal(frozen.assignments.tester.agentToolConfig, 'tool.dsh-spawn')
+    assert.equal(frozen.assignments.tester.source, 'publish-override')
+    assert.deepEqual(frozen.stageOverridesApplied, ['tester'])
+    // 冻结到 goal 行上，之后仍能回答"这条目标当初选了谁"。
+    assert.deepEqual(JSON.parse(mod.db.prepare('SELECT agent_tool_config FROM goal WHERE id=?').get(frozen.stages && published.json.task.goal.id).agent_tool_config), { agentToolConfig: { id: 'tool.codex', version: 1 } })
+  })
+
+  it('★★ 目标级 Agent 的边界：不存在的引用拒绝、testRunner 不许带、指标只在预览告警里出现', async () => {
+    const scope = 'space-goal-agent-guard'
+    await seedSoftwareSpace(scope)
+
+    // ① 引用不存在 ⇒ 409 具名码，且**不留半个目标**。
+    const goalsBefore = mod.db.prepare('SELECT COUNT(*) AS n FROM goal').get().n
+    const ghost = await post('/api/goal', {
+      scope, by: 'general', objective: '幽灵工具',
+      agentToolConfig: { id: 'tool.ghost', version: 1 },
+    })
+    assert.equal(ghost.status, 409, ghost.text)
+    assert.equal(ghost.json.code, 'AGENT_TOOL_CONFIG_UNRESOLVED')
+    assert.equal(mod.db.prepare('SELECT COUNT(*) AS n FROM goal').get().n, goalsBefore, '★★★ 拒绝时不留半条链')
+
+    // ② testRunner 混进覆盖层 ⇒ 拒绝（忽略会让用户以为改成了）。
+    //   ★ 顶层 `agentToolConfig` 只是 `{id, version}` 的引用，塞不进 testRunner；
+    //   真正能带它的是 `stageOverrides`，所以这条判据走那条路。
+    const withRunner = await post('/api/goal', {
+      scope, by: 'general', objective: '偷改验收',
+      stageOverrides: { coder: { testRunner: { executable: 'true', args: [], timeoutMs: 1000 } } },
+    })
+    assert.equal(withRunner.status, 400, withRunner.text)
+    assert.equal(withRunner.json.code, 'AGENT_PLAN_OVERRIDE_TEST_RUNNER')
+
+    // ③ 预览对"引用不存在"给出**与发布同一个**状态码与 code。
+    //   ★ 它没被做成 blocker，是因为"你写了一个不存在的 id"是**请求本身有问题**，
+    //     不是"配置齐了但机器没就绪"。两者若都走 blockers，前端就分不出
+    //     "改一下再试"和"去开节点"。
+    const previewBad = await post('/api/goal/plan', {
+      scope, by: 'general', objective: '预览幽灵工具',
+      agentToolConfig: { id: 'tool.ghost', version: 1 },
+    })
+    assert.equal(previewBad.status, ghost.status, '★★ 预览与发布对同一个坏引用必须同码')
+    assert.equal(previewBad.json.code, ghost.json.code)
+  })
+
+  it('★★ 决策 #2：审查与实现同源时标注 selfReview（不拦发布）；不同源时不标', async () => {
+    // 决策是 A：**接受并显式标注**。拦了就等于否掉「整条目标一个 Agent」这个能力本身，
+    // 所以这里只断言"标了没有"，不断言"被拒了"。
+    const scope = 'space-self-review'
+    await seedSoftwareSpace(scope)
+    // 配一个审查闭环：design=requirement / implementation=coder / review=reviewer。
+    const baseWorkflow = {
+      designRole: 'requirement', implementationRole: 'coder', reviewRole: 'reviewer', maxReworkRounds: 2,
+      stageTools: {
+        requirement: { agentToolConfig: { id: 'tool.claude-code', version: 1 }, modelConfig: null, nodeId: null, testRunner: null },
+        coder: { agentToolConfig: { id: 'tool.dsh-spawn', version: 1 }, modelConfig: null, nodeId: null,
+          testRunner: { executable: 'node', args: ['--test'], timeoutMs: 300000 } },
+        reviewer: { agentToolConfig: { id: 'tool.codex', version: 1 }, modelConfig: null, nodeId: null, testRunner: null },
+      },
+    }
+    assert.equal((await post('/api/pipeline', {
+      scope, by: 'general',
+      stages: SOFTWARE_ROLES.map((role, index) => ({
+        role, label: `阶段-${role}`, prompt: role, next: SOFTWARE_ROLES[index + 1] ?? null,
+      })),
+      workflow: baseWorkflow,
+    })).status, 200)
+
+    // 不同源（模板里 review=codex、implementation=dsh-spawn）⇒ 不标注。
+    const distinct = await post('/api/goal/plan', { scope, by: 'general', objective: '不同源' })
+    assert.equal(distinct.status, 200, distinct.text)
+    assert.equal(distinct.json.selfReview, null, '★★ 不同源不许标：误标会让真实的自审提示失去意义')
+
+    // 目标级把整条链都设成同一个 Provider ⇒ 审查与实现同源。
+    //   `tool.dsh-spawn` 的 providerName 是 spawn，用它覆盖全链。
+    const sameProvider = await post('/api/goal/plan', {
+      scope, by: 'general', objective: '同源',
+      agentToolConfig: { id: 'tool.dsh-spawn', version: 1 },
+    })
+    assert.equal(sameProvider.status, 200, sameProvider.text)
+    assert.ok(sameProvider.json.selfReview !== null, '★★★ 同 provider 必须被标出来')
+    assert.equal(sameProvider.json.selfReview.same, 'spawn')
+    assert.match(sameProvider.json.selfReview.note, /语义审查不具备交叉验证性质/)
+    // ★ 必须同时说清"哪一半还独立"——否则用户会以为整个验收都失效了。
+    assert.match(sameProvider.json.selfReview.note, /独立测试回执不受影响/)
+    // ★ 不拦：仍然 publishable。
+    assert.equal(sameProvider.json.publishable, true, '★★ 标注不是拦截')
+
+    // 发布回执里也要带上（事后要能回答"当时是不是自审"）。
+    const published = await post('/api/goal', {
+      scope, by: 'general', objective: '同源发布',
+      agentToolConfig: { id: 'tool.dsh-spawn', version: 1 },
+    })
+    assert.equal(published.status, 200, published.text)
+    assert.equal(published.json.task.frozen.selfReview?.same, 'spawn', '★ 冻结回执要留存自审标注')
+  })
+
   it('custom-dag 必须显式选择：不选具名定义时按 pipeline 建链', async () => {
     const scope = 'space-explicit-dag'
     await seedSoftwareSpace(scope)

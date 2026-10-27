@@ -154,8 +154,49 @@ test('④ ★★★ `validate` 成功后按该尝试所属任务的作用域结�
   assert.deepEqual(settled, ['sc-8'], '★★★ 没有这一条，`validate` 里的结算整句删掉也没人知道')
 })
 
-test('④b ★★★ `handoff` 成功后同样要结算目标（而且它写在一个 try 里）', async () => {
-  const settled = []
+test('④d ★★★ 验证判词进时间线：只记结论与身份，不复制证据；审计失败不许带崩验收', async () => {
+  // T2.4（2026-10-27）：此前判词**只在 run_validations**，任务时间线上查不到
+  // "这次验收是谁按什么判的"。而时间是团队真正在看的那一屏。
+  const audited = []
+  const router = mkRouter({
+    audit: (by, scope, action, taskId, detail) => { audited.push({ by, scope, action, taskId, detail }) },
+    runStore: {
+      recordValidation: () => ({ state: 'failed', code: 'CRITERIA_UNMET', reason: '验收标准第 2 条未满足', criteria: ['x'], 输出大文本: 'y'.repeat(5000) }),
+      handoff: () => ({}),
+      getAttempt: () => ({ taskId: 'rv-goal' }),
+      validationsOf: () => [], handoffsOf: () => [], runResultsOf: () => [], runEventCountsOf: () => ({}),
+    },
+  })
+  await router.dispatch({ method: 'POST' }, {}, { path: '/api/runtime/validate', url: new URL('http://x/') })
+  assert.equal(audited.length, 1, '★ 一次验证写一条审计')
+  const entry = audited[0]
+  assert.equal(entry.action, 'runtime:validation')
+  assert.equal(entry.taskId, 'rv-goal', '★★ 必须挂在**任务**上：否则 /api/activity?taskId= 查不到')
+  assert.equal(entry.scope, 'sc-8', '★ 作用域取自该尝试所属任务')
+  assert.equal(entry.detail.state, 'failed')
+  assert.equal(entry.detail.verdict, '未通过')
+  assert.match(entry.detail.reason, /验收标准第 2 条/)
+  // ★★ 反例守卫：证据正文**不许**被复制进 audit（同一份大文本两张表各存一遍）。
+  assert.equal(Object.hasOwn(entry.detail, '输出大文本'), false, '★★ 证据正文留在 run_validations，不进 audit')
+  assert.ok(JSON.stringify(entry.detail).length < 2000, '★ 判词明细必须短')
+})
+
+test('④e ★★★ 审计抛异常时验收仍然成功（不能因为记账失败就让人重验）', async () => {
+  const router = mkRouter({
+    audit: () => { throw new Error('审计写失败') },
+    runStore: {
+      recordValidation: () => ({ state: 'passed' }),
+      handoff: () => ({}),
+      getAttempt: () => ({ taskId: 'rv-goal' }),
+      validationsOf: () => [], handoffsOf: () => [], runResultsOf: () => [], runEventCountsOf: () => ({}),
+    },
+  })
+  const res = {}
+  assert.equal(await router.dispatch({ method: 'POST' }, res, { path: '/api/runtime/validate', url: new URL('http://x/') }), true)
+  assert.equal(res.sent.code, 200, '★★★ 审计失败不许把 200 变成 500：重验会撞幂等拒绝')
+})
+
+test('④b ★★★ `handoff` 成功后同样要结算目标（而且它写在一个 try 里）', async () => {  const settled = []
   const router = mkRouter({ settleGoalsOfScope: (s) => { settled.push(s) } })
   const res = {}
   assert.equal(await router.dispatch({ method: 'POST' }, res, { path: '/api/runtime/handoff', url: new URL('http://x/') }), true)

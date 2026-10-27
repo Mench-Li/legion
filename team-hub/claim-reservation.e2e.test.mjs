@@ -112,7 +112,20 @@ test('真实任务认领与文件预约同事务：撞车等待，释放后才�
     assert.equal(hub.db.prepare("SELECT state FROM write_reservations WHERE task_id='T-manual-stop' ORDER BY id DESC LIMIT 1").get().state, 'reconciling')
     assert.equal((await post('/api/claim', { id: 'T-manual-stop', by: 'worker', scope: 'default' })).status, 409)
     assert.equal((await post('/api/tasks/T-manual-stop/reservation/confirm-stopped', { by: 'worker', scope: 'default', confirm: 'stopped:T-manual-stop' })).status, 403)
+    // ★ T2.4（2026-10-27）：确认停止必须留痕。此前这条路由**全程不写 audit**，
+    //   于是"人工确认进程已停止、占用已释放"在任务时间线上查不到——占用没了，
+    //   但没人知道是谁在什么时候确认的。
+    const auditBefore = hub.db.prepare("SELECT COUNT(*) AS n FROM audit WHERE action='write-intent:confirm-stopped'").get().n
     assert.equal((await post('/api/tasks/T-manual-stop/reservation/confirm-stopped', { by: 'general', scope: 'default', confirm: 'stopped:T-manual-stop' })).status, 200)
+    const stopAudit = hub.db.prepare("SELECT * FROM audit WHERE action='write-intent:confirm-stopped' AND taskId='T-manual-stop' ORDER BY seq DESC LIMIT 1").get()
+    assert.ok(stopAudit !== undefined, '★★ 确认停止必须落一条 audit（否则时间线上看不见）')
+    assert.equal(hub.db.prepare("SELECT COUNT(*) AS n FROM audit WHERE action='write-intent:confirm-stopped'").get().n, auditBefore + 1, '★ 只记一条，不重复')
+    assert.equal(stopAudit.member, 'general', '★ 谁确认的要能查到')
+    assert.match(String(stopAudit.detail), /attemptId/, '★ 明细要指到具体那次尝试')
+    // ★ 审计是在**释放成功之后**写的：确认失败那条路径不许留下"已确认停止"的记录。
+    assert.equal((await post('/api/tasks/T-manual-stop/reservation/confirm-stopped', { by: 'general', scope: 'default', confirm: 'stopped:T-manual-stop' })).status, 404, '第二次没有可对账的预约')
+    assert.equal(hub.db.prepare("SELECT COUNT(*) AS n FROM audit WHERE action='write-intent:confirm-stopped'").get().n, auditBefore + 1,
+      '★★ 失败的那次不许多记一条（"确认了但没释放"是最会骗人的记录）')
     assert.equal((await post('/api/claim', { id: 'T-manual-stop', by: 'worker', scope: 'default' })).status, 200)
 
     const insertDomain = hub.db.prepare('INSERT INTO tasks (id,title,status,scope,fixCount,fileDomain) VALUES (?,?,?,?,?,?)')

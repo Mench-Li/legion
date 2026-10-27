@@ -44,6 +44,17 @@ export function createRuntimeVerificationRoutes({
   json,
   handleRun, runStore, requireString,
   getTask, settleGoalsOfScope,
+  /**
+   * 审计落盘（T2.4，2026-10-27）：验证判词此前**只落在 `run_validations`**，
+   * 不进 audit。于是团队在任务时间线（`/api/activity?taskId=`）上读不到
+   * "这次验收是谁按什么判据判的、结论是什么"——而时间是大家真正在看的那一屏。
+   *
+   * ★ 只记**结论与身份**，不复制证据正文：证据留在 `run_validations`，
+   *   复制一份到 audit 会让同一份大文本在两张表里各存一遍并各自过期。
+   *
+   * 可选注入（缺省不写）：`(by, scope, action, taskId, detail) => void`。
+   */
+  audit = null,
 }) {
   const deps = { json,
     handleRun, runStore, requireString,
@@ -51,6 +62,27 @@ export function createRuntimeVerificationRoutes({
   }
   for (const [k, v] of Object.entries(deps)) {
     if (v === undefined || v === null) throw new TypeError(`createRuntimeVerificationRoutes 缺注入项：${k}`)
+  }
+
+  /**
+   * 把一次验证判词记进时间线。**失败绝不影响验收结论**：
+   * 验收已经落库了，为一条审计把 200 变成 500 会让人重新验一次，
+   * 而第二次验证会撞上「同一 attempt 已有判词」的幂等拒绝。
+   */
+  const auditValidation = (actor, attemptId, taskId, validation) => {
+    if (typeof audit !== 'function') return
+    let scope = '*'
+    try { scope = getTask(taskId)?.scope ?? '*' } catch { /* 任务不存在时用 '*' */ }
+    try {
+      audit(actor, scope, 'runtime:validation', taskId, {
+        attemptId,
+        state: validation?.state ?? null,
+        // 判词要能一眼读完：通过/不通过 + 第一条原因（若有）。
+        verdict: validation?.state === 'passed' ? '通过' : (validation?.state === 'failed' ? '未通过' : String(validation?.state ?? '未知')),
+        reason: typeof validation?.reason === 'string' ? validation.reason.slice(0, 500) : null,
+        code: validation?.code ?? null,
+      })
+    } catch { /* 见上：不影响验收结论 */ }
   }
 
   const routes = [
@@ -80,6 +112,8 @@ export function createRuntimeVerificationRoutes({
             reason: body.reason ?? null,
           })
           try { settleGoalsOfScope(getTask(runStore.getAttempt(body.attemptId).taskId).scope) } catch { /* 任务不存在时不结算 */ }
+          // T2.4：判词进时间线（只记结论与身份，证据留在 run_validations）。
+          try { auditValidation(body.actor, body.attemptId ?? r?.attemptId ?? null, runStore.getAttempt(r?.attemptId ?? body.attemptId)?.taskId ?? null, r) } catch { /* 审计不影响验收 */ }
           return r
         })
       },

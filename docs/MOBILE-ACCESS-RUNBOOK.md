@@ -119,6 +119,7 @@ Invoke-WebRequest http://127.0.0.1:8787/api/identity/bootstrap -Method POST `
 tunnel: de285451-cce3-4de5-a171-56c810a65e5c
 credentials-file: C:/Users/<你>/.cloudflared/de285451-cce3-4de5-a171-56c810a65e5c.json
 protocol: http2            # ★ 见下面"为什么不用 QUIC"
+edge-ip-version: auto       # 自动选可用的 IPv4/IPv6 边缘
 ingress:
   - hostname: home.legion-si.online
     service: http://127.0.0.1:8787
@@ -129,11 +130,11 @@ ingress:
 QUIC 下 10.8s / 51.6s（抖动大），http2 下 1.4s / 3.3s / 4.2s。
 本机出站 QUIC（UDP 7844）到 region2 不通，钉 QUIC 会反复重试 ⇒ 忽快忽慢。
 
-**为什么钉 IPv4**（`edge-ip-version: "4"`）：日志里隧道连的是 **IPv6 边缘**
-（`2606:4700:...`），而这台机器的 IPv6 明显不稳 —— QUIC 预检在 region2 失败、
-Node 的连接也总是先试 IPv6 再超时（实测报错里前两个候选地址都是 IPv6）。
-钉 IPv4 之后隧道连的是 `198.41.x.x:7844`。
-排查这类问题的顺序值得记下来：**先看隧道连的是哪一族地址，再看协议。**
+**边缘 IP 自动选路**（`edge-ip-version: auto`）：2026-10-10 的网络下 IPv6 不稳，
+当时钉 IPv4 后隧道连到 `198.41.x.x:7844`。2026-10-20 的网络下情况反过来：
+IPv4 边缘只能维持约一条连接，固定入口间歇返回 Cloudflare 1033；`auto` 实测选择
+IPv6 边缘，建立四条连接，`mobile-live-check` 在固定入口全部通过。
+因此不再把地址族固定在 2026-10-10 的网络条件上。排查时先看连接器实际选择的地址族与连接数。
 
 **自启为什么用启动文件夹而不是服务**：`cloudflared service install` 与
 `schtasks /create /sc onlogon` 在这台机器上**都要管理员**（实测 Access is denied）；

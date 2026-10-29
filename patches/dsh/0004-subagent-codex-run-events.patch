@@ -1,0 +1,291 @@
+From 31dce726dadcb13932335425a423e969b51969c5 Mon Sep 17 00:00:00 2001
+From: legion <legion@local>
+Date: Wed, 28 Oct 2026 15:42:00 +0800
+Subject: [PATCH 2/2] subagent-codex: emit tool events
+
+---
+ .../subagent/subagent-codex/src/run-events.ts | 77 +++++++++++++++++++
+ packages/subagent/subagent-codex/src/run.ts   | 15 +++-
+ packages/subagent/subagent-codex/src/wire.ts  | 22 ++++++
+ .../tests/subagent-codex.spec.ts              | 51 +++++++++++-
+ 4 files changed, 160 insertions(+), 5 deletions(-)
+ create mode 100644 packages/subagent/subagent-codex/src/run-events.ts
+
+diff --git a/packages/subagent/subagent-codex/src/run-events.ts b/packages/subagent/subagent-codex/src/run-events.ts
+new file mode 100644
+index 0000000000..df2da77bc0
+--- /dev/null
++++ b/packages/subagent/subagent-codex/src/run-events.ts
+@@ -0,0 +1,77 @@
++/**
++ * Provider-local bounded event stream.
++ *
++ * Why this is duplicated in both out-of-process providers: the seam's core
++ * package (`@deepseek-ai/dsh-subagent`) ships inside the host's app.asar and is
++ * not a profile-installable package, so a Legion compat patch cannot change it.
++ * Keeping the bridge local lets each provider expose `run.events` without a core
++ * patch. Keep the two copies in step; the tests pin the observable behaviour.
++ *
++ * @module @deepseek-ai/dsh-subagent-codex/run-events
++ */
++/** One provider-observed progress event. */
++export interface RunEvent {
++  /** Discriminator; consumers map it onto their own vocabulary. */
++  readonly type: string
++  readonly [key: string]: unknown
++}
++
++/** Options for {@link createRunEventStream}. */
++export interface RunEventStreamOptions {
++  /** Maximum buffered events before the oldest is dropped. Defaults to 1000. */
++  readonly limit?: number
++}
++
++/** A bounded push-to-async-iterable bridge for provider-observed events. */
++export interface RunEventStream {
++  /** The iterable a consumer reads; ends when {@link close} is called and drained. */
++  readonly events: AsyncIterable<RunEvent>
++  /** Append one observed event. No-op after close. */
++  push(event: RunEvent): void
++  /** End the iterable after the buffered events are drained. Idempotent. */
++  close(): void
++}
++
++/** Create a bounded event stream. */
++export function createRunEventStream(options: RunEventStreamOptions = {}): RunEventStream {
++  const limit = options.limit ?? 1000
++  if (!Number.isSafeInteger(limit) || limit <= 0) throw new TypeError('run event stream limit must be a positive integer')
++  const buffer: RunEvent[] = []
++  let dropped = 0
++  let closed = false
++  let wake: (() => void) | undefined
++  const notify = (): void => {
++    const resume = wake
++    wake = undefined
++    resume?.()
++  }
++  const events = (async function* (): AsyncGenerator<RunEvent> {
++    for (;;) {
++      const next = buffer.shift()
++      if (next !== undefined) {
++        yield next
++        continue
++      }
++      if (closed) break
++      await new Promise<void>((resolve) => { wake = resolve })
++    }
++    if (dropped > 0) yield { type: 'run.progress', droppedEvents: dropped }
++  })()
++  return {
++    events,
++    push(event: RunEvent): void {
++      if (closed) return
++      if (buffer.length >= limit) {
++        buffer.shift()
++        dropped += 1
++      }
++      buffer.push(event)
++      notify()
++    },
++    close(): void {
++      if (closed) return
++      closed = true
++      notify()
++    },
++  }
++}
+diff --git a/packages/subagent/subagent-codex/src/run.ts b/packages/subagent/subagent-codex/src/run.ts
+index 47c5189be3..627ac3af33 100644
+--- a/packages/subagent/subagent-codex/src/run.ts
++++ b/packages/subagent/subagent-codex/src/run.ts
+@@ -31,6 +31,7 @@ import {
+   CodexAppServerWire,
+   type CodexWireFailureFacts,
+ } from './wire.ts'
++import { createRunEventStream } from './run-events.ts'
+ 
+ /** Default POSIX grace between subprocess termination tiers. */
+ export const DEFAULT_DISPOSE_GRACE_MS = 3_000
+@@ -247,11 +248,13 @@ export async function startCodexRun(
+     }, thrown(error))
+   }
+ 
++  const runEvents = createRunEventStream()
+   const wire = new CodexAppServerWire(
+     child.stdout as NonNullable<SubprocessHandle['stdout']>,
+     child.stdin as NonNullable<SubprocessHandle['stdin']>,
+     spec.permissionMode,
+     spec.model,
++    (event) => runEvents.push(event),
+   )
+   const onStderr = (chunk: Buffer | string): void => {
+     const bytes = typeof chunk === 'string' ? Buffer.from(chunk) : chunk
+@@ -418,6 +421,9 @@ export async function startCodexRun(
+         throw error instanceof CodexRunFailure
+           ? error
+           : new CodexRunFailure(facts, thrown(error))
++      } finally {
++        // The turn is over (or failed); no further item notifications belong to it.
++        runEvents.close()
+       }
+     },
+     collectOutput,
+@@ -428,12 +434,17 @@ export async function startCodexRun(
+     onAbort,
+   })
+ 
+-  return subprocessRunHandle({
++  const handle = subprocessRunHandle({
+     id: brandString<SessionId>(randomUUID()),
+     result,
+     signal: request.signal,
+     onAbort,
+     requestCancel,
+-    teardown: disposeProcess,
++    teardown: async () => {
++      runEvents.close()
++      await disposeProcess()
++    },
+   })
++  // Provider-local extension: see the Claude provider's matching note.
++  return Object.assign(handle, { events: runEvents.events })
+ }
+diff --git a/packages/subagent/subagent-codex/src/wire.ts b/packages/subagent/subagent-codex/src/wire.ts
+index b4e0f662b1..d558951461 100644
+--- a/packages/subagent/subagent-codex/src/wire.ts
++++ b/packages/subagent/subagent-codex/src/wire.ts
+@@ -10,6 +10,7 @@
+ import type { Readable, Writable } from 'node:stream'
+ import type { ContentBlock } from '@deepseek-ai/dsh-llm'
+ import type { SubagentResult } from '@deepseek-ai/dsh-subagent'
++import type { RunEvent } from './run-events.ts'
+ import { JsonRpcLineTransport } from '@deepseek-ai/dsh-sdk-protocol'
+ import type { CodexPermissionMode } from './run.ts'
+ 
+@@ -226,6 +227,7 @@ export class CodexAppServerWire {
+     output: Writable,
+     private readonly permissionMode: CodexPermissionMode,
+     private readonly model?: string,
++    private readonly onEvent?: (event: RunEvent) => void,
+   ) {
+     this.transport = new JsonRpcLineTransport(input, output)
+     // Fatal protocol state can arrive after the current guarded operation has
+@@ -663,6 +665,7 @@ export class CodexAppServerWire {
+       }
+       if (id !== this.turnId) return
+       const item = object(params.item, 'item/completed item')
++      this.publishItemEvent(item)
+       if (this.recordDeclinedItem(item, order)) return
+       if (item.type !== 'agentMessage') return
+       const text = typeof item.text === 'string'
+@@ -708,4 +711,23 @@ export class CodexAppServerWire {
+       order: order ?? this.nextObservationOrder(),
+     })
+   }
++
++  /**
++   * Publish one tool item's terminal fact. Other item kinds (agent messages)
++   * are not progress events; the app-server's own status is the only authority
++   * for whether the tool succeeded.
++   */
++  private publishItemEvent(item: JsonObject): void {
++    if (this.onEvent === undefined) return
++    const type = item.type
++    if (type !== 'commandExecution' && type !== 'fileChange' && type !== 'mcpToolCall' && type !== 'webSearch') return
++    const status = typeof item.status === 'string' ? item.status : undefined
++    const failed = status === 'failed' || status === 'declined'
++    this.onEvent({
++      type: failed ? 'tool.failed' : 'tool.completed',
++      toolName: type,
++      ...(typeof item.id === 'string' ? { toolId: item.id } : {}),
++      ...(status === undefined ? {} : { status }),
++    })
++  }
+ }
+diff --git a/packages/subagent/subagent-codex/tests/subagent-codex.spec.ts b/packages/subagent/subagent-codex/tests/subagent-codex.spec.ts
+index 80607bca6c..dc96b26948 100644
+--- a/packages/subagent/subagent-codex/tests/subagent-codex.spec.ts
++++ b/packages/subagent/subagent-codex/tests/subagent-codex.spec.ts
+@@ -236,11 +236,16 @@ function fakeChild(options: FakeChildOptions = {}): FakeChild {
+   }
+ }
+ 
+-function defaultWire(child: FakeChild): CodexAppServerWire {
++function defaultWire(
++  child: FakeChild,
++  onEvent?: (event: { readonly type: string; readonly [key: string]: unknown }) => void,
++): CodexAppServerWire {
+   return new CodexAppServerWire(
+     child.handle.stdout!,
+     child.handle.stdin!,
+     DEFAULT_CODEX_PERMISSION_MODE,
++    undefined,
++    onEvent,
+   )
+ }
+ 
+@@ -258,12 +263,14 @@ function runSpec(
+   }
+ }
+ 
+-async function initializeWire(): Promise<{
++async function initializeWire(
++  onEvent?: (event: { readonly type: string; readonly [key: string]: unknown }) => void,
++): Promise<{
+   readonly child: FakeChild
+   readonly wire: CodexAppServerWire
+ }> {
+   const child = fakeChild()
+-  const wire = defaultWire(child)
++  const wire = defaultWire(child, onEvent)
+   wire.start()
+   const initializing = wire.initialize(new AbortController().signal)
+   const initialize = await child.peer.nextMethod('initialize')
+@@ -804,6 +811,44 @@ describe('CodexAppServerWire', () => {
+     wire.close()
+   })
+ 
++  it('publishes completed/failed tool items as provider progress events', async () => {
++    const events: Array<Record<string, unknown>> = []
++    const { child, wire } = await initializeWire((event) => { events.push(event as Record<string, unknown>) })
++    const result = wire.runTurn(['task'], new AbortController().signal)
++    const turnStart = await child.peer.nextMethod('turn/start')
++    child.peer.respond(turnStart, { turn: { id: 'turn-1' } })
++    await nextTask()
++    child.peer.send(
++      {
++        method: 'item/completed',
++        params: {
++          threadId: 'thread-1',
++          turnId: 'turn-1',
++          item: { type: 'commandExecution', id: 'call-1', status: 'completed' },
++        },
++      },
++      {
++        method: 'item/completed',
++        params: {
++          threadId: 'thread-1',
++          turnId: 'turn-1',
++          item: { type: 'fileChange', id: 'call-2', status: 'failed' },
++        },
++      },
++      agentMessage('done', 'final_answer'),
++      turnCompleted('completed'),
++    )
++    await expect(result).resolves.toEqual({
++      output: [{ type: 'text', text: 'done' }],
++      stopReason: 'completed',
++    })
++    expect(events).toEqual([
++      { type: 'tool.completed', toolName: 'commandExecution', toolId: 'call-1', status: 'completed' },
++      { type: 'tool.failed', toolName: 'fileChange', toolId: 'call-2', status: 'failed' },
++    ])
++    wire.close()
++  })
++
+   it('uses the last nullable-phase answer when no explicit final exists', async () => {
+     const { child, wire } = await initializeWire()
+     const result = wire.runTurn(['task'], new AbortController().signal)
+-- 
+2.55.0.windows.5
+

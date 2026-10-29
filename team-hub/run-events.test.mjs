@@ -224,6 +224,65 @@ test('⑩ 只追加：源码里没有任何 UPDATE/DELETE run_events 的路径',
   assert.match(src, /INSERT INTO run_events/)
 })
 
+test('⑩b 无租约的阶段 Attempt 可追加单条事件（appendRunEvent 自己分配序号）', () => {
+  const f = fixture()
+  try {
+    const a = f.store.appendRunEvent({ attemptId: 'wfa-test-1', taskId: 'T-1', type: 'run.started', event: { stageId: 's1' } })
+    const b = f.store.appendRunEvent({ attemptId: 'wfa-test-1', taskId: 'T-1', type: 'run.completed' })
+    assert.equal(a.seq, 1)
+    assert.equal(b.seq, 2)
+    assert.equal(a.known, true)
+    assert.equal(b.ok, true)
+    const rows = f.store.runEventsOf('wfa-test-1')
+    assert.deepEqual(rows.map((r) => [r.seq, r.type]), [[1, 'run.started'], [2, 'run.completed']])
+    // 不传 event 时，payload 至少带 type —— 读的人不会拿到一个 `{}` 去猜它是什么。
+    assert.equal(rows[1].event.type, 'run.completed')
+    assert.throws(() => f.store.appendRunEvent({ attemptId: 'wfa-test-1', taskId: '', type: 'run.started' }), /taskId/)
+    assert.throws(() => f.store.appendRunEvent({ attemptId: 'wfa-test-1', taskId: 'T-1', type: '' }), /type/)
+  } finally { f.dispose() }
+})
+
+test('⑩c sinceSeq 只返回游标之后的事件，越界游标返回空数组', () => {
+  const f = fixture()
+  try {
+    f.store.recordRunEvents({
+      attemptId: f.attemptId,
+      leaseEpoch: f.leaseEpoch,
+      events: [ev(1, 'run.started'), ev(2, 'tool.requested'), ev(3, 'tool.completed'), ev(4, 'run.completed')],
+    })
+    assert.deepEqual(f.store.runEventsOf(f.attemptId, { sinceSeq: 2 }).map((e) => e.seq), [3, 4])
+    assert.deepEqual(f.store.runEventsOf(f.attemptId, { sinceSeq: 4 }), [])
+    assert.deepEqual(f.store.runEventsOf(f.attemptId, { sinceSeq: 4, type: 'tool.completed' }), [])
+    assert.throws(() => f.store.runEventsOf(f.attemptId, { sinceSeq: -1 }), /sinceSeq/)
+    assert.throws(() => f.store.runEventsOf(f.attemptId, { sinceSeq: 1.5 }), /sinceSeq/)
+  } finally { f.dispose() }
+})
+
+test('⑩d 非租约阶段 Attempt 可批量写入（显式 taskId），无归属仍拒绝', () => {
+  const f = fixture()
+  try {
+    const r = f.store.recordRunEvents({
+      attemptId: 'wfa-batch-1',
+      taskId: 'T-1',
+      events: [ev(1, 'run.started'), ev(2, 'tool.requested', { toolName: 'pwsh' })],
+    })
+    assert.equal(r.ok, true)
+    assert.equal(r.written, 2)
+    const rows = f.store.runEventsOf('wfa-batch-1')
+    assert.deepEqual(rows.map((x) => x.seq), [1, 2])
+    assert.equal(rows[1].event.toolName, 'pwsh')
+    // 不给 taskId 时仍拒绝：事件不允许挂到"不知道属于谁"的尝试上。
+    assert.throws(
+      () => f.store.recordRunEvents({ attemptId: 'wfa-batch-1', events: [ev(3, 'run.completed')] }),
+      (e) => e.code === RUN_ERRORS.ATTEMPT_NOT_FOUND,
+    )
+    assert.throws(
+      () => f.store.recordRunEvents({ attemptId: 'wfa-batch-1', taskId: '', events: [] }),
+      /taskId/,
+    )
+  } finally { f.dispose() }
+})
+
 // ---------------------------------------------------------------- ② 接线层（executor）
 
 test('⑪ executor 真的收集事件：三条出口都带明细', () => {
@@ -477,4 +536,45 @@ test('⑱ 未知类型经 HTTP 落库后 known:false 可见', async () => {
   assert.equal(future.known, false)
   const counts = await get(`/api/runtime/run-events?attemptId=${encodeURIComponent(lease.attemptId)}&counts=1`)
   assert.equal(counts.body.unknownTypeCount, 1)
+})
+
+test('⑲ sinceSeq + limit：按游标续读，nextSeq/hasMore 与实际一致', async () => {
+  const lease = await toRunning(await claimOne('t19'), 't19')
+  await post('/api/runtime/transition', {
+    attemptId: lease.attemptId, leaseEpoch: lease.leaseEpoch, workerId: 'w-t19',
+    outcome: 'completed',
+    context: {
+      runEvents: [
+        ev(1, 'run.started'), ev(2, 'tool.requested'), ev(3, 'tool.completed'),
+        ev(4, 'artifact.produced'), ev(5, 'run.completed'),
+      ],
+    },
+  })
+  const url = (qs) => `/api/runtime/run-events?attemptId=${encodeURIComponent(lease.attemptId)}${qs}`
+
+  const first = await get(url('&limit=2'))
+  assert.equal(first.status, 200)
+  assert.deepEqual(first.body.events.map((e) => e.seq), [1, 2])
+  assert.equal(first.body.nextSeq, 2)
+  assert.equal(first.body.hasMore, true)
+
+  const second = await get(url(`&limit=2&sinceSeq=${first.body.nextSeq}`))
+  assert.deepEqual(second.body.events.map((e) => e.seq), [3, 4])
+  assert.equal(second.body.nextSeq, 4)
+  assert.equal(second.body.hasMore, true)
+
+  const third = await get(url(`&sinceSeq=${second.body.nextSeq}`))
+  assert.deepEqual(third.body.events.map((e) => e.seq), [5])
+  assert.equal(third.body.nextSeq, 5)
+  assert.equal(third.body.hasMore, false)
+
+  // 游标已是最新：空数组 + 游标原样返回，调用方不会误以为"读失败了"。
+  const idle = await get(url(`&sinceSeq=${third.body.nextSeq}`))
+  assert.deepEqual(idle.body.events, [])
+  assert.equal(idle.body.nextSeq, 5)
+  assert.equal(idle.body.hasMore, false)
+
+  const bad = await get(url('&sinceSeq=abc'))
+  assert.equal(bad.status, 400)
+  assert.equal(bad.body.code, 'INVALID_PARAM')
 })

@@ -172,12 +172,13 @@ test('⑩ 多补丁时必须显式 --patch，避免"猜一条来应用"', () => 
 test('⑪ 本机真实判定：装了 DSH 的机器上，基线必须自洽（否则就是漂移已经发生）', () => {
   const installed = installedDsh()
   if (installed === null) return   // 未观察：这台机器没装 DSH
-  const entry = selectPatch(base)
-  const deployed = deployedPackage(entry.deployed.package)
-  const result = evaluateBase(base, { installed, deployed })
-  assert.equal(result.ok, true,
-    '基线与本机现状不一致（DSH 升级过 / profile 重装过 / 补丁被改过）：\n' + JSON.stringify(result.checks, null, 2)
-    + '\n修法：node scripts/dsh-patch.mjs --check 看逐项判定，必要时重新生成补丁并 --record')
+  for (const entry of base.patches) {
+    const deployed = deployedPackage(entry.deployed.package)
+    const result = evaluateBase(base, { installed, deployed }, { patchEntry: entry })
+    assert.equal(result.ok, true,
+      `${entry.slug} 与本机现状不一致（DSH 升级过 / profile 重装过 / 补丁被改过）：\n` + JSON.stringify(result.checks, null, 2)
+      + '\n修法：node scripts/dsh-patch.mjs --check --patch=' + entry.slug + ' 看逐项判定，必要时重新生成补丁并 --record')
+  }
 })
 
 // ══════════════════════════════════════════════════════════════════════════
@@ -195,7 +196,7 @@ test('⑫ 要构建哪个包，必须从补丁正文推导（写死包名会在�
   )
   assert.equal(packageDirOf({ targets: ['packages/a/one/x.ts', 'packages/a/two/y.ts'] }), null, '跨包补丁不猜')
   assert.equal(packageDirOf({ targets: ['docs/README.md'] }), null, '不是包内文件就不构建')
-  const derived = packageDirOf(selectPatch(base))
+  const derived = packageDirOf(base.patches.find((entry) => entry.slug === 'subagent-claude-code-run-events'))
   assert.equal(derived, 'packages/subagent/subagent-claude-code', '基线里这条补丁的目标包应与事实一致')
 })
 
@@ -207,7 +208,7 @@ test('⑬ 参数解析认识构建/安装子命令（否则 --build 会被当成
 })
 
 test('⑭ 检出没带补丁时，构建必须**拒绝**（否则编出来的是原版，还会被误读成部署失败）', () => {
-  const entry = selectPatch(base)
+  const entry = base.patches.find((item) => item.slug === 'subagent-claude-code-run-events') ?? selectPatch(base)
   const patchPath = join(PATCH_DIR, entry.file)
   // 用一个干净的临时目录冒充检出：既没有包，也没有补丁
   const empty = mkdtempSync(join(tmpdir(), 'dsh-nopatch-'))
@@ -221,7 +222,7 @@ test('⑮ 本机构建产物形态必须与上游一致（字节量级 + 外置�
   if (!existsSync(join(source, 'packages', 'subagent', 'subagent-claude-code', 'package.json'))) {
     return   // 未观察：这台机器没有该检出
   }
-  const entry = selectPatch(base)
+  const entry = base.patches.find((item) => item.slug === 'subagent-claude-code-run-events') ?? selectPatch(base)
   const patchPath = join(PATCH_DIR, entry.file)
   const built = buildProvider(source, entry, patchPath)
   // 检出不在"已打补丁"状态时，判据仍要成立：它必须**明确拒绝**，而不是编出原版还报成功。
@@ -248,7 +249,7 @@ test('⑮ 本机构建产物形态必须与上游一致（字节量级 + 外置�
 
 test('⑯ 安装只覆盖那一个产物、且先备份（这样它能一键回退，也不会动依赖解析）', () => {
   const source = process.env.DSH_CHECKOUT ?? 'D:/project/DSH/dsh/deepseek-harness'
-  const entry = selectPatch(base)
+  const entry = base.patches.find((item) => item.slug === 'subagent-claude-code-run-events') ?? selectPatch(base)
   const patchPath = join(PATCH_DIR, entry.file)
   const deployed = deployedPackage(entry.deployed.package)
   if (deployed === null || !existsSync(join(source, 'packages', 'subagent', 'subagent-claude-code', 'package.json'))) return

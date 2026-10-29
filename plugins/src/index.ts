@@ -97,6 +97,7 @@ import { planTimeoutSettlement, planTimeoutTransitionFailure, workerStoppedWithi
 import { branchOwnChangesRefspec } from './branchScope.js'
 import { resolveStaleMinutes } from './configSanity.js'
 import { parseExternalWorkerReport } from '../../runtime/adapters/dsh/external-agent.mjs'
+import { mapDshEvent } from '../../runtime/adapters/dsh/events.mjs'
 // PRT-108 棘轮：provider 目录读取与外部 Agent 接线一律经适配层，插件不再直接依赖执行面服务。
 // 见 runtime/adapters/dsh/subagent-client.mjs 的文件头（为什么这 5 个调用点必须下沉）。
 import {
@@ -2493,6 +2494,54 @@ function spaceWorker(ctx: AppContext, config: Config): void {
         scope,
       })
     }
+    /**
+     * A：把 DSH 句柄上确实存在的进度事件转发到 Hub。
+     *
+     * - 没有 `events`（当前 Claude Code 以外的 provider）就什么都不做——不伪造；
+     * - 序号从 **2** 起：Hub 在 begin 时已写入 `run.started`（seq 1），worker 的
+     *   事件沿用同一 `(attempt_id, event_seq)` 空间，重复号会被幂等忽略；
+     * - 上报失败只记日志，不影响任务结算（明细缺失不该让一次真实运行作废）。
+     */
+    const forwardStageRunEvents = (run: unknown): void => {
+      if (workflowStageAttemptId === null || !useHub) return
+      const events = (run as { events?: AsyncIterable<unknown> } | null)?.events
+      if (events === null || events === undefined || typeof events[Symbol.asyncIterator] !== 'function') return
+      void (async () => {
+        let seq = 2
+        let batch: Array<{ seq: number; type: string; event: Record<string, unknown> }> = []
+        const flush = async (): Promise<void> => {
+          if (batch.length === 0) return
+          const sending = batch
+          batch = []
+          try {
+            await hubPost('/api/agent-workflow/stage-attempts/events', {
+              attemptId: workflowStageAttemptId,
+              events: sending,
+              by: t.soldier ?? config.role,
+              scope,
+            })
+          } catch (error) {
+            log(`${t.id} 阶段运行事件上报失败：${String(error)}`)
+          }
+        }
+        try {
+          for await (const raw of events) {
+            const mapped = mapDshEvent(raw)
+            batch.push({
+              seq,
+              type: mapped.type,
+              event: { ...mapped.payload, seq, type: mapped.type },
+            })
+            seq += 1
+            if (batch.length >= 20) await flush()
+          }
+        } catch (error) {
+          log(`${t.id} 阶段运行事件流中断：${String(error)}`)
+        } finally {
+          await flush()
+        }
+      })()
+    }
     const quarantineUnknownWorkflowResult = async (reason: string, preserveCanceledTask = false): Promise<boolean> => {
       if (!isWorkflowTask) return false
       const providerName = t.agentSelectionSnapshot?.agentToolConfig?.providerName ?? config.provider
@@ -2627,6 +2676,9 @@ function spaceWorker(ctx: AppContext, config: Config): void {
             dispose: () => externalRun.dispose(),
             localAgent: undefined,
           }
+          // 句柄上带 `events` 时（DSH 已实现该能力的 provider）就开始转发；
+          // 没有就保持静默，运行明细里只会有 begin/终态两条生命周期事实。
+          forwardStageRunEvents(externalRun)
         } else {
           if (hasFrozenTool && frozenConfig.adapter !== 'dsh-native') {
             throw new Error(`阶段 Agent 工具 adapter 不受支持：${frozenConfig?.adapter ?? 'missing'}`)

@@ -203,9 +203,11 @@ export function createRuntimeVerificationRoutes({
         // "这次运行**过程**里发生了什么"——用了哪个模型、请求了哪些工具、
         // 工具是成了还是败了、模型说了什么。
         //
-        // 两条只读参数：
+        // 三条只读参数：
         //   · `type`  —— 只看某一类（"这次调了哪些工具"用 `tool.requested`）；
         //   · `counts=1` —— 只要按类型的计数（13 种事件逐个数），不要正文。
+        //   · `sinceSeq` —— 只取序号大于它的行；返回 `nextSeq` 与 `hasMore`，调用方
+        //     据此续读。断线重连不需要重拉整段明细。
         //
         // `known` 必须透出去：`known: false` 的行说明**上游产生了一种本控制面
         // 不认识的事件**。那是一个要被看见的信号；过滤掉它会让"上游新增了事件
@@ -218,13 +220,37 @@ export function createRuntimeVerificationRoutes({
         }
         const type = url.searchParams.get('type')
         const limitRaw = url.searchParams.get('limit')
+        const limit = limitRaw === null ? 1000 : Number(limitRaw)
+        if (!Number.isSafeInteger(limit) || limit <= 0) {
+          json(res, 400, { ok: false, error: 'limit 必须是正安全整数', code: 'INVALID_PARAM' }); return
+        }
+        const sinceRaw = url.searchParams.get('sinceSeq')
+        let sinceSeq = null
+        if (sinceRaw !== null && sinceRaw !== '') {
+          if (!/^\d+$/.test(sinceRaw)) {
+            json(res, 400, { ok: false, error: 'sinceSeq 必须是非负整数', code: 'INVALID_PARAM' }); return
+          }
+          sinceSeq = Number(sinceRaw)
+          if (!Number.isSafeInteger(sinceSeq)) {
+            json(res, 400, { ok: false, error: 'sinceSeq 超出安全整数范围', code: 'INVALID_PARAM' }); return
+          }
+        }
+        // 多取一条判断 hasMore；返回仍是 limit 条。
+        const probeLimit = limit < Number.MAX_SAFE_INTEGER ? limit + 1 : limit
+        const page = runStore.runEventsOf(attemptId, {
+          type: type === null || type.length === 0 ? null : type,
+          limit: probeLimit,
+          sinceSeq,
+        })
+        const hasMore = page.length > limit
+        const events = hasMore ? page.slice(0, limit) : page
         json(res, 200, {
           ok: true,
           attemptId,
-          events: runStore.runEventsOf(attemptId, {
-            type: type === null || type.length === 0 ? null : type,
-            limit: limitRaw === null ? 1000 : Number(limitRaw),
-          }),
+          events,
+          sinceSeq,
+          nextSeq: events.length === 0 ? (sinceSeq ?? 0) : events[events.length - 1].seq,
+          hasMore,
           serverTimeMs: Date.now(),
         })
       },

@@ -97,7 +97,7 @@
   },
   "deployed": {
     "profileRoot": "C:\\Users\\11150\\.dsh\\profiles\\desktop",
-    "version": "0.2.1-rc.2",
+    "version": "0.2.1-rc.3",
     "libPath": "C:\\Users\\11150\\.dsh\\profiles\\desktop\\node_modules\\@deepseek-ai\\dsh-subagent-codex\\lib\\index.js",
     "libSha256": "2833abd2521c9d718cf480508da28ea0bc2f93a10132d9ba42b40fc1b7254f65",
     "markersPresent": [
@@ -105,7 +105,7 @@
       "droppedEvents"
     ]
   },
-  "recordedAt": "2026-10-28T07:56:56.246Z",
+  "recordedAt": "2026-10-29T04:50:44.056Z",
   "deployedByPackage": {
     "dsh-subagent-claude-code": {
       "profileRoot": "C:\\Users\\11150\\.dsh\\profiles\\desktop",
@@ -119,7 +119,7 @@
     },
     "dsh-subagent-codex": {
       "profileRoot": "C:\\Users\\11150\\.dsh\\profiles\\desktop",
-      "version": "0.2.1-rc.2",
+      "version": "0.2.1-rc.3",
       "libPath": "C:\\Users\\11150\\.dsh\\profiles\\desktop\\node_modules\\@deepseek-ai\\dsh-subagent-codex\\lib\\index.js",
       "libSha256": "2833abd2521c9d718cf480508da28ea0bc2f93a10132d9ba42b40fc1b7254f65",
       "markersPresent": [

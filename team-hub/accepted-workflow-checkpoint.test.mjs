@@ -21,6 +21,70 @@ function createTaskWorktree(taskId) {
   return root
 }
 
+test('★ 没有登记任何产物时冻结本任务分支的 HEAD（BUG-039：不再一律 409）', () => {
+  const taskId = 'T-checkpoint-head'
+  const workspaceDir = createTaskWorktree(taskId)
+  try {
+    // 工作已经提交在这条分支上，但没有任何东西保证 worker 还会去登记产物。
+    mkdirSync(join(workspaceDir, 'workbench'), { recursive: true })
+    writeFileSync(join(workspaceDir, 'workbench', 'app.mjs'), 'export const fixed = true\n')
+    git(workspaceDir, ['add', 'workbench/app.mjs'])
+    git(workspaceDir, ['-c', 'user.name=Test', '-c', 'user.email=test@example.invalid', 'commit', '-m', 'stage work'])
+    const head = git(workspaceDir, ['rev-parse', 'HEAD'])
+
+    const checkpoint = commitAcceptedWorkflowArtifacts({
+      taskId,
+      stageId: 'implement',
+      workspaceDir,
+      artifacts: [],
+      resolveArtifact: () => { throw new Error('空产物表不该去解析产物') },
+      runGit,
+    })
+
+    assert.equal(checkpoint.sourceCommit, head, '冻结的应当是本任务分支的 HEAD')
+    assert.deepEqual(checkpoint.paths, [], '没有登记产物 ⇒ 路径清单为空（而不是编一个）')
+  } finally {
+    rmSync(workspaceDir, { recursive: true, force: true })
+  }
+})
+
+test('★ 没有产物且工作区脏：拒绝并说清两条出路（未提交改动不在 HEAD 里）', () => {
+  const taskId = 'T-checkpoint-head-dirty'
+  const workspaceDir = createTaskWorktree(taskId)
+  try {
+    writeFileSync(join(workspaceDir, 'workbench-uncommitted.mjs'), 'export const loose = true\n')
+    assert.throws(() => commitAcceptedWorkflowArtifacts({
+      taskId,
+      stageId: 'implement',
+      workspaceDir,
+      artifacts: [],
+      resolveArtifact: () => { throw new Error('空产物表不该去解析产物') },
+      runGit,
+    }), /没有已登记的文件产物，且工作区还有 1 处未提交改动[\s\S]*先提交这些改动或登记对应产物/)
+    assert.equal(git(workspaceDir, ['status', '--porcelain=v1', '--untracked-files=all']), '?? workbench-uncommitted.mjs', '拒绝时不得动工作区')
+  } finally {
+    rmSync(workspaceDir, { recursive: true, force: true })
+  }
+})
+
+test('★ 没有产物且不在本任务分支：仍拒绝（冻结的是「这一阶段的产物」，不是随便一个 HEAD）', () => {
+  const taskId = 'T-checkpoint-head-branch'
+  const workspaceDir = createTaskWorktree(taskId)
+  try {
+    git(workspaceDir, ['symbolic-ref', 'HEAD', 'refs/heads/other'])
+    assert.throws(() => commitAcceptedWorkflowArtifacts({
+      taskId,
+      stageId: 'implement',
+      workspaceDir,
+      artifacts: [],
+      resolveArtifact: () => { throw new Error('空产物表不该去解析产物') },
+      runGit,
+    }), /阶段工作区分支错误：期望 w\/T-checkpoint-head-branch，实际 other/)
+  } finally {
+    rmSync(workspaceDir, { recursive: true, force: true })
+  }
+})
+
 test('human acceptance freezes only the registered workflow artifact into a verifiable task commit', () => {
   const taskId = 'T-checkpoint'
   const workspaceDir = createTaskWorktree(taskId)

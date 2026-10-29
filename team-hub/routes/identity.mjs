@@ -274,6 +274,17 @@ export function createIdentityRoutes({
     }
   }
 
+  /**
+   * 资料写接口的输入错误：**必须**是 IDENTITY_INVALID_INPUT（400）。
+   *
+   * 不能复用 `requireString`：它抛 MISSING_PARAM，而前端按具名 code 分支
+   * （R-08）。也不能把 readBody 的解析异常原样透出去——那会变成
+   * IDENTITY_REQUEST_FAILED，读起来像"服务坏了"而不是"请求体写错了"。
+   */
+  const invalidProfileInput = (message) => Object.assign(new Error(message), {
+    code: 'IDENTITY_INVALID_INPUT', status: 400,
+  })
+
   const routes = [
     // ── 能力发现与初始化 ────────────────────────────────────────────────────
     {
@@ -398,11 +409,52 @@ export function createIdentityRoutes({
       method: 'GET',
       path: '/api/identity/me',
       async run(req, res, { url }) {
-        await withUser(req, res, url, (me) => ({
-          user: { userId: me.userId, name: me.name },
-          roles: userStore.rolesOf(me.userId),
-          systemRole: userStore.isSystemAdmin(me.userId) ? 'admin' : 'none',
-        }))
+        await withUser(req, res, url, (me) => {
+          // ★ 追加式扩展：user.userId / user.name 的名字与类型**不变**
+          //   （手机端只读这两个字段，见 workbench/mobile/app.mjs），
+          //   新字段只增不改；旧客户端忽略它们即可。
+          const row = userStore.userRow(me.userId)
+          const user = userStore.publicUser(row)
+          return {
+            user: {
+              userId: user.userId, name: user.name,
+              displayName: user.displayName, avatar: user.avatar,
+              createdAt: user.createdAt, disabled: user.disabled,
+            },
+            roles: userStore.rolesOf(me.userId),
+            systemRole: userStore.isSystemAdmin(me.userId) ? 'admin' : 'none',
+          }
+        })
+      },
+    },
+    {
+      method: 'POST',
+      path: '/api/identity/profile',
+      async run(req, res, { url }) {
+        // 只更新**本人**：目标 userId 一律从 Bearer 令牌解析；
+        // 请求体里的 userId / name 等按未知字段拒绝（不得静默改变目标）。
+        await withUser(req, res, url, async (me) => {
+          let body
+          try {
+            body = await readBody(req)
+          } catch {
+            throw invalidProfileInput('请求体不是合法 JSON')
+          }
+          if (body === null || typeof body !== 'object' || Array.isArray(body)) {
+            throw invalidProfileInput('请求体必须是 JSON 对象')
+          }
+          // P0 允许字段集合 = {displayName}（P1 头像再追加 avatar；现在拒绝）。
+          const allowed = new Set(['displayName'])
+          const unknown = Object.keys(body).filter((k) => !allowed.has(k))
+          if (unknown.length > 0) {
+            throw invalidProfileInput(`不支持的字段：${unknown.join('、')}`)
+          }
+          if (!Object.prototype.hasOwnProperty.call(body, 'displayName')) {
+            throw invalidProfileInput('缺少 displayName')
+          }
+          // 长度/控制字符/类型校验在仓储层做（唯一实现）；路由只做形状 + 白名单。
+          return { user: userStore.updateProfile({ userId: me.userId, displayName: body.displayName }) }
+        })
       },
     },
     {

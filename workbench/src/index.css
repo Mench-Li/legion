@@ -3784,3 +3784,24 @@ body {
 .provider-derive-plan code { background: #f1f3f5; padding: 1px 4px; border-radius: 4px; }
 .set-form-hint { font-size: 12px; color: #657384; line-height: 1.7; margin: 6px 0 10px; }
 
+/* ── 账号中心（设置 →「账号与连接」）──────────────────────────────────────────
+ *
+ * 新增样式落 index.css，不改压缩长行的 workspace.css（同 docs/RESEARCH.md 的
+ * 口径）。要点是**窄屏不横向溢出**：显示名/设备名/空间角色都可能是长串或 CJK，
+ * 而账号页常在 320–430px 的窗口宽度下被打开。
+ * ★ overflow-wrap + word-break + min-width:0 三件套缺一不可：
+ *   flex 子项默认 min-width:auto，长单词会把整行撑破。 */
+.account-page { display: flex; flex-direction: column; gap: 16px; }
+.account-page > .settings-runtime-status { margin: 0; min-height: 1em; }
+.account-display-name { font-size: 18px; font-weight: 600; overflow-wrap: anywhere; word-break: break-word; }
+.account-page .settings-session-row > div { min-width: 0; }
+.account-page .settings-session-row strong { overflow-wrap: anywhere; word-break: break-word; }
+.account-facts { display: grid; grid-template-columns: minmax(120px, 180px) minmax(0, 1fr); gap: 6px 16px; margin: 0; }
+.account-facts > div { display: contents; }
+.account-facts dt { color: #657384; font-size: 12px; }
+.account-facts dd { margin: 0; min-width: 0; overflow-wrap: anywhere; word-break: break-word; }
+@media (max-width: 720px) {
+  .account-facts { grid-template-columns: minmax(0, 1fr); }
+  .account-facts dt { margin-top: 6px; }
+}
+

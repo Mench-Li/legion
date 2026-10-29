@@ -137,7 +137,7 @@ import { resolveProfileName } from '../../runtime/adapters/dsh/profile-name.mjs'
 //     > 一次"改了、也重（编译/重启了别的服务）了"的操作，
 //     > 与一次"改了、但那台机器没吃到"的操作，在**日志与读数都照常滚动**的时候是一样的 ——
 //     > 区别只在读出来的是新结论还是旧结论。
-import { materializeWorkflowCheckpoints, WORKFLOW_CHECKPOINT_EVIDENCE_PREFIX } from '../../runtime/contracts/agent-workflow-checkpoints.mjs'
+import { latestUpstreamCheckpoint, materializeWorkflowCheckpoints, WORKFLOW_CHECKPOINT_EVIDENCE_PREFIX } from '../../runtime/contracts/agent-workflow-checkpoints.mjs'
 import { validateAgentWorkflowTestReport } from '../../runtime/contracts/agent-workflow.mjs'
 import { expectedExternalPermissionMode } from '../../runtime/contracts/agent-provider-policy.mjs'
 import { agentOptionsForFrozenModel } from '../../runtime/contracts/agent-model-selection.mjs'
@@ -2372,8 +2372,21 @@ function spaceWorker(ctx: AppContext, config: Config): void {
     let worktreeDir: string | null = null
     let workflowReviewBaseCommit: string | null = null
     let workflowImplementationBaseCommit: string | null = null
+    // ★ BUG-040：审查阶段的基线取**上游冻结提交本身**，不是 main 的 HEAD。
+    //
+    //   审查要看的正是「上游交来的那份代码」。从 HEAD 建分支、再把旧基线的冻结提交
+    //   merge 进来，只要 main 在两轮之间改过同一段代码，merge 就必然冲突并自动回滚
+    //   ⇒ 派工中止，任务停在 in_review（现场：T-219 导 T-218 的 `app.mjs` 时撞上）。
+    //   从冻结提交建分支时，那次 merge 天然是空操作；真正的冲突被留给合并回 main
+    //   的那一刻 —— 那才是人能看见并裁决的地方。
+    //
+    //   实现/设计阶段**不**这么干：它们要基于最新主分支写代码，基线仍是 HEAD。
+    const reviewStage = isWorkflowStage(t, stage, 'review')
+    const workflowBaseRef = reviewStage && t.agentSelectionSnapshot?.source === 'goal-agent-workflow'
+      ? latestUpstreamCheckpoint(t.agentSelectionSnapshot.workflowContext)?.sourceCommit ?? null
+      : null
     if (config.isolate) {
-      worktreeDir = await workspace.prepareWorktree(t.id)
+      worktreeDir = await workspace.prepareWorktree(t.id, { baseRef: workflowBaseRef })
       if (worktreeDir !== null) cwd = worktreeDir
       else log(`${t.id} worktree 不可用，回退到 workspace 直接工作`)
     }

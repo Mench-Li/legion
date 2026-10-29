@@ -82,3 +82,52 @@ test('manual acceptance records a frozen checkpoint for the next workflow stage'
     rmSync(workspace, { recursive: true, force: true })
   }
 })
+
+test('★ 没有登记任何产物的阶段也能验收：冻结本任务分支的 HEAD（BUG-039）', async () => {
+  const taskId = `T-head-${randomUUID().slice(0, 8)}`
+  const scope = 'accepted-checkpoint-test'
+  const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..')
+  const workspace = join(repoRoot, '.legion-worktrees', taskId)
+  mkdirSync(workspace, { recursive: true })
+  const callGit = (args) => {
+    const result = runGit(args, workspace)
+    assert.equal(result.ok, true, `${args.join(' ')} failed: ${result.stderr}`)
+    return result.stdout.trim()
+  }
+  try {
+    callGit(['init', '--initial-branch', `w/${taskId}`])
+    callGit(['-c', 'user.name=Test', '-c', 'user.email=test@example.invalid', 'commit', '--allow-empty', '-m', 'base'])
+    mkdirSync(join(workspace, 'workbench'), { recursive: true })
+    writeFileSync(join(workspace, 'workbench', 'app.mjs'), 'export const fixed = true\n')
+    callGit(['add', 'workbench/app.mjs'])
+    callGit(['-c', 'user.name=Test', '-c', 'user.email=test@example.invalid', 'commit', '-m', 'implemented'])
+    const head = callGit(['rev-parse', 'HEAD'])
+
+    mod.db.prepare(`INSERT INTO tasks
+      (id,title,priority,status,scope,hold,role,soldier,goalId,version,fileDomain,createdAt,updatedAt)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(
+      taskId, 'Implemented stage without registered artifacts', 'high', 'in_review', scope, 0, 'coder', null, null, 1,
+      JSON.stringify([]), new Date().toISOString(), new Date().toISOString(),
+    )
+    mod.db.prepare('UPDATE tasks SET agent_selection_snapshot=?, artifacts=? WHERE id=?').run(
+      JSON.stringify({
+        source: 'goal-agent-workflow',
+        workflowStageId: 'implement',
+        reviewWorkflow: { stageDefinitionsById: { implement: { role: 'coder', nextStageIds: ['review'] } } },
+      }),
+      JSON.stringify([]),
+      taskId,
+    )
+
+    const accepted = await post('/api/transition', { id: taskId, to: 'done', by: 'general', scope })
+    assert.equal(accepted.status, 200, accepted.text)
+    assert.equal(accepted.json.task.status, 'done')
+    const checkpoint = accepted.json.task.evidence.find((item) => item.text.startsWith('agent-workflow-stage-checkpoint:'))
+    assert.ok(checkpoint, '下游仍然需要一条 checkpoint 证据')
+    const value = JSON.parse(checkpoint.text.slice('agent-workflow-stage-checkpoint:'.length))
+    assert.equal(value.sourceCommit, head, '冻结的是本任务分支的 HEAD')
+    assert.deepEqual(value.artifactPaths, [])
+  } finally {
+    rmSync(workspace, { recursive: true, force: true })
+  }
+})

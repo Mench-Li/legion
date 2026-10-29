@@ -133,8 +133,21 @@ export interface Workspace {
   repoRootFor: () => string
   workspaceFor: () => string
   worktreeRootFor: () => string
-  prepareWorktree: (taskId: string) => Promise<string | null>
+  prepareWorktree: (taskId: string, options?: PrepareWorktreeOptions) => Promise<string | null>
   commitWorktree: (taskId: string, dir: string, summary: string) => Promise<boolean>
+}
+
+/** `prepareWorktree` 的建分支基线（只在**新建**分支时生效；复用既有分支/目录一律忽略）。 */
+export interface PrepareWorktreeOptions {
+  /**
+   * 新分支的起点提交（缺省 `HEAD`）。
+   *
+   * 审查阶段要「看一眼上游交来的那份代码」，基线必须是**上游冻结提交本身**：
+   * 从 HEAD 建分支再把冻结提交 merge 进来，只要 main 在两轮之间改过同一段代码，
+   * merge 就冲突、自动回滚、整条阶段停摆（现场：T-219 导 T-218 时撞 `app.mjs`）。
+   * 从冻结提交建分支，那次 merge 天然是空操作；冲突被挪到真正合入 main 的那一刻。
+   */
+  baseRef?: string | null
 }
 
 export function createWorkspace(deps: WorkspaceDeps): Workspace {
@@ -236,10 +249,13 @@ export function createWorkspace(deps: WorkspaceDeps): Workspace {
    * worktree 隔离：为任务建独立分支 worktree（w/<taskId>）。失败返回 null 由调用方回退。
    * 复用优先：同任务已有 worktree（blocked 解阻 / 退回纠错续做）直接复用，不删除上一轮部分改动；
    * worktree 被清理但分支仍在（blocked 时已提交 WIP）则从分支重新挂载。
+   *
+   * `options.baseRef` 只影响**新建**的那一次（见 `PrepareWorktreeOptions`）。
    */
-  async function prepareWorktreeRaw(taskId: string): Promise<string | null> {
+  async function prepareWorktreeRaw(taskId: string, options: PrepareWorktreeOptions = {}): Promise<string | null> {
     const root = worktreeRootFor()
     const dir = join(root, taskId)
+    const baseRef = typeof options.baseRef === 'string' && options.baseRef.trim() !== '' ? options.baseRef.trim() : 'HEAD'
     try {
       await ensurePrePushGuard()
       if (existsSync(dir)) {
@@ -263,12 +279,14 @@ export function createWorkspace(deps: WorkspaceDeps): Workspace {
         activity('worktree', taskId, `复用分支 w/${taskId}：${dir}`)
         return dir
       }
-      const add = await runGit(repoRootFor(), ['worktree', 'add', '-b', `w/${taskId}`, dir, 'HEAD'])
+      const add = await runGit(repoRootFor(), ['worktree', 'add', '-b', `w/${taskId}`, dir, baseRef])
       if (add.code !== 0) {
-        log(`${taskId} worktree 创建失败：${(add.err || add.out).trim()}`)
+        log(`${taskId} worktree 创建失败（基线 ${baseRef}）：${(add.err || add.out).trim()}`)
         return null
       }
-      activity('worktree', taskId, `隔离 worktree 就绪：${dir}（分支 w/${taskId}）`)
+      activity('worktree', taskId, baseRef === 'HEAD'
+        ? `隔离 worktree 就绪：${dir}（分支 w/${taskId}）`
+        : `隔离 worktree 就绪：${dir}（分支 w/${taskId}，基线取上游冻结提交 ${baseRef.slice(0, 12)}）`)
       return dir
     } catch (e) {
       log(`${taskId} prepareWorktree 异常：${String(e)}`)
@@ -281,8 +299,8 @@ export function createWorkspace(deps: WorkspaceDeps): Workspace {
    * 让「编码实现」阶段至少跑得起本仓的 tsc/vite/构建，而不是只能声明「未执行」。
    * 联接本身失败不影响已就绪的 worktree。
    */
-  async function prepareWorktree(taskId: string): Promise<string | null> {
-    const dir = await prepareWorktreeRaw(taskId)
+  async function prepareWorktree(taskId: string, options: PrepareWorktreeOptions = {}): Promise<string | null> {
+    const dir = await prepareWorktreeRaw(taskId, options)
     if (dir !== null) {
       try {
         linkNodeModulesForWorktree(dir)

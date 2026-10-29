@@ -1,5 +1,45 @@
 export const WORKFLOW_CHECKPOINT_EVIDENCE_PREFIX = 'agent-workflow-stage-checkpoint:'
 
+/**
+ * 上游阶段清单里**最新一个**可用的冻结提交；没有就返回 null。
+ *
+ * ## 它是干什么用的
+ *
+ * 下游阶段（尤其审查）新建 `w/<任务id>` 时，基线应当取**上游冻结提交本身**，
+ * 而不是 `main` 的 HEAD。理由在 `materializeWorkflowCheckpoints` 那一侧：
+ * 从 HEAD 建分支之后再把旧基线的冻结提交 merge 进来，只要 main 在两轮之间改过
+ * 同一段代码，merge 就必然冲突、自动回滚、整条阶段停摆（现场：T-219 导入
+ * T-218 的提交时与 main 的同一段 `app.mjs` 冲突，派工直接中止）。
+ * 从冻结提交建分支时，那次 merge 天然是空操作，冲突被挪到**真正要合入 main
+ * 的那一刻**——那才是人该做决定的地方。
+ *
+ * `upstreamStages` 是**由新到旧**排的（materialize 反过来逐个合入，让最新的最后落），
+ * 所以基准取第一个带有效 checkpoint 的阶段。
+ *
+ * ## 为什么这里读坏了返回 null 而不是抛
+ *
+ * 本函数只决定「分支从哪建」。格式坏掉时，判据的严格版本在
+ * `materializeWorkflowCheckpoints`：它会带着阶段名抛出「缺少有效的冻结 Git 提交证据」，
+ * 那条错误才该被看到。这里再抛一次只会让同一个原因有两条不同的文案。
+ */
+export function latestUpstreamCheckpoint(workflowContext) {
+  const upstream = workflowContext?.upstreamStages
+  if (!Array.isArray(upstream)) return null
+  for (const stage of upstream) {
+    if (typeof stage?.stageId !== 'string' || typeof stage?.taskId !== 'string') continue
+    const evidence = Array.isArray(stage.evidence) ? stage.evidence : []
+    const checkpoints = evidence.filter((item) => typeof item?.text === 'string' && item.text.startsWith(WORKFLOW_CHECKPOINT_EVIDENCE_PREFIX))
+    const last = checkpoints.at(-1)
+    if (last === undefined) continue
+    let parsed = null
+    try { parsed = JSON.parse(last.text.slice(WORKFLOW_CHECKPOINT_EVIDENCE_PREFIX.length)) } catch { continue }
+    if (parsed?.stageId === stage.stageId && /^[0-9a-f]{40,64}$/i.test(parsed?.sourceCommit ?? '')) {
+      return Object.freeze({ stageId: stage.stageId, taskId: stage.taskId, sourceCommit: parsed.sourceCommit })
+    }
+  }
+  return null
+}
+
 /** Merge completed ancestor stage commits into the current stage's isolated branch. */
 export async function materializeWorkflowCheckpoints({ workflowContext, workdir, runGit } = {}) {
   if (typeof workdir !== 'string' || workdir.trim() === '') throw new TypeError('workdir is required')

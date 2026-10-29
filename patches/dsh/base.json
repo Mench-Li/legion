@@ -11,8 +11,8 @@
       "file": "0001-subagent-claude-code-accept-terminal-assistant-text.patch",
       "summary": "subagent-claude-code：success 但 result 为空时回退到累积的 assistant 文本，避免把成功判成无结果",
       "upstream": {
-        "baseCommit": "687f282e8625c6b8d11ff58211a90524be2e4317",
-        "baseVersion": "0.2.1-rc.2",
+        "baseCommit": "1f81c047fc48fa190a683e469daa699857e9afe8",
+        "baseVersion": "0.2.1-rc.3",
         "sourceBranch": "legion/compat-claude-provider",
         "legacyLocalCommit": "194eae5b6eb9ad8ee0b6a0251f6780f053dd6823"
       },
@@ -30,22 +30,102 @@
         "packages/subagent/subagent-claude-code/tests/subagent-claude-code.spec.ts"
       ],
       "branch": "legion/compat-claude-provider"
+    },
+    {
+      "slug": "subagent-claude-code-run-events",
+      "file": "0003-subagent-claude-code-run-events.patch",
+      "summary": "Claude Code：SDK 消息映射为工具/用量事件并随 run 发布",
+      "upstream": {
+        "baseCommit": "1f81c047fc48fa190a683e469daa699857e9afe8",
+        "baseVersion": "0.2.1-rc.3",
+        "sourceBranch": "legion/compat-claude-provider"
+      },
+      "deployed": {
+        "package": "dsh-subagent-claude-code",
+        "markers": [
+          "tool.requested",
+          "droppedEvents"
+        ]
+      },
+      "sha256": "a623613d2a7cbb03b82a4a044517c022db23418a628e1f5b6f3bb6b15061f947",
+      "bytes": 11873,
+      "targets": [
+        "packages/subagent/subagent-claude-code/src/events.ts",
+        "packages/subagent/subagent-claude-code/src/run-events.ts",
+        "packages/subagent/subagent-claude-code/src/run.ts",
+        "packages/subagent/subagent-claude-code/tests/events.spec.ts"
+      ],
+      "branch": "legion/compat-claude-provider",
+      "dependsOn": [
+        "subagent-run-event-stream"
+      ]
+    },
+    {
+      "slug": "subagent-codex-run-events",
+      "file": "0004-subagent-codex-run-events.patch",
+      "summary": "Codex：item/completed 映射为工具事件并随 run 发布",
+      "upstream": {
+        "baseCommit": "1f81c047fc48fa190a683e469daa699857e9afe8",
+        "baseVersion": "0.2.1-rc.3",
+        "sourceBranch": "legion/compat-claude-provider"
+      },
+      "deployed": {
+        "package": "dsh-subagent-codex",
+        "markers": [
+          "tool.failed",
+          "droppedEvents"
+        ]
+      },
+      "sha256": "13c3fb3166d08b630b5453732df62de53c67e7b3564d8d063228ce66f71ac4c9",
+      "bytes": 10730,
+      "targets": [
+        "packages/subagent/subagent-codex/src/run-events.ts",
+        "packages/subagent/subagent-codex/src/run.ts",
+        "packages/subagent/subagent-codex/src/wire.ts",
+        "packages/subagent/subagent-codex/tests/subagent-codex.spec.ts"
+      ],
+      "branch": "legion/compat-claude-provider",
+      "dependsOn": [
+        "subagent-run-event-stream"
+      ]
     }
   ],
   "installed": {
     "asarPath": "D:\\software\\dsh\\resources\\app.asar",
-    "appVersion": "0.2.1-rc.2",
-    "asarSha256": "47874618bf5b3011fcaac10cd4c85f69da333e70d4f99b921207c78d0999512a"
+    "appVersion": "0.2.1-rc.3",
+    "asarSha256": "04b32e3a872826ba15cfb2081c6a929a8d4ecaa65e09a2543e5a6b30e2eff1f0"
   },
   "deployed": {
     "profileRoot": "C:\\Users\\11150\\.dsh\\profiles\\desktop",
     "version": "0.2.1-rc.2",
-    "libPath": "C:\\Users\\11150\\.dsh\\profiles\\desktop\\node_modules\\@deepseek-ai\\dsh-subagent-claude-code\\lib\\index.js",
-    "libSha256": "3cd278f0043f1c8c1a954c784d61328c956cf0f57ffbc13def6151795632c134",
+    "libPath": "C:\\Users\\11150\\.dsh\\profiles\\desktop\\node_modules\\@deepseek-ai\\dsh-subagent-codex\\lib\\index.js",
+    "libSha256": "2833abd2521c9d718cf480508da28ea0bc2f93a10132d9ba42b40fc1b7254f65",
     "markersPresent": [
-      "assistantText",
-      "end_turn"
+      "tool.failed",
+      "droppedEvents"
     ]
   },
-  "recordedAt": "2026-10-21T09:42:43.545Z"
+  "recordedAt": "2026-10-28T07:56:56.246Z",
+  "deployedByPackage": {
+    "dsh-subagent-claude-code": {
+      "profileRoot": "C:\\Users\\11150\\.dsh\\profiles\\desktop",
+      "version": "0.2.1-rc.2",
+      "libPath": "C:\\Users\\11150\\.dsh\\profiles\\desktop\\node_modules\\@deepseek-ai\\dsh-subagent-claude-code\\lib\\index.js",
+      "libSha256": "643cccb68bdd7e50478938d5e69860ee227c69e3015a813cae2fc20e860a89f9",
+      "markersPresent": [
+        "tool.requested",
+        "droppedEvents"
+      ]
+    },
+    "dsh-subagent-codex": {
+      "profileRoot": "C:\\Users\\11150\\.dsh\\profiles\\desktop",
+      "version": "0.2.1-rc.2",
+      "libPath": "C:\\Users\\11150\\.dsh\\profiles\\desktop\\node_modules\\@deepseek-ai\\dsh-subagent-codex\\lib\\index.js",
+      "libSha256": "2833abd2521c9d718cf480508da28ea0bc2f93a10132d9ba42b40fc1b7254f65",
+      "markersPresent": [
+        "tool.failed",
+        "droppedEvents"
+      ]
+    }
+  }
 }

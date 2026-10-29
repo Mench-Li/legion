@@ -2778,20 +2778,31 @@ export function createRunStore({
    * @param {Array<{seq:number, type:string, known?:boolean, event?:object}>} p.events
    * @param {number|null} [p.leaseEpoch] 写入时的租约纪元（与其它写入口同一纪律：
    *        过期 worker 的写入被拒，否则一次崩溃重启后旧进程还能补一份明细）。
+   * @param {string|null} [p.taskId] 当 `attemptId` 不是 `run_attempts` 行时
+   *        （Agent Workflow 阶段 Attempt，`wfa-*`）由调用方给出归属任务；租约尝试
+   *        一律以库里的 task_id 为准，不会被它改写。
    */
-  function recordRunEvents({ attemptId, events, leaseEpoch = null }) {
+  function recordRunEvents({ attemptId, events, leaseEpoch = null, taskId = null }) {
     if (typeof attemptId !== 'string' || attemptId.trim() === '') {
       throw new ContractError(RUN_ERRORS.ATTEMPT_NOT_FOUND, 'recordRunEvents 需要 attemptId')
     }
     if (!Array.isArray(events)) throw new TypeError('recordRunEvents 的 events 必须是数组')
+    if (taskId !== null && (typeof taskId !== 'string' || taskId.trim() === '')) {
+      throw new TypeError('recordRunEvents 的 taskId 必须是非空字符串或 null')
+    }
     return withTx(() => {
       const atMs = clock()
       const row = rowOf(db, attemptId)
-      if (row === null) throw new ContractError(RUN_ERRORS.ATTEMPT_NOT_FOUND, `没有这条尝试：${attemptId}`)
-      if (leaseEpoch !== null && leaseEpoch !== undefined && row.lease_epoch !== leaseEpoch) {
+      if (row !== null && leaseEpoch !== null && leaseEpoch !== undefined && row.lease_epoch !== leaseEpoch) {
         throw fail(RUN_ERRORS.LEASE_EPOCH_STALE,
           `leaseEpoch 不符：请求 ${leaseEpoch}，实际 ${row.lease_epoch}——拒绝写入过期 worker 的事件明细`,
           { currentEpoch: row.lease_epoch, currentWorkerId: row.worker_id })
+      }
+      // 非租约尝试没有 `run_attempts` 行，归属任务由调用方给出；不允许"猜一个
+      // task_id"把事件挂到别的任务上。
+      const effectiveTaskId = row !== null ? row.task_id : taskId
+      if (effectiveTaskId === null) {
+        throw new ContractError(RUN_ERRORS.ATTEMPT_NOT_FOUND, `没有这条尝试：${attemptId}`)
       }
       const insert = db.prepare(
         `INSERT INTO run_events (attempt_id, task_id, event_seq, type, known, at_ms, event_json, lease_epoch)
@@ -2820,13 +2831,13 @@ export function createRunStore({
           : ev.known !== false
         if (Buffer.byteLength(json, 'utf8') > MAX_RUN_EVENT_JSON_BYTES) {
           oversized += 1
-          const r = insert.run(attemptId, row.task_id, seq, ev.type, known ? 1 : 0, atMs,
+          const r = insert.run(attemptId, effectiveTaskId, seq, ev.type, known ? 1 : 0, atMs,
             JSON.stringify({ truncatedByStore: true, limitBytes: MAX_RUN_EVENT_JSON_BYTES, type: ev.type }), leaseEpoch)
           if (r.changes === 1) written += 1
           else skipped += 1
           continue
         }
-        const r = insert.run(attemptId, row.task_id, seq, ev.type, known ? 1 : 0, atMs, json, leaseEpoch)
+        const r = insert.run(attemptId, effectiveTaskId, seq, ev.type, known ? 1 : 0, atMs, json, leaseEpoch)
         if (r.changes === 1) written += 1
         else skipped += 1
       }
@@ -2840,21 +2851,76 @@ export function createRunStore({
   }
 
   /**
+   * 追加**一条**运行事件，序号由本仓储分配（`MAX(event_seq) + 1`）。
+   *
+   * 与 `recordRunEvents` 的分工：后者服务 `run_attempts` 的租约路径，序号由 worker
+   * 权威给出、并校验 `leaseEpoch`；本方法服务**没有租约**的尝试（当前是 Agent
+   * Workflow 的阶段 Attempt，`wfa-*`），调用方（Hub 自身）已持有 taskId，不需要
+   * 伪造一条 `run_attempts` 行。
+   *
+   * 幂等边界不同：这里没有调用方序号，重复调用会各分配一个新序号——因此调用点
+   * 必须位于"这次状态迁移确实发生"的分支内。终态重复上报在路由层已提前返回。
+   *
+   * 用 SAVEPOINT 而不是本仓储的 `withTx`：调用点可能已经处在 **server 自己的**
+   * 事务里，而 `withTx` 的嵌套状态只认识本文件发起的事务，直接 `BEGIN IMMEDIATE`
+   * 会得到 "cannot start a transaction within a transaction"。
+   */
+  function appendRunEvent({ attemptId, taskId, type, event = null } = {}) {
+    if (typeof attemptId !== 'string' || attemptId.trim() === '') {
+      throw new ContractError(RUN_ERRORS.ATTEMPT_NOT_FOUND, 'appendRunEvent 需要 attemptId')
+    }
+    if (typeof taskId !== 'string' || taskId.trim() === '') {
+      throw new TypeError('appendRunEvent 需要 taskId')
+    }
+    if (typeof type !== 'string' || type.trim() === '') {
+      throw new TypeError('appendRunEvent 的 type 必须是非空字符串')
+    }
+    const savepoint = 'run_event_append'
+    db.exec(`SAVEPOINT ${savepoint}`)
+    try {
+      const atMs = clock()
+      const seq = db.prepare(
+        'SELECT COALESCE(MAX(event_seq), 0) + 1 AS seq FROM run_events WHERE attempt_id = ?',
+      ).get(attemptId).seq
+      const json = JSON.stringify(event ?? { type })
+      const known = isKnownEventType(type)
+      const body = Buffer.byteLength(json, 'utf8') > MAX_RUN_EVENT_JSON_BYTES
+        ? JSON.stringify({ truncatedByStore: true, limitBytes: MAX_RUN_EVENT_JSON_BYTES, type })
+        : json
+      const r = db.prepare(
+        `INSERT INTO run_events (attempt_id, task_id, event_seq, type, known, at_ms, event_json, lease_epoch)
+         VALUES (?, ?, ?, ?, ?, ?, ?, NULL) ON CONFLICT (attempt_id, event_seq) DO NOTHING`,
+      ).run(attemptId, taskId, seq, type, known ? 1 : 0, atMs, body)
+      db.exec(`RELEASE ${savepoint}`)
+      return Object.freeze({ ok: r.changes === 1, attemptId, seq, type, known, atMs })
+    } catch (error) {
+      try { db.exec(`ROLLBACK TO ${savepoint}`); db.exec(`RELEASE ${savepoint}`) } catch { /* 回滚失败时保留原始错误 */ }
+      throw error
+    }
+  }
+
+  /**
    * F-05 前半的读面：一次 Attempt 的事件明细（按契约序号升序）。
    *
    * `known` 原样返回：库里出现一条 `known = 0` 的行说明**上游产生了一种
    * 本控制面不认识的事件**。那是一个要被看见的信号，不是要被过滤掉的噪声——
    * 过滤掉会让"上游新增了事件但我们不记"与"上游什么都没产生"长得一样。
    */
-  function runEventsOf(attemptId, { type = null, limit = 1000 } = {}) {
+  function runEventsOf(attemptId, { type = null, limit = 1000, sinceSeq = null } = {}) {
     if (typeof attemptId !== 'string' || attemptId.trim() === '') {
       throw new ContractError(RUN_ERRORS.ATTEMPT_NOT_FOUND, 'runEventsOf 需要 attemptId')
     }
     if (!Number.isSafeInteger(limit) || limit <= 0) throw new TypeError('limit 必须是正安全整数')
-    const rows = type === null
-      ? db.prepare('SELECT * FROM run_events WHERE attempt_id = ? ORDER BY event_seq ASC LIMIT ?').all(attemptId, limit)
-      : db.prepare('SELECT * FROM run_events WHERE attempt_id = ? AND type = ? ORDER BY event_seq ASC LIMIT ?')
-        .all(attemptId, type, limit)
+    if (sinceSeq !== null && sinceSeq !== undefined && (!Number.isSafeInteger(sinceSeq) || sinceSeq < 0)) {
+      throw new TypeError('sinceSeq 必须是非负安全整数')
+    }
+    const where = ['attempt_id = ?']
+    const params = [attemptId]
+    if (sinceSeq !== null && sinceSeq !== undefined) { where.push('event_seq > ?'); params.push(sinceSeq) }
+    if (type !== null) { where.push('type = ?'); params.push(type) }
+    const rows = db.prepare(
+      `SELECT * FROM run_events WHERE ${where.join(' AND ')} ORDER BY event_seq ASC LIMIT ?`,
+    ).all(...params, limit)
     return Object.freeze(rows.map((r) => Object.freeze({
       seq: Number(r.event_seq),
       attemptId: r.attempt_id,
@@ -3109,7 +3175,7 @@ export function createRunStore({
     runResultsOf,
     // F-05 前半：运行明细（13 种 RunEvent）的写与读。在此之前只有终态与用量
     // 两类能落地，其余 11 种读完即弃。
-    recordRunEvents, runEventsOf, runEventCountsOf,
+    recordRunEvents, appendRunEvent, runEventsOf, runEventCountsOf,
     // PRT-307：机器验收的唯一入口（核判据 → 落库 → 按结论推进状态）
     recordValidation, validationsOf, criteriaOf,
     // PRT-308：交接（原子创建下一岗位任务 + 收口）

@@ -5581,6 +5581,37 @@ function rowToAgentWorkflowStageAttempt(row) {
   }
 }
 
+/**
+ * 阶段 Attempt 的运行事件**尽力**落库：与 `recordRunEventsBestEffort` 同一条原则——
+ * 明细缺一条不能让一次真实的阶段结算回滚（否则会把真实结果作废并触发重跑）。
+ * 失败计数留在控制面日志里，而不是假装事件写成。
+ */
+function appendStageAttemptRunEvent(input) {
+  try {
+    runStore.appendRunEvent(input)
+  } catch (error) {
+    console.warn(`[run-events] 阶段 Attempt 事件未落库 attempt=${input?.attemptId ?? '?'} type=${input?.type ?? '?'}: ${error instanceof Error ? error.message : String(error)}`)
+  }
+}
+
+function recordAgentWorkflowStageAttemptEvents({ attemptId, events, truncated = false, by, scope } = {}) {
+  if (typeof attemptId !== 'string' || attemptId.trim() === '') throw new Error('缺少参数 attemptId')
+  if (!Array.isArray(events)) throw new Error('events 必须是数组')
+  if (events.length > 500) throw Object.assign(new Error('单次最多 500 条事件'), { statusCode: 413 })
+  // 这里**不**再包一层 server 事务：`recordRunEvents` 自己用 `BEGIN IMMEDIATE`，
+  // 两层事务会在 SQLite 上报 "cannot start a transaction within a transaction"。
+  // 归属校验读到的 task_id 是一个稳定事实，不需要和明细写入同一原子边界。
+  const current = db.prepare('SELECT * FROM agent_workflow_stage_attempts WHERE id=? AND scope=?').get(attemptId, scope)
+  if (!current) throw Object.assign(new Error(`阶段 Attempt 不存在：${attemptId}`), { statusCode: 404 })
+  if (current.started_by !== by) throw Object.assign(new Error('只有创建该阶段 Attempt 的 worker 可以上报运行事件'), { statusCode: 403 })
+  if (events.length === 0) return { ok: true, attemptId, written: 0, skipped: 0, oversized: 0, total: 0, truncated }
+  const result = runStore.recordRunEvents({ attemptId, taskId: current.task_id, events })
+  if (truncated) {
+    audit(by, scope, 'agent-workflow:attempt-events-truncated', current.task_id, { attemptId, dropped: true })
+  }
+  return { ...result, truncated }
+}
+
 function beginAgentWorkflowStageAttempt({ taskId, stageId, providerName: requestedProviderName, workspaceDir, idempotencyKey, by, scope } = {}) {
   if (typeof taskId !== 'string' || taskId.trim() === '') throw new Error('缺少参数 taskId')
   if (typeof stageId !== 'string' || stageId.trim() === '') throw new Error('缺少参数 stageId')
@@ -5620,6 +5651,16 @@ function beginAgentWorkflowStageAttempt({ taskId, stageId, providerName: request
       .run(id, scope, workflow.instanceId, taskId, stageId, attemptNo, idempotencyKey, by,
         providerName, workspaceDir, JSON.stringify(frozen), atMs, atMs)
     audit(by, scope, 'agent-workflow:attempt-start', taskId, { attemptId: id, stageId, attemptNo, providerName }, task.goalId)
+    // F01/F02：阶段 Attempt 没有 `run_attempts` 租约行，但其生命周期仍要落进
+    // `run_events`（UI 的「运行明细」按 attemptId 读同一张表）。这里只写我们
+    // 确实知道的事实；provider 的细粒度工具事件在 DSH 句柄给出 `events`
+    // 异步流之前不会伪造。
+    appendStageAttemptRunEvent({
+      attemptId: id,
+      taskId,
+      type: 'run.started',
+      event: { stageId, providerName, attemptNo, workflowInstanceId: workflow.instanceId },
+    })
     return rowToAgentWorkflowStageAttempt(db.prepare('SELECT * FROM agent_workflow_stage_attempts WHERE id=?').get(id))
   })
 }
@@ -5755,6 +5796,20 @@ function reportAgentWorkflowStageAttempt({ attemptId, providerRunId, state, stop
         attemptId, stageId: current.stage_id, providerName: current.provider_name, providerRunId: nextRunId,
         state, stopReason: normalizedStopReason,
       })
+      // 终态与 Attempt 的结算在**同一事务**里落一条运行明细；`running` 不写，
+      // 因为开始已经由 `run.started` 记录，重复一条 running 只会把时间线拉长。
+      const terminalEventType = state === 'completed' ? 'run.completed'
+        : state === 'failed' ? 'run.failed'
+          : state === 'canceled' ? 'run.cancelled'
+            : state === 'unknown' ? 'run.outcome_unknown' : null
+      if (terminalEventType !== null) {
+        appendStageAttemptRunEvent({
+          attemptId,
+          taskId: current.task_id,
+          type: terminalEventType,
+          event: { state, providerRunId: nextRunId, stopReason: normalizedStopReason },
+        })
+      }
     }
     return rowToAgentWorkflowStageAttempt(db.prepare('SELECT * FROM agent_workflow_stage_attempts WHERE id=?').get(attemptId))
   })
@@ -8392,6 +8447,7 @@ const router = createRouter([
     beginStageAttempt: beginAgentWorkflowStageAttempt,
     reportStageAttempt: reportAgentWorkflowStageAttempt,
     reconcileStageAttempt: reconcileAgentWorkflowStageAttempt,
+    recordStageEvents: recordAgentWorkflowStageAttemptEvents,
   }),
 ])
 

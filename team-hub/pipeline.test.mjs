@@ -1377,6 +1377,23 @@ it('Agent 工作流快照与 typed review 台账在 team-hub 重启后可恢复'
   assert.equal(startedAttempt.status, 200, startedAttempt.text)
   assert.equal(startedAttempt.json.task.state, 'starting')
   assert.equal(startedAttempt.json.task.attemptNo, 2, '恢复测试继续沿用该阶段已有的成功 Attempt 编号')
+  // F01/F02：阶段 Attempt 的生命周期事件要落进同一张 run_events，UI 的
+  // 「运行明细」按 attemptId 就能读到；这里钉住"开始"这一条真的写了。
+  const startedRunEvents = await get(`/api/runtime/run-events?attemptId=${encodeURIComponent(startedAttempt.json.task.id)}`)
+  assert.equal(startedRunEvents.status, 200, startedRunEvents.text)
+  assert.deepEqual(startedRunEvents.json.events.map((e) => e.type), ['run.started'])
+  assert.equal(startedRunEvents.json.events[0].event.stageId, attemptSnapshot.workflowStageId)
+  // A：执行者把观测到的工具事件批量交回 Hub；序号由 worker 给，Hub 只做归属校验与落库。
+  const forwardedEvents = await post('/api/agent-workflow/stage-attempts/events', {
+    attemptId: startedAttempt.json.task.id,
+    events: [{ seq: 2, type: 'tool.requested', event: { seq: 2, type: 'tool.requested', toolName: 'pwsh' } }],
+    by: attemptTaskRow.role, scope: 'space-independent-agent-workflow',
+  })
+  assert.equal(forwardedEvents.status, 200, forwardedEvents.text)
+  assert.equal(forwardedEvents.json.task.written, 1)
+  const afterForward = await get(`/api/runtime/run-events?attemptId=${encodeURIComponent(startedAttempt.json.task.id)}`)
+  assert.deepEqual(afterForward.json.events.map((e) => e.type), ['run.started', 'tool.requested'])
+  assert.equal(afterForward.json.events[1].event.toolName, 'pwsh')
   const runAttached = await post('/api/agent-workflow/stage-attempts/report', {
     attemptId: startedAttempt.json.task.id, providerRunId: 'dsh-run-persisted-1', state: 'running',
     by: attemptTaskRow.role, scope: 'space-independent-agent-workflow',
@@ -1414,6 +1431,12 @@ it('Agent 工作流快照与 typed review 台账在 team-hub 重启后可恢复'
   })
   assert.equal(runFinished.status, 200, runFinished.text)
   assert.equal(runFinished.json.task.providerRunId, 'dsh-run-persisted-1')
+  // 终态与 Attempt 结算同一事务：事件流以契约终态事件收尾，且带住 provider run id。
+  const finishedRunEvents = await get(`/api/runtime/run-events?attemptId=${encodeURIComponent(startedAttempt.json.task.id)}`)
+  assert.equal(finishedRunEvents.status, 200, finishedRunEvents.text)
+  assert.deepEqual(finishedRunEvents.json.events.map((e) => e.type), ['run.started', 'tool.requested', 'run.completed'])
+  assert.equal(finishedRunEvents.json.events[2].event.providerRunId, 'dsh-run-persisted-1')
+  assert.equal(finishedRunEvents.json.events[2].event.stopReason, 'completed')
   assert.deepEqual(runFinished.json.task.result, {
       status: 'done', summary: 'implemented', evidence: 'tests passed',
       testReport: {

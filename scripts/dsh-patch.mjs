@@ -209,7 +209,7 @@ export function selectPatch(base, slug) {
 export function evaluateBase(base, now, options = {}) {
   const patchDir = options.patchDir ?? PATCH_DIR
   const checks = []
-  const patch = selectPatch(base)
+  const patch = options.patchEntry ?? selectPatch(base)
   if (patch === null) {
     checks.push({ id: 'patch', ok: false, text: '基线里没有可唯一确定的补丁（用 --patch=<slug> 指定）' })
     return { ok: false, checks, drifts: [] }
@@ -292,6 +292,65 @@ export function patchTargets(patchText) {
   return [...new Set(targets)]
 }
 
+/**
+ * `--register`：把一个**已经生成好**的补丁登记进基线。
+ *
+ * 为什么需要它：README 说 base.json 由脚本生成、不要手改；而 `--record` 只更新
+ * 已有条目。这个模式把“新补丁”的必要事实（哈希、字节数、目标、所属包、标记）
+ * 从补丁正文里读出来，避免手抄路径或哈希导致 `--check` 从一开始就红。
+ *
+ * 约束与工具其余部分一致：一补丁一包（`packageDirOf` 必须唯一）、分支必须以
+ * `legion/` 开头。`dependsOn` 只用于记录“必须先应用的补丁”，不改变应用顺序。
+ *
+ * @param base - 当前基线
+ * @param input - `{ file, slug, summary, markers, packageName, dependsOn?, branch? }`
+ * @returns 追加后的新基线对象（不写盘）
+ */
+export function registerPatch(base, input) {
+  const file = input?.file
+  if (typeof file !== 'string' || file.trim() === '') throw new Error('--register 需要补丁文件名')
+  if (file.includes('/') || file.includes('\\')) throw new Error('--register 只接受 patches/dsh 下的文件名，不接受路径')
+  const patchPath = join(PATCH_DIR, file)
+  if (!existsSync(patchPath)) throw new Error(`补丁文件不存在：${file}`)
+  if (typeof input.slug !== 'string' || input.slug.trim() === '') throw new Error('--slug 必填')
+  if ((base.patches ?? []).some((entry) => entry.slug === input.slug || entry.file === file)) {
+    throw new Error(`补丁已登记：${input.slug} / ${file}`)
+  }
+  const patchText = readFileSync(patchPath, 'utf8')
+  const targets = patchTargets(patchText)
+  if (targets.length === 0) throw new Error('补丁里找不到 `+++ b/...` 目标')
+  if (packageDirOf({ targets }) === null) {
+    throw new Error('补丁必须只落在一个 packages/<area>/<name>/ 下（一补丁一包）')
+  }
+  if (typeof input.packageName !== 'string' || input.packageName.trim() === '') {
+    throw new Error('--package 必填（profile 里的包名，如 dsh-subagent）')
+  }
+  const markers = Array.isArray(input.markers) ? input.markers.filter((m) => typeof m === 'string' && m !== '') : []
+  if (markers.length === 0) throw new Error('--markers 必填：构建产物里应出现的补丁标记（逗号分隔）')
+  const first = (base.patches ?? [])[0]
+  const branch = input.branch ?? first?.branch
+  if (typeof branch !== 'string' || !branch.startsWith('legion/')) {
+    throw new Error('分支必须从 legion/ 开头（绝不允许落到 master/main）')
+  }
+  const entry = {
+    slug: input.slug,
+    file,
+    summary: typeof input.summary === 'string' ? input.summary : '',
+    upstream: {
+      baseCommit: first?.upstream?.baseCommit ?? null,
+      baseVersion: first?.upstream?.baseVersion ?? null,
+      sourceBranch: branch,
+    },
+    deployed: { package: input.packageName, markers },
+    sha256: sha256File(patchPath),
+    bytes: readFileSync(patchPath).length,
+    targets,
+    branch,
+  }
+  if (Array.isArray(input.dependsOn) && input.dependsOn.length > 0) entry.dependsOn = input.dependsOn
+  return { ...base, patches: [...(base.patches ?? []), entry] }
+}
+
 /** 打印人读报告。 */
 function printReport(result) {
   for (const check of result.checks) {
@@ -302,8 +361,12 @@ function printReport(result) {
 
 /** 解析命令行参数（`--k=v` 与 `--flag` 两种）。 */
 export function parseArgs(argv) {
-  const MODES = ['check', 'apply', 'build', 'install', 'revert', 'record', 'list']
-  const out = { mode: null, source: null, patch: null, strict: false, json: false }
+  const MODES = ['check', 'apply', 'build', 'install', 'revert', 'record', 'list', 'register']
+  const out = {
+    mode: null, source: null, patch: null, strict: false, json: false,
+    register: null, slug: null, summary: null, markers: null,
+    packageName: null, dependsOn: null, branch: null,
+  }
   for (const raw of argv) {
     if (raw.startsWith('--') && MODES.includes(raw.slice(2))) {
       out.mode = raw.slice(2)
@@ -311,6 +374,13 @@ export function parseArgs(argv) {
     else if (raw === '--json') out.json = true
     else if (raw.startsWith('--source=')) out.source = raw.slice('--source='.length)
     else if (raw.startsWith('--patch=')) out.patch = raw.slice('--patch='.length)
+    else if (raw.startsWith('--register=')) { out.mode = 'register'; out.register = raw.slice('--register='.length) }
+    else if (raw.startsWith('--slug=')) out.slug = raw.slice('--slug='.length)
+    else if (raw.startsWith('--summary=')) out.summary = raw.slice('--summary='.length)
+    else if (raw.startsWith('--markers=')) out.markers = raw.slice('--markers='.length)
+    else if (raw.startsWith('--package=')) out.packageName = raw.slice('--package='.length)
+    else if (raw.startsWith('--depends-on=')) out.dependsOn = raw.slice('--depends-on='.length)
+    else if (raw.startsWith('--branch=')) out.branch = raw.slice('--branch='.length)
     else throw new Error(`不认识的参数：${raw}`)
   }
   return out
@@ -447,15 +517,18 @@ export function installProvider(source, patchEntry, patchPath) {
 }
 
 /** `--record`：把当前机器的事实写回基线（作者字段保留，只重录证据）。 */
-function record(base) {
-  const patchEntry = selectPatch(base)
+function record(base, patchEntry) {
+  if (patchEntry === null || patchEntry === undefined) {
+    patchEntry = selectPatch(base)
+  }
   if (patchEntry === null) throw new Error('基线里没有可唯一确定的补丁')
   const patchRel = patchEntry.file
   const patchPath = join(PATCH_DIR, patchRel)
   if (!existsSync(patchPath)) throw new Error(`补丁文件不存在：${patchRel}`)
   const patchText = readFileSync(patchPath, 'utf8')
   const installed = installedDsh()
-  const deployed = deployedPackage(patchEntry.deployed?.package ?? 'dsh-subagent-claude-code')
+  const packageName = patchEntry.deployed?.package ?? 'dsh-subagent-claude-code'
+  const deployed = deployedPackage(packageName)
 
   const next = {
     ...base,
@@ -470,6 +543,20 @@ function record(base) {
       asarPath: installed.asarPath,
       appVersion: installed.appVersion,
       asarSha256: installed.asarSha256,
+    },
+    // 补丁栈里每个包各有一份部署证据；顶层 `deployed` 保留最近一次，
+    // 兼容单补丁时代的读取方。
+    deployedByPackage: deployed === null ? (base.deployedByPackage ?? {}) : {
+      ...(base.deployedByPackage ?? {}),
+      [packageName]: {
+        profileRoot: deployed.profileRoot,
+        version: deployed.version,
+        libPath: deployed.libPath,
+        libSha256: deployed.libSha256,
+        markersPresent: (patchEntry.deployed?.markers ?? []).filter(
+          (marker) => deployed.libText !== null && deployed.libText.includes(marker),
+        ),
+      },
     },
     deployed: deployed === null ? null : {
       ...base.deployed,
@@ -502,13 +589,48 @@ function main() {
     return 0
   }
 
+  if (args.mode === 'register') {
+    if (base === null) { console.log('  ✘ 没有基线，先建立 base.json'); return 1 }
+    try {
+      const next = registerPatch(base, {
+        file: args.register,
+        slug: args.slug,
+        summary: args.summary,
+        markers: (args.markers ?? '').split(',').map((item) => item.trim()).filter((item) => item !== ''),
+        packageName: args.packageName,
+        dependsOn: (args.dependsOn ?? '').split(',').map((item) => item.trim()).filter((item) => item !== ''),
+        branch: args.branch,
+      })
+      writeFileSync(BASE_PATH, `${JSON.stringify(next, null, 2)}\n`, 'utf8')
+      const entry = next.patches[next.patches.length - 1]
+      console.log(`  ✔ 已登记 ${entry.slug}（${entry.file}）`)
+      console.log(`      包 ${entry.deployed.package}；目标 ${entry.targets.join(', ')}；标记 ${entry.deployed.markers.join(', ')}`)
+      return 0
+    } catch (error) {
+      console.log(`  ✘ ${error instanceof Error ? error.message : String(error)}`)
+      return 1
+    }
+  }
+
   if (args.mode === 'record') {
     if (base === null) { console.log('  ✘ 没有基线可重录'); return 1 }
-    const next = record(base)
+    const targets = args.patch !== null
+      ? [selectPatch(base, args.patch)].filter((entry) => entry !== null)
+      : base.patches
+    if (targets.length === 0) {
+      console.log('  ✘ 补丁无法唯一确定（用 --patch=<slug> 指定）')
+      return 1
+    }
+    let next = base
+    for (const entry of targets) next = record(next, entry)
     console.log('  ✔ 已重录基线')
     console.log(`      已装 DSH：${next.installed?.appVersion ?? '(未找到)'}`)
-    console.log(`      部署产物：${next.deployed?.version ?? '(未找到)'}  sha256 ${String(next.deployed?.libSha256 ?? '').slice(0, 12)}…`)
-    console.log(`      标记齐全：${(next.deployed?.markersPresent ?? []).join(', ') || '(无)'}`)
+    for (const entry of targets) {
+      const evidence = next.deployedByPackage?.[entry.deployed?.package] ?? next.deployed
+      console.log(`      ${entry.slug} → ${entry.deployed?.package ?? '?'}：`
+        + `${evidence?.libSha256 === undefined ? '(未找到)' : `${String(evidence.libSha256).slice(0, 12)}…`}`
+        + `；标记 ${(evidence?.markersPresent ?? []).join(', ') || '(无)'}`)
+    }
     return 0
   }
 
@@ -517,33 +639,47 @@ function main() {
     return 1
   }
 
+  if (args.mode === 'check') {
+    const entries = args.patch !== null
+      ? [selectPatch(base, args.patch)].filter((entry) => entry !== null)
+      : base.patches
+    if (entries.length === 0) {
+      console.log('  ✘ 补丁无法唯一确定（用 --patch=<slug> 指定）')
+      return 1
+    }
+    const installed = installedDsh()
+    let ok = true
+    for (const entry of entries) {
+      console.log(`  · ${entry.slug}（${entry.deployed?.package ?? '?'}）`)
+      const now = { installed, deployed: deployedPackage(entry.deployed?.package ?? 'dsh-subagent-claude-code') }
+      const result = evaluateBase(base, now, { patchEntry: entry })
+      printReport(result)
+      if (args.source !== null) {
+        const entryPath = join(PATCH_DIR, entry.file)
+        const applied = patchAppliesCleanly(resolve(args.source), entryPath)
+        console.log(`  ${applied.ok ? '✔' : '✘'} 补丁能落到该检出上：${applied.message}`)
+        if (!applied.ok) result.ok = false
+        const reversed = patchAppliesCleanly(resolve(args.source), entryPath, true)
+        console.log(`  ${reversed.ok ? '✔' : '－'} 反向应用（说明该检出已是打过补丁的状态时会成立）：${reversed.message}`)
+      } else {
+        console.log('  － 未给 --source：跳过"补丁能否落到检出上"的检查')
+      }
+      if (args.strict && installed === null) {
+        console.log('  ✘ --strict：找不到已装 DSH 也算失败')
+        result.ok = false
+      }
+      ok = ok && result.ok
+      if (args.json) console.log(JSON.stringify(result, null, 2))
+    }
+    return ok ? 0 : 1
+  }
+
   const patchEntry = selectPatch(base, args.patch)
   if (patchEntry === null) {
     console.log('  ✘ 补丁无法唯一确定（用 --patch=<slug> 指定）')
     return 1
   }
   const patchPath = join(PATCH_DIR, patchEntry.file)
-
-  if (args.mode === 'check') {
-    const now = { installed: installedDsh(), deployed: deployedPackage(patchEntry.deployed?.package ?? 'dsh-subagent-claude-code') }
-    const result = evaluateBase(base, now)
-    printReport(result)
-    if (args.source !== null) {
-      const applied = patchAppliesCleanly(resolve(args.source), patchPath)
-      console.log(`  ${applied.ok ? '✔' : '✘'} 补丁能落到该检出上：${applied.message}`)
-      if (!applied.ok) result.ok = false
-      const reversed = patchAppliesCleanly(resolve(args.source), patchPath, true)
-      console.log(`  ${reversed.ok ? '✔' : '－'} 反向应用（说明该检出已是打过补丁的状态时会成立）：${reversed.message}`)
-    } else {
-      console.log('  － 未给 --source：跳过"补丁能否落到检出上"的检查')
-    }
-    if (args.strict && now.installed === null) {
-      console.log('  ✘ --strict：找不到已装 DSH 也算失败')
-      return 1
-    }
-    if (args.json) console.log(JSON.stringify(result, null, 2))
-    return result.ok ? 0 : 1
-  }
 
   if (args.mode === 'apply' || args.mode === 'revert' || args.mode === 'build' || args.mode === 'install') {
     if (args.source === null) {
@@ -618,7 +754,7 @@ function main() {
     return 0
   }
 
-  console.log('用法：--list | --check [--source=…] [--strict] | --apply --source=… | --build --source=… | --install --source=… | --revert --source=… | --record')
+  console.log('用法：--list | --check [--source=…] [--strict] | --apply --source=… | --build --source=… | --install --source=… | --revert --source=… | --record [--patch=<slug>] | --register=<file> --slug=<slug> --package=<pkg> --markers=<a,b>')
   return 1
 }
 

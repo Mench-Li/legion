@@ -1,8 +1,8 @@
 // team-hub/routes/agent-workflow.mjs
 // Typed review outcomes and atomic rework creation for stage Agent workflows.
 
-export function createAgentWorkflowRoutes({ json, handleWrite, submitReview, readHistory, readInstances, beginStageAttempt, reportStageAttempt, reconcileStageAttempt } = {}) {
-  const deps = { json, handleWrite, submitReview, readHistory, readInstances, beginStageAttempt, reportStageAttempt, reconcileStageAttempt }
+export function createAgentWorkflowRoutes({ json, handleWrite, submitReview, readHistory, readInstances, beginStageAttempt, reportStageAttempt, reconcileStageAttempt, recordStageEvents } = {}) {
+  const deps = { json, handleWrite, submitReview, readHistory, readInstances, beginStageAttempt, reportStageAttempt, reconcileStageAttempt, recordStageEvents }
   for (const [key, value] of Object.entries(deps)) {
     if (value === undefined || value === null) throw new TypeError(`createAgentWorkflowRoutes 缺注入项：${key}`)
   }
@@ -76,6 +76,21 @@ export function createAgentWorkflowRoutes({ json, handleWrite, submitReview, rea
         disposition: body?.disposition,
         note: body?.note,
         idempotencyKey: body?.idempotencyKey,
+        by,
+        scope,
+      }))
+    },
+  }, {
+    method: 'POST',
+    match: 'exact',
+    path: '/api/agent-workflow/stage-attempts/events',
+    async run(req, res) {
+      // A 链路的 Legion 半边：执行者把自己确实观测到的 RunEvent 批量交给 Hub。
+      // 事件由 worker 编号（契约序号权威），这里只做归属校验与落库。
+      await handleWrite(req, res, (body, by, scope) => recordStageEvents({
+        attemptId: body?.attemptId,
+        events: body?.events,
+        truncated: body?.truncated === true,
         by,
         scope,
       }))

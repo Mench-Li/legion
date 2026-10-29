@@ -1,0 +1,321 @@
+From 5bba838b73fe4b3784486d572630e0388c0bdd65 Mon Sep 17 00:00:00 2001
+From: legion <legion@local>
+Date: Wed, 28 Oct 2026 15:41:59 +0800
+Subject: [PATCH 1/2] subagent-claude-code: emit tool and usage events
+
+---
+ .../subagent-claude-code/src/events.ts        | 81 +++++++++++++++++++
+ .../subagent-claude-code/src/run-events.ts    | 79 ++++++++++++++++++
+ .../subagent/subagent-claude-code/src/run.ts  | 19 ++++-
+ .../subagent-claude-code/tests/events.spec.ts | 45 +++++++++++
+ 4 files changed, 223 insertions(+), 1 deletion(-)
+ create mode 100644 packages/subagent/subagent-claude-code/src/events.ts
+ create mode 100644 packages/subagent/subagent-claude-code/src/run-events.ts
+ create mode 100644 packages/subagent/subagent-claude-code/tests/events.spec.ts
+
+diff --git a/packages/subagent/subagent-claude-code/src/events.ts b/packages/subagent/subagent-claude-code/src/events.ts
+new file mode 100644
+index 0000000000..ab87264a5e
+--- /dev/null
++++ b/packages/subagent/subagent-claude-code/src/events.ts
+@@ -0,0 +1,81 @@
++/**
++ * Map provider-observed Claude Code SDK messages onto the subagent seam's
++ * progress events. Only facts the SDK actually reports are emitted: tool
++ * requests/results and usage. Assistant prose is already delivered as the final
++ * output, and streaming deltas are deliberately not duplicated into the event
++ * stream (volume without actionable content).
++ *
++ * @module @deepseek-ai/dsh-subagent-claude-code/events
++ */
++import type { RunEvent } from './run-events.ts'
++
++interface ClaudeUsage {
++  input_tokens?: unknown
++  output_tokens?: unknown
++}
++
++interface ClaudeBlock {
++  type?: unknown
++  name?: unknown
++  id?: unknown
++  tool_use_id?: unknown
++  is_error?: unknown
++}
++
++interface ClaudeMessage {
++  type?: unknown
++  message?: { content?: unknown }
++  usage?: ClaudeUsage
++}
++
++/** Translate one SDK message into zero or more seam events. */
++export function claudeMessageEvents(raw: unknown): RunEvent[] {
++  if (raw === null || typeof raw !== 'object') return []
++  const message = raw as ClaudeMessage
++  const events: RunEvent[] = []
++  if (message.type === 'assistant') {
++    const content = message.message?.content
++    if (Array.isArray(content)) {
++      for (const block of content as ClaudeBlock[]) {
++        if (block === null || typeof block !== 'object') continue
++        if (block.type !== 'tool_use' || typeof block.name !== 'string') continue
++        events.push({
++          type: 'tool.requested',
++          toolName: block.name,
++          ...(typeof block.id === 'string' ? { toolId: block.id } : {}),
++        })
++      }
++    }
++    return events
++  }
++  if (message.type === 'user') {
++    const content = message.message?.content
++    if (Array.isArray(content)) {
++      for (const block of content as ClaudeBlock[]) {
++        if (block === null || typeof block !== 'object') continue
++        if (block.type !== 'tool_result' || typeof block.tool_use_id !== 'string') continue
++        events.push({
++          type: block.is_error === true ? 'tool.failed' : 'tool.completed',
++          toolId: block.tool_use_id,
++        })
++      }
++    }
++    return events
++  }
++  if (message.type === 'result') {
++    const usage = message.usage
++    if (usage !== undefined && usage !== null && typeof usage === 'object') {
++      const inputTokens = typeof usage.input_tokens === 'number' ? usage.input_tokens : undefined
++      const outputTokens = typeof usage.output_tokens === 'number' ? usage.output_tokens : undefined
++      if (inputTokens !== undefined || outputTokens !== undefined) {
++        events.push({
++          type: 'usage.updated',
++          ...(inputTokens === undefined ? {} : { inputTokens }),
++          ...(outputTokens === undefined ? {} : { outputTokens }),
++        })
++      }
++    }
++    return events
++  }
++  return events
++}
+diff --git a/packages/subagent/subagent-claude-code/src/run-events.ts b/packages/subagent/subagent-claude-code/src/run-events.ts
+new file mode 100644
+index 0000000000..4b8fab8e78
+--- /dev/null
++++ b/packages/subagent/subagent-claude-code/src/run-events.ts
+@@ -0,0 +1,79 @@
++/**
++ * Provider-local bounded event stream.
++ *
++ * Why this is duplicated in both out-of-process providers: the seam's core
++ * package (`@deepseek-ai/dsh-subagent`) ships inside the host's app.asar and is
++ * not a profile-installable package, so a Legion compat patch cannot change it.
++ * Keeping the bridge local lets each provider expose `run.events` without a core
++ * patch. Keep the two copies in step; the tests pin the observable behaviour.
++ *
++ * @module @deepseek-ai/dsh-subagent-claude-code/run-events
++ */
++/** One provider-observed progress event. */
++export interface RunEvent {
++  /** Discriminator; consumers map it onto their own vocabulary. */
++  readonly type: string
++  readonly [key: string]: unknown
++}
++
++/** Options for {@link createRunEventStream}. */
++export interface RunEventStreamOptions {
++  /** Maximum buffered events before the oldest is dropped. Defaults to 1000. */
++  readonly limit?: number
++}
++
++/** A bounded push-to-async-iterable bridge for provider-observed events. */
++export interface RunEventStream {
++  /** The iterable a consumer reads; ends when {@link close} is called and drained. */
++  readonly events: AsyncIterable<RunEvent>
++  /** Append one observed event. No-op after close. */
++  push(event: RunEvent): void
++  /** End the iterable after the buffered events are drained. Idempotent. */
++  close(): void
++}
++
++/** Create a bounded event stream. */
++export function createRunEventStream(options: RunEventStreamOptions = {}): RunEventStream {
++  const limit = options.limit ?? 1000
++  if (!Number.isSafeInteger(limit) || limit <= 0) throw new TypeError('run event stream limit must be a positive integer')
++  const buffer: RunEvent[] = []
++  let dropped = 0
++  let closed = false
++  let wake: (() => void) | undefined
++  const notify = (): void => {
++    const resume = wake
++    wake = undefined
++    resume?.()
++  }
++  const events = (async function* (): AsyncGenerator<RunEvent> {
++    for (;;) {
++      const next = buffer.shift()
++      if (next !== undefined) {
++        yield next
++        continue
++      }
++      if (closed) break
++      await new Promise<void>((resolve) => { wake = resolve })
++    }
++    // The consumer learns the timeline is incomplete instead of inferring
++    // "nothing else happened".
++    if (dropped > 0) yield { type: 'run.progress', droppedEvents: dropped }
++  })()
++  return {
++    events,
++    push(event: RunEvent): void {
++      if (closed) return
++      if (buffer.length >= limit) {
++        buffer.shift()
++        dropped += 1
++      }
++      buffer.push(event)
++      notify()
++    },
++    close(): void {
++      if (closed) return
++      closed = true
++      notify()
++    },
++  }
++}
+diff --git a/packages/subagent/subagent-claude-code/src/run.ts b/packages/subagent/subagent-claude-code/src/run.ts
+index a643d06de2..923fc49dc5 100644
+--- a/packages/subagent/subagent-claude-code/src/run.ts
++++ b/packages/subagent/subagent-claude-code/src/run.ts
+@@ -36,6 +36,8 @@ import {
+   claudeSpawnSpec,
+   ManagedClaudeCodeProcess,
+ } from './process.ts'
++import { claudeMessageEvents } from './events.ts'
++import { createRunEventStream } from './run-events.ts'
+ 
+ /** Default POSIX grace between subprocess termination tiers. */
+ export const DEFAULT_DISPOSE_GRACE_MS = 3_000
+@@ -237,10 +239,12 @@ export async function consumeClaudeQuery(
+   query: AsyncIterable<SDKMessage>,
+   onPermissionDenied?: () => void,
+   onResult?: () => void,
++  onMessage?: (message: SDKMessage) => void,
+ ): Promise<SubagentResult> {
+   let answer: string | undefined
+   let assistantText: string[] = []
+   for await (const message of query) {
++    onMessage?.(message)
+     if (message.type === 'system' && message.subtype === 'permission_denied') {
+       onPermissionDenied?.()
+       continue
+@@ -537,6 +541,9 @@ export async function startClaudeCodeRun(
+   const publishedChild = child
+   const publishedProcessFailure = childProcessFailure
+   let receivedResult = false
++  // Provider-observed progress. Bounded, and closed on settlement or teardown;
++  // absent consumers cannot grow the host's memory without bound.
++  const runEvents = createRunEventStream()
+   const result = settleRunResult({
+     attempt: async () => {
+       try {
+@@ -550,6 +557,8 @@ export async function startClaudeCodeRun(
+             ))
+           }, () => {
+             receivedResult = true
++          }, (message) => {
++            for (const event of claudeMessageEvents(message)) runEvents.push(event)
+           }),
+           publishedProcessFailure,
+         ])
+@@ -576,6 +585,9 @@ export async function startClaudeCodeRun(
+         throw error instanceof ClaudeCodeFailure
+           ? error
+           : new ClaudeCodeFailure(facts, thrown(error))
++      } finally {
++        // The query stream is done (or failed); no further progress can arrive.
++        runEvents.close()
+       }
+     },
+     collectOutput: () => [],
+@@ -586,13 +598,14 @@ export async function startClaudeCodeRun(
+     onAbort,
+   })
+ 
+-  return subprocessRunHandle({
++  const handle = subprocessRunHandle({
+     id: brandString<SessionId>(randomUUID()),
+     result,
+     signal: request.signal,
+     onAbort,
+     requestCancel,
+     teardown: async () => {
++      runEvents.close()
+       try {
+         await disposeClaudeCodeChild(publishedQuery, publishedChild)
+       } catch (error: unknown) {
+@@ -602,4 +615,8 @@ export async function startClaudeCodeRun(
+       }
+     },
+   })
++  // The seam's handle type lives in the host bundle; the extra property is the
++  // provider-local extension Legion reads. Object.assign keeps the base handle
++  // contract intact for every existing consumer.
++  return Object.assign(handle, { events: runEvents.events })
+ }
+diff --git a/packages/subagent/subagent-claude-code/tests/events.spec.ts b/packages/subagent/subagent-claude-code/tests/events.spec.ts
+new file mode 100644
+index 0000000000..9e50a391d7
+--- /dev/null
++++ b/packages/subagent/subagent-claude-code/tests/events.spec.ts
+@@ -0,0 +1,45 @@
++import { describe, expect, it } from 'vitest'
++import { claudeMessageEvents } from '../src/events.ts'
++
++describe('claudeMessageEvents', () => {
++  it('maps assistant tool_use blocks to tool.requested', () => {
++    const events = claudeMessageEvents({
++      type: 'assistant',
++      message: {
++        content: [
++          { type: 'text', text: 'working' },
++          { type: 'tool_use', id: 'tool-1', name: 'Bash', input: { command: 'ls' } },
++        ],
++      },
++    })
++    expect(events).toEqual([{ type: 'tool.requested', toolName: 'Bash', toolId: 'tool-1' }])
++  })
++
++  it('maps user tool_result blocks to completed/failed', () => {
++    const events = claudeMessageEvents({
++      type: 'user',
++      message: {
++        content: [
++          { type: 'tool_result', tool_use_id: 'tool-1', is_error: false },
++          { type: 'tool_result', tool_use_id: 'tool-2', is_error: true },
++        ],
++      },
++    })
++    expect(events).toEqual([
++      { type: 'tool.completed', toolId: 'tool-1' },
++      { type: 'tool.failed', toolId: 'tool-2' },
++    ])
++  })
++
++  it('maps result usage to usage.updated and ignores non-numeric fields', () => {
++    expect(claudeMessageEvents({ type: 'result', usage: { input_tokens: 12, output_tokens: 3 } }))
++      .toEqual([{ type: 'usage.updated', inputTokens: 12, outputTokens: 3 }])
++    expect(claudeMessageEvents({ type: 'result', usage: { input_tokens: 'x' } })).toEqual([])
++  })
++
++  it('returns no events for unobserved message kinds or garbage', () => {
++    expect(claudeMessageEvents({ type: 'stream_event' })).toEqual([])
++    expect(claudeMessageEvents(null)).toEqual([])
++    expect(claudeMessageEvents({ type: 'assistant', message: { content: 'text' } })).toEqual([])
++  })
++})
+-- 
+2.55.0.windows.5
+

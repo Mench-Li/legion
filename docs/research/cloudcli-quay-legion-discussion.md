@@ -1,6 +1,6 @@
 # CloudCLI 和 Quay 功能借鉴与 Legion Agent 接入讨论稿
 
-状态：讨论稿，Q01 的优先方向已确认，Q02 至 Q06 待决策，尚未形成完整实施方案。版本：0.3。创建及更新日期：2026-10-10。
+状态：讨论稿，Q01 的优先方向已确认，Q02 至 Q06 待决策，尚未形成完整实施方案。版本：0.4。创建日期：2026-10-10，最近更新：2026-10-28。
 
 本稿整理 CloudCLI 与 Quay 中适合 Legion 借鉴的功能，说明 Legion 当前连接 Claude Code、Codex 和 DSH 原生 Agent 的方式，并记录后续需要讨论的产品与架构问题。功能编号 F01 至 F08、问题编号 Q01 至 Q06 保持稳定，后续可以按编号修改本稿。
 
@@ -8,9 +8,11 @@ Legion 已经通过 DSH Provider 调用外部 Agent。Claude Code 使用官方 A
 
 ## 研究范围与依据
 
-本地现状以 2026-10-10 检出的源码为依据：Legion HEAD 为 `3f48b02ccb2eac68a90ac2d7c083869a6041ce05`，DSH HEAD 为 `5badb15009ae1756c3afe0ae0cef1faafc290ccc`。工作区中的未提交内容也属于本次读取范围；这两个提交号不代表当前已安装或运行的版本。本文没有将源码能力等同于当前节点已注册、已认证或已启用的能力。
+本地现状以 2026-10-28 复核的源码为依据：Legion HEAD 为 `32a446f19ab4276a5e9e4d0b7c560eece6ff4be9`，DSH HEAD 为 `687f282e8625c6b8d11ff58211a90524be2e4317`。0.3 记录的是 2026-10-10 的快照（Legion `3f48b02…`、DSH `5badb15…`）；两次读取都包含工作区未提交内容。提交号不代表当前已安装或运行的版本。本文没有将源码能力等同于当前节点已注册、已认证或已启用的能力。
 
-外部项目研究对象为 [yaleh/claudecodeui](https://github.com/yaleh/claudecodeui) 的 develop 分支和 [yaleh/quay](https://github.com/yaleh/quay) 的 master 分支。CloudCLI 发布记录为 [v1.39.0](https://github.com/yaleh/claudecodeui/releases/tag/v1.39.0)，Quay 为 [v0.18.0](https://github.com/yaleh/quay/releases/tag/v0.18.0)。外部项目的运行稳定性仍需实际部署验证。
+外部项目研究对象为 [yaleh/claudecodeui](https://github.com/yaleh/claudecodeui) 的 develop 分支（复核 commit `6b1f4ed2aa71f7ec698c085147e962e95bfde967`，2026-10-25）和 [yaleh/quay](https://github.com/yaleh/quay) 的 master 分支（复核 commit `49c8dd8959559999ff11f60d9527a155767c4613`，2026-10-27）。0.3 记录的是 CloudCLI [v1.39.0](https://github.com/yaleh/claudecodeui/releases/tag/v1.39.0) 与 Quay [v0.18.0](https://github.com/yaleh/quay/releases/tag/v0.18.0)；复核时两者已分别到 [v1.41.0](https://github.com/yaleh/claudecodeui/releases/tag/v1.41.0) 和 [v0.24.0](https://github.com/yaleh/quay/releases/tag/v0.24.0)。CloudCLI 是 [siteboon/claudecodeui](https://github.com/siteboon/claudecodeui) 的派生仓库（fork），不是 Quay 的分支。外部项目的运行稳定性仍需实际部署验证；Quay 的 npm 与 SEA 发布渠道已退役，Claude Code 插件是当前唯一受支持的安装路径，评估其部署成本时不能沿用旧的 npm 安装假设。
+
+0.4 对两个外部项目的最新代码做了逐条复核：0.3 引用的 8 个代码与文档链接经复核仍然有效，F01–F08 的方向性判断成立；需要修正的是版本时效、以及三处表述（CloudCLI 是 fork 而非分支、Quay 面板的只读范围、CloudCLI 只读取和校验 Quay 配置）。复核还发现两项应补入 F07 的事实：resident restore 与 MCP 会话级写工具。复核为静态源码阅读，未构建或运行，因此不改变“运行稳定性仍需实际部署验证”的结论。
 
 相关已有文档：[外部 Agent 工具接入能力与 Legion 接入方案](external-agent-tools-2026-09-30.md)。该文档保留跨 Agent 阶段协作、版本化交接和返工的详细设计；本稿聚焦功能借鉴和会话运行能力，不替代其工作流定义。
 
@@ -21,7 +23,7 @@ Legion 已经通过 DSH Provider 调用外部 Agent。Claude Code 使用官方 A
 | CloudCLI | 人与多种编程 Agent 交互的 Web 和桌面工作环境 | 会话与执行分层、事件补读、常驻进程、运行状态、MCP 控制 |
 | Quay | 持续组织任务实施、检查和代码合入的开发系统 | 可执行判据、机械驱动、独立核实落地、失败升级、执行记录 |
 
-两个项目已有实际关联：Quay 将 CloudCLI 分支列为驱动开发案例，CloudCLI 有 Quay 配置与观察面板。CloudCLI 的 Quay 面板使用只读命令白名单，不能由此推断其已经提供完整的 Quay 调度控制。
+两个项目已有实际关联：Quay 在 “Quay in practice” 中把 CloudCLI 列为受其驱动的开发案例，案例数字由 Quay 自述、统计窗口止于 2026-10-07；CloudCLI 提供 Quay 配置读取与观察面板，并新增了 cockpit、fleet 汇总与 initiative 决策队列。面板对 quay CLI 的任务与调度命令使用只读白名单，明确拒绝 `task create/edit/check`、`driver start/stop`、`gate run` 与 `promote/retreat`；另有接口会话钉选和 fleet `initiative decide` 两条非任务写路径。不能由此推断其已经提供完整的 Quay 调度控制。
 
 两边的 Provider 含义不同：CloudCLI Provider 适配编程 Agent；Quay Provider 适配任务存储，例如本地 Markdown 或 GitHub Issues。Quay 的存储可替换性不能直接推导为其自动开发执行引擎可以任意替换。
 
@@ -54,7 +56,7 @@ flowchart TB
 
 Legion 在外部阶段派工前保存 Attempt，校验独立 worktree、父会话 cwd、冻结配置、Provider 注册和权限模式。返回结果经文本报告解析后继续进入阶段流程。Provider 声明的权限模式是配置核对依据，不替代真实文件访问验证或操作系统隔离。
 
-Legion 当前外部工具配置声明文本输入、文本输出和取消能力；`sessionResume`、`outputSchema`、`toolFilter` 与 `localAgent` 为 false。它们描述的是当前适配器向 Legion 开放的能力，不能推导为 Claude 或 Codex 产品本身不具备相关功能。需要人工交互的外部调用也没有统一转成 Legion 中的交互审批界面。
+Legion 当前外部工具配置声明文本输入、文本输出和取消能力；`sessionResume`、`outputSchema`、`toolFilter` 与 `localAgent` 为 false。它们描述的是当前适配器向 Legion 开放的能力，不能推导为 Claude 或 Codex 产品本身不具备相关功能。其中 `sessionResume` 自 2026-10-13 起不再作为用户可配置项，只保留在数据模型中。需要人工交互的外部调用也没有统一转成 Legion 中的交互审批界面。
 
 源码入口：
 
@@ -81,13 +83,13 @@ Legion 当前外部工具配置声明文本输入、文本输出和取消能力�
 | F07 | 持久会话与常驻宿主 | CloudCLI | 统一 Provider 调用和会话身份基础 | 按能力开放恢复或续接；设计伙伴可持续对话，任务执行仍保留 Attempt 边界 | 后续 |
 | F08 | 外部 MCP 控制面 | CloudCLI | Hub API、操作者与审计体系 | 暴露查询、发送、停止等明确操作，复用权限与审计，保留单一任务事实源 | 后续 |
 
-F01 和 F02 的参考是 CloudCLI 的服务端 Run、事件序号、补读缓冲与持久化历史协调：[聊天运行架构](https://github.com/yaleh/claudecodeui/blob/develop/docs/architecture/README.md)。浏览器连接只负责观察和交互，不承担执行生命周期。
+F01 和 F02 的参考是 CloudCLI 的服务端 Run、事件序号、补读缓冲与持久化历史协调：[聊天运行架构](https://github.com/yaleh/claudecodeui/blob/develop/docs/architecture/README.md)。浏览器连接只负责观察和交互，不承担执行生命周期。补读缓冲按 Run 有容量上限，完成后只保留数分钟；`lastSeq` 超出缓冲时回退到 REST 历史，持久性来自落盘的 transcript。Legion 设计补读时应把“内存缓冲”和“持久历史”分开，前者用于断线重连，后者用于事后核查。
 
-F03 至 F05 的参考是 Quay 的独立检查与机械推进：[Promotion Driver](https://github.com/yaleh/quay/blob/master/plugin/scripts/promotion-driver.ts)、[Worker Driver](https://github.com/yaleh/quay/blob/master/plugin/scripts/worker-driver.ts)、[Fan-in](https://github.com/yaleh/quay/blob/master/plugin/scripts/worker-fan-in.ts)。Agent 自述完成、进程退出和代码真实落地需要分别确认；验收判据也应避免只验证实现自己定义的行为。
+F03 至 F05 的参考是 Quay 的独立检查与机械推进：[Promotion Driver](https://github.com/yaleh/quay/blob/master/plugin/scripts/promotion-driver.ts)、[Worker Driver](https://github.com/yaleh/quay/blob/master/plugin/scripts/worker-driver.ts)、[Fan-in](https://github.com/yaleh/quay/blob/master/plugin/scripts/worker-fan-in.ts)。Agent 自述完成、进程退出和代码真实落地需要分别确认；验收判据也应避免只验证实现自己定义的行为。Quay 的 [driver-result.ts](https://github.com/yaleh/quay/blob/master/plugin/scripts/driver-result.ts) 把这条不变量实现为 `verified / failed / not-evaluated` 三态：worker 退出码与修复者的“已修好”都不作判据，只有独立于执行者的直接量返回 `true` 才产出 `verified`，读不到输入则落 `not-evaluated` 而不是伪装成失败或成功。这与 Q04 要求“不支持的字段保留明确的未提供状态”是同一形状，可直接作为 Legion 事件与判据的词表参考。同一任务连续修复达到上限后标 `needs-human` 并停止修复循环，则是 F04 失败升级的现成参照。
 
-F06 的实现需要适配 Windows。CloudCLI 的 systemd 和 cgroup 隔离方案不能直接用于 Legion 当前主要环境：[进程隔离说明](https://github.com/yaleh/claudecodeui/blob/develop/docs/operations/process-isolation-and-memory-caps.md)。
+F06 的实现需要适配 Windows。CloudCLI 的 systemd 和 cgroup 隔离方案不能直接用于 Legion 当前主要环境：[进程隔离说明](https://github.com/yaleh/claudecodeui/blob/develop/docs/operations/process-isolation-and-memory-caps.md)。该方案按 systemd user scope 与 `MemoryMax` 设计；在没有可用 systemd user manager 的环境（macOS、CI、容器）中，CloudCLI 直接不设上限并在 stderr 说明，Windows 没有等价物，Legion 需要另行设计进程归属与回收。
 
-F07 和 F08 的参考分别是 [Session Host](https://github.com/yaleh/claudecodeui/blob/develop/server/modules/session-hosts/session-host-manager.service.ts) 和 [MCP 控制工具](https://github.com/yaleh/claudecodeui/blob/develop/server/modules/mcp-gateway/mcp-gateway.write-tools.ts)。不直接复制常驻会话的 bypass 权限策略；Legion 应按自身授权边界定义运行政策。
+F07 和 F08 的参考分别是 [Session Host](https://github.com/yaleh/claudecodeui/blob/develop/server/modules/session-hosts/session-host-manager.service.ts)、[resident-restore.service.ts](https://github.com/yaleh/claudecodeui/blob/develop/server/modules/session-hosts/resident-restore.service.ts) 和 [MCP 控制工具](https://github.com/yaleh/claudecodeui/blob/develop/server/modules/mcp-gateway/mcp-gateway.write-tools.ts)。Session Host 区分 `per-run` 与 `resident` 两种生命周期，resident 默认空闲 24 小时后关闭；resident restore 默认开启，服务重启时按最近活跃窗口重新拉起至多 16 个 resident 会话。这说明“重启后恢复”可以由 provider 会话恢复完成，不必依赖进程一直存活，F07 的三层区分应据此补一条。MCP 控制面现有 13 个读工具与 5 个会话级写工具（`session_send`、`session_create`、`session_interrupt`、`session_start`、`session_close`），“先只读”是 Legion 的授权策略选择，而不是参考实现的能力上限。不直接复制常驻会话的 bypass 权限策略；CloudCLI 在 bypass 之外还安装了无人值守拒绝回调，Legion 应按自身授权边界定义运行政策。
 
 ## 功能如何组成开发闭环
 
@@ -295,6 +297,8 @@ sequenceDiagram
 
 结果快照与事件历史分别保存：快照便于迅速看现状，历史解释如何到达现状。工具参数和日志需控制长度、处理凭据等敏感内容；第一版不要求收集模型内部推理或全量 token。
 
+CloudCLI 的三态判词（`verified / failed / not-evaluated`）和“浏览器只拿 app session id、provider session id 留在服务端”是两个可直接复用的做法：前者对应“执行结果”里的待核实状态，后者说明原生执行身份可以只保存在执行层，不必下发前端。
+
 **第一阶段的验收建议：** 刷新页面后可以补回同一运行的关键事件；重复上报不重复展示；查看一次失败即可找到节点、原因、代码版本和下一步。
 
 **待确认：** 是否以“简明状态 + 关键时间线 + 可展开详情”为第一版，而非将完整终端作为唯一主体。
@@ -357,6 +361,8 @@ flowchart LR
 
 上图是候选接口关系。接口应复用现有 Hub 的命令和审计，不能绕过认领与阶段检查直接启动另一套执行循环。重复请求要防止重复创建或重复派工；外部 Agent 与任务内部 Agent 的身份和权限需要区分，避免任务自己无限创建任务。第一版不建议提供任意 shell 转发接口。
 
+参考实现已经给出规模感：CloudCLI 的 MCP 控制面现有 13 个读工具和 5 个会话级写工具，写工具全部限定在单个会话范围内。Legion 若开放写操作，可以沿用同样的“按会话、按动作限权”粒度，而不是引入通用转发。
+
 用户可以为明确范围授予持续权限，并不要求每次查询都确认；超出已授权范围的写操作才另行处理。是否需要远程公开服务、多用户隔离和外网部署应另开需求，不从一个本地 MCP 查询入口扩张成平台工程。
 
 **第一阶段的验收建议：** 授权 Agent 只能查询指定范围；接口返回与页面一致的状态和证据；将来允许写入时，每个动作可查发起者，重复请求不导致重复执行。
@@ -378,5 +384,6 @@ Q01 决定先做什么，不要求现在实现 Q02 至 Q06 的全部能力。Q03
 | 2026-10-10 | 0.1 | 整理项目定位、当前接入方式、八项候选功能、三张架构图和六项讨论问题 | 尚未形成实施决策 |
 | 2026-10-10 | 0.2 | 逐项补充 Q01 至 Q06 的解释、方案比较、推荐边界、验收场景及两张图；依据节点使用反馈补充首次配置与试跑前提 | 六项仍待决策；进入逐项讨论，未授权产品实现 |
 | 2026-10-10 | 0.3 | 记录用户对 Q01 的选择，并同步状态、优先顺序和讨论进度 | Q01 优先方向已确认；Q02 至 Q06 待决策，尚未形成完整实施方案 |
+| 2026-10-28 | 0.4 | 依据两个外部项目最新代码逐条复核：更新版本与提交号（CloudCLI v1.41.0、Quay v0.24.0）、修正 fork 与面板只读范围表述、补充补读缓冲边界、Quay 三态判词、resident restore、MCP 会话级写工具与 Quay 安装渠道变化 | 结论与优先级未变（Q01 仍为首阶段方向）；F01–F04 的“优先”排序继续有效，具体实施在 Legion 侧单独推进 |
 
 后续在本文件中修改对应条目，保留功能与问题编号；已确认的选择更新到正文，并在修订记录中说明。实施计划和任务应在需求确认后单独建立，避免把讨论建议当成已授权的开发范围。

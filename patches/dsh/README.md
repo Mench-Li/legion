@@ -27,7 +27,13 @@ Legion 是产品，DSH 是它面向的运行时。DSH 的上游是官方仓库
 
 | 文件 | 修什么 | 对着哪一版 |
 | --- | --- | --- |
-| `0001-subagent-claude-code-accept-terminal-assistant-text.patch` | `subagent-claude-code`：SDK 返回 `subtype=success`、`is_error=false`，但 `result` 文本为空时，回退到累积的 `assistant` 文本 —— 否则"成功"被判成"无结果"，上层看到 `invalid-result` | DSH `0.2.1-rc.2`（`687f282e`） |
+| `0001-subagent-claude-code-accept-terminal-assistant-text.patch` | `subagent-claude-code`：SDK 返回 `subtype=success`、`is_error=false`，但 `result` 文本为空时，回退到累积的 `assistant` 文本 —— 否则"成功"被判成"无结果"，上层看到 `invalid-result` | DSH `0.2.1-rc.3`（`1f81c047`） |
+| `0003-subagent-claude-code-run-events.patch` | `subagent-claude-code`：把 SDK 的 `tool_use`/`tool_result`/`usage` 映射成 `run.events`（工具与用量），随 run 句柄发布；有界缓冲，丢弃时补 `run.progress` | DSH `0.2.1-rc.3`（`1f81c047`），依赖 0001 |
+| `0004-subagent-codex-run-events.patch` | `subagent-codex`：把 `item/completed` 的 `commandExecution`/`fileChange`/`mcpToolCall` 映射成 `tool.completed`/`tool.failed`，随 run 句柄发布 | DSH `0.2.1-rc.3`（`1f81c047`） |
+
+> 为什么没有 `dsh-subagent` 核心补丁：核心包在 DSH 宿主的 `app.asar` 里，不是 profile 可安装包，`--install` 无法覆盖。因此事件流桥接代码放在两个 provider 内部（两份 `run-events.ts`，行为一致），不依赖核心新导出。
+>
+> 三个补丁构成一个**补丁栈**：0001 必须先应用；0003 依赖 0001 的源码状态；0004 与 0001 无交集但同样以该基线为准。`--check` / `--record` 不带 `--patch` 时会逐个补丁、按 `deployed.package` 分别取证。
 
 基线（哈希、目标文件、部署证据）在 [`base.json`](base.json)，**由脚本生成**，不要手改。
 

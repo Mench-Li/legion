@@ -14,6 +14,7 @@ test('GET workflow instances requires scope and bounds result limit', async () =
     handleWrite: async () => {}, submitReview: async () => {}, readHistory: async () => {},
     readInstances: async (input) => { calls.push(input); return { instances: [{ id: 'wf-1' }], total: 1, offset: 0, limit: 100 } },
     beginStageAttempt: async () => ({}), reportStageAttempt: async () => ({}), reconcileStageAttempt: async () => ({}),
+    recordStageEvents: async () => ({}),
   })
   await routes.dispatch({ method: 'GET' }, {}, { path: '/api/agent-workflow/instances', url: new URL('http://local/api/agent-workflow/instances') })
   assert.equal(response.status, 400)
@@ -36,6 +37,7 @@ test('POST review forwards authenticated actor, scope, and typed evidence to ato
     readHistory: async (input) => { received = input; return { workflowId: 'T-900', reviews: [] } },
     readInstances: async () => [],
     beginStageAttempt: async () => ({}), reportStageAttempt: async () => ({}), reconcileStageAttempt: async () => ({}),
+    recordStageEvents: async () => ({}),
   })
   assert.equal(await routes.dispatch({ method: 'POST' }, {}, { path: '/api/agent-workflow/review' }), true)
   assert.deepEqual(received, {
@@ -64,6 +66,7 @@ test('stage Attempt routes bind the authenticated actor/scope and forward provid
     beginStageAttempt: async (input) => { received.push(input); return { id: 'wfa-1' } },
     reportStageAttempt: async (input) => { received.push(input); return { id: 'wfa-1' } },
     reconcileStageAttempt: async (input) => { received.push(input); return { id: 'reconcile-1' } },
+    recordStageEvents: async () => ({}),
   })
   assert.equal(await routes.dispatch({ method: 'POST' }, {}, { path: '/api/agent-workflow/stage-attempts/start' }), true)
   assert.equal(await routes.dispatch({ method: 'POST' }, {}, { path: '/api/agent-workflow/stage-attempts/report' }), true)
@@ -73,4 +76,27 @@ test('stage Attempt routes bind the authenticated actor/scope and forward provid
     { attemptId: 'wfa-1', providerRunId: 'claude-run-8', state: 'running', stopReason: null, error: undefined, result: undefined, by: 'designer', scope: 'legion' },
     { attemptId: 'wfa-1', disposition: 'confirmed-stopped', note: '本机进程已退出', idempotencyKey: 'once-only-key', by: 'designer', scope: 'legion' },
   ])
+})
+
+test('POST stage-attempts/events forwards attempt, events and the truncation flag', async () => {
+  let received
+  const routes = createAgentWorkflowRoutes({
+    json: () => {},
+    handleWrite: async (_req, _res, callback) => callback({
+      attemptId: 'wfa-1',
+      events: [{ seq: 2, type: 'tool.requested', event: { seq: 2, type: 'tool.requested', toolName: 'pwsh' } }],
+      truncated: true,
+    }, 'designer', 'legion'),
+    submitReview: async () => ({}), readHistory: async () => ({}), readInstances: async () => [],
+    beginStageAttempt: async () => ({}), reportStageAttempt: async () => ({}), reconcileStageAttempt: async () => ({}),
+    recordStageEvents: async (input) => { received = input; return { ok: true } },
+  })
+  assert.equal(await routes.dispatch({ method: 'POST' }, {}, { path: '/api/agent-workflow/stage-attempts/events' }), true)
+  assert.deepEqual(received, {
+    attemptId: 'wfa-1',
+    events: [{ seq: 2, type: 'tool.requested', event: { seq: 2, type: 'tool.requested', toolName: 'pwsh' } }],
+    truncated: true,
+    by: 'designer',
+    scope: 'legion',
+  })
 })

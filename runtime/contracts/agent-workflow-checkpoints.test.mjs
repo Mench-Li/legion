@@ -4,7 +4,7 @@ import { spawnSync } from 'node:child_process'
 import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { materializeWorkflowCheckpoints, WORKFLOW_CHECKPOINT_EVIDENCE_PREFIX } from './agent-workflow-checkpoints.mjs'
+import { latestUpstreamCheckpoint, materializeWorkflowCheckpoints, WORKFLOW_CHECKPOINT_EVIDENCE_PREFIX } from './agent-workflow-checkpoints.mjs'
 
 function git(cwd, args) {
   const result = spawnSync('git', args, { cwd, encoding: 'utf8' })
@@ -103,4 +103,59 @@ test('conflicting upstream import is rolled back and reported', async (t) => {
   }), /导入上游阶段 design 的冻结提交失败（合并已回滚）/)
   assert.equal(checkedGit(downstream, ['status', '--porcelain']), '')
   assert.equal((await readFile(join(downstream, 'seed.txt'), 'utf8')).replaceAll('\r\n', '\n'), 'downstream\n')
+})
+
+test('latestUpstreamCheckpoint：取清单里**最新**一个有效冻结提交（由新到旧）', () => {
+  const implementation = checkpoint('implementation', 'b'.repeat(40))
+  const design = checkpoint('design', 'a'.repeat(40))
+  const got = latestUpstreamCheckpoint({
+    upstreamStages: [
+      { stageId: 'implementation', taskId: 'T-2', evidence: [design, implementation] },
+      { stageId: 'design', taskId: 'T-1', evidence: [design] },
+    ],
+  })
+  assert.deepEqual(got, { stageId: 'implementation', taskId: 'T-2', sourceCommit: 'b'.repeat(40) })
+})
+
+test('latestUpstreamCheckpoint：最新阶段没有提交时退到下一个有提交的阶段', () => {
+  const got = latestUpstreamCheckpoint({
+    upstreamStages: [
+      { stageId: 'review', taskId: 'T-3', evidence: [] },
+      { stageId: 'implementation', taskId: 'T-2', evidence: [checkpoint('implementation', 'b'.repeat(40))] },
+    ],
+  })
+  assert.equal(got?.stageId, 'implementation')
+})
+
+test('latestUpstreamCheckpoint：坏证据/缺清单 ⇒ null（严格判据留给 materialize）', () => {
+  assert.equal(latestUpstreamCheckpoint({}), null)
+  assert.equal(latestUpstreamCheckpoint({ upstreamStages: [] }), null)
+  assert.equal(latestUpstreamCheckpoint({ upstreamStages: [{ stageId: 'design', taskId: 'T-1', evidence: [{ text: `${WORKFLOW_CHECKPOINT_EVIDENCE_PREFIX}{not json` }] }] }), null)
+  assert.equal(latestUpstreamCheckpoint({ upstreamStages: [{ stageId: 'design', taskId: 'T-1', evidence: [checkpoint('other', 'a'.repeat(40))] }] }), null)
+})
+
+test('★ 以冻结提交为基线建的审查分支：导入是空操作（BUG-040 的修法本身）', async (t) => {
+  const root = await repoFixture(t)
+  const implementation = join(root, 'impl')
+  checkedGit(root, ['worktree', 'add', '-b', 'w/impl', implementation, 'HEAD'])
+  await writeFile(join(implementation, 'app.mjs'), 'export const v = 2\n')
+  checkedGit(implementation, ['add', 'app.mjs'])
+  checkedGit(implementation, ['commit', '-m', 'implementation'])
+  const implementationCommit = checkedGit(implementation, ['rev-parse', 'HEAD'])
+
+  // main 继续往前走，改到**同一个文件**：从 HEAD 建分支再 merge 就会冲突（上一条用例）。
+  await writeFile(join(root, 'app.mjs'), 'export const v = 3 // main moved on\n')
+  checkedGit(root, ['add', 'app.mjs'])
+  checkedGit(root, ['commit', '-m', 'main moves on'])
+
+  const review = join(root, 'review')
+  checkedGit(root, ['worktree', 'add', '-b', 'w/review', review, implementationCommit])
+  const merged = await materializeWorkflowCheckpoints({
+    workdir: review, runGit: async (cwd, args) => git(cwd, args),
+    workflowContext: { upstreamStages: [{ stageId: 'implementation', taskId: 'T-2', evidence: [checkpoint('implementation', implementationCommit)] }] },
+  })
+  assert.deepEqual(merged.map((item) => item.stageId), ['implementation'], '清单照旧返回（调用方据此记交接）')
+  assert.equal((await readFile(join(review, 'app.mjs'), 'utf8')).replaceAll('\r\n', '\n'), 'export const v = 2\n',
+    '★ 审查看到的是交来的那份代码；main 的新写法没有混进来，也没有冲突')
+  assert.equal(checkedGit(review, ['status', '--porcelain']), '')
 })

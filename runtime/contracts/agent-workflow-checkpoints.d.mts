@@ -17,3 +17,7 @@ export declare function materializeWorkflowCheckpoints(input: {
   workdir: string
   runGit(workdir: string, args: string[]): Promise<WorkflowGitResult>
 }): Promise<ReadonlyArray<{ stageId: string; taskId: string; sourceCommit: string }>>
+
+export declare function latestUpstreamCheckpoint(
+  workflowContext?: { upstreamStages?: WorkflowCheckpointStage[] } | null,
+): Readonly<{ stageId: string; taskId: string; sourceCommit: string }> | null

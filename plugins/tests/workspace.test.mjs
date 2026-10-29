@@ -337,6 +337,37 @@ test('★ 全新任务：rev-parse 探测分支 → worktree add -b（argv 逐�
   assert.deepEqual(h.logs, [GUARD_LOG, WORKTREE_DEPS_WARNING])
 })
 
+test('★★ 审查阶段从上游冻结提交建分支：baseRef 逐字进 argv（不是 main 的 HEAD）', async (t) => {
+  const h = tmp(t, { branchExists: false })
+  const dir = join(h.ws.worktreeRootFor(), 'T-9')
+  const baseRef = 'a'.repeat(40)
+  const out = await h.ws.prepareWorktree('T-9', { baseRef })
+  assert.equal(out, dir)
+  assert.deepEqual(argv(h), [
+    ['rev-parse', '--verify', 'w/T-9'],
+    ['worktree', 'add', '-b', 'w/T-9', dir, baseRef],
+  ], '★ 基线必须是上游冻结提交本身；写成 HEAD 就会在 main 改过同一段代码时 merge 冲突')
+  assert.match(h.activities[0].text, /基线取上游冻结提交 a{12}/)
+})
+
+test('★ baseRef 缺省/空串 ⇒ 基线回落 HEAD（实现阶段与旧调用方行为不变）', async (t) => {
+  for (const options of [undefined, {}, { baseRef: null }, { baseRef: '   ' }]) {
+    const h = tmp(t, { branchExists: false })
+    const dir = join(h.ws.worktreeRootFor(), 'T-9')
+    const out = await h.ws.prepareWorktree('T-9', options)
+    assert.equal(out, dir)
+    assert.deepEqual(argv(h).at(-1), ['worktree', 'add', '-b', 'w/T-9', dir, 'HEAD'], `options=${JSON.stringify(options)}`)
+  }
+})
+
+test('★ 复用既有分支时忽略 baseRef（续做不换基线）', async (t) => {
+  const h = tmp(t, { branchExists: true, onGit: gitCreatesWorktree() })
+  const dir = join(h.ws.worktreeRootFor(), 'T-1')
+  const out = await h.ws.prepareWorktree('T-1', { baseRef: 'b'.repeat(40) })
+  assert.equal(out, dir)
+  assert.deepEqual(argv(h).at(-1), ['worktree', 'add', dir, 'w/T-1'], '★ 已存在的分支只挂载，不重设基线')
+})
+
 test('★ git 一律在**绑定的**仓库里执行，目录也建在绑定仓库根下', async (t) => {
   const h = tmp(t, { branchExists: false })
   const boundRoot = join(h.root, 'bound-repo') // 落在临时目录里，守卫会真的建出 .git/hooks（用完随临时树删掉）
@@ -449,7 +480,7 @@ test('★ 新建失败 → null + 日志，且不记"就绪"事件', async (t) =
   const out = await h.ws.prepareWorktree('T-1')
   assert.equal(out, null)
   assert.deepEqual(h.activities, [], '★ 失败不得记"worktree 就绪"（看板会把回退读成隔离成功）')
-  assert.deepEqual(h.logs, [GUARD_LOG, 'T-1 worktree 创建失败：fatal: could not create'])
+  assert.deepEqual(h.logs, [GUARD_LOG, 'T-1 worktree 创建失败（基线 HEAD）：fatal: could not create'], '★ 失败日志带上试过的基线（审查阶段是冻结提交，不是 HEAD）')
 })
 
 test('★ 从分支挂载失败 → null + 专门的日志串（与新建失败区分开）', async (t) => {

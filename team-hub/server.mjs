@@ -102,6 +102,7 @@ import {
 } from './approval-ttl.mjs'
 import { createRunStore, RunError } from './run-store.mjs'
 import { Worker } from 'node:worker_threads'
+import { createHandoffRouter } from './handoff-hub-wire.mjs'
 import { resolveRepoIdentity } from '../packages/shared/src/repo-identity.mjs'
 import { runGit as runDeliveryGit } from './git-plumbing.mjs'
 import { commitAcceptedWorkflowArtifacts } from './accepted-workflow-checkpoint.mjs'
@@ -8516,6 +8517,12 @@ const router = createRouter([
     transitionTask, settleGoalsOfScope, advanceTask,
     reassignTask, now, getTask,
     releaseStaleTasks, inboxCount, handleWrite,
+  }),
+  // 从任意一环接手（handoff）：对已交付的一环只补结算，不派 agent。
+  createHandoffRouter({
+    json, handleWrite, audit,
+    getTask, transitionTask, db, repoRoot: process.cwd(),
+    appendStageAttemptRunEvent,
   }),
   createReworkRoutes({
     json,

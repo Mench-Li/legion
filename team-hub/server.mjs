@@ -3130,10 +3130,12 @@ function publishGoalRecord(targetScope, objective, mode = 'chain', by = 'general
       // （server.mjs 的 findWorkflowStageAncestor），把设计任务删掉，设计产物就
       // 无从查起——那正是之前 409「缺少冻结设计产物版本」的来源。
       const startAtImplementation = startAt === 'implement'
+      let inheritedDesign = []
       const designStageId = chain.workflowSnapshot?.designStageId ?? null
       const implementationStageId = chain.workflowSnapshot?.implementationStageId ?? null
       if (startAtImplementation) {
         const inherited = adoptDesignArtifactsOf(adoptFrom)
+        inheritedDesign = inherited
         if (inherited.length === 0) {
           throw Object.assign(new Error('被接手交付的冻结快照里没有设计产物引用（workflowContext.designArtifacts 为空）：无法从实现环起链，请改用整链接手'), {
             code: 'ADOPT_NO_DESIGN_ARTIFACTS', statusCode: 409,
@@ -3178,6 +3180,17 @@ function publishGoalRecord(targetScope, objective, mode = 'chain', by = 'general
         const snapshot = parseJson(row?.agent_selection_snapshot, null)
         if (snapshot === null || typeof snapshot !== 'object') continue
         snapshot.adopt = adopt
+        // ★ 设计产物引用必须**同时**写进任务快照的 workflowContext：
+        //   守护开工前会核 `t.agentSelectionSnapshot.workflowContext.designArtifacts`
+        //   （"缺少带 SHA-256 摘要的设计产物，拒绝开工"），它读的是任务快照，
+        //   不是 hub 在认领时现算的那一份。只登记到设计任务的 artifacts 上不够。
+        if (inheritedDesign.length > 0) {
+          snapshot.workflowContext = {
+            ...(snapshot.workflowContext ?? {}),
+            designArtifacts: inheritedDesign.map((item) => ({ path: item.path, digest: item.digest, title: item.title ?? '' })),
+            implementation: snapshot.workflowContext?.implementation ?? null,
+          }
+        }
         db.prepare('UPDATE tasks SET agent_selection_snapshot=? WHERE id=?').run(JSON.stringify(snapshot), createdTask.id)
         stamped += 1
       }

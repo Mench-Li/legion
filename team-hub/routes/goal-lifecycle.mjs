@@ -133,6 +133,9 @@ export function createGoalLifecycleRoutes({
             agentNodeId,
             orchestration,
             assignmentInputOf(body),
+            // 接手既有交付（adopt）：body.adoptFrom = 被接手的任务 ID（可选）。
+            // 省略 = 行为与以前逐字相同（从 main 起）。
+            typeof body.adoptFrom === 'string' && body.adoptFrom.trim() !== '' ? body.adoptFrom.trim() : null,
           )
         })
       },

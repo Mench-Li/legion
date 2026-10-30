@@ -1999,6 +1999,22 @@ function spaceWorker(ctx: AppContext, config: Config): void {
       const sib = goalSiblingLines(t.goalId ?? goal.id, t.id)
       if (sib.length > 0) goalLines.push('目标下并行任务快照（同目标任务并行推进，只处理与本任务衔接，不越界替别人干活）：', ...sib)
     }
+    // 接手既有交付（adopt）：本环的基线不是 main，而是一个**已经验收过的交付现场**。
+    //
+    // 为什么要有这一节：返工/接手时让 agent 从 main 重写一遍是最贵的做法——T-224 的
+    // 编码阶段跑了 57 分钟，而代码已经在 `w/T-224` 上（19 个文件、测试全绿）。工作区
+    // 确实建在那个提交上（见 prepareWorktree 的 baseRef），但**不告诉它**，它仍会按
+    // 提示词从零写一遍：沉默地重复劳动，比不接手更糟。
+    const adopt = t.agentSelectionSnapshot?.adopt
+    if (adopt !== null && adopt !== undefined && typeof adopt.commit === 'string' && /^[0-9a-f]{40,64}$/i.test(adopt.commit)) {
+      goalLines.push(
+        '',
+        '## 接手既有交付（adopt）',
+        `本环接手任务 ${typeof adopt.taskId === 'string' ? adopt.taskId : '（未知）'} 已交付的现场：commit ${adopt.commit}${typeof adopt.branch === 'string' && adopt.branch !== '' ? `（分支 ${adopt.branch}）` : ''}。既有产物**已经在这个工作区里**，不要从 main 重写。`,
+        '你的职责是**核对并只做必要修补**：先读既有产物、跑验证，确认它确实满足本环要求；确有缺口才改，并说明改了什么。',
+        '本目标的阶段文档仍写本目标的目录（见上面的目标分析文档目录），不要把旧目标的同名文档整段照抄进来。',
+      )
+    }
     // 文件域约束段：切片任务声明文件域，改动越域会被 merge 前机器闸门拦截（B 层防窜台）。
     const domLines: string[] = []
     if (t.fileDomain !== null && t.fileDomain !== undefined && t.fileDomain.length > 0) {
@@ -2386,8 +2402,16 @@ function spaceWorker(ctx: AppContext, config: Config): void {
     const workflowBaseRef = reviewStage && t.agentSelectionSnapshot?.source === 'goal-agent-workflow'
       ? latestUpstreamCheckpoint(t.agentSelectionSnapshot.workflowContext)?.sourceCommit ?? null
       : null
+    // ★ 接手既有交付（adopt）：基线直接用被接手的那次提交，而不是 main。
+    //   这一条对**所有阶段**都成立（设计阶段也要看到既有文档，而不是从空白开始），
+    //   且优先级高于审查阶段的上游冻结提交——接手时"上游"就是那份交付本身。
+    const adoptedCommit = typeof t.agentSelectionSnapshot?.adopt?.commit === 'string'
+      && /^[0-9a-f]{40,64}$/i.test(t.agentSelectionSnapshot.adopt.commit)
+      ? t.agentSelectionSnapshot.adopt.commit
+      : null
+    const baseRef = adoptedCommit ?? workflowBaseRef
     if (config.isolate) {
-      worktreeDir = await workspace.prepareWorktree(t.id, { baseRef: workflowBaseRef })
+      worktreeDir = await workspace.prepareWorktree(t.id, { baseRef })
       if (worktreeDir !== null) cwd = worktreeDir
       else log(`${t.id} worktree 不可用，回退到 workspace 直接工作`)
     }

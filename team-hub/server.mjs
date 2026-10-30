@@ -2937,7 +2937,58 @@ function previewGoalPlan({ targetScope, objective = '', mode = 'chain', workflow
   })
 }
 
-function publishGoalRecord(targetScope, objective, mode = 'chain', by = 'general', docSync = false, workflowDefinitionRef = null, agentNodeId = null, orchestration = 'pipeline', assignmentInput = null) {
+/**
+ * 接手既有交付（adopt）：把一个**已验收任务**的交付现场解析成可继承的基线。
+ *
+ * 为什么需要它：实现写完、验收过了，但审查环因为上游冻结的命令/回执接不上时，
+ * 唯一能走通流程的办法是**整链重来**——把需求、选型、拆解、编码再跑一遍。T-224 的
+ * 编码阶段花了 57 分钟、产出 19 个文件，而重来一遍只是因为审查环认不出它。
+ *
+ * adopt 的做法：新目标建链时把这份交付（commit + 分支 + 文档目录）钉进每个任务的
+ * 冻结快照，守护建工作区时直接从那个提交起，提示词里也明说"接手，不要重写"。
+ * 回执与证据仍由本环**真跑**一遍产生，不走任何伪造路径。
+ */
+function resolveAdoptSource(scope, adoptFrom) {
+  const fromId = typeof adoptFrom === 'string' ? adoptFrom.trim() : ''
+  if (fromId === '') throw Object.assign(new Error('adoptFrom 必须是被接手任务的任务 ID'), { code: 'ADOPT_INVALID', statusCode: 400 })
+  const source = (() => {
+    // `getTask` 对不存在的任务抛的是普通 Error（400）；这里要的是可判别的 404，
+    // 否则调用方分不清"接错了一个不存在的任务"与"参数写错了"。
+    const row = db.prepare('SELECT * FROM tasks WHERE id = ?').get(fromId)
+    return row === undefined ? null : rowToTask(row)
+  })()
+  if (source === null || source === undefined) throw Object.assign(new Error(`找不到被接手的任务：${fromId}`), { code: 'ADOPT_SOURCE_MISSING', statusCode: 404 })
+  if (source.scope !== scope) throw Object.assign(new Error(`被接手的任务 ${fromId} 不属于空间 ${scope}`), { code: 'ADOPT_SCOPE_MISMATCH', statusCode: 403 })
+  // 只接手**已验收**的交付：还在 in_review 的东西接手过来，等于把没验完的半成品
+  // 交给下游，而下游会把它当成"已完成"来审。
+  if (source.status !== 'done') {
+    throw Object.assign(new Error(`被接手的任务 ${fromId} 当前 ${source.status}：只有已验收（done）的交付能被接手`), {
+      code: 'ADOPT_NOT_DONE', statusCode: 409,
+    })
+  }
+  const checkpoint = [...(source.evidence ?? [])].reverse().find((entry) =>
+    typeof entry?.text === 'string' && entry.text.startsWith('agent-workflow-stage-checkpoint:'))
+  let commit = null
+  if (checkpoint !== undefined) {
+    try { commit = JSON.parse(checkpoint.text.slice('agent-workflow-stage-checkpoint:'.length))?.sourceCommit ?? null } catch { commit = null }
+  }
+  if (typeof commit !== 'string' || !/^[0-9a-f]{40,64}$/i.test(commit)) {
+    throw Object.assign(new Error(`被接手的任务 ${fromId} 没有可继承的冻结提交（缺少 agent-workflow-stage-checkpoint，或其中的 sourceCommit 不合法）`), {
+      code: 'ADOPT_NO_COMMIT', statusCode: 409,
+    })
+  }
+  return {
+    taskId: source.id,
+    goalId: source.goalId ?? null,
+    commit,
+    branch: `w/${source.id}`,
+    docsDir: (source.goalId ? getGoal(source.goalId)?.docsDir ?? null : null),
+    adoptedAt: now(),
+    adoptedBy: null,
+  }
+}
+
+function publishGoalRecord(targetScope, objective, mode = 'chain', by = 'general', docSync = false, workflowDefinitionRef = null, agentNodeId = null, orchestration = 'pipeline', assignmentInput = null, adoptFrom = null) {
   return withTx(() => {
     const rawMode = mode === 'slice' ? 'slice' : 'chain'
     let workflowDefinition = null
@@ -3035,6 +3086,33 @@ function publishGoalRecord(targetScope, objective, mode = 'chain', by = 'general
         plan?.goalAgent === null || plan?.goalAgent === undefined ? null : JSON.stringify(plan.goalAgent),
       )
     const chain = createGoalChain(goalId, targetScope, objective.trim(), rawMode, plan ?? effectiveWorkflow, frozenOrchestration === 'custom-dag' ? 'custom-dag' : 'pipeline')
+    // ── 接手既有交付（adopt）：把继承基线钉进每个任务的冻结快照 ──────────────
+    //
+    // 钉在**任务快照**里而不是目标上：守护建工作区、拼提示词时手里只有任务快照
+    // （`agentSelectionSnapshot`），而这两个动作恰恰是"要不要重写"的分水岭。
+    if (adoptFrom !== null && adoptFrom !== undefined) {
+      const adopt = resolveAdoptSource(targetScope, adoptFrom)
+      // ★ 没有跨 Agent 工作流快照的链（纯流水线）没有"冻结快照"可钉，adopt 会变成
+      //   一次**静默空操作**：发布成功、什么都没接手、下游照旧从 main 重写。
+      //   宁可在这里具名拒绝。（先校验来源，再谈链路形状——调用方更需要的
+      //   "这个任务能不能接手"不该被"这个空间没配工作流"盖住。）
+      if (chain.workflowSnapshot === null || chain.workflowSnapshot === undefined) {
+        throw Object.assign(new Error('接手既有交付需要跨 Agent 工作流链（该空间未配置工作流，链路任务没有冻结快照可继承）'), {
+          code: 'ADOPT_REQUIRES_WORKFLOW', statusCode: 409,
+        })
+      }
+      adopt.adoptedBy = by
+      let stamped = 0
+      for (const createdTask of chain.tasks) {
+        const row = db.prepare('SELECT agent_selection_snapshot FROM tasks WHERE id=?').get(createdTask.id)
+        const snapshot = parseJson(row?.agent_selection_snapshot, null)
+        if (snapshot === null || typeof snapshot !== 'object') continue
+        snapshot.adopt = adopt
+        db.prepare('UPDATE tasks SET agent_selection_snapshot=? WHERE id=?').run(JSON.stringify(snapshot), createdTask.id)
+        stamped += 1
+      }
+      audit(by, targetScope, 'goal:adopt', adopt.taskId, { goalId, adoptedCommit: adopt.commit, adoptedBranch: adopt.branch, stamped })
+    }
     if (chain.workflowSnapshot !== null && chain.workflowSnapshot !== undefined) {
       const createdAtMs = new Date(t).getTime()
       // ★ 目标级快照与实例快照必须是**同一份**：两处各算一次，迟早会出现

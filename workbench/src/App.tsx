@@ -28,6 +28,7 @@ import type { SceneCue, SceneFacts } from './scene/sceneState'
 import type { SceneBoardVisit } from './scene/sceneBoard'
 import { buildMissions } from './missions'
 import { boardFromHubTasks } from './hubBoard'
+import { isAuthFailure } from './hub-errors'
 import { hubRetryDelay } from './hubReconnect'
 import type { ActivityEvent, BoardData, GoalInfo, GoalStatus, Mission, RosterAgent, SpaceInfo } from './types'
 import { WorkspaceNavigation } from './components/WorkspaceNavigation'
@@ -132,6 +133,9 @@ export default function App(): React.JSX.Element {
   const [spaceSettings, setSpaceSettings] = useState<SpaceInfo | null>(null)
   const [conn, setConn] = useState<ConnState>('connecting')
   const [error, setError] = useState('')
+  // 「连不上」与「登录过期」是两种要人做不同事的失败：前者等它回来，
+  // 后者只能重新登录。混成同一块面板会把人送去修一个没坏的东西。
+  const [authExpired, setAuthExpired] = useState(false)
   const [hubRetryInfo, setHubRetryInfo] = useState<{ attempt: number; delayMs: number } | null>(null)
   const retryHubNowRef = useRef<(() => void) | null>(null)
   const [active, setActive] = useState(() => {
@@ -208,13 +212,26 @@ export default function App(): React.JSX.Element {
         setMissions(hubMissions.missions)
         setScopeAware(hubMissions.scopeAware)
         setConn('live')
+        setAuthExpired(false)
         setHubRetryInfo(null)
         failedAttempts = 0
       } catch (e) {
         if (disposed) return
         setHubMode(false)
         setConn('error')
-        setError(e instanceof Error ? e.message : String(e))
+        const message = e instanceof Error ? e.message : String(e)
+        // ★ 凭据过期 ≠ 中枢不可达。401/403（`IDENTITY_*`）再重连一万次也还是 401；
+        //   从前这里不分类，一律排进"每 N 秒重连"的循环，界面上那句
+        //   「自动重连已开启：第 N 次重试」就会在原地打转一整夜（现场 2026-10-30）。
+        //   这一类要的是**重新登录**：`recoverSession` 已经清掉失效凭据并触发登录门。
+        if (isAuthFailure(e)) {
+          setAuthExpired(true)
+          setError(`${message}（登录已过期，请重新登录）`)
+          setHubRetryInfo(null)
+          return
+        }
+        setAuthExpired(false)
+        setError(message)
         const delayMs = hubRetryDelay(failedAttempts)
         failedAttempts += 1
         setHubRetryInfo({ attempt: failedAttempts, delayMs })
@@ -675,25 +692,35 @@ export default function App(): React.JSX.Element {
   if (conn === 'error') {
     return (
       <div className="state-box">
-        <div className="err">✕ 无法连接中枢 {hubBase()}</div>
+        <div className="err">{authExpired ? '✕ 登录已过期' : `✕ 无法连接中枢 ${hubBase()}`}</div>
         <div style={{ fontSize: 12 }}>错误：{error}</div>
         {hubRetryInfo && (
           <div style={{ fontSize: 12 }} aria-live="polite">
             自动重连已开启：第 {hubRetryInfo.attempt} 次重试，间隔 {Math.ceil(hubRetryInfo.delayMs / 1000)} 秒。也可以立即重试。
           </div>
         )}
-        <div style={{ fontSize: 12, lineHeight: 1.9 }}>
-          1. 确认中枢 team-hub v2 已启动，且本页的 <code>{hubBase()}</code> 指向它（默认走同源 <code>/hub</code> 反代）。
-          <br />
-          2. 中枢在别处时：在浏览器控制台执行
-          <code>localStorage.setItem('legion.workbench.hub', 'http://127.0.0.1:8787')</code>
-          后点击「立即重试」。
-          <br />
-          说明：v1 看板那条数据源已**整条取消**，这里不再有任何回退 —— 中枢不可达就是「没有数据」，
-          不会退回去显示一份过期快照。
-        </div>
-        <button className="btn primary" onClick={() => retryHubNowRef.current?.()}>
-          立即重试
+        {authExpired ? (
+          // 凭据失效：中枢本身是好的，给"去检查中枢"的提示只会把人送去修一个没坏的东西。
+          <div style={{ fontSize: 12, lineHeight: 1.9 }}>
+            身份凭据已过期或被撤销（中枢 <code>{hubBase()}</code> 本身可达）。
+            <br />
+            页面不会自动重连——重连再多次也还是 401。请重新登录；本机部署也可以刷新页面，
+            界面会退回机器令牌继续读看板。
+          </div>
+        ) : (
+          <div style={{ fontSize: 12, lineHeight: 1.9 }}>
+            1. 确认中枢 team-hub v2 已启动，且本页的 <code>{hubBase()}</code> 指向它（默认走同源 <code>/hub</code> 反代）。
+            <br />
+            2. 中枢在别处时：在浏览器控制台执行
+            <code>localStorage.setItem('legion.workbench.hub', 'http://127.0.0.1:8787')</code>
+            后点击「立即重试」。
+            <br />
+            说明：v1 看板那条数据源已**整条取消**，这里不再有任何回退 —— 中枢不可达就是「没有数据」，
+            不会退回去显示一份过期快照。
+          </div>
+        )}
+        <button className="btn primary" onClick={() => (authExpired ? window.location.reload() : retryHubNowRef.current?.())}>
+          {authExpired ? '重新加载页面' : '立即重试'}
         </button>
       </div>
     )

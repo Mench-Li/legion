@@ -92,7 +92,15 @@ export function createHandoffRouter(deps) {
     const dir = handoffWorktreeDir(repoRoot, task.id)
     if (existsSync(dir)) return dir
     mkdirSync(dir, { recursive: true })
-    const r = spawnSync('git', ['worktree', 'add', '--detach', dir, commit], { cwd: repoRoot, encoding: 'utf8' })
+    // ★ 必须挂在一个**具名分支**上，不能用 --detach：认领时要按目录→仓库落写预约，
+    //   detached 的 HEAD 不指向任何分支，仓库解析不出来，冲突码被压成
+    //   `write-reservation-failed`（实测：detached 时 identity-registration /
+    //   mobile-api-contract 两套挂，改成 -b handoff/<id> 后 18/18、17/17 全绿）。
+    let r = spawnSync('git', ['worktree', 'add', '-b', `handoff/${task.id}`, dir, commit], { cwd: repoRoot, encoding: 'utf8' })
+    if (r.status !== 0 && /already exists/i.test(String(r.stderr ?? ''))) {
+      // 重试时分支已在：直接复用，不新建。
+      r = spawnSync('git', ['worktree', 'add', dir, `handoff/${task.id}`], { cwd: repoRoot, encoding: 'utf8' })
+    }
     if (r.status !== 0) {
       throw Object.assign(new Error(`准备接手工作区失败：${String(r.stderr ?? '').trim().slice(0, 300)}`), {
         code: 'HANDOFF_WORKTREE_FAILED', statusCode: 500,

@@ -123,8 +123,15 @@ export function createHandoffRouter(deps) {
       } catch { /* 已是目录/平台不支持：忽略，让测试自己报缺依赖 */ }
     }
     const startedAtMs = Date.now()
+    // ★ 必须**清干净环境**再跑：hub 进程自己的 env 里带着 `TEAM_HUB_DB`（它就是靠它启动的），
+    //   继承下去会让测试去写**线上真库**而不是各自的临时库 —— 表现为认领预约跟线上任务打架，
+    //   同一工作区、同一脚本，手动跑 9 套全绿、经 hub 跑却挂 1 套（实测 2026-10-30）。
+    const env = { CI: '1' }
+    for (const key of ['PATH', 'PATHEXT', 'SystemRoot', 'WINDIR', 'TEMP', 'TMP', 'TMPDIR', 'APPDATA', 'USERPROFILE']) {
+      if (process.env[key] !== undefined) env[key] = process.env[key]
+    }
     const r = spawnSync(runner.executable, runner.args, {
-      cwd, encoding: 'utf8', timeout: runner.timeoutMs, maxBuffer: 8 * 1024 * 1024,
+      cwd, encoding: 'utf8', timeout: runner.timeoutMs, maxBuffer: 8 * 1024 * 1024, env,
     })
     const finishedAtMs = Date.now()
     const timedOut = r.error !== undefined && r.error !== null && String(r.error.code ?? '') === 'ETIMEDOUT'

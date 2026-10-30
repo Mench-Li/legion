@@ -2988,7 +2988,21 @@ function resolveAdoptSource(scope, adoptFrom) {
   }
 }
 
-function publishGoalRecord(targetScope, objective, mode = 'chain', by = 'general', docSync = false, workflowDefinitionRef = null, agentNodeId = null, orchestration = 'pipeline', assignmentInput = null, adoptFrom = null) {
+/**
+ * 被接手任务的冻结快照里登记过的设计产物引用（`[{path, digest, title}]`）。
+ *
+ * 复用它的原因：审查环的设计产物是按**祖先任务**解析的（见 resolveWorkflowContext
+ * 的 findWorkflowStageAncestor），而"从实现环起链"时设计环是**接手**过来的，
+ * 不重新产出——所以只能把被接手交付当时登记的那几份引过来，不能凭空算摘要。
+ */
+function adoptDesignArtifactsOf(taskId) {
+  const row = db.prepare('SELECT agent_selection_snapshot FROM tasks WHERE id=?').get(taskId)
+  const snapshot = parseJson(row?.agent_selection_snapshot, null)
+  const artifacts = snapshot?.workflowContext?.designArtifacts
+  return Array.isArray(artifacts) ? artifacts : []
+}
+
+function publishGoalRecord(targetScope, objective, mode = 'chain', by = 'general', docSync = false, workflowDefinitionRef = null, agentNodeId = null, orchestration = 'pipeline', assignmentInput = null, adoptFrom = null, startAt = null) {
   return withTx(() => {
     const rawMode = mode === 'slice' ? 'slice' : 'chain'
     let workflowDefinition = null
@@ -3102,6 +3116,62 @@ function publishGoalRecord(targetScope, objective, mode = 'chain', by = 'general
         })
       }
       adopt.adoptedBy = by
+      // ── 从哪个环节起链（startAt）──────────────────────────────────────
+      //
+      // 默认整链从需求开始——那条路会把需求/选型/拆解/用例再跑一遍（≈2 小时），
+      // 而它们早就交付过了。`startAt: 'implement'` 做两件事：
+      //   ① **接手设计环**：把被接手交付里登记过的设计产物（path+digest）直接
+      //      登记到新链的设计任务上，并把它按"已验收"收口（含冻结提交证据）——
+      //      这样审查环按祖先链解析 `designArtifacts` 时能拿到东西，而不是空数组；
+      //   ② **跳过中间流水线环节**：设计之后、实现之前的那几环（选型/拆解/用例）
+      //      取消掉，并把实现任务的 blockedBy 清空，让它立刻可认领。
+      //
+      // 为什么不是"整条 design 环都取消"：审查环的设计产物是按**祖先任务**解析的
+      // （server.mjs 的 findWorkflowStageAncestor），把设计任务删掉，设计产物就
+      // 无从查起——那正是之前 409「缺少冻结设计产物版本」的来源。
+      const startAtImplementation = startAt === 'implement'
+      const designStageId = chain.workflowSnapshot?.designStageId ?? null
+      const implementationStageId = chain.workflowSnapshot?.implementationStageId ?? null
+      if (startAtImplementation) {
+        const inherited = adoptDesignArtifactsOf(adoptFrom)
+        if (inherited.length === 0) {
+          throw Object.assign(new Error('被接手交付的冻结快照里没有设计产物引用（workflowContext.designArtifacts 为空）：无法从实现环起链，请改用整链接手'), {
+            code: 'ADOPT_NO_DESIGN_ARTIFACTS', statusCode: 409,
+          })
+        }
+        const designTask = chain.tasks.find((createdTask) => createdTask.workflowStageId === designStageId
+          || createdTask.role === chain.workflowSnapshot?.designRole)
+        if (designTask === undefined) {
+          throw Object.assign(new Error('这条链没有设计环，无法做"接手设计"：请改用整链接手'), {
+            code: 'ADOPT_NO_DESIGN_STAGE', statusCode: 409,
+          })
+        }
+        const artifacts = inherited.map((item) => ({
+          kind: 'file', path: item.path, digest: item.digest, title: item.title ?? '', by: 'adopt', at: now(),
+        }))
+        const checkpoint = `agent-workflow-stage-checkpoint:${JSON.stringify({
+          stageId: designStageId, sourceCommit: adopt.commit, artifactPaths: artifacts.map((item) => item.path), acceptedBy: 'adopt',
+        })}`
+        const designRow = db.prepare('SELECT evidence, version FROM tasks WHERE id=?').get(designTask.id)
+        const designEvidence = [...parseJson(designRow?.evidence, []), { by: 'adopt', at: now(), text: checkpoint }]
+        db.prepare('UPDATE tasks SET status=?, artifacts=?, evidence=?, version=? WHERE id=?')
+          .run('done', JSON.stringify(artifacts), JSON.stringify(designEvidence), Number(designRow?.version ?? 0) + 1, designTask.id)
+        // 设计之后、实现之前的流水线环节：取消，并把实现任务的阻塞清空。
+        const order = chain.tasks.map((createdTask) => createdTask.id)
+        const designIndex = order.indexOf(designTask.id)
+        const implementationTask = chain.tasks.find((createdTask) => createdTask.workflowStageId === implementationStageId
+          || createdTask.role === chain.workflowSnapshot?.implementationRole)
+        const implementationIndex = implementationTask === undefined ? -1 : order.indexOf(implementationTask.id)
+        for (const createdTask of chain.tasks.slice(designIndex + 1, implementationIndex)) {
+          db.prepare("UPDATE tasks SET status='canceled', version=version+1 WHERE id=?").run(createdTask.id)
+        }
+        if (implementationTask !== undefined) {
+          db.prepare("UPDATE tasks SET blockedBy='[]', version=version+1 WHERE id=?").run(implementationTask.id)
+        }
+        audit(by, targetScope, 'goal:adopt-start-at', adopt.taskId, {
+          goalId, startAt, designTaskId: designTask.id, inheritedDesignArtifacts: artifacts.length,
+        })
+      }
       let stamped = 0
       for (const createdTask of chain.tasks) {
         const row = db.prepare('SELECT agent_selection_snapshot FROM tasks WHERE id=?').get(createdTask.id)

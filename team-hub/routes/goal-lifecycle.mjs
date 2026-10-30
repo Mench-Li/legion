@@ -136,6 +136,9 @@ export function createGoalLifecycleRoutes({
             // 接手既有交付（adopt）：body.adoptFrom = 被接手的任务 ID（可选）。
             // 省略 = 行为与以前逐字相同（从 main 起）。
             typeof body.adoptFrom === 'string' && body.adoptFrom.trim() !== '' ? body.adoptFrom.trim() : null,
+            // 起链环节（可选）：'implement' = 接手设计环、跳过中间流水线环节，
+            // 只从实现环往后跑（实现 → 审查 → 测试 → 部署）。
+            body.startAt === 'implement' ? 'implement' : null,
           )
         })
       },

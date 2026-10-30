@@ -95,7 +95,7 @@ async function makeSpace(scope, { withWorkflow = false } = {}) {
 }
 
 /** 造一个"已验收的交付"：任务 + done + 一条冻结提交的证据。 */
-async function makeDeliveredTask(scope, { done = true, checkpoint = true } = {}) {
+async function makeDeliveredTask(scope, { done = true, checkpoint = true, designArtifacts = null } = {}) {
   const created = await post('/api/create', {
     scope, by: 'general', title: '【编码实现】账号管理', role: 'coder',
   })
@@ -104,7 +104,18 @@ async function makeDeliveredTask(scope, { done = true, checkpoint = true } = {})
   const evidence = checkpoint
     ? [{ by: 'general', at: '2026-10-30T01:52:42.617Z', text: `agent-workflow-stage-checkpoint:${JSON.stringify({ stageId: 'coder', sourceCommit: COMMIT, artifactPaths: [], acceptedBy: 'general' })}` }]
     : []
-  mod.db.prepare('UPDATE tasks SET status=?, evidence=? WHERE id=?').run(done ? 'done' : 'in_review', JSON.stringify(evidence), id)
+  if (designArtifacts === null) {
+    mod.db.prepare('UPDATE tasks SET status=?, evidence=? WHERE id=?').run(done ? 'done' : 'in_review', JSON.stringify(evidence), id)
+  } else {
+    // 从实现环起链要靠它：审查环按祖先任务解析设计产物，接手时只能引用旧的登记。
+    const snapshot = {
+      source: 'goal-agent-workflow', pipelineVersion: 'p1', stageRole: 'coder', workflowStageId: 'implement',
+      agentToolConfig: null, modelConfig: null, executionNode: null,
+      workflowContext: { designArtifacts, implementation: null },
+    }
+    mod.db.prepare('UPDATE tasks SET status=?, evidence=?, agent_selection_snapshot=? WHERE id=?')
+      .run(done ? 'done' : 'in_review', JSON.stringify(evidence), JSON.stringify(snapshot), id)
+  }
   return id
 }
 
@@ -177,4 +188,53 @@ test('⑤ 不带 adoptFrom 时行为不变：快照里没有 adopt 字段', asyn
     const raw = mod.db.prepare('SELECT agent_selection_snapshot FROM tasks WHERE id=?').get(row.id).agent_selection_snapshot
     assert.equal(raw === null ? undefined : JSON.parse(raw).adopt, undefined)
   }
+})
+
+
+test('⑥ startAt=implement：接手设计环、跳过中间环节，只留实现→审查→下游', async () => {
+  const scope = 'adopt-f'
+  await makeSpace(scope, { withWorkflow: true })
+  const DIGEST = 'a'.repeat(64)
+  const sourceId = await makeDeliveredTask(scope, {
+    designArtifacts: [{ taskId: 'T-old-design', path: 'docs/G-old/REQUIREMENTS.md', digest: DIGEST, title: '需求' }],
+  })
+  const published = await post('/api/goal', {
+    scope, by: 'general', objective: '账号管理（从实现环接手）', mode: 'chain',
+    adoptFrom: sourceId, startAt: 'implement',
+  })
+  assert.equal(published.status, 200, '发布失败：' + JSON.stringify(published.body))
+  const rows = mod.db.prepare('SELECT * FROM tasks WHERE goalId=? ORDER BY rowid').all(published.body.task.goal.id)
+  const byRole = Object.fromEntries(rows.map((row) => [row.role, row]))
+
+  // ① 设计环被"接手"收口：done + 继承产物 + 冻结提交证据
+  const design = byRole.designer
+  assert.equal(design.status, 'done', '设计环必须收口，否则审查环解析不到设计产物')
+  const designArtifacts = JSON.parse(design.artifacts)
+  assert.equal(designArtifacts.length, 1)
+  assert.equal(designArtifacts[0].path, 'docs/G-old/REQUIREMENTS.md')
+  assert.equal(designArtifacts[0].digest, DIGEST)
+  assert.ok(JSON.parse(design.evidence).some((e) => String(e.text).startsWith('agent-workflow-stage-checkpoint:')),
+    '设计环要有冻结提交证据，审查环按它解析提交')
+
+  // ② 实现环节清空阻塞，立刻可认领
+  assert.equal(JSON.parse(byRole.coder.blockedBy ?? '[]').length, 0, '实现环不该再等设计环')
+
+  // ③ 实现环与下游都钉着同一条继承基线
+  for (const role of ['coder', 'reviewer']) {
+    const adopt = JSON.parse(byRole[role].agent_selection_snapshot).adopt
+    assert.ok(adopt, role + ' 缺少 adopt 基线')
+    assert.equal(adopt.commit, COMMIT)
+    assert.equal(adopt.taskId, sourceId)
+  }
+})
+
+test('⑦ 没有设计产物引用时，"从实现环起链"要具名拒绝，而不是悄悄空转', async () => {
+  const scope = 'adopt-g'
+  await makeSpace(scope, { withWorkflow: true })
+  const sourceId = await makeDeliveredTask(scope) // 没有 workflowContext
+  const published = await post('/api/goal', {
+    scope, by: 'general', objective: 'x', adoptFrom: sourceId, startAt: 'implement',
+  })
+  assert.equal(published.status, 409)
+  assert.equal(published.body.code, 'ADOPT_NO_DESIGN_ARTIFACTS')
 })

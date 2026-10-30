@@ -9,6 +9,20 @@ function safeFailureType(error) {
   }
 }
 
+/**
+ * BUG-043：把「没有可确认终态」拆成可归因的 stop_reason。
+ *
+ * 从前这类结果一律记成 `outcome-unknown`，于是「超时」「启动失败」「provider 拒绝」
+ * 在库里长得一模一样 —— T-224 跑了 56.9 分钟、超过配置上限也没被砍，事后却无法
+ * 从 Attempt 里判断到底是哪条路径。这个映射保持纯函数，才能用断言钉住。
+ */
+export function workflowUnknownStopReason({ timedOut = false, taskCanceled = false, failureType = null } = {}) {
+  if (taskCanceled) return 'canceled-race'
+  if (timedOut) return 'timeout'
+  if (failureType !== null && failureType !== undefined && failureType !== '') return 'provider-rejected'
+  return 'outcome-unknown'
+}
+
 export async function waitForWorkflowAgentRun({
   run,
   taskId,

@@ -142,3 +142,26 @@ export function hubErrorText(e: unknown): string {
   }
   return base
 }
+
+/**
+ * 这是一次**凭据不行**，还是**中枢不可达**？
+ *
+ * 两者的处置完全相反，而界面从前把它们当成同一件事（所有失败都进"中枢不可达 →
+ * 每 5 秒重连"的循环）：
+ *
+ *   · 中枢不可达 → 等它回来是对的（重启、网络抖动都会自己好）；
+ *   · 凭据过期/被撤销 → 再重连一万次也还是 401，该做的是**去重新登录**
+ *     （或者清掉失效凭据、回退到机器令牌）。
+ *
+ * 现场（2026-10-30）：访问令牌 19:14 过期，页面把 401 当成"中枢不可达"重连了一整夜，
+ * 界面上那句"自动重连已开启：第 N 次重试"永远在原地打转。
+ *
+ * 判据只认**具名码**，不做"401 就一定是过期"那种外推：中枢的 `/api/identity/*`
+ * 用 `IDENTITY_*` 前缀把这一类错误标出来，其余 401/403（比如空间越权）不是同一个处置。
+ */
+export function isAuthFailure(e: unknown): boolean {
+  const h = asHubError(e)
+  if (h.status !== 401 && h.status !== 403) return false
+  if (h.code === null || h.code === undefined) return h.status === 401
+  return h.code.startsWith('IDENTITY_')
+}

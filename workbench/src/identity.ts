@@ -260,7 +260,22 @@ export function setSessionExpiredHandler(fn: ExpiredHandler | null): void {
 let recovery: Promise<boolean> | null = null
 
 export async function recoverSession(): Promise<boolean> {
-  if (getRefreshToken().length === 0) return false
+  // ★ 没有刷新凭据时，**也必须清掉那把已经作废的访问令牌**。
+  //
+  //   从前这里直接 `return false`，把死掉的访问令牌留在 sessionStorage 里；
+  //   之后每一次请求都带着同一个失效凭据再 401 —— 而调用方（App 的看板加载循环）
+  //   把 401 当成"中枢不可达"每 5 秒重连一次，于是页面永远转圈、永远同一条红。
+  //   现场（2026-10-30）：访问令牌 19:14 过期，refresh 已被轮换掉，页面挂了一夜。
+  //
+  //   清掉之后重放会用机器令牌（本机部署）⇒ 立刻有数据；远端 Hub 则拿到一次
+  //   干净的 401，由上面按"凭据过期"处理，而不是无限重连。
+  if (getRefreshToken().length === 0) {
+    if (getAccessToken().length > 0) {
+      clearSession()
+      expiredHandler?.()
+    }
+    return false
+  }
   if (recovery !== null) return recovery
   recovery = (async () => {
     try {

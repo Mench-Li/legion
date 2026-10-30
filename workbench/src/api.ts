@@ -83,7 +83,16 @@ function withAuthHeaders(headers?: HeadersInit): Headers {
 async function fetchWithSessionRetry(input: string, init: RequestInit): Promise<Response> {
   const res = await fetch(input, init)
   if (res.status !== 401) return res
-  if (!(await recoverSession())) return res
+  await recoverSession()
+  // ★ 没救回来也要**重放一次**。
+  //
+  //   从前这里在刷新失败时直接 `return res`，把原来那个 401 交回去 —— 而
+  //   `recoverSession` 已经把失效凭据清掉了（见 identity.ts），于是这次重放本来
+  //   能用机器令牌拿到 200，却白扔了。
+  //   现场（2026-10-30）：页面拿着过期的访问令牌重连了一整夜。
+  //
+  //   重放用的头由 `withAuthHeaders` **重新读**：刷新换了令牌、或者凭据已被清空
+  //   （回退到机器令牌），沿用旧头等于没救。
   return fetch(input, { ...init, headers: withAuthHeaders(init.headers) })
 }
 
@@ -968,7 +977,9 @@ async function hubPost(path: string, body: Record<string, unknown>): Promise<unk
   let res: Response
   try {
     res = await post()
-    if (res.status === 401 && await recoverSession()) res = await post()
+    // 与 `fetchWithSessionRetry` 同一条规矩：401 时救一次会话，**无论救没救回来都重放一次**
+    // （没救回来时凭据已被清空，这一次会走机器令牌）。
+    if (res.status === 401) { await recoverSession(); res = await post() }
   } catch (e) {
     if (e instanceof DOMException && e.name === 'AbortError') throw new Error(`请求超时（20s）：中枢 ${hubBase()} 无响应，请确认 team-hub 已启动`)
     throw new Error(`无法连接中枢 ${hubBase()}${path}（网络/代理错误），请检查 team-hub 状态`)
@@ -1962,22 +1973,31 @@ export interface HubModelBinding {
 
 /** 通用 JSON 请求。**写请求都带 20s 超时**（与 hubPost 一致：界面不能无感卡住）。 */
 export async function hubRequest(method: string, path: string, body?: Record<string, unknown>): Promise<unknown> {
-  const ctrl = new AbortController()
-  const timer = setTimeout(() => ctrl.abort(), 20_000)
+  // 超时控制器在**重放时重建**：沿用同一个已 abort 的 signal，重放会在发出前
+  // 就被自己的中断信号毙掉——而那看起来像"重放也没成功"。
+  const send = async (): Promise<Response> => {
+    const ctrl = new AbortController()
+    const timer = setTimeout(() => ctrl.abort(), 20_000)
+    try {
+      return await fetch(`${hubBase()}${path}`, {
+        method,
+        headers: { 'Content-Type': 'application/json', ...authHeaders() },
+        ...(body === undefined ? {} : { body: JSON.stringify({ ...body, by: body.by ?? 'general' }) }),
+        signal: ctrl.signal,
+      })
+    } finally { clearTimeout(timer) }
+  }
   let res: Response
   try {
-    res = await fetch(`${hubBase()}${path}`, {
-      method,
-      headers: { 'Content-Type': 'application/json', ...authHeaders() },
-      ...(body === undefined ? {} : { body: JSON.stringify({ ...body, by: body.by ?? 'general' }) }),
-      signal: ctrl.signal,
-    })
+    res = await send()
+    // ★ 401 时救一次会话再重放（与 hubGet / hubPost 同一条规矩）。
+    //   这条路径从前**完全没有**会话抢救：任何走 hubRequest 的读/写拿到 401
+    //   都会直接把过期凭据的错误抛给界面，而界面把它当成"中枢不可达"去重连。
+    if (res.status === 401) { await recoverSession(); res = await send() }
   } catch (e) {
-    clearTimeout(timer)
     if (e instanceof DOMException && e.name === 'AbortError') throw new Error(`请求超时（20s）：中枢 ${hubBase()} 无响应，请确认 team-hub 已启动`)
     throw new Error(`无法连接中枢 ${hubBase()}${path}（网络/代理错误），请检查 team-hub 状态`)
   }
-  clearTimeout(timer)
   if (!res.ok) {
     const text = await res.text().catch(() => '')
     let parsed: unknown = null

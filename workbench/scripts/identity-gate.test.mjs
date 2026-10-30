@@ -98,12 +98,15 @@ describe('指挥台账号会话', () => {
     // 报出一句"没有重放"，而重放明明在。
     const postAt = api.indexOf('async function hubPost')
     assert.ok(postAt > 0, '找不到 hubPost')
-    const replayAt = api.indexOf('res.status === 401 && await recoverSession()')
+    // ★ 2026-10-30：判据从「抢救成功才重放」改成「401 一律重放一次」。
+    //   抢救失败时凭据已被清空，这一次重放会走机器令牌；继续拿旧令牌只会永远 401。
+    const replayAt = api.indexOf('res.status === 401) { await recoverSession()')
     assert.ok(replayAt > postAt, 'hubPost 必须在 401 上抢救一次会话并重放')
     // 重放必须重新取头：刷新换了令牌，沿用旧头等于没刷新。
     assert.match(api, /headers: withAuthHeaders\(init\.headers\)/)
-    // 没有刷新凭据时**不动手** —— 本机/桌面部署行为与改动前逐字相同。
-    assert.match(identity, /if \(getRefreshToken\(\)\.length === 0\) return false/)
+    // 没有刷新凭据、也**没有**用户访问令牌时不动手 —— 本机/桌面部署行为与改动前逐字相同；
+    // 但**有**那把死掉的访问令牌时必须清掉（否则之后每个请求继续 401）。
+    assert.match(identity, /if \(getRefreshToken\(\)\.length === 0\) \{[\s\S]*?if \(getAccessToken\(\)\.length > 0\) \{[\s\S]*?clearSession\(\)/)
   })
 
   test('⑥ 注册入口按策略出现，closed 时整块不显示', () => {
@@ -223,5 +226,60 @@ describe('忘记口令（账号恢复）', () => {
     assert.match(fn, /postJson/)
     // 不带 token：进不来的人正是要用它的人。
     assert.doesNotMatch(fn, /token: getAccessToken\(\)/)
+  })
+})
+
+// ============================================================================
+// 凭据过期 ≠ 中枢不可达（2026-10-30 现场）
+//
+// 访问令牌 19:14 过期、刷新凭据已被轮换；页面把 401 当成"中枢不可达"，每 5 秒重连，
+// 在原地转了一整夜 —— 而 `recoverSession` 在没有刷新凭据时直接 `return false`，
+// 把死掉的访问令牌留在了 sessionStorage 里。
+//
+// 这一组守的是**源码形态**（指挥台没有组件级渲染环境，见文件头）：
+//   ㉔ 401 之后**无论如何**都要重放一次（清掉死令牌后，重放走机器令牌）；
+//   ㉕ 没有刷新凭据时，死令牌必须被清掉并通知登录门；
+//   ㉖ `hubRequest`（通用读写）也必须做会话抢救；
+//   ㉗ 看板加载循环要把凭据失败**挡在重连之外**（它只会是同一个 401）。
+// ============================================================================
+describe('凭据过期与中枢不可达分开处置', () => {
+  const api = read('workbench/src/api.ts')
+  const app = read('workbench/src/App.tsx')
+  const identity = read('workbench/src/identity.ts')
+  const hubErrors = read('workbench/src/hub-errors.ts')
+
+  test('㉔ 401 之后无条件重放一次（不再"刷新失败就把 401 交回去"）', () => {
+    const fn = /async function fetchWithSessionRetry[\s\S]*?\n}/.exec(api)?.[0] ?? ''
+    assert.ok(fn.length > 0, '找不到 fetchWithSessionRetry')
+    assert.match(fn, /await recoverSession\(\)/, '必须尝试救一次会话')
+    assert.match(fn, /return fetch\(input, \{ \.\.\.init, headers: withAuthHeaders\(init\.headers\) \}\)/, '必须重放一次，并重新取头')
+    assert.doesNotMatch(fn, /if \(!\(await recoverSession\(\)\)\) return res/, '★ 刷新失败也得分支到重放：清掉死令牌后这次重放才走机器令牌')
+  })
+
+  test('㉕ 没有刷新凭据时，死掉的访问令牌必须被清掉', () => {
+    const fn = /export async function recoverSession[\s\S]*?\n}/.exec(identity)?.[0] ?? ''
+    assert.ok(fn.length > 0, '找不到 recoverSession')
+    const early = fn.slice(fn.indexOf('getRefreshToken().length === 0'), fn.indexOf('recovery !== null'))
+    assert.match(early, /clearSession\(\)/, '没有刷新凭据时必须清掉那把失效的访问令牌')
+    assert.match(early, /expiredHandler\?\.\(\)/, '要通知上层回登录页')
+  })
+
+  test('㉖ hubRequest 也做会话抢救（不只是 hubGet/hubPost）', () => {
+    const fn = /export async function hubRequest[\s\S]*?\n}/.exec(api)?.[0] ?? ''
+    assert.ok(fn.length > 0, '找不到 hubRequest')
+    assert.match(fn, /res\.status === 401/)
+    assert.match(fn, /recoverSession\(\)/)
+    assert.match(fn, /const send = async/, '重放要重建 AbortController（沿用已 abort 的 signal 会重放不出来）')
+  })
+
+  test('㉗ 看板加载循环把凭据失败挡在重连之外', () => {
+    assert.match(hubErrors, /export function isAuthFailure/, '缺判据：什么算凭据失败')
+    const at = app.indexOf('isAuthFailure(e)')
+    assert.ok(at > 0, 'App 必须用 isAuthFailure 分类')
+    const retryAt = app.indexOf('setHubRetryInfo({ attempt: failedAttempts')
+    assert.ok(retryAt > at, '凭据失败那条分支必须先 return，不能排进重连')
+    const branch = app.slice(at, at + 400)
+    assert.match(branch, /return/, '凭据失败不得继续排重连')
+    assert.match(branch, /登录已过期/, '文案要指向"重新登录"，不是"去检查中枢"')
   })
 })

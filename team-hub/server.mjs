@@ -3168,7 +3168,14 @@ function publishGoalRecord(targetScope, objective, mode = 'chain', by = 'general
           db.prepare("UPDATE tasks SET status='canceled', version=version+1 WHERE id=?").run(createdTask.id)
         }
         if (implementationTask !== undefined) {
-          db.prepare("UPDATE tasks SET blockedBy='[]', version=version+1 WHERE id=?").run(implementationTask.id)
+          // ★ blockedBy 要改成**设计任务**，不能清空。
+          //   hub 认领实现任务时按 blockedBy 祖先链找设计产物
+          //   （resolveWorkflowContext → findWorkflowStageAncestor）；清空就等于
+          //   "没有设计产物" ⇒ 409 AGENT_WORKFLOW_DESIGN_ARTIFACT_MISSING，
+          //   而界面/日志上那句是"缺少带 SHA-256 摘要的设计产物"——与 adopt 毫无字面关系。
+          //   设计任务此时已 done，挂上去不阻塞认领。
+          db.prepare('UPDATE tasks SET blockedBy=?, version=version+1 WHERE id=?')
+            .run(JSON.stringify([designTask.id]), implementationTask.id)
         }
         audit(by, targetScope, 'goal:adopt-start-at', adopt.taskId, {
           goalId, startAt, designTaskId: designTask.id, inheritedDesignArtifacts: artifacts.length,

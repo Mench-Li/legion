@@ -216,8 +216,9 @@ test('⑥ startAt=implement：接手设计环、跳过中间环节，只留实�
   assert.ok(JSON.parse(design.evidence).some((e) => String(e.text).startsWith('agent-workflow-stage-checkpoint:')),
     '设计环要有冻结提交证据，审查环按它解析提交')
 
-  // ② 实现环节清空阻塞，立刻可认领
-  assert.equal(JSON.parse(byRole.coder.blockedBy ?? '[]').length, 0, '实现环不该再等设计环')
+  // ② 实现环只等**已收口的设计环**：既不再等被跳过的中间环节，也保留设计祖先链
+  //    （hub 认领时按 blockedBy 祖先找设计产物，清空会变成 409 缺少设计产物）
+  assert.deepEqual(JSON.parse(byRole.coder.blockedBy ?? '[]'), [design.id], '实现环应只挂已 done 的设计任务')
 
   // ③ 实现环与下游都钉着同一条继承基线
   for (const role of ['coder', 'reviewer']) {

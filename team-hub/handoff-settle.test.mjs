@@ -59,7 +59,7 @@ test('⑥ 结算记录：provider 取冻结值，run id 标注 verify-only，回
     sourceCommit: SHA, summary: '接手 717607bf', evidence: 'verify-changed 通过', startedAtMs: 1, finishedAtMs: 2,
   })
   assert.equal(attempt.providerName, 'spawn')
-  assert.equal(attempt.providerRunId, 'verify-only:717607bfd4fb')
+  assert.match(attempt.providerRunId, /^verify-only:717607bfd4fb:/, '带唯一后缀：同一提交重试不会撞 idempotency 唯一约束')
   assert.equal(attempt.state, 'completed')
   assert.equal(attempt.result.testReport.passed, true)
   assert.deepEqual(attempt.result.testReport.failures, [])

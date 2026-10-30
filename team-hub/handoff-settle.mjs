@@ -70,11 +70,14 @@ export function runnerMatchesReceipt(testRunner, receipt) {
  */
 export function buildSettleAttempt({ attemptId, stageId, providerName, receipt, sourceCommit, summary, evidence, startedAtMs, finishedAtMs }) {
   const shortSha = String(sourceCommit ?? '').slice(0, 12)
+  // idempotency_key 在 (scope, idempotency_key) 上唯一：同一提交重试时必须换 key，
+  // 否则第二次结算会被 UNIQUE 约束挡在写回执之前（现场：同样的 717607bf 重试）。
+  const discriminator = String(attemptId ?? '').slice(-8)
   return {
     id: attemptId,
     stageId,
     providerName,
-    providerRunId: `verify-only:${shortSha}`,
+    providerRunId: `verify-only:${shortSha}:${discriminator}`,
     state: 'completed',
     result: {
       summary,

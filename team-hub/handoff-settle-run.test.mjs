@@ -57,11 +57,11 @@ test('① 通过：置 done，写下检查点 + 实现证据（审查环认领�
   assert.match(d.calls.statuses[0].comment, /未派 agent/)
 })
 
-test('② 未通过：停在 in_review，评论带退出码（不能置 done）', async () => {
+test('② 未通过：从 todo 落 blocked（状态机不允许 todo→in_review），评论带退出码', async () => {
   const d = deps({ runRunner: async () => ({ state: 'failed', exitCode: 1, ...RUNNER, error: 'boom' }) })
   const result = await settleHandoff({ taskId: 'T-240', by: 'general' }, d)
   assert.equal(result.ok, false)
-  assert.deepEqual(d.calls.statuses.map((s) => s.status), ['in_review'])
+  assert.deepEqual(d.calls.statuses.map((s) => s.status), ['blocked'])
   assert.match(d.calls.statuses[0].comment, /退出码 1/)
   assert.equal(d.calls.evidence.length, 0, '没通过就不该写实现证据')
 })
@@ -70,7 +70,7 @@ test('③ 未知（超时/中断）：同样停 in_review，但原因写"没有�
   const d = deps({ runRunner: async () => ({ state: 'unknown', exitCode: null, ...RUNNER }) })
   const result = await settleHandoff({ taskId: 'T-240', by: 'general' }, d)
   assert.equal(result.ok, false)
-  assert.deepEqual(d.calls.statuses.map((s) => s.status), ['in_review'])
+  assert.deepEqual(d.calls.statuses.map((s) => s.status), ['blocked'])
   assert.match(d.calls.statuses[0].comment, /没有跑出结论/)
 })
 

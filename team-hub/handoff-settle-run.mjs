@@ -79,7 +79,9 @@ export async function settleHandoff({ taskId, by }, deps) {
 
   if (!settlement.ok) {
     // 失败/未知都停在 in_review，并把原因写成人能读的一句话（含退出码/超时秒数）。
-    deps.setStatus(taskId, 'in_review', `⚠ ${settlement.reason}。工作现场保留在接手基线上，人工核对后可重新结算。`)
+    // 状态机：todo 只能去 in_progress / blocked / canceled —— 从 todo 直接写
+    // in_review 会被拒（现场：400 非法迁移）。失败就落 blocked，已开工过的落 in_review。
+    deps.setStatus(taskId, task.status === 'todo' ? 'blocked' : 'in_review', `⚠ ${settlement.reason}。工作现场保留在接手基线上，人工核对后可重新结算。`)
     return { ok: false, settlement, attempt, sourceCommit }
   }
 

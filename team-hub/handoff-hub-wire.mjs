@@ -15,7 +15,7 @@
 // ============================================================================
 
 import { spawnSync } from 'node:child_process'
-import { existsSync, mkdirSync } from 'node:fs'
+import { existsSync, mkdirSync, symlinkSync } from 'node:fs'
 
 import { assertSettleable, handoffWorktreeDir } from './handoff-adapters.mjs'
 import { settleHandoff } from './handoff-settle-run.mjs'
@@ -102,6 +102,18 @@ export function createHandoffRouter(deps) {
   }
 
   const runRunner = ({ runner, cwd }) => {
+    // 接手的 detached 工作区里没有 node_modules，而仓库里的测试会直接 import 依赖
+    // （现场：workbench/scripts/account-profile.test.mjs -> Cannot find package typescript）。
+    // 与守护的 prepareWorktree 同一条做法：把仓库里现成的那份链接进去。
+    for (const sub of ['workbench/node_modules', 'plugins/node_modules']) {
+      const target = repoRoot.replace(/[\\/]+$/, "") + "/" + sub
+      const link = cwd.replace(/[\\/]+$/, "") + "/" + sub
+      if (!existsSync(target) || existsSync(link)) continue
+      try {
+        mkdirSync(link.slice(0, link.lastIndexOf("/")), { recursive: true })
+        symlinkSync(target, link, 'junction')
+      } catch { /* 已是目录/平台不支持：忽略，让测试自己报缺依赖 */ }
+    }
     const startedAtMs = Date.now()
     const r = spawnSync(runner.executable, runner.args, {
       cwd, encoding: 'utf8', timeout: runner.timeoutMs, maxBuffer: 8 * 1024 * 1024,

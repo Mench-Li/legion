@@ -107,7 +107,7 @@ import {
   subagentProviderCapabilities,
   subagentProviderPermissionMode,
 } from '../../runtime/adapters/dsh/subagent-client.mjs'
-import { waitForWorkflowAgentRun } from '../../runtime/adapters/dsh/workflow-run.mjs'
+import { waitForWorkflowAgentRun, workflowUnknownStopReason } from '../../runtime/adapters/dsh/workflow-run.mjs'
 // ★ 2026-10-13：本机 provider **就绪度**自检（装了没 / 登录了没 / 端点通不通）。
 // 为什么需要：心跳上报的 `providerNames` 与能力位是**声明**，不是**读数** ——
 // 一台没装 codex 的机器，工作流面板照样显示"就绪"，而用户面对的是一个
@@ -573,6 +573,8 @@ export function apply(ctx: AppContext, config: Config): void {
  * spaceWorker 实例；逐实例重复同一份摘要只会把日志淹掉。日志写失败由调用方的 log() 自行吞掉。
  */
 let configSummaryLogged = false
+/** BUG-043：本进程**实际生效**的超时配置只打印一次（多空间 mount 不重复刷屏）。 */
+let effectiveTimeoutConfigLogged = false
 function logConfigOnce(log: (msg: string) => void): void {
   if (configSummaryLogged) return
   configSummaryLogged = true
@@ -617,6 +619,16 @@ function spaceWorker(ctx: AppContext, config: Config): void {
   const effectiveConfig: Config = staleVerdict.adjusted
     ? { ...config, staleMinutes: staleVerdict.staleMinutes }
     : config
+
+  // ★ BUG-043：配置文件是**启动时**装载的 —— 改了 `cordis.patch.yml` 不重启宿主，运行值不会变。
+  // 这一行是「文件里写的」与「进程实际用的」之间唯一的锚：下次再有人对着文件里的数字推断
+  // 运行时行为（例如把 desktop 的 45 分钟当成没在跑的 web 的 25 分钟），日志会先说话。
+  if (!effectiveTimeoutConfigLogged) {
+    effectiveTimeoutConfigLogged = true
+    log(`生效超时配置（BUG-043）：workerTimeoutMs=${config.workerTimeoutMs}`
+      + `（${Math.ceil(config.workerTimeoutMs / 60_000)} 分钟），`
+      + `staleMinutes=${effectiveConfig.staleMinutes}${staleVerdict.adjusted ? '（已按 BUG-009-b 校正）' : ''}`)
+  }
 
   /** 看板动态事件流：追加结构化事件到 scrum/activity.jsonl（serve.mjs 经 SSE 推给看板）。 */
   const activityFile = join(config.scrumDir, 'activity.jsonl')
@@ -2566,12 +2578,16 @@ function spaceWorker(ctx: AppContext, config: Config): void {
         }
       })()
     }
-    const quarantineUnknownWorkflowResult = async (reason: string, preserveCanceledTask = false): Promise<boolean> => {
+    const quarantineUnknownWorkflowResult = async (
+      reason: string,
+      preserveCanceledTask = false,
+      stopReason = 'outcome-unknown',
+    ): Promise<boolean> => {
       if (!isWorkflowTask) return false
       const providerName = t.agentSelectionSnapshot?.agentToolConfig?.providerName ?? config.provider
       const stageId = t.agentSelectionSnapshot?.workflowStageId ?? t.role ?? 'unknown'
       const runRef = providerRunId === null ? '' : `，providerRunId=${providerRunId}`
-      await reportWorkflowStageAttempt({ state: 'unknown', providerRunId, stopReason: 'outcome-unknown', error: reason })
+      await reportWorkflowStageAttempt({ state: 'unknown', providerRunId, stopReason, error: reason })
         .catch(error => log(`${t.id} 阶段 Attempt 未能登记未知结果：${String(error)}`))
       await safeComment(t.id, preserveCanceledTask
         ? `⛔ 工作流阶段结果未知（stage=${stageId}, provider=${providerName}${runRef}）：${reason}。任务保持取消状态，工作区已保留并等待人工核对；不会自动推进或重派。`
@@ -2814,7 +2830,7 @@ function spaceWorker(ctx: AppContext, config: Config): void {
     })()
     if (run === undefined) {
       if (isWorkflowTask) {
-        await quarantineUnknownWorkflowResult('Agent 启动结果未知或启动请求失败')
+        await quarantineUnknownWorkflowResult('Agent 启动结果未知或启动请求失败', false, 'start-error')
         return
       }
       if (resolveIntegrationMode(process.env) === 'integration') await transitionTo(t.id, 'blocked', scope, true)
@@ -2855,7 +2871,18 @@ function spaceWorker(ctx: AppContext, config: Config): void {
             : failureType
               ? `provider result promise rejected（type=${failureType}）`
               : 'worker 连接中断或 provider 未返回可确认的终态'
-        await quarantineUnknownWorkflowResult(reason, taskCanceled)
+        // ★ BUG-043：超时必须留下自己的痕迹。从前它只 abort、不打日志，Attempt 又与崩溃
+        // 同记 `outcome-unknown`，于是"看门狗有没有响"只能靠猜（T-224 56.9 分钟即为此）。
+        if (waited.timedOut) {
+          log(`${t.id} workflow 阶段超时（>${Math.round(config.workerTimeoutMs / 60_000)} 分钟），`
+            + 'provider 未返回可确认的终态，已隔离为 timeout，等待人工核对')
+        }
+        const unknownStopReason = workflowUnknownStopReason({
+          timedOut: waited.timedOut,
+          taskCanceled,
+          failureType,
+        })
+        await quarantineUnknownWorkflowResult(reason, taskCanceled, unknownStopReason)
         await run.dispose().catch(() => undefined)
         return
       }
@@ -2906,7 +2933,7 @@ function spaceWorker(ctx: AppContext, config: Config): void {
         activity('aborted', t.id, '用户取消已传到 Agent provider，provider 返回取消终态')
         return
       }
-      await quarantineUnknownWorkflowResult(`任务取消与 provider 终态发生竞态（${result.stopReason}）；结果未用于推进工作流`, true)
+      await quarantineUnknownWorkflowResult(`任务取消与 provider 终态发生竞态（${result.stopReason}）；结果未用于推进工作流`, true, 'canceled-race')
       return
     }
     if (result.stopReason !== 'completed' || result.structured === undefined) {
@@ -2915,7 +2942,7 @@ function spaceWorker(ctx: AppContext, config: Config): void {
         : ''
       log(`${t.id} worker 未完成（${result.stopReason}）${diagnostic}`)
       if (isWorkflowTask) {
-        await quarantineUnknownWorkflowResult(`worker 未完成（${result.stopReason}）${diagnostic}`)
+        await quarantineUnknownWorkflowResult(`worker 未完成（${result.stopReason}）${diagnostic}`, false, 'provider-incomplete')
         return
       }
       await safeComment(t.id, `⚠ worker 未完成（${result.stopReason}）${diagnostic}，任务保留在 in_progress，等待人工处理或下一轮重试`)
@@ -3006,7 +3033,7 @@ function spaceWorker(ctx: AppContext, config: Config): void {
       try {
         await reportWorkflowStageAttempt({ state: 'completed', providerRunId, stopReason: result.stopReason, result: workflowAttemptResult })
       } catch (error) {
-        await quarantineUnknownWorkflowResult(`worker 已返回结果但阶段 Attempt 终态未能持久化：${String(error)}`)
+        await quarantineUnknownWorkflowResult(`worker 已返回结果但阶段 Attempt 终态未能持久化：${String(error)}`, false, 'persist-error')
         return
       }
     }

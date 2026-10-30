@@ -25,3 +25,10 @@ export interface WorkflowAgentRunWaitResult {
 }
 
 export declare function waitForWorkflowAgentRun(input: WaitForWorkflowAgentRunInput): Promise<WorkflowAgentRunWaitResult>
+
+/** BUG-043：把「没有可确认终态」映射成可归因的 stop_reason（纯函数，便于断言）。 */
+export declare function workflowUnknownStopReason(input?: {
+  timedOut?: boolean
+  taskCanceled?: boolean
+  failureType?: string | null
+}): 'canceled-race' | 'timeout' | 'provider-rejected' | 'outcome-unknown'

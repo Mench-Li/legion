@@ -48,6 +48,19 @@ export interface Task {
     source: string
     pipelineVersion: string
     stageRole: string
+    /**
+     * 接手既有交付（adopt）：本任务继承一个**已验收**任务的现场。
+     * 工作区从 `commit` 起（不是 main），提示词里也会明说"核对 + 必要修补，别重写"。
+     */
+    adopt?: {
+      taskId: string
+      commit: string
+      branch?: string | null
+      goalId?: string | null
+      docsDir?: string | null
+      adoptedAt?: string
+      adoptedBy?: string | null
+    } | null
     workflowStageId?: string | null
     agentToolConfig: AgentToolConfigSnapshot | null
     modelConfig: { id: string; version: number } | null

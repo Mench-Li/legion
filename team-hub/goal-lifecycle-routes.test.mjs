@@ -224,8 +224,8 @@ const drive = async (router, path, body) => {
 test('⑤ ★★★ 发布时**作用域回落**：`body.scope` 有就用（trim），没有就用 hub 给的那个', async () => {
   const { router, calls } = spyRouter()
   await drive(router, '/api/goal', { by: 'general', objective: 'O' })
-  assert.deepEqual(calls.publish[0], ['scope-from-hub', 'O', 'chain', 'general', false, null, null, 'pipeline', null],
-    '★★★ 没有 body.scope 时必须回落到 handleWrite 递进来的 scope（第 9 位是新加的分配层，缺省 null）')
+  assert.deepEqual(calls.publish[0], ['scope-from-hub', 'O', 'chain', 'general', false, null, null, 'pipeline', null, null],
+    '★★★ 没有 body.scope 时必须回落到 handleWrite 递进来的 scope（第 9 位是分配层、第 10 位是接手基线 adoptFrom，缺省都是 null）')
   await drive(router, '/api/goal', { by: 'general', objective: 'O', scope: '  other  ' })
   assert.equal(calls.publish[1][0], 'other', '★★ 给了 scope 就用它，且要去空白')
   await drive(router, '/api/goal', { by: 'general', objective: 'O', scope: '   ' })

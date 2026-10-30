@@ -1,6 +1,6 @@
 # 模型运行期调度（Model Runtime）设计
 
-> 状态：**设计稿 v0.1**（待将军裁定 §12 的三个开放问题后定稿）
+> 状态：**设计稿 v0.2**（§12.2 三个问题已于 2026-10-30 裁定，可进入 P0 拆解）
 > 关联：[README.md](../README.md)（总览）· [ORCHESTRATION-V3.md](ORCHESTRATION-V3.md)（编排分层）· [DECISION-legion-owns-model-config.md](DECISION-legion-owns-model-config.md)（模型配置归属）· [FEATURES.md](FEATURES.md)（模型 × 智能体配置）
 > 一句话：**Legion 已经有"能不能换模型"的策略（`canSwitchModel`）和"花多少钱"的账本（`budget-ledger`），缺的是一层在运行期真正消费候选链、记录每次切换理由的调度器；本设计把这层补上，形态参考 magpie，边界按 Legion 自己的纪律收紧。**
 
@@ -10,7 +10,7 @@
 
 1. **调度粒度是 attempt，不是 task。** attempt 已有幂等键、租约、预算预留和 `unknown` 语义，是天然的重试点；任务级重试会把一次 429 变成一次 30 分钟的重跑。
 2. **候选来源就是现有的 `chain`**（primary + fallbackProfiles），不新增"模型池"概念；账号/Key 池留到 P2 作为可选扩展。
-3. **切换必须过价格守卫。** 复用 [`canSwitchModel`](../runtime/contracts/price-table.mjs)：更便宜或同价放行，更贵需批准，任一侧未定价一律拒绝。
+3. **切换必须过价格守卫。** 复用 [`canSwitchModel`](../runtime/contracts/price-table.mjs)：更便宜或同价放行，更贵需批准（任务上一次性的显式标记，或将军在调度台操作），任一侧未定价一律拒绝。
 4. **只有"第一个副作用之前"允许切换。** 一旦工具调用成功返回，失败一律走 `unknown`，不重试、不换模型。
 5. **配置错误不等于运行故障。** `PRIMARY_UNRESOLVED` 继续硬失败，不允许 fallback 顶替（沿用 [run-inputs.mjs](../orchestrator/worker/run-inputs.mjs) 的现有纪律）。
 6. **Rest 落库、跨 worker 共享。** 限流到几点、配额何时重置要能被另一台宿主看见，不能只存在进程内存里。
@@ -243,11 +243,12 @@ async function runAttempt(ctx):
   return fail('all-candidates-rested')       // 带每个候选的原因
 ```
 
-### 5.2 三条守卫（缺一不可）
+### 5.2 四条守卫（缺一不可）
 
 1. **价格守卫**：`canSwitchModel` 返回 `false` 就不切；`PRICE_UNKNOWN` 也拒绝——这是刻意的，补价目表比放行便宜。
 2. **副作用守卫**：`firstSideEffect()` 一旦触发，后续所有失败都归 `unknown`，与 [plugins/src/index.ts](../plugins/src/index.ts) 里"确认外部执行未产生副作用前不会自动重试"的现有纪律一致。
 3. **配置守卫**：`PRIMARY_UNRESOLVED` 不进候选循环；fallback 只为"运行时连不上"存在，不为"配置写错了"兜底。
+4. **同 provider 守卫（P1）**：`to.provider !== from.provider` 默认拒绝，记 `CROSS_PROVIDER_BLOCKED`；只有空间级 `allowCrossProvider`（P3，默认关）打开才放行。跨 provider 改变的不只是成本，还有"数据去了哪"。
 
 ### 5.3 退避取值顺序
 
@@ -413,6 +414,27 @@ worktree 不变、分支不变，只换引擎与 `modelArg`；新进程的首条
 - 日志只记 host，不记完整 URL 与 key。
 - Legion 不落盘 prompt；网关侧是否记录由网关自己负责，接入时确认。
 
+### 6.8 升价批准：一次性、可审计
+
+不新造开关表，用现有的 `tasks` 加两列 + 审计：
+
+| 位置 | 字段 | 语义 |
+| --- | --- | --- |
+| `tasks` | `allow_price_increase` | 0/1；将军在调度台或任务详情打开 |
+| `tasks` | `price_increase_consumed_at` | 非空 = 已消费；写入时把上一列清零 |
+| `audit` | `model:approve-price-increase` | 记录操作者、开关动作、任务与时刻 |
+
+**消费时机（顺序不可乱）**：
+
+1. 价格守卫返回 `MORE_EXPENSIVE_NEEDS_APPROVAL`，且 `allow_price_increase = 1`；
+2. 先 `reserve` 差额；**预留失败 → 不消费、不切换**（标记保持可用，稍后可重试）；
+3. 预留成功 → 置 `price_increase_consumed_at`、清零 `allow_price_increase`、发起调用；
+4. 调用在首副作用前失败 → 标记**不自动恢复**（失败后要重新点一次）：一次点击不能变成多次花钱。
+
+**调度台操作**：任务行 ⋯ 菜单 → "允许升价一次"，与 `hold` 同级，但只影响模型切换、不影响任务流转。接口 `POST /api/task/price-increase { id, on, by }`，写审计并推 SSE。
+
+**边界**：同一次 attempt 里连续切两次更贵候选，第二次仍需要新标记（一次标记只覆盖一次执行）。
+
 ---
 
 ## 7. 可观测性
@@ -427,6 +449,8 @@ worktree 不变、分支不变，只换引擎与 `modelArg`；新进程的首条
 | `exhausted_wait` | `model:exhausted` 的等待时长分布 | 决定是否要扩候选 |
 
 任务详情新增一条"模型决策"时间线：候选列表（含跳过原因）→ 选中的 → 结果 → 若切换，显示贵了多少。
+
+Rest 的到期时间只在任务详情与 `/api/model-runtime/rest` 出现；**任务卡不新增字段**（§12.2 裁定 3）。
 
 ---
 
@@ -461,7 +485,7 @@ modelRuntime:
 
 1. **不引入外部网关**：provider 仍是 dsh adapter，密钥仍走 DPAPI 凭据库；本设计不新增任何出网路径。
 2. **决策记录不含敏感内容**：只存 profile id、原因码、金额；`candidates_json` 里不得出现 `secret_ref`。
-3. **不自动升价**：唯一入口是 `canSwitchModel` 的 `approved`，且批准必须留下操作者。
+3. **不自动升价**：唯一入口是 `canSwitchModel` 的 `approved`（§6.8 的一次性标记），且批准必须留下操作者。
 4. **只用用户自有 key**：不做订阅账号桥接，不读取其它 CLI 的登录态。
 5. **Rest 的写权限收敛**：只允许运行期内部写；人工清除走带审计的接口。
 
@@ -472,9 +496,9 @@ modelRuntime:
 | 阶段 | 范围 | 改动面 | 验收 | 回滚 |
 | --- | --- | --- | --- | --- |
 | P0 记录 | Rest 表 + 决策记录 + 分类器；不切换 | 新模块 + hub 两张表 + 审计 | 影子模式跑一周，决策记录与实际选择一致 | 删表 + 关开关 |
-| P1 切换 | native：首副作用前 failover + 价格守卫；external：attempt 级重开（§5.5） | `run-inputs`、执行入口、worktree diff 探针 | 注入 429/连接失败，验证第 2 个候选被使用且未升价；external 仅在 worktree 无改动时重开 | 开关回 shadow |
+| P1 切换 | native：首副作用前 failover + 价格守卫（仅同 provider）；external：attempt 级重开（§5.5） | `run-inputs`、执行入口、worktree diff 探针、任务两列 | 注入 429/连接失败，验证第 2 个候选被使用且未升价；external 仅在 worktree 无改动时重开；跨 provider 被拒 | 开关回 shadow |
 | P2 健康 | 上游 `retry-after`/重置时间接入；启动失败重试一次；`gateway` profile 与周期健康检查 | classify + probe + profile 路由 | 限流等待接近上游值；网关断开后 60s 内被标 Rest 并切走 | 退回本地指数、关闭 gateway |
-| P3 亲和与账 | 缓存亲和 + 成本 KPI + OTLP 导出 | 调度器 + usage | `cost_per_accepted_task` 可读且可复算 | 关亲和 |
+| P3 亲和与账 | 缓存亲和 + 成本 KPI + OTLP 导出；跨 provider 开关（默认关） | 调度器 + usage + settings | `cost_per_accepted_task` 可读且可复算；开关关闭时跨 provider 仍被拒 | 关亲和、关开关 |
 
 每阶段独立可验收；P0 不改任何执行行为，风险最低，建议先做。
 
@@ -501,6 +525,10 @@ modelRuntime:
 | AC-15 | 网关 401 | `auth` Rest，不自动过期 | 单测 |
 | AC-16 | 网关连续 3 次 5xx | Rest 指数增长；候选链切到下一个 | 集成用例 |
 | AC-17 | 网关模型列表为空 | 判该 profile 不可用并告警，不退化为"全部模型" | 单测 |
+| AC-18 | 任务标记=1，切到更贵候选 | 先预留差额再调用；`price_increase_consumed_at` 写入、标记清零 | 集成用例 |
+| AC-19 | 未标记者切更贵 | 拒绝 `MORE_EXPENSIVE_NEEDS_APPROVAL`，标记不被消费 | 单测 |
+| AC-20 | 跨 provider 候选（默认） | 拒绝并记 `CROSS_PROVIDER_BLOCKED` | 单测 |
+| AC-21 | 任务卡 | 不出现 Rest 字段；Rest 只在详情与接口 | UI 断言 |
 
 ---
 
@@ -518,11 +546,19 @@ modelRuntime:
 | 多宿主同时写 Rest | 状态抖动 | 以 `(scope, profile)` 为主键，写入幂等（取更晚的 `until`） |
 | 与回收器叠加 | 双写者 | §6.6 先修阈值与心跳 |
 
-### 12.2 开放问题（需将军裁定）
+### 12.2 已裁定（2026-10-30）
 
-1. **更贵候选的批准入口放哪？** 任务上加一个"允许升价一次"的显式标记，还是只允许将军在调度台操作？
-2. **fallback 是否限制同 provider？** 跨 provider 切换会改变"数据去了哪"，是否需要单独的合规开关？
-3. **Rest 的可见性**：是否在任务卡上直接显示"等 14:20 重试"，还是只在详情里展示（避免卡片信息过载）？
+| # | 问题 | 裁定 | 落到哪 |
+| --- | --- | --- | --- |
+| 1 | 更贵候选的批准入口 | 任务上放"允许升价一次"标记；同时允许将军在调度台操作。标记是**一次性**的，消费后自动清零 | §6.8 |
+| 2 | fallback 是否跨 provider | P1 只允许**同 provider** 内切换；跨 provider 作为 P3 的可选开关，默认关 | §5.2、§10 |
+| 3 | Rest 是否上任务卡 | 只在**任务详情**展示；卡片不加，避免信息过载 | §7 |
+
+三条的理由（一句话）：
+
+1. 标记放任务上，是因为"这次值得多花钱"是**任务级判断**；放全局会变成长期授权，放模型上又太碎。
+2. 先同 provider，是因为跨 provider 改变的不只是成本，还有"数据去了哪"；这一条要单独开关、单独审计。
+3. 卡片是扫视用的，详情是判断用的；Rest 属于后者。
 
 ---
 

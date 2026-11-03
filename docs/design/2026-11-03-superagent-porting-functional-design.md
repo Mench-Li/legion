@@ -1273,13 +1273,36 @@ CREATE TABLE IF NOT EXISTS metric_baseline (
 | `@` 追加 / 升级 | `appendTaskNote` 单点；无 @ 走原分支 | 无 @ 即今天的行为 |
 | 事件流 | 只加列与只读接口 | 不调 `/api/reconcile` 即可 |
 | 回归门 | CI 里是否调用 `check-baseline.mjs` | 不调用 = 只报告不拦截 |
+| **认领顺序（已决定先开）** | `LEGION_GOAL_SHARE=1`（+ 可选 `LEGION_GOAL_SHARE_DEFAULT=0.5`） | 关闭后回到 `priority × createdAt` |
+
+**启用 `LEGION_GOAL_SHARE` 的操作口径**（2026-11-03 决策：先只开这一个）
+
+它读取的是**守护进程的环境变量**，不是仓库里的配置文件——所以必须在启动 DSH/守护的那个环境里导出：
+
+```powershell
+# PowerShell（当前会话）
+$env:LEGION_GOAL_SHARE = '1'
+$env:LEGION_GOAL_SHARE_DEFAULT = '0.5'   # 单目标默认份额，可省略
+```
+```bash
+# bash / CI
+export LEGION_GOAL_SHARE=1
+export LEGION_GOAL_SHARE_DEFAULT=0.5
+```
+
+生效后只改**认领顺序**（缺口大的目标先跑），不拒任何任务；要回滚就删掉这个变量重启守护。
+验证方式：同一空间造两个不同目标的 todo 任务、只留 1 个空槽，观察先被认领的是"在跑数更少的目标"那个；
+再看 `GET /api/tasks/:id/blocking` 的 `reason` 分布是否仍以 `slot` / `fileDomain` 为主。
 
 回滚粒度都是"关开关"或"不调用某个脚本"，**没有需要回滚的库结构变更**（除 `tasks.comments` 的 B 段删列，那是最后一步、可延后）。
 
 ### 11.4 剩余两项（有理由，不是遗漏）
 
 1. ~~**F6 排序接线**~~ ✅ 已完成：`plugins/src/claimOrder.ts`（缺口→priority→createdAt、权重、不改集合）+ 接进 `stateMachine.runRound` 的 todo 遍历，开关 `LEGION_GOAL_SHARE=1`（默认关）。判据 `plugins/tests/claim-order.test.mjs` 6/6。
-2. **F0 B 段删列**（唯一剩余）：需要 65 处读取点全部收敛到投影；过渡期的同事务同步列已保证读取零改动，**删除是纯清理、收益小于风险**，故明确延后为技术债而非交付缺口。
+2. **F0 B 段删列**（唯一剩余）：**实测 165 处**读取点（不是早期估算的 65——用
+   `node team-hub/scripts/comment-column-readers.mjs` 扫描 657 个文件得出，含 `文件:行` 清单）。
+   过渡期的同事务同步列已保证读取零改动，**删除是纯清理、收益小于风险**，故延后为技术债。
+   什么时候可以删：该脚本 `count < 5`（`readyToDrop=true`）时。
 
 ### 11.5 验收命令（可复现）
 
@@ -1317,4 +1340,6 @@ node team-hub/scripts/check-baseline.mjs
 - `dropped` 落 `canceled` 而非 `done`：`done` 只有将军能写（`taskctl:527-532`）。
 - `waiting` 留在 `in_progress`、不发消息：Legion 没有 `idle` 态。
 - `plugins/tests/worker-regression.test.mjs` 本机**存量失败**（10s 超时）；已 `git stash` 对照确认与本次改动无关。
+  **2026-11-03 已加环境守卫**：缺完整 agent 链路时 15 条用例显式 `skip`（`pass 0 / fail 0 / skipped 15`），
+  恢复条件 = 设 `LEGION_AGENT_CHAIN=1` 且中枢可真实派发 agent。理由：**假红点会掩盖真回归**。
 - `mentions.mjs` 与 `commentIntent.ts` 是**两份规则**（两个包之间无运行时依赖，DEC-2），变更需同时改两处。

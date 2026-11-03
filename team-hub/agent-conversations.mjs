@@ -1,5 +1,7 @@
 import { randomUUID, createHash } from 'node:crypto'
 import { redactValue } from '../runtime/adapters/dsh/redact.mjs'
+import { appendInput } from './task-input.mjs'
+import { resumeAfterAnswer } from './task-resume.mjs'
 
 const parse = (value, fallback = []) => { try { return JSON.parse(value ?? '') } catch { return fallback } }
 const keyOf = (...parts) => JSON.stringify(parts)
@@ -209,10 +211,14 @@ export function createAgentConversationService({ db, withTx, audit, clock = Date
         db.prepare("UPDATE agent_questions SET status='answered',answer=?,answered_by=?,source_message_id=?,version=version+1 WHERE id=? AND version=?")
           .run(body,input.by,messageId,q.id,q.version)
         feedbackId = feedback(b,a,t,messageId,`问题：${q.body}\n用户决定：${body}`,input.by)
-        // Legacy soldier state machine detects a human reply in comments.
-        const notes=parse(t.comments)
-        notes.push({ by:input.by,at:iso(),text:`问题答复：${body}`,questionId:q.id })
-        db.prepare('UPDATE tasks SET comments=?,version=version+1,updatedAt=? WHERE id=?').run(JSON.stringify(notes),iso(),t.id)
+        // 答复也走**输入行**（F0 的唯一写点），列由行投影同步 —— 老的"人回话"检测照样成立，
+        // 但不再是对 `comments` 列的第二处内联写。
+        appendInput(db, {
+          taskId: t.id, kind: 'comment', actor: input.by, actorKind: 'user',
+          body: `问题答复：${body}`, at: iso(), channel: 'answer_question', meta: { questionId: q.id },
+        }, { inTransaction: true })
+        // F2：答完就放行 —— 否则闸装上了却没有放行开关，任务会静默停摆。
+        resumeAfterAnswer(db, { taskId: t.id, actor: input.by, at: iso(), audit })
       }
       if (intent === 'create_task') {
         if (!createTask) fail('UNSUPPORTED_CAPABILITY','任务创建未接线',409)

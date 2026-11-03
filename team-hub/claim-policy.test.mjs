@@ -52,6 +52,10 @@ function makeDb() {
       status TEXT NOT NULL DEFAULT 'backlog', version INTEGER NOT NULL DEFAULT 1,
       soldier TEXT, scope TEXT DEFAULT 'default', hold INTEGER DEFAULT 0,
       createdAt TEXT, updatedAt TEXT, acceptance TEXT DEFAULT '[]'
+    );
+    -- F2：候选 SQL 里多了一条 NOT EXISTS(agent_questions ...) 资格，夹具必须带上这张表。
+    CREATE TABLE IF NOT EXISTS agent_questions (
+      id TEXT PRIMARY KEY, task_id TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'open'
     )
   `)
   ensureRunSchema(db)
@@ -251,11 +255,13 @@ test('③ ★ 每个 gate 的 `sql` 与 `holds` 必须在**同一批任务**上�
  */
 function evalGateAgainstSql(gate, task) {
   const db = new DatabaseSync(':memory:')
-  db.exec('CREATE TABLE tasks (status TEXT, hold INTEGER)')
+  db.exec('CREATE TABLE tasks (id TEXT, status TEXT, hold INTEGER)')
+  // F2：候选 SQL 里多了一条 `agent_questions` 子查询，"真的交给引擎执行"的夹具也要有这张表。
+  db.exec('CREATE TABLE IF NOT EXISTS agent_questions (id TEXT PRIMARY KEY, task_id TEXT, status TEXT)')
   // node:sqlite 不接受布尔绑定参数，所以 `hold` 要显式归一成 0/1/NULL。
   // 归一化本身也必须忠于原值：`false` → 0、`true` → 1、缺失 → NULL。
   const hold = task.hold === undefined || task.hold === null ? null : (task.hold ? 1 : 0)
-  db.prepare('INSERT INTO tasks (status, hold) VALUES (?, ?)').run(task.status ?? null, hold)
+  db.prepare('INSERT INTO tasks (id, status, hold) VALUES (?, ?, ?)').run('t', task.status ?? null, hold)
   const row = db.prepare(`SELECT 1 AS hit FROM tasks t WHERE ${gate.sql}`).get()
   return row !== undefined && row !== null
 }

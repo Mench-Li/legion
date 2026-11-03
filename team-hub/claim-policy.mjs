@@ -33,7 +33,8 @@ import { pathsIntersect } from '../packages/shared/src/path-domain.mjs'
 // ============================================================================
 
 /** 策略版本。它一变，缓存过的计划与在途的认领判定都该被重新审视。 */
-export const CLAIM_POLICY_VERSION = 'legion/claim-policy@1'
+// v2（F2）：新增 `no-open-question` 任务级资格 —— 有未答问题的任务不再进候选。
+export const CLAIM_POLICY_VERSION = 'legion/claim-policy@2'
 
 /**
  * **终态尝试**：处在这几个状态里的尝试不再算"活跃"。
@@ -79,6 +80,16 @@ export const TASK_GATES = Object.freeze([
       return !(h === 1 || h === true || (typeof h === 'number' && h !== 0))
     },
     userText: '任务被将军拦下了（hold）',
+  }),
+  Object.freeze({
+    // F2（设计稿 §3 F2）：**有未答问题就不派工**。
+    // 「在等人拍板」是执行面的事实，不是提示词里的建议——所以它落在这里，
+    // 与 status-todo / not-held 同一组，两条候选路径自动共用。
+    id: 'no-open-question',
+    sql: "NOT EXISTS (SELECT 1 FROM agent_questions q WHERE q.task_id = t.id AND q.status = 'open')",
+    // 纯函数镜像：调用方用 `openQuestionCount` 把子查询的结果带进来（诊断/dry-run 用）。
+    holds: (task) => Number(task?.openQuestionCount ?? task?.open_questions ?? 0) === 0,
+    userText: '任务有未回答的问题（在等人拍板）',
   }),
 ])
 
@@ -186,6 +197,8 @@ export const CLAIM_REJECTIONS = Object.freeze({
   TASK_NOT_FOUND: 'claim-task-not-found',
   TASK_HELD: 'claim-task-held',
   TASK_NOT_TODO: 'claim-task-not-todo',
+  /** F2：任务有未答问题，等将军拍板（不混进「不在 todo」）。 */
+  TASK_HAS_OPEN_QUESTION: 'claim-task-has-open-question',
   ATTEMPT_ACTIVE: 'claim-attempt-active',
   ATTEMPT_NOT_QUEUED: 'claim-attempt-not-queued',
   ATTEMPT_BACKOFF: 'claim-attempt-backoff',
@@ -218,7 +231,8 @@ export function isTaskEligible(task, { scope = null } = {}) {
         ok: false,
         code: g.id === 'not-held' ? CLAIM_REJECTIONS.TASK_HELD
           : g.id === 'status-todo' ? CLAIM_REJECTIONS.TASK_NOT_TODO
-            : `claim-${g.id}`,
+            : g.id === 'no-open-question' ? CLAIM_REJECTIONS.TASK_HAS_OPEN_QUESTION
+              : `claim-${g.id}`,
         userText: g.userText,
         gate: g.id,
       })

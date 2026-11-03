@@ -47,6 +47,7 @@ export function createTaskLifecycleRoutes({
   transitionTask, settleGoalsOfScope, advanceTask,
   reassignTask, now, getTask,
   releaseStaleTasks, inboxCount, handleWrite,
+  admitClaim = null, admissionEnabled = false,
 }) {
   const deps = { json,
     runStore, db, readPipeline,
@@ -157,6 +158,16 @@ export function createTaskLifecycleRoutes({
           const soldier = typeof body.soldier === 'string' && body.soldier.length > 0 ? body.soldier : by
           const ttl = typeof body.ttlMinutes === 'number' && Number.isInteger(body.ttlMinutes) && body.ttlMinutes > 0 ? body.ttlMinutes : undefined
           const agentNodeId = typeof body.agentNodeId === 'string' && body.agentNodeId.trim() !== '' ? body.agentNodeId.trim() : null
+          // F6/F7（设计稿 §8.1 / §8.2）：保留槽与目标配额的准入判定。
+          // 默认关闭（admissionEnabled=false）⇒ 今天的行为；开关关掉即回退。
+          if (typeof admitClaim === 'function' && admissionEnabled === true) {
+            const verdict = admitClaim(db, { taskId: id, by: soldier, scope }, { enabled: true })
+            if (verdict.allowed !== true) {
+              throw Object.assign(new Error(verdict.userText || verdict.code), {
+                code: verdict.code, statusCode: 409, hint: verdict.reason,
+              })
+            }
+          }
           const task = claimTask(id, soldier, body.ifVersion, body.force === true, body.round, body.requestId, ttl, scope, agentNodeId)
           audit(by, scope, 'claim', id, { soldier, agentNodeId }, task.goalId)
           return task

@@ -71,6 +71,28 @@ import { createHash, randomUUID } from 'node:crypto'
 import { dirname, extname, isAbsolute, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { standardsFor } from './stage-standards.mjs'
+import { appendInput, ensureTaskInputSchema, listInputs, reconcileInputs } from './task-input.mjs'
+import { createTaskInputRoutes } from './routes/task-input.mjs'
+import { ensureOpenQuestionIndex } from './scripts/merge-open-questions.mjs'
+import { createTaskReportRoutes } from './routes/task-report.mjs'
+import { ensureReportSchema, submitReport } from './task-report.mjs'
+import { classifyComment } from './mentions.mjs'
+import { createDecisionRoutes } from './routes/decisions.mjs'
+import { ensureDecisionSchema, listDecisions, recordDecision } from './decisions.mjs'
+import { acceptOnTodo, ensureAcceptanceSchema } from './acceptance.mjs'
+import { createPolicyRulesRoutes } from './routes/policy-rules.mjs'
+import { ensureEventSchema, reconcileEvents, stampEvent } from './event-log.mjs'
+import { weeklyReport } from './weekly-report.mjs'
+import { createRegressionRoutes } from './routes/regression.mjs'
+import { createGoalShareRoutes } from './routes/goal-share.mjs'
+import { createPreemptionRoutes } from './routes/preemption.mjs'
+import { createBlockingRoutes } from './routes/blocking.mjs'
+import { admitClaim } from './claim-admission.mjs'
+import { ensureShadowSchema, shadowReport, SHADOW_ERRORS } from './shadow-report.mjs'
+import { createShadowRoutes } from './routes/shadow.mjs'
+import { ensurePreemptionSchema } from './preemption.mjs'
+import { ensureBorrowSchema, releaseExpiredBorrows, activeBorrows } from './goal-share.mjs'
+import { ensureRegressionSchema, listCases, promoteCase, clusterFailures, draftCaseFor, saveDraft } from './regression-store.mjs'
 import { evaluatePermission, normalizeOperation } from './permission-engine.mjs'
 import {
   APPROVAL_ATTEMPT_COLUMN,
@@ -1527,6 +1549,9 @@ db.exec(`
   )
 `)
 ensureColumn('space_runtime', 'review_workflow', 'review_workflow TEXT DEFAULT NULL')
+// F4（设计稿 §3 F4 / DEC-5）：空间级受理模式 —— `auto` 允许推断受理进队，
+// `manual` 只受理人明确要的，`off` 一律不受理。真值在空间设置，任务上只留快照。
+ensureColumn('space_runtime', 'accept_mode', "TEXT DEFAULT 'manual'")
 
 // 迁移：members 补充 model 列（S2/R-1 决策 B1：守护心跳可携带当前选用模型，供 GET /api/chat/health 聚合展示；
 // 列可空，既有成员行/插入语句零影响）。走 ensureColumn：双进程并发启动时非原子写法会崩在这里
@@ -1656,6 +1681,26 @@ db.exec(`
     detail TEXT
   )
 `)
+// F0（设计稿 §3 F0）：输入行表。评论/证据/反馈的唯一真相是行，`tasks` 上的三列在本阶段是投影。
+ensureTaskInputSchema(db)
+// F2（设计稿 §3 F2）：报告状态列与幂等回执表（幂等键 = reportId）。
+ensureReportSchema(db)
+// F4（设计稿 §3 F4）：受理台账（policy_rules / decisions）+ 任务上的 mandate / accept_mode 快照。
+ensureDecisionSchema(db)
+ensureAcceptanceSchema(db)
+// F5（设计稿 §3 F5）：事件的四列 + 唯一索引 + 消费游标表 + 任务订阅列。
+ensureEventSchema(db)
+// F9（设计稿 §8.4）：回归用例表（只生成 draft，晋升由人）。
+ensureRegressionSchema(db)
+// F6（设计稿 §8.1）：目标份额配置列 + 借槽台账。
+ensureColumn('space_runtime', 'goal_share', 'JSON')
+ensureBorrowSchema(db)
+// F7（设计稿 §8.2）：抢占台账（I-7.4 的防活锁按它数次数）。
+ensurePreemptionSchema(db)
+// F7/F8（设计稿 §8.2/§8.3）：保留槽列（只读解释与认领判定共用同一份真值）。
+ensureColumn('space_runtime', 'reserved_slots', 'INTEGER DEFAULT 1')
+// F10（设计稿 §8.5）：影子验证复用 decisions（不新增表），只补一个只读视图。
+ensureShadowSchema(db)
 // P2-8①：浏览器助手按空间的抓取历史（团队级共享、可审计；serve.mjs 侧只写库、不负责保留策略）。
 // 唯一键 (scope,url)：同一 URL 重复抓取只更新最近一次结果（更新时间/状态/字节/耗时/错误码/缓存命中），
 // 避免历史里堆满同一地址的重复行；URL 计数与「最近抓了什么」都读这张表。
@@ -3487,6 +3532,51 @@ function nextId() {
   return `T-${String(m + 1).padStart(3, '0')}`
 }
 
+/**
+ * F5：哪些审计动作本身就是「可重放的事件」，以及它们的 kind。
+ * 只收录**状态可回答**的那几类（评论 / 迁移 / 交付回执 / 目标状态）——
+ * 把所有审计都当事件会让对账变成"重放一切"，那是另一种噪音。
+ */
+const EVENT_ACTION_KINDS = Object.freeze({
+  transition: 'task_status',
+  comment: 'comment',
+  delivery: 'delivery_receipt',
+  verify: 'verify_receipt',
+  goal: 'goal_status',
+})
+
+/** 由成员名推断 actor_kind（决定"能不能授权"）。 */
+function actorKindOf(member) {
+  const who = String(member ?? '').toLowerCase()
+  if (who === 'general') return 'general'
+  if (who === 'user' || who === 'human') return 'user'
+  if (who.startsWith('agent:') || who.startsWith('soldier')) return 'soldier'
+  if (who === 'ci') return 'ci'
+  if (who === '' || who === 'system' || who === 'daemon') return 'system'
+  return 'bot'
+}
+
+/**
+ * F7 执行面：抢占时尽力通知持有者停手。
+ * 走既有的 `agent_commands.stop_run` 通道（不新建通道）；任何失败都只让 `notified=false`，
+ * **不影响**已经完成的状态释放。
+ */
+function issueStopCommand({ taskId, scope, type, by, reason }) {
+  try {
+    const task = db.prepare('SELECT role, soldier FROM tasks WHERE id=?').get(taskId)
+    const role = task?.role ?? task?.soldier ?? null
+    if (!role) return null
+    const agent = db.prepare('SELECT agent_id FROM agent_registry WHERE scope=? AND role=?').get(scope ?? 'default', role)
+    if (!agent?.agent_id) return null
+    return agentConversations.command({
+      agentId: agent.agent_id, scope: scope ?? 'default', taskId, by, type,
+      resolutionNote: reason ?? '被抢占', clientRequestId: `preempt:${taskId}:${Date.now()}`,
+    })
+  } catch (error) {
+    console.warn(`[preempt] 停止命令未送达（task=${taskId}）：${String(error?.message ?? error)}`)
+    return null
+  }
+}
 function audit(member, scope, action, taskId, detail, goalId = null) {
   // P1-1 第 2 步现场：audit.seq 曾用进程内内存计数器（启动读一次 MAX(seq)，此后 nextSeq++），
   // 8787 独立进程与 3080 宿主 v2 外壳双进程写同一 team.db 时各自从同起点递增 → 撞
@@ -3507,6 +3597,27 @@ function audit(member, scope, action, taskId, detail, goalId = null) {
       // ——所以落 `null`（"没有诊断载荷"），而不是省略这一列。
       .run(seq, now(), member, scope, action, taskId, JSON.stringify(detail ?? null), goalId)
     broadcastAudit(auditEvent({ seq, ts: now(), member, scope, action, taskId, goalId, detail }))
+    // ── F5（设计稿 §3 F5 / I-5.1）：能给"为什么"当证据的写入，顺手盖上事件章 ──
+    // 为什么在 audit() 里做：状态写入与事件追加必须同事务，而审计行本来就是那次写入的产物。
+    // 在路由层各盖一遍，等于逼每个写点重复一次同样的判断（也一定会有人漏）。
+    if (EVENT_ACTION_KINDS[action] !== undefined && taskId) {
+      try {
+        stampEvent(db, {
+          seq,
+          kind: EVENT_ACTION_KINDS[action],
+          subject: `task:${taskId}`,
+          // 版本优先取载荷里的（同一次写入的版本号），没有就退回 seq：
+          // 幂等的意义是"同一事件的重复写入被忽略"，seq 至少保证不会互相覆盖。
+          version: detail?.version ?? seq,
+          actorKind: actorKindOf(member),
+          addressed: detail?.addressed ?? 'none',
+          human: actorKindOf(member) !== 'soldier' && actorKindOf(member) !== 'bot' && actorKindOf(member) !== 'system' ? 1 : 0,
+        })
+      } catch (error) {
+        // 事件章失败不该让业务写入失败：事件流是**证据**，不是前置条件。
+        console.warn(`[audit] 事件盖章失败（seq=${seq} action=${action}）：${String(error?.message ?? error)}`)
+      }
+    }
     return seq
   })
 }
@@ -7282,6 +7393,14 @@ function transitionTask(id, to, by, ifVersion, force, confirmedStopped = false) 
     }
     if (to === 'todo') {
       db.prepare('UPDATE tasks SET soldier=NULL, claimedAt=NULL, claimedRound=NULL WHERE id=?').run(id)
+      // ── F4（设计稿 §3 F4 / DEC-1）：授权与台账**只在这里写**，不在路由层散落 ──
+      // 默认 strict=false：先记账（每条开工的任务都留下依据），再谈强制。
+      // strict=true 时无依据的系统受理会被 OUT_OF_MANDATE 拒掉，并回滚整次迁移。
+      acceptOnTodo(db, { taskId: id, by, at: now() }, {
+        audit,
+        strict: mandateStrict(),
+        acceptMode: acceptModeFor(t.scope),
+      })
     }
     if (acceptedWorkflowCheckpoint !== null) {
       const evidence = Array.isArray(t.evidence) ? [...t.evidence, acceptedWorkflowCheckpoint] : [acceptedWorkflowCheckpoint]
@@ -7509,13 +7628,65 @@ function reworkTask({ id, by, reason, ifVersion = undefined, scope: requestScope
  * @param {'comments'|'evidence'|'feedback'} field
  */
 function appendTaskNote(id, by, text, field) {
+  // F0（设计稿 §3 F0 / DEC-3）：评论、证据、反馈统一走**输入行**，列由行同事务投影。
+  // 行是唯一真相；列保留一个版本让读取点零改动（A 段）。
+  const KIND_BY_FIELD = { comments: 'comment', evidence: 'evidence', feedback: 'feedback' }
+  const baseKind = KIND_BY_FIELD[field] ?? 'comment'
   return withTx(() => {
-    const t = getTask(id)
-    const list = parseJson(t[field], [])
-    list.push({ by, at: now(), text })
-    db.prepare(`UPDATE tasks SET ${field}=?, version=version+1, updatedAt=? WHERE id=?`).run(JSON.stringify(list), now(), id)
+    // 先取一次任务：保留"未知任务 <id>"这条既有文案（含只含空格的 id 也一样），
+    // 路由层与用例都靠它区分"忘了传 id"和"任务不在"。
+    const task = getTask(id)
+    // F3（设计稿 §3 F3）：`@` 分流**只在这一个点上做**，不在各种路由里散落。
+    // 无 @（或 @ 自己 / @ 不认识的）→ 仍是普通 comment，行为与今天一致。
+    const verdict = baseKind === 'comment'
+      ? classifyComment({ text, author: by, soldier: task.soldier, status: task.status, scopeRoles: scopeRolesOf(task.scope) })
+      : { effect: 'comment', addressedTo: [], ignoredSelf: [], unknownRoles: [], deliverable: false, reason: 'not-comment' }
+    const kind = verdict.effect === 'order' ? 'order' : baseKind
+    const meta = verdict.effect === 'comment'
+      ? {}
+      : { effect: verdict.effect, mention_role: verdict.addressedTo[0] ?? null, addressed_to: verdict.addressedTo }
+    const { input } = appendInput(db, {
+      taskId: id, kind,
+      actor: by, actorKind: 'user', body: text, at: now(),
+      channel: 'api/comment', meta,
+    }, { inTransaction: true })
+    // escalate（@general）= 升级为提问：建一条未答问题，让派工闸把它挡住、等人拍板。
+    // 不在这里改任务状态（状态迁移仍归状态机）——问题行本身就是"在等人"的真相。
+    if (verdict.effect === 'escalate') {
+      try {
+        submitReport(db, {
+          taskId: id, reportId: `escalate:${id}:${input.id}`, status: 'blocked',
+          summary: String(text).slice(0, 200), question: { body: String(text).slice(0, 800) }, actor: by,
+        }, { withTx, audit })
+      } catch (error) {
+        // 已有未答问题时不再叠一条（一个任务同时只允许一个问题）；评论本身照记。
+        if (error?.code !== 'REPORT_QUESTION_ALREADY_OPEN') throw error
+      }
+    }
     return getTask(id)
   })
+}
+
+/** 该 scope 的成员角色（`@` 只认成员；读不到 registry 时退回 general）。 */
+function scopeRolesOf(scope) {
+  try {
+    const rows = db.prepare('SELECT role FROM agent_registry WHERE scope=? AND archived=0').all(scope ?? 'default')
+    const roles = rows.map((r) => String(r.role).toLowerCase())
+    return roles.includes('general') ? roles : [...roles, 'general']
+  } catch {
+    return ['general']
+  }
+}
+
+/** 授权强制开关（默认关：先记账，后强制）。 */
+function mandateStrict() { return process.env.LEGION_MANDATE_STRICT === '1' }
+
+/** 空间级受理模式（DEC-5：真值在空间设置；读不到就按人工受理）。 */
+function acceptModeFor(scope) {
+  try {
+    const row = db.prepare('SELECT accept_mode FROM space_runtime WHERE scope=?').get(scope ?? 'default')
+    return row?.accept_mode ?? 'manual'
+  } catch { return 'manual' }
 }
 
 // ── 转派 / 租约回收 / 离线 inbox ──
@@ -7528,9 +7699,13 @@ function reassignTask(id, soldier, by) {
     if (t.status === 'done' || t.status === 'canceled') throw new Error(`任务 ${id} 已 ${t.status}，不可转派`)
     if (t.soldier === soldier && t.role === soldier) throw new Error(`任务 ${id} 已由 ${soldier} 负责，无需转派`)
     const prev = t.soldier ?? '（未分配）'
-    const comments = parseJson(t.comments, [])
-    comments.push({ by, at: now(), text: `转派：${prev} → ${soldier}（由 ${by}，岗位同步为 ${soldier}）` })
-    db.prepare('UPDATE tasks SET soldier=?, role=?, comments=?, version=version+1, updatedAt=? WHERE id=?').run(soldier, soldier, JSON.stringify(comments), now(), id)
+    db.prepare('UPDATE tasks SET soldier=?, role=?, version=version+1, updatedAt=? WHERE id=?')
+      .run(soldier, soldier, now(), id)
+    // 转派说明也写成输入行（F0：消除对 comments 列的第二处内联写）
+    appendInput(db, {
+      taskId: id, kind: 'comment', actor: by, actorKind: 'user', at: now(), channel: 'reassign',
+      body: `转派：${prev} → ${soldier}（由 ${by}，岗位同步为 ${soldier}）`,
+    }, { inTransaction: true })
     return getTask(id)
   })
 }
@@ -8025,6 +8200,9 @@ async function handleWrite(req, res, run, { envelope = 'task' } = {}) {
     if (Array.isArray(e?.errors)) extra.errors = e.errors
     if (Array.isArray(e?.paths)) extra.paths = e.paths
     if (typeof e?.holderTaskId === 'string') extra.holderTaskId = e.holderTaskId
+    // 告警语义：调用方（看板 / 守护）要能区分「普通拒绝」与「这是保护性拦截」
+    // （例如 F7 的防活锁）。丢了这个标记，一次保护性拒绝会看起来像故障。
+    if (e?.alert === true) extra.alert = true
     json(res, status, Object.keys(extra).length > 0 ? { error: message, ...extra } : { error: message })
   }
 }
@@ -8278,6 +8456,16 @@ export const agentConversations = createAgentConversationService({
   db, withTx, audit, createTask,
   recordRunEvents: input => runStore.recordRunEvents(input),
 })
+// F2（设计稿 §3 F2 / DEC-4）：一个任务同时只允许一个未答问题 —— 由 DB 部分唯一索引保证，
+// 不靠应用层自觉。历史库里可能有双开，那时建索引会失败；这不该挡住启动，
+// 而是打印一条**可执行的**处理指令（先跑归并脚本，再重启）。
+try {
+  ensureOpenQuestionIndex(db)
+} catch (error) {
+  console.warn(`[task-hub] 未建「一任务一未答问题」唯一索引：${String(error?.message ?? error)}\n`
+    + '  处理：node team-hub/scripts/merge-open-questions.mjs --dry-run  # 先看有多少双开\n'
+    + '        node team-hub/scripts/merge-open-questions.mjs            # 归并并建索引')
+}
 export function reconcileAgentConversations() { return agentConversations.reconcile() }
 const agentConversationTimer = setInterval(() => {
   if (db.isOpen === false) { clearInterval(agentConversationTimer);return }
@@ -8454,6 +8642,33 @@ const router = createRouter([
     json,
     appendTaskNote, audit, handleWrite,
   }),
+  // F0 只读面：输入行列表与对账（设计稿 §3 F0）
+  createTaskInputRoutes({
+    json, db, listInputs, reconcileInputs,
+  }),
+  // F2 回报写口：状态 + 待答问题 + 审计，一个事务里落盘（DEC-2）
+  createTaskReportRoutes({
+    json, db, withTx, audit, handleWrite, submitReport,
+  }),
+  // F4 受理台账（只读面；写入口在 transitionTask，DEC-1）
+  createDecisionRoutes({ json, db, listDecisions, reconcileEvents, weeklyReport }),
+  // F10 规则候选影子验证（纯只读：新规则会让历史决策翻转多少）
+  createShadowRoutes({ json, db, shadowReport }),
+  // F8 并发可解释（纯只读：谁挡我、挡了多久）
+  createBlockingRoutes({ json, db }),
+  // F7 抢占与人优先槽（判定 + 台账 + 任务时间线留痕）
+  createPreemptionRoutes({ json, db, handleWrite, audit, appendInput, transitionTask, commandFn: issueStopCommand }),
+  // F6 目标份额与借槽（配额只影响排序与准入，不进 gate）
+  createGoalShareRoutes({
+    json, db, handleWrite, releaseExpiredBorrows, activeBorrows,
+  }),
+  // F9 错误归纳：失败簇 → draft 回归用例 → 人晋升（I-9.1）
+  createRegressionRoutes({
+    json, db, handleWrite,
+    listCases, promoteCase, clusterFailures, draftCaseFor, saveDraft,
+  }),
+  // F4 规则集读写（变更只写事件，不撤销在途任务）
+  createPolicyRulesRoutes({ json, db, handleWrite, audit }),
   createTeamPlansRoutes({
     json,
     contextPlanStore, handleRun,
@@ -8517,6 +8732,7 @@ const router = createRouter([
     transitionTask, settleGoalsOfScope, advanceTask,
     reassignTask, now, getTask,
     releaseStaleTasks, inboxCount, handleWrite,
+    admitClaim, admissionEnabled: process.env.LEGION_CLAIM_ADMISSION === '1',
   }),
   // 从任意一环接手（handoff）：对已交付的一环只补结算，不派 agent。
   createHandoffRouter({

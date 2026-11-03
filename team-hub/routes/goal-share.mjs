@@ -19,6 +19,7 @@ export function createGoalShareRoutes({
   normalizeGoalShare = defaultNormalize,
   releaseExpiredBorrows,
   activeBorrows,
+  recordBorrow = null,
 }) {
   for (const [key, value] of Object.entries({ json, db, handleWrite })) {
     if (value === undefined || value === null) throw new TypeError(`createGoalShareRoutes 缺注入项：${key}`)
@@ -63,6 +64,29 @@ export function createGoalShareRoutes({
             ON CONFLICT(scope) DO UPDATE SET goal_share=excluded.goal_share, updatedAt=excluded.updatedAt`)
             .run(scope, JSON.stringify(config), new Date().toISOString())
           return { scope, config }
+        }, { envelope: null })
+      },
+    },
+    {
+      // 演练/运维用：造一笔借槽，才能验"到期释放 + 留痕"这条闭环。
+      // **不是业务主路径**——业务里的借槽由认领准入（claim-admission）自然产生。
+      method: 'POST',
+      match: 'exact',
+      path: '/api/goal-borrows',
+      async run(req, res) {
+        if (typeof recordBorrow !== 'function') return json(res, 503, { error: '借槽造数未接线' })
+        await handleWrite(req, res, async (body) => {
+          const goalId = String(body?.goalId ?? '').trim()
+          // 不允许"无名借槽"：审计里对不上目标，等于白借
+          if (goalId === '') throw Object.assign(new Error('缺少 goalId'), { statusCode: 400 })
+          const borrow = recordBorrow(db, {
+            goalId,
+            taskId: body?.taskId ?? null,
+            scope: body?.scope ?? 'default',
+            grantedAt: body?.grantedAt ?? null,
+            ttlSec: body?.ttlSec ?? null,
+          })
+          return { borrow }
         }, { envelope: null })
       },
     },

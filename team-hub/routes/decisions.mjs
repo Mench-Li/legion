@@ -16,12 +16,45 @@ const TASK_SUFFIX = '/mandate'
 /**
  * @param deps.json / deps.db / deps.listDecisions
  */
-export function createDecisionRoutes({ json, db, listDecisions, reconcileEvents = null, weeklyReport = null }) {
+export function createDecisionRoutes({
+  json, db, listDecisions, reconcileEvents = null, weeklyReport = null,
+  handleWrite = null, setBaseline = null, listBaselines = null,
+}) {
   for (const [key, value] of Object.entries({ json, db, listDecisions })) {
     if (value === undefined || value === null) throw new TypeError(`createDecisionRoutes 缺注入项：${key}`)
   }
 
   const routes = [
+    {
+      // F11（设计稿 §8.6 / I-11.1）：基线只读面。
+      method: 'GET',
+      match: 'exact',
+      path: '/api/metric-baseline',
+      async run(req, res, ctx) {
+        if (typeof listBaselines !== 'function') return json(res, 503, { error: '基线未接线' })
+        const q = new URL(String(ctx.url ?? ctx.path), 'http://127.0.0.1').searchParams
+        const rows = listBaselines(db, { scope: q.get('scope') })
+        return json(res, 200, { count: rows.length, baselines: rows })
+      },
+    },
+    {
+      // F11：基线写入口。**只有人能写**——校验在 setBaseline 里，这里只透传错误码。
+      method: 'POST',
+      match: 'exact',
+      path: '/api/metric-baseline',
+      async run(req, res) {
+        if (typeof handleWrite !== 'function' || typeof setBaseline !== 'function') {
+          return json(res, 503, { error: '基线写入口未接线' })
+        }
+        await handleWrite(req, res, async (body, by) => {
+          const baseline = setBaseline(db, {
+            metric: body.metric, scope: body.scope ?? 'default', value: body.value, by,
+            at: body.at ?? null,
+          })
+          return { baseline }
+        }, { envelope: null })
+      },
+    },
     {
       // F5（设计稿 §3 F5 观测）：周报六个数的只读出口。
       method: 'GET',

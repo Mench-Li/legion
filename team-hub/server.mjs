@@ -88,10 +88,11 @@ import { createGoalShareRoutes } from './routes/goal-share.mjs'
 import { createPreemptionRoutes } from './routes/preemption.mjs'
 import { createBlockingRoutes } from './routes/blocking.mjs'
 import { admitClaim } from './claim-admission.mjs'
+import { ensureBaselineSchema, setBaseline, listBaselines } from './regression-gate.mjs'
 import { ensureShadowSchema, shadowReport, SHADOW_ERRORS } from './shadow-report.mjs'
 import { createShadowRoutes } from './routes/shadow.mjs'
 import { ensurePreemptionSchema } from './preemption.mjs'
-import { ensureBorrowSchema, releaseExpiredBorrows, activeBorrows } from './goal-share.mjs'
+import { ensureBorrowSchema, releaseExpiredBorrows, activeBorrows, recordBorrow } from './goal-share.mjs'
 import { ensureRegressionSchema, listCases, promoteCase, clusterFailures, draftCaseFor, saveDraft } from './regression-store.mjs'
 import { evaluatePermission, normalizeOperation } from './permission-engine.mjs'
 import {
@@ -1701,6 +1702,8 @@ ensurePreemptionSchema(db)
 ensureColumn('space_runtime', 'reserved_slots', 'INTEGER DEFAULT 1')
 // F10（设计稿 §8.5）：影子验证复用 decisions（不新增表），只补一个只读视图。
 ensureShadowSchema(db)
+// F11（设计稿 §8.6）：指标基线表（只能由人写）。
+ensureBaselineSchema(db)
 // P2-8①：浏览器助手按空间的抓取历史（团队级共享、可审计；serve.mjs 侧只写库、不负责保留策略）。
 // 唯一键 (scope,url)：同一 URL 重复抓取只更新最近一次结果（更新时间/状态/字节/耗时/错误码/缓存命中），
 // 避免历史里堆满同一地址的重复行；URL 计数与「最近抓了什么」都读这张表。
@@ -8651,7 +8654,10 @@ const router = createRouter([
     json, db, withTx, audit, handleWrite, submitReport,
   }),
   // F4 受理台账（只读面；写入口在 transitionTask，DEC-1）
-  createDecisionRoutes({ json, db, listDecisions, reconcileEvents, weeklyReport }),
+  createDecisionRoutes({
+    json, db, listDecisions, reconcileEvents, weeklyReport,
+    handleWrite, setBaseline, listBaselines,
+  }),
   // F10 规则候选影子验证（纯只读：新规则会让历史决策翻转多少）
   createShadowRoutes({ json, db, shadowReport }),
   // F8 并发可解释（纯只读：谁挡我、挡了多久）
@@ -8660,7 +8666,7 @@ const router = createRouter([
   createPreemptionRoutes({ json, db, handleWrite, audit, appendInput, transitionTask, commandFn: issueStopCommand }),
   // F6 目标份额与借槽（配额只影响排序与准入，不进 gate）
   createGoalShareRoutes({
-    json, db, handleWrite, releaseExpiredBorrows, activeBorrows,
+    json, db, handleWrite, releaseExpiredBorrows, activeBorrows, recordBorrow,
   }),
   // F9 错误归纳：失败簇 → draft 回归用例 → 人晋升（I-9.1）
   createRegressionRoutes({

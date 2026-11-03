@@ -1299,12 +1299,23 @@ export LEGION_GOAL_SHARE_DEFAULT=0.5
 ### 11.4 剩余两项（有理由，不是遗漏）
 
 1. ~~**F6 排序接线**~~ ✅ 已完成：`plugins/src/claimOrder.ts`（缺口→priority→createdAt、权重、不改集合）+ 接进 `stateMachine.runRound` 的 todo 遍历，开关 `LEGION_GOAL_SHARE=1`（默认关）。判据 `plugins/tests/claim-order.test.mjs` 6/6。
-2. **F0 B 段删列**（唯一剩余）：**实测 165 处**读取点（不是早期估算的 65——用
+2. **F11 基线与 F6 借槽的写入口**（2026-11-03 补齐）：`POST /api/metric-baseline`（仅人可写）、
+   `GET /api/metric-baseline`、`POST /api/goal-borrows`（演练/运维造数）。此前两者只能验一半。
+3. **F0 B 段删列**（唯一剩余）：**实测 165 处**读取点（不是早期估算的 65——用
    `node team-hub/scripts/comment-column-readers.mjs` 扫描 657 个文件得出，含 `文件:行` 清单）。
    过渡期的同事务同步列已保证读取零改动，**删除是纯清理、收益小于风险**，故延后为技术债。
    什么时候可以删：该脚本 `count < 5`（`readyToDrop=true`）时。
 
 ### 11.5 验收命令（可复现）
+
+**最快的一步：一键能力演练（自建临时库、自起自停、13 项断言）**
+
+```bash
+node team-hub/scripts/acceptance-drill.mjs          # 全过退 0；--keep 保留证据与临时库
+```
+覆盖 F0 输入行 / F1+F2 四态与幂等 / F2 派工闸 / F3 `@` 三语义 / F4 台账与规则版本 /
+F5 对账与周报 / F6 配额与借槽 / F7 抢占让槽 / F9 归纳与晋升门 / F10 影子 / F11 不退化门。
+它是"接进真实 HTTP 面之后还对不对"的证据，与单元判据互补。
 
 ```bash
 # team-hub：本设计新增/影响的 38 个套件

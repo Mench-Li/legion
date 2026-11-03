@@ -85,12 +85,16 @@
 // ============================================================================
 
 import type { StageDef, Task } from './types.js'
+import { classifyFeedback } from './commentIntent.js'
+import { orderTodoCandidates, activeByGoalOf, type GoalShareConfig } from './claimOrder.js'
 
 export interface StateMachineDeps {
   /** 只声明本切片读到的字段（理由见文件头）。 */
   config: {
     role: string
     intervalMs: number
+    /** F6 认领顺序用（可选：老调用方不传也不影响）。 */
+    maxWorkers?: number
   }
   log: (msg: string) => void
   /** 本 worker 实例的 scope（`transitionTo` / `safeComment` 的默认 scopeFor）。 */
@@ -116,7 +120,7 @@ export interface StateMachineDeps {
   maxMediateAttempts: number
   claimTask: (id: string, soldier: string) => Promise<void>
   workTodo: (t: Task, stage?: StageDef) => Promise<void>
-  workReturned: (t: Task, feedback: Task['comments'], stage?: StageDef) => Promise<void>
+  workReturned: (t: Task, feedback: Task['comments'], stage?: StageDef, intent?: 'rework' | 'order') => Promise<void>
   runDiscussion: (t: Task) => Promise<void>
   safeComment: (id: string, text: string, scopeFor?: string) => Promise<void>
   transitionTo: (id: string, to: string, scopeFor?: string) => Promise<void>
@@ -128,6 +132,20 @@ export interface StateMachine {
   runRound: (tasks: Task[], byId: Map<string, Task>) => void
 }
 
+/** F6：认领顺序开关（默认关；关掉即回到"按优先级 + 创建时间"的今天行为）。 */
+function goalShareEnabled(): boolean {
+  return process.env.LEGION_GOAL_SHARE === '1'
+}
+
+/** F6：目标份额配置（环境变量可覆盖默认份额，便于灰度）。 */
+function goalShareConfig(): GoalShareConfig {
+  const share = Number(process.env.LEGION_GOAL_SHARE_DEFAULT ?? '')
+  return {
+    default: Number.isFinite(share) && share > 0 && share <= 1 ? share : 0.5,
+    weights: {},
+    borrowTtlSec: 600,
+  }
+}
 export function createStateMachine(deps: StateMachineDeps): StateMachine {
   const {
     config, log, scope, isPipeline, stageByRole, stageOf,
@@ -193,7 +211,13 @@ export function createStateMachine(deps: StateMachineDeps): StateMachine {
 
     // 1. todo：认领（互斥）→ 派工（流水线模式按任务角色；讨论任务走群聊）。
     //    自动交接纪律：被将军拦截（hold）的任务不认领；依赖未解除的任务待上一环 done 后由下轮认领。
-    for (const t of tasks.filter(t => t.status === 'todo')) {
+    //    F6（设计稿 §8.1）：`LEGION_GOAL_SHARE=1` 时按"目标缺口"重排候选——配额只影响**谁先跑**，
+    //    不改资格判定（gate 在 team-hub 那侧，未动）。默认关 ⇒ 与今天完全一致。
+    for (const t of orderTodoCandidates(tasks.filter(t => t.status === 'todo'), {
+      maxWorkers: config.maxWorkers,
+      config: goalShareConfig(),
+      activeByGoal: goalShareEnabled() ? activeByGoalOf(tasks) : {},
+    })) {
       if (!room() || inflight.has(t.id)) continue
       if (isPipeline() && stageOf(t) === undefined && t.role !== 'discussion') continue // 流水线模式跳过无角色/未知角色任务
       if (t.hold) continue // 将军拦截：等放行
@@ -274,8 +298,19 @@ export function createStateMachine(deps: StateMachineDeps): StateMachine {
       if (feedback.length === 0 && !abortDriven) continue
       if (abortDriven && (abortRetryAt.get(t.id) ?? 0) + config.intervalMs * 4 > Date.now()) continue
       if (abortDriven) abortRetryAt.set(t.id, Date.now())
+      // F3：把「打回」与「追加」分开（设计稿 §3 F3）。
+      //   · @general ⇒ escalate：守护**停手**——问题已由 team-hub 落成未答问题，等人拍板；
+      //   · @<其他角色> ⇒ order：这是追加要求，不是失败，不该被当成"重做"去计数；
+      //   · 无 @ ⇒ rework：维持今天的行为。
+      const intent = classifyFeedback({
+        texts: feedback.map(c => c.text ?? ''),
+        author: feedback.length > 0 ? feedback[feedback.length - 1].by : null,
+        soldier: t.soldier ?? t.role ?? null,
+        roles: [...stageByRole().keys()],
+      })
+      if (intent.intent === 'escalate') continue
       inflight.add(t.id)
-      runDetached(t.id, workReturned(t, feedback, stageOf(t)))
+      runDetached(t.id, workReturned(t, feedback, stageOf(t), intent.intent))
     }
   }
 

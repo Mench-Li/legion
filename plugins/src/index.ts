@@ -94,6 +94,8 @@ import { createHandoff, isSliceTesterTask } from './handoff.js'
 import { createSliceOrchestration } from './sliceOrchestration.js'
 import { decideProductionTool, type GrantedWrite } from './productionWriteGuard.js'
 import { planTimeoutSettlement, planTimeoutTransitionFailure, workerStoppedWithin, TIMEOUT_SETTLE_GRACE_MS } from './timeoutSettlement.js'
+import { normalizeReport, settlementFor, type NormalizedReport, type ReportState, type WaitForReason } from './reportSettlement.js'
+import { blockedReportPayload } from './reportPayload.js'
 import { branchOwnChangesRefspec } from './branchScope.js'
 import { resolveStaleMinutes } from './configSanity.js'
 import { parseExternalWorkerReport } from '../../runtime/adapters/dsh/external-agent.mjs'
@@ -329,7 +331,10 @@ function workflowHasForwardEdges(task: Task, stage: StageDef | undefined): boole
 
 /** worker 结构回报。 */
 interface WorkerReport {
-  status: 'done' | 'blocked'
+  /** 四态意图（F1）：done=可交付 / waiting=在等外部条件 / blocked=卡住 / dropped=无需处理。 */
+  status: ReportState
+  /** 仅 `waiting` 必填：等什么。结构化枚举，禁止自由文本（自由文本推断状态不可靠）。 */
+  wait_for?: WaitForReason
   summary: string
   evidence: string
   blocker: string
@@ -380,7 +385,9 @@ interface ModeratorReport {
 const WORKER_SCHEMA: ObjectJsonSchema = {
   type: 'object',
   properties: {
-    status: { type: 'string', enum: ['done', 'blocked'] },
+    status: { type: 'string', enum: ['done', 'waiting', 'blocked', 'dropped'] },
+    // F1：waiting 必填的结构化原因（与 reportSettlement 的 WAIT_FOR_REASONS 同源）
+    wait_for: { type: 'string', enum: ['external-review', 'upstream-merge', 'human-decision', 'ci-result', 'dependency'] },
     summary: { type: 'string' },
     evidence: { type: 'string' },
     blocker: { type: 'string' },
@@ -2182,6 +2189,10 @@ function spaceWorker(ctx: AppContext, config: Config): void {
             '   {"status":"done","summary":"一句话总结","evidence":"验证证据（命令与输出要点）","blocker":"","artifact":null}',
             '   "artifact" 可选（无产物必须为 null）：{"kind":"html|file|url","path":"产物绝对路径（工作目录内）","title":"一句话标题"}——html 会进看板 iframe 预览，file/url 变成看板链接。',
             '   或 {"status":"blocked","summary":"已完成的部分","evidence":"","blocker":"卡在哪个文件/命令/什么报错（必须具体）","artifact":null}',
+            '   或 {"status":"waiting","wait_for":"ci-result","summary":"在等什么","evidence":"已做到哪一步","blocker":"","artifact":null}',
+            '      —— waiting 表示**在等外部条件**（wait_for 只能取 external-review / upstream-merge / human-decision / ci-result / dependency），不发消息，等条件成熟会被重新派工。',
+            '   或 {"status":"dropped","summary":"为什么无需处理","evidence":"例如：需求已被 T-xxx 覆盖","blocker":"","artifact":null}',
+            '      —— dropped 表示**这活不值得做 / 已经不必要**：任务按「无需处理」取消，**不会打扰任何人**。别为了交差而报 done。',
           ]),
       ...(goal !== null && goal !== undefined && !externalDesignStage && !externalReviewStage
         ? ['   若上方含「所属目标」，报告 JSON 请再追加 "goalRef":{"goalId":"<目标ID>","contextVersion":<执行时依据的版本整数>}（仅用于版本对账，不改变报告语义）。']
@@ -3107,6 +3118,34 @@ function spaceWorker(ctx: AppContext, config: Config): void {
     if (goal !== null && goalRef && goalRef.goalId === t.goalId && typeof goalRef.contextVersion === 'number' && goalRef.contextVersion < (goal.contextVersion ?? 0)) {
       await safeComment(t.id, `ℹ️ 本报告基于目标上下文 v${goalRef.contextVersion}，目标现已更新至 v${goal.contextVersion}——如改动受旧上下文约束，请将军核对后决定是否打回重做（默认不自动重做，下一派工按新版本对齐）。`)
     }
+    // F1（白皮书 §2.11 / 设计稿 §3 F1）：先归一化**意图**，再按结算计划走。
+    // 未支持的状态、或 waiting 缺 wait_for ⇒ 明确拒收（静默当 done 等于伪造报告）。
+    let intent: NormalizedReport
+    try {
+      intent = normalizeReport(report as unknown as { status?: unknown; wait_for?: unknown; summary?: unknown; blocker?: unknown })
+    } catch (error) {
+      const why = String((error as Error)?.message ?? error)
+      await safeComment(t.id, `⚠ 报告不合法：${why}\n请按四态重报：done / waiting（带 wait_for）/ blocked / dropped。`, scope)
+      await transitionTo(t.id, 'blocked', scope, true)
+      activity('ask', t.id, `报告不合法：${why}`)
+      log(`${t.id} → blocked（报告不合法：${why}）`)
+      return
+    }
+    // dropped = 无需处理：终态 canceled、**不发任何消息**，但留审计（不打扰 ≠ 不留痕）。
+    if (intent.status === 'dropped') {
+      const plan = settlementFor(intent)
+      activity(plan.auditAction, t.id, `无需处理（${plan.reportState}）：${intent.summary || '（未说明）'}`)
+      await transitionTo(t.id, plan.taskStatus)
+      log(`${t.id} → ${plan.taskStatus}（dropped：无需处理，不打扰人）`)
+      return
+    }
+    // waiting = 在等外部条件：留在 in_progress，**不发进度噪音**；由 stale 回收器在下一轮重新评估。
+    if (intent.status === 'waiting') {
+      const plan = settlementFor(intent)
+      activity(plan.auditAction, t.id, `等待 ${plan.waitFor ?? '（未注明）'}：${intent.summary || '（未说明）'}`)
+      log(`${t.id} → ${plan.taskStatus}（waiting：等 ${plan.waitFor}，不发消息）`)
+      return
+    }
     // D7' 机器闸门：切片测试任务（tester + slice 键）走专用结算，不进入常规 advancePipeline 流转
     // 绕行谓词 isSliceTesterTask 已拆到 ./handoff.ts（交接边界）——它与 advancePipeline 是
     // 同一问题的两个面。闸门动作 settleSliceTest 与闸门在 runWorker 里的**位置**（必须排在常规
@@ -3419,10 +3458,39 @@ function spaceWorker(ctx: AppContext, config: Config): void {
       const wtHint = worktreeDir !== null
         ? `\n[worktree] 部分改动已提交到分支 w/${t.id}（${worktreeDir}），解阻后续做会自动复用`
         : ''
-      await safeComment(t.id, `❓ 需要将军介入确认：${report.blocker || report.summary}${wtHint}\n请将军在本任务评论里给出处理意见（例如：继续的方向 / 放宽或调整要求 / 打回原因），士兵会带着答复续做；也可先 🖐 拦截或转派。`)
-      await transitionTo(t.id, 'blocked', scope, true)
+      // F2（设计稿 §3 F2 / DEC-2）：状态 + 待答问题 + 审计**一次请求**落盘。
+      // 不再写 `❓` 文本——结构化问题才是「在等人拍板」的真相，文本只是它的影子；
+      // 而影子会被当成真相去解析（这正是本次改造要消灭的东西）。
+      const questionBody = (report.blocker || '').trim()
+      let reported = false
+      try {
+        // 请求形状由 `./reportPayload.ts` 决定（幂等键 / 空 blocker 不带问题 / id 转义），
+        // 那里有判据钉着，本处只负责发出去。
+        const { path: reportPath, body: reportBody } = blockedReportPayload({
+          taskId: t.id,
+          version: t.version,
+          role: config.role,
+          scope,
+          summary: report.summary,
+          evidence: report.evidence || '',
+          blocker: report.blocker || '',
+          worktreeHint: wtHint,
+        })
+        await hubPost(reportPath, reportBody)
+        reported = true
+      } catch (error) {
+        // 回落：接口不可用时仍走老路径，否则任务既没变 blocked、也没人知道为什么。
+        log(`${t.id} 回报接口失败，回落到评论 + transition：${String(error)}`)
+      }
+      if (!reported) {
+        await safeComment(t.id, `❓ 需要将军介入确认：${report.blocker || report.summary}${wtHint}\n请将军在本任务评论里给出处理意见（例如：继续的方向 / 放宽或调整要求 / 打回原因），士兵会带着答复续做；也可先 🖐 拦截或转派。`)
+        await transitionTo(t.id, 'blocked', scope, true)
+      } else if (!questionBody) {
+        // 没带问题的 blocked = 真卡住（stuck），仍要让人在任务里看见
+        await safeComment(t.id, `⛔ 卡住了（无待答问题）：${report.summary}${wtHint}`)
+      }
       activity('ask', t.id, `需要将军确认：${report.blocker || report.summary}`)
-      log(`${t.id} → blocked（❓ 待将军确认：${report.blocker || report.summary}）`)
+      log(`${t.id} → blocked（${questionBody ? '❓ 已登记待答问题' : '⛔ 无待答问题'}：${report.blocker || report.summary}）`)
     }
   }
 
@@ -3447,8 +3515,15 @@ function spaceWorker(ctx: AppContext, config: Config): void {
   }
 
   /** 处理被退回/解阻的任务。 */
-  async function workReturned(t: Task, feedback: Task['comments'], stage?: StageDef): Promise<void> {
-    activity('redispatch', t.id, '被退回/解阻，重新派工')
+  async function workReturned(t: Task, feedback: Task['comments'], stage?: StageDef, intent?: 'rework' | 'order'): Promise<void> {
+    // F3（设计稿 §3 F3）：`@` 追加与「打回」在**措辞**上必须分开——
+    // 这句话既给士兵看、也给将军在时间线上看。写成同一句，等于让两边都误判当前处境。
+    if (intent === 'order') {
+      const who = feedback.length > 0 ? feedback[feedback.length - 1].by : '将军'
+      activity('redispatch', t.id, `收到 ${who} 的追加要求，继续做（不是打回）`)
+    } else {
+      activity('redispatch', t.id, '被退回/解阻，重新派工')
+    }
     await runWorker(t, feedback, stage)
   }
 

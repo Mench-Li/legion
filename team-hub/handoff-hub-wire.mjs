@@ -3,33 +3,53 @@
 // 把 handoff 的四层接到 hub 的**入口**上（`server.mjs` 只留一行注册）。
 //
 // 分层：
-//   `handoff-settle.mjs`      判定（纯函数，9 条断言）
-//   `handoff-settle-run.mjs`  落点（注入式，6 条断言）
-//   `handoff-adapters.mjs`    形状适配 + 三条硬边界（8 条断言）
-//   `routes/handoff.mjs`      HTTP 形状（6 条断言）
-//   本文件                     ← **hub 内部原语的接线**：读任务 / 置状态 / 写评论 /
+//   `handoff-settle.mjs`      判定（纯函数）
+//   `handoff-settle-run.mjs`  落点（注入式）
+//   `handoff-adapters.mjs`    形状适配 + 三条硬边界
+//   `routes/handoff.mjs`      HTTP 形状
+//   本文件                     ← **hub 内部原语的接线**：读任务 / 置状态 / 写证据 /
 //                                写 attempt / 准备 worktree / 跑 runner
 //
-// 诚实边界：settle **不启动任何 agent**。`provider_run_id` 记 `verify-only:<sha>`，
+// 诚实边界：settle **不启动任何 agent**。`provider_run_id` 记 `verify-only:<sha>:<n>`，
 // 实现证据正文写明"未派 agent"——跑的是真命令、回执是真结果，标注的是"谁没参与"。
+//
+// 这一版把 2026-10-30 现场手工补过的四件事落成代码（否则每次接手都要再手补一遍）：
+//   ① 跑验证时**清空环境**（否则继承 hub 的 TEAM_HUB_DB，测试会去写线上库）；
+//   ② 冻结 args 里的脚本可能在接手提交里还不存在 ⇒ 回退到仓库根下的同一路径；
+//   ③ attempt 要写 `provider_run_id`（审查环按它比对）；
+//   ④ 证据写进任务的 **evidence 列**（hub 从那一列读），不是 comments。
 // ============================================================================
 
 import { spawnSync } from 'node:child_process'
 import { existsSync, mkdirSync, symlinkSync } from 'node:fs'
+import { isAbsolute, join } from 'node:path'
 
 import { assertSettleable, handoffWorktreeDir } from './handoff-adapters.mjs'
 import { settleHandoff } from './handoff-settle-run.mjs'
 import { createHandoffRoutes } from './routes/handoff.mjs'
 
-/** 读-改-写一个任务的 JSON 列（`comments` 就是这个形状）。 */
-function pushComment(db, taskId, item) {
-  const row = db.prepare('SELECT comments FROM tasks WHERE id=?').get(taskId)
+/** 读-改-写任务的某个 JSON 列。 */
+function pushJsonColumn(db, taskId, column, item) {
+  const row = db.prepare(`SELECT ${column} FROM tasks WHERE id=?`).get(taskId)
   if (row === undefined) throw new Error(`找不到任务 ${taskId}`)
   let list = []
-  try { list = JSON.parse(row.comments ?? '[]') } catch { list = [] }
+  try { list = JSON.parse(row[column] ?? '[]') } catch { list = [] }
   if (!Array.isArray(list)) list = []
   list.push(item)
-  db.prepare('UPDATE tasks SET comments=?, version=version+1 WHERE id=?').run(JSON.stringify(list), taskId)
+  db.prepare(`UPDATE tasks SET ${column}=?, version=version+1 WHERE id=?`).run(JSON.stringify(list), taskId)
+}
+
+/** 把冻结 argv 里的相对脚本路径解析成**真实存在**的绝对路径。 */
+export function resolveRunnerArgs(args, { cwd, repoRoot }) {
+  if (!Array.isArray(args) || args.length === 0) return args
+  const [first, ...rest] = args
+  if (isAbsolute(first)) return args
+  const inWorktree = join(cwd, first)
+  if (existsSync(inWorktree)) return [inWorktree, ...rest]
+  // 验证脚本属于**现在的工具链**，不属于被接手的那个提交 —— 接手时它常常还不存在。
+  const inRepo = join(repoRoot, first)
+  if (existsSync(inRepo)) return [inRepo, ...rest]
+  return args
 }
 
 /**
@@ -48,11 +68,10 @@ export function createHandoffRouter(deps) {
     try { return getTask(id) } catch { return null }
   }
 
-  // `saveAttempt` 要写 task_id，而 attempt 构造器只关心阶段事实 —— 用闭包带上。
   let currentTaskId = ''
 
   const saveAttempt = (attempt) => {
-    // 列名与 `beginAgentWorkflowStageAttempt` 的 INSERT 逐字一致（server.mjs:5815）。
+    // 列名与 `beginAgentWorkflowStageAttempt` 的 INSERT 逐字一致（server.mjs）。
     const task = loadTask(currentTaskId)
     const snapshot = task?.agentSelectionSnapshot ?? {}
     const workflowInstanceId = snapshot?.reviewWorkflow?.instanceId ?? null
@@ -61,8 +80,9 @@ export function createHandoffRouter(deps) {
       .get(currentTaskId).n
     db.prepare(`INSERT INTO agent_workflow_stage_attempts
       (id, scope, workflow_instance_id, task_id, stage_id, attempt_no, idempotency_key, started_by,
-       provider_name, workspace_dir, state, selection_snapshot_json, result_json, created_at_ms, updated_at_ms)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'completed', ?, ?, ?, ?)`)
+       provider_name, provider_run_id, workspace_dir, state, selection_snapshot_json, result_json,
+       created_at_ms, updated_at_ms)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'completed', ?, ?, ?, ?)`)
       .run(
         attempt.id,
         task?.scope ?? 'default',
@@ -73,6 +93,7 @@ export function createHandoffRouter(deps) {
         attempt.providerRunId,
         'handoff',
         attempt.providerName,
+        attempt.providerRunId,
         '',
         JSON.stringify(snapshot),
         JSON.stringify({ ...attempt.result, providerRunId: attempt.providerRunId }),
@@ -92,13 +113,10 @@ export function createHandoffRouter(deps) {
     const dir = handoffWorktreeDir(repoRoot, task.id)
     if (existsSync(dir)) return dir
     mkdirSync(dir, { recursive: true })
-    // ★ 必须挂在一个**具名分支**上，不能用 --detach：认领时要按目录→仓库落写预约，
-    //   detached 的 HEAD 不指向任何分支，仓库解析不出来，冲突码被压成
-    //   `write-reservation-failed`（实测：detached 时 identity-registration /
-    //   mobile-api-contract 两套挂，改成 -b handoff/<id> 后 18/18、17/17 全绿）。
+    // ★ 必须挂在**具名分支**上，不能用 --detach：认领时要按目录→仓库落写预约，
+    //   detached 的 HEAD 不指向任何分支，仓库解析不出来（实测两套测试因此挂）。
     let r = spawnSync('git', ['worktree', 'add', '-b', `handoff/${task.id}`, dir, commit], { cwd: repoRoot, encoding: 'utf8' })
     if (r.status !== 0 && /already exists/i.test(String(r.stderr ?? ''))) {
-      // 重试时分支已在：直接复用，不新建。
       r = spawnSync('git', ['worktree', 'add', dir, `handoff/${task.id}`], { cwd: repoRoot, encoding: 'utf8' })
     }
     if (r.status !== 0) {
@@ -110,27 +128,25 @@ export function createHandoffRouter(deps) {
   }
 
   const runRunner = ({ runner, cwd }) => {
-    // 接手的 detached 工作区里没有 node_modules，而仓库里的测试会直接 import 依赖
-    // （现场：workbench/scripts/account-profile.test.mjs -> Cannot find package typescript）。
-    // 与守护的 prepareWorktree 同一条做法：把仓库里现成的那份链接进去。
+    // 接手的 detached 工作区里没有 node_modules，而仓库里的测试会直接 import 依赖。
     for (const sub of ['workbench/node_modules', 'plugins/node_modules']) {
-      const target = repoRoot.replace(/[\\/]+$/, "") + "/" + sub
-      const link = cwd.replace(/[\\/]+$/, "") + "/" + sub
+      const target = join(repoRoot, sub)
+      const link = join(cwd, sub)
       if (!existsSync(target) || existsSync(link)) continue
       try {
-        mkdirSync(link.slice(0, link.lastIndexOf("/")), { recursive: true })
+        mkdirSync(join(cwd, sub.split('/')[0]), { recursive: true })
         symlinkSync(target, link, 'junction')
       } catch { /* 已是目录/平台不支持：忽略，让测试自己报缺依赖 */ }
     }
-    const startedAtMs = Date.now()
-    // ★ 必须**清干净环境**再跑：hub 进程自己的 env 里带着 `TEAM_HUB_DB`（它就是靠它启动的），
-    //   继承下去会让测试去写**线上真库**而不是各自的临时库 —— 表现为认领预约跟线上任务打架，
-    //   同一工作区、同一脚本，手动跑 9 套全绿、经 hub 跑却挂 1 套（实测 2026-10-30）。
+    // ★ 必须**清干净环境**再跑：hub 进程的 env 里带着 TEAM_HUB_DB（它靠它启动），
+    //   继承下去会让测试写**线上真库**，表现为认领预约与线上任务打架。
     const env = { CI: '1' }
     for (const key of ['PATH', 'PATHEXT', 'SystemRoot', 'WINDIR', 'TEMP', 'TMP', 'TMPDIR', 'APPDATA', 'USERPROFILE']) {
       if (process.env[key] !== undefined) env[key] = process.env[key]
     }
-    const r = spawnSync(runner.executable, runner.args, {
+    const args = resolveRunnerArgs(runner.args, { cwd, repoRoot })
+    const startedAtMs = Date.now()
+    const r = spawnSync(runner.executable, args, {
       cwd, encoding: 'utf8', timeout: runner.timeoutMs, maxBuffer: 8 * 1024 * 1024, env,
     })
     const finishedAtMs = Date.now()
@@ -140,6 +156,7 @@ export function createHandoffRouter(deps) {
       state: timedOut ? 'unknown' : r.status === 0 ? 'passed' : 'failed',
       exitCode: timedOut ? null : r.status,
       executable: runner.executable,
+      // 回执里的 argv 必须是**冻结的那一份**，否则 runnerMatchesReceipt 判不一致。
       args: [...runner.args],
       timeoutMs: runner.timeoutMs,
       startedAtMs,
@@ -149,21 +166,29 @@ export function createHandoffRouter(deps) {
     }
   }
 
+  const appendEvidence = (taskId, text, by) => {
+    // ★ 证据进 **evidence 列**：hub 的交接解析读的是 `implementationTask.evidence`。
+    pushJsonColumn(db, taskId, 'evidence', { by, at: new Date().toISOString(), text })
+  }
+
   const adapters = {
     loadTask,
-    // 实现阶段的判定按**任务自己**的冻结快照来（不同链的 stage id 可以不同）。
     assertSettleable: (task) => assertSettleable(task, {
       implementationStageId: task?.agentSelectionSnapshot?.reviewWorkflow?.implementationStageId ?? null,
     }),
     prepareWorktree,
     runRunner,
     saveAttempt,
-    appendEvidence: (taskId, text, by) => pushComment(db, taskId, {
-      by, at: new Date().toISOString(), text, isEvidence: true,
-    }),
+    appendEvidence,
     setStatus: (taskId, status, comment) => {
       if (typeof comment === 'string' && comment !== '') {
-        pushComment(db, taskId, { by: 'handoff', at: new Date().toISOString(), text: comment })
+        pushJsonColumn(db, taskId, 'comments', { by: 'handoff', at: new Date().toISOString(), text: comment })
+      }
+      // 状态机：todo/in_progress 都不能直接 done（todo→done、in_progress→done 都是非法迁移）。
+      // 成功结算的合规路径是 …→in_review→done；done 由 general 触发，走人工验收的收口逻辑。
+      const current = loadTask(taskId)?.status
+      if (status === 'done' && (current === 'todo' || current === 'in_progress')) {
+        transitionTask(taskId, 'in_review', 'handoff')
       }
       transitionTask(taskId, status, 'handoff')
     },

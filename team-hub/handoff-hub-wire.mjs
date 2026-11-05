@@ -194,8 +194,11 @@ export function createHandoffRouter(deps) {
       // 状态机：todo/in_progress 都不能直接 done（todo→done、in_progress→done 都是非法迁移）。
       // 成功结算的合规路径是 …→in_review→done；done 由 general 触发，走人工验收的收口逻辑。
       const current = loadTask(taskId)?.status
-      if (status === 'done' && (current === 'todo' || current === 'in_progress')) {
-        transitionTask(taskId, 'in_review', currentBy)
+      if (status === 'done') {
+        // 状态机允许的路径：todo → in_progress → in_review → done。
+        // todo 直接写 in_review 会被拒（现场 400 非法迁移 todo → in_review）。
+        if (current === 'todo') transitionTask(taskId, 'in_progress', currentBy)
+        if (current === 'todo' || current === 'in_progress') transitionTask(taskId, 'in_review', currentBy)
       }
       // ★ done 只有将军（by=general）能按：用请求里的操作者，不要写死 handoff。
       transitionTask(taskId, status, currentBy)

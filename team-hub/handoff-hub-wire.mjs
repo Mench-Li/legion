@@ -21,6 +21,7 @@
 // ============================================================================
 
 import { spawnSync } from 'node:child_process'
+import { createHash } from 'node:crypto'
 import { existsSync, mkdirSync, symlinkSync } from 'node:fs'
 import { isAbsolute, join } from 'node:path'
 
@@ -69,6 +70,7 @@ export function createHandoffRouter(deps) {
   }
 
   let currentTaskId = ''
+  let currentBy = 'handoff'
 
   const saveAttempt = (attempt) => {
     // 列名与 `beginAgentWorkflowStageAttempt` 的 INSERT 逐字一致（server.mjs）。
@@ -162,6 +164,9 @@ export function createHandoffRouter(deps) {
       startedAtMs,
       finishedAtMs,
       outputExcerpt: output.slice(-4000),
+      // 审查环的回执校验要求 64 位十六进制摘要；缺了它 checkedEvidence 直接判无效。
+      outputDigest: createHash('sha256').update(output).digest('hex'),
+      runnerNodeId: 'desktop-software',
       error: timedOut ? 'runner 超时' : (r.error ? String(r.error.message ?? r.error) : null),
     }
   }
@@ -188,9 +193,10 @@ export function createHandoffRouter(deps) {
       // 成功结算的合规路径是 …→in_review→done；done 由 general 触发，走人工验收的收口逻辑。
       const current = loadTask(taskId)?.status
       if (status === 'done' && (current === 'todo' || current === 'in_progress')) {
-        transitionTask(taskId, 'in_review', 'handoff')
+        transitionTask(taskId, 'in_review', currentBy)
       }
-      transitionTask(taskId, status, 'handoff')
+      // ★ done 只有将军（by=general）能按：用请求里的操作者，不要写死 handoff。
+      transitionTask(taskId, status, currentBy)
     },
   }
 
@@ -200,6 +206,7 @@ export function createHandoffRouter(deps) {
     audit,
     settleHandoff: (input) => {
       currentTaskId = input.taskId
+      currentBy = input.by ?? 'handoff'
       if (loadTask(input.taskId) === null) {
         throw Object.assign(new Error(`找不到要结算的任务：${input.taskId}`), {
           code: 'HANDOFF_TASK_MISSING', statusCode: 404,

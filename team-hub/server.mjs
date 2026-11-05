@@ -6838,6 +6838,36 @@ function resolveAgentWorkflowContextSnapshot(workflowOrPipeline, taskId) {
           || !supersededArtifacts.has(`${upstream.taskId}\0${item.path.replaceAll('\\', '/')}\0${item.digest}`)),
       }))
     }
+
+    // ★ 同一路径被**返工重新登记**时，以最新一次登记为准（BUG-044）。
+    //
+    // 现场（G-mw34jokf-2）：返工 #1（T-308）把 docs/FEATURES.md 登记成 dae3ac40…，
+    // 返工 #2（T-310）又登记成 01888aae…，而下游 tester/devops 认领时仍拿 dae3ac40…
+    // 当"期望摘要" ⇒ 文件明明已是最新，却永久报"上游阶段产物摘要已变化"。
+    //
+    // 上面的 supersededArtifacts 只按**祖先关系**丢弃旧版本；返工链与主线是两支，
+    // 兄弟/表亲关系的两次登记互不覆盖。产物版本的语义应当与祖先关系无关：
+    // **同一条路径，最后登记的说了算。**
+    const newestArtifactAt = new Map()
+    for (const upstream of upstreamStages) {
+      for (const item of upstream.artifacts ?? []) {
+        if (item?.kind !== 'file' || typeof item.path !== 'string') continue
+        const key = item.path.replaceAll('\\', '/')
+        const at = typeof item.at === 'string' ? item.at : ''
+        const prev = newestArtifactAt.get(key)
+        if (prev === undefined || at > prev.at) newestArtifactAt.set(key, { at, taskId: upstream.taskId, digest: item.digest })
+      }
+    }
+    if (newestArtifactAt.size > 0) {
+      upstreamStages = upstreamStages.map((upstream) => ({
+        ...upstream,
+        artifacts: (upstream.artifacts ?? []).filter((item) => {
+          if (item?.kind !== 'file' || typeof item.path !== 'string') return true
+          const newest = newestArtifactAt.get(item.path.replaceAll('\\', '/'))
+          return newest === undefined || (newest.taskId === upstream.taskId && newest.digest === item.digest)
+        }),
+      }))
+    }
   }
 
   if (taskStageId === implementationStageId) {

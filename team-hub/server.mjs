@@ -6847,6 +6847,9 @@ function resolveAgentWorkflowContextSnapshot(workflowOrPipeline, taskId) {
     //
     // 上面的 supersededArtifacts 只按**祖先关系**丢弃旧版本；返工链与主线是两支，
     // 兄弟/表亲关系的两次登记互不覆盖。产物版本的语义应当与祖先关系无关：
+  }
+
+
     // **同一条路径，最后登记的说了算。**
     const newestArtifactAt = new Map()
     for (const upstream of upstreamStages) {
@@ -6868,7 +6871,6 @@ function resolveAgentWorkflowContextSnapshot(workflowOrPipeline, taskId) {
         }),
       }))
     }
-  }
 
   if (taskStageId === implementationStageId) {
     if (designArtifacts.length === 0) {

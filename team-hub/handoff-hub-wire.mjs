@@ -166,6 +166,8 @@ export function createHandoffRouter(deps) {
       outputExcerpt: output.slice(-4000),
       // 审查环的回执校验要求 64 位十六进制摘要；缺了它 checkedEvidence 直接判无效。
       outputDigest: createHash('sha256').update(output).digest('hex'),
+      // 校验要求 outputTruncated 是布尔值（缺它整份回执判无效）。
+      outputTruncated: output.length > 4000,
       runnerNodeId: 'desktop-software',
       error: timedOut ? 'runner 超时' : (r.error ? String(r.error.message ?? r.error) : null),
     }

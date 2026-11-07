@@ -161,3 +161,7 @@ team-hub/team.db-*
 .cloudflared-*.log
 .cloudflared-*.log.out
 
+
+# CPU profile 现场副本（.prof/，临时目录）
+.prof/
+

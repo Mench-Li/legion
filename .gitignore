@@ -156,3 +156,8 @@ team-hub/team.db
 team-hub/team.db.*
 team-hub/team.db-*
 
+
+# 隧道运行日志（cloudflared 重定向输出，不属于仓库内容）
+.cloudflared-*.log
+.cloudflared-*.log.out
+

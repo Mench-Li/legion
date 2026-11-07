@@ -571,17 +571,37 @@ export function createEventDeliveryStore({
    */
   function advanceCursor({ subscriberId }) {
     requireSubscriber(subscriberId)
-    const rows = db.prepare(
-      'SELECT seq, state FROM event_deliveries WHERE subscriber_id = ? ORDER BY seq ASC',
-    ).all(subscriberId)
-    if (rows.length === 0) return subscriberOf(subscriberId)
-    const first = rows[0].seq
-    let cursor = first - 1
-    for (const r of rows) {
-      if (r.seq !== cursor + 1) break
-      if (!TERMINAL_SET.has(r.state)) break
-      cursor = r.seq
+    const current = subscriberOf(subscriberId)
+    const from = Number.isSafeInteger(current?.cursorSeq) ? current.cursorSeq : -1
+    // ★ 从**已持久化的游标**往后增量推进，而不是把该订阅者的全部行读进内存再从头走一遍。
+    //
+    //   现场（BUG-046）：anonymous:workbench:1 累积 104,297 行，旧实现每次调用要把
+    //   这 10 万行读成对象再遍历（实测 145ms），而它在**每条事件投递后**都会被调用
+    //   ⇒ 调用首尾相接，hub 永久 100% CPU、端口在听但不响应任何请求。
+    //
+    //   语义不变：游标仍是"从该订阅者第一条被 plan 过的 seq 起、连续终态的最大 seq"，
+    //   遇到洞/非终态就停在洞前。只是起点换成"上次算到哪儿"，最多 5 批追上。
+    const batch = db.prepare(
+      'SELECT seq, state FROM event_deliveries WHERE subscriber_id = ? AND seq > ? ORDER BY seq ASC LIMIT 2000',
+    )
+    let cursor = from
+    let touched = false
+    for (let round = 0; round < 5; round++) {
+      const rows = batch.all(subscriberId, cursor)
+      if (rows.length === 0) break
+      touched = true
+      // 起点语义：该订阅者**第一条被 plan 过的 seq** 之前的不算洞（那时还没有它的事）。
+      // 游标初值是 0 而不是 -1，所以判据是 cursor < rows[0].seq - 1，不是 cursor < 0。
+      if (round === 0 && cursor < rows[0].seq - 1) cursor = rows[0].seq - 1
+      let stalled = false
+      for (const r of rows) {
+        if (r.seq !== cursor + 1) { stalled = true; break }
+        if (!TERMINAL_SET.has(r.state)) { stalled = true; break }
+        cursor = r.seq
+      }
+      if (stalled || rows.length < 2000) break
     }
+    if (!touched) return current
     const sub = subscriberOf(subscriberId)
     const next = Math.max(sub?.cursorSeq ?? 0, cursor)
     db.prepare('UPDATE event_subscribers SET cursor_seq = ? WHERE subscriber_id = ?').run(next, subscriberId)

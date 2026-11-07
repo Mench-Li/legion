@@ -9184,6 +9184,25 @@ async function handle(req, res, stripPrefix) {
         const entry = auditEvent(r)
         let frame = { ok: false, reason: 'not-attempted' }
         try {
+        // ★ 回放只在**这条订阅者确实有投递意图**时记账（补洞），否则只写帧不落行。
+        //
+        //   现场（BUG-047）：每次 SSE 重连都会新建一个匿名订阅者（独立性是安全性质，
+        //   见 event-subscribers 测试 ⑤），随后回放 30 条历史 ⇒ 稀里糊涂给新订阅者
+        //   造了 30 条投递意图 + 90 个写事务。客户端一重连风暴（如 401 触发的
+        //   EventSource 自动重试），表就以每秒上千行的速度膨胀，hub CPU 常驻 40–70%。
+        //
+        //   回放的本质是"把已经发生过的事件补给这个连接"，不是"替它创建投递义务"：
+        //   没有意图行就没有洞要补，凭空造行只是把一次重连变成 30 行垃圾。
+        //    **有**意图行（真的漏投过）时才记账 —— 补洞的语义原样保留。
+        const hasIntent = deliveryStore.readRow(subscriberId, entry.seq) !== null && deliveryStore.readRow(subscriberId, entry.seq) !== undefined
+        if (!hasIntent) {
+          const direct = writeEventFrame(res, entry)
+          if (direct.ok !== true) {
+            if (direct.reason !== undefined && direct.reason !== 'not-attempted') break
+          }
+          continue
+        }
+
           withTx(() => {
             deliveryStore.plan({ subscriberId, events: [{ seq: entry.seq, scope: entry.scope ?? null, event: entry.event }] })
             const taken = deliveryStore.takeUp({ subscriberId, seqs: [entry.seq] })

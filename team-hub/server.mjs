@@ -9372,7 +9372,11 @@ if (isMain) {
 //   单订阅者 10 万行，占库体积绝大部分。只清**终态且过期**的行（delivered/suppressed）；
 //   非终态行是"还没投出去的事实"，删掉等于丢事件。每小时一批，每批上限 2 万行，
 //   避免一次删太多把 WAL 顶爆；积压会在几轮内自然消化。
-const EVENT_RETENTION_DAYS = 7
+// 保留期 1 天：7 天时旧行清不掉（现场那次事件风暴一小时就堆了 55 万行，全都"很新"），
+// 而投递行只是"这条事件投给过谁"的记账，历史价值远低于它占的体积与扫描成本。
+// 代价：订阅者断线超过 1 天后重连，只能拿到"最近 30 条"而不是精确续传——对匿名客户端可接受，
+// 有 clientId 的客户端本来就是靠自己的游标续传。
+const EVENT_RETENTION_DAYS = 1
 setInterval(() => {
   try {
     const removed = deliveryStore.pruneTerminal({ olderThanMs: EVENT_RETENTION_DAYS * 86400000 })

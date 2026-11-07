@@ -7903,6 +7903,13 @@ function subscriberIdFor({ clientId, kind, scope }) {
   const c = typeof clientId === 'string' && clientId.trim() !== '' ? clientId.trim() : null
   if (c === null) {
     anonymousSeq += 1
+    // ★ 匿名订阅者保持**独立编号**（每个连接一个），这是安全性质：
+    //   两个连接共用一个订阅者，就会共用一个游标 —— 后连的那条会"继承"前一条
+    //   已经推进到的位置，从而**漏掉自己该收到的事件**（判据见 event-subscribers 测试 ⑤）。
+    //
+    //   它带来的增长由**保留期**兜住（server.mjs 每小时清理 >7 天的终态投递行），
+    //   而不是靠共享 id —— 用共享 id 换体积，等于拿"不漏事件"换"表更小"，不划算。
+    anonymousSeq += 1
     return `anonymous:${k}:${anonymousSeq}`
   }
   // scope 进 id：同一个浏览器在两个 scope 页签里是**两个订阅者**，
@@ -9341,6 +9348,18 @@ if (isMain) {
   setInterval(() => {
     try { cleanupChatAttachments() } catch { /* 清理失败不崩主服务，下一轮再试 */ }
   }, 3600 * 1000).unref()
+
+// ★ 投递行保留期（BUG-046 的另一半）：`event_deliveries` 只进不出，现场 566,407 行、
+//   单订阅者 10 万行，占库体积绝大部分。只清**终态且过期**的行（delivered/suppressed）；
+//   非终态行是"还没投出去的事实"，删掉等于丢事件。每小时一批，每批上限 2 万行，
+//   避免一次删太多把 WAL 顶爆；积压会在几轮内自然消化。
+const EVENT_RETENTION_DAYS = 7
+setInterval(() => {
+  try {
+    const removed = deliveryStore.pruneTerminal({ olderThanMs: EVENT_RETENTION_DAYS * 86400000 })
+    if (removed > 0) console.log(`[team-hub] 投递行保留期：清理 ${removed} 条（>${EVENT_RETENTION_DAYS} 天的终态行）`)
+  } catch { /* 清理失败不崩主服务，下一轮再试 */ }
+}, 3600 * 1000).unref()
   // PRT-615：审批到期扫描的加速器。
   //
   // **正确性不靠它**——权限面的每个入口都会懒扫一次（`sweepApprovalsLazily`），

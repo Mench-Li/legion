@@ -688,6 +688,30 @@ export function createEventDeliveryStore({
     })
   }
 
+  /**
+   * 清掉**已经终态且过期**的投递行（保留期）。
+   *
+   * ★ 为什么必须有：这张表只进不出（现场 566,407 行、单订阅者 10 万行）。
+   *   它不只是占体积——`advanceCursor` 等价物、`rowsOf`、重连回放都要在这张表上走，
+   *   行数越多，越容易把事件循环拖死（见 BUG-046）。保留期是这个问题的另一半解药。
+   *
+   * 只删终态（`delivered`/`suppressed`）：非终态行是**还没投出去的事实**，
+   * 删掉等于丢事件——那正是游标不允许跳过洞的理由。
+   *
+   * @returns 删掉的行数
+   */
+  function pruneTerminal({ olderThanMs = 7 * 86400000, limit = 20000, now = Date.now() } = {}) {
+    if (!Number.isSafeInteger(olderThanMs) || olderThanMs <= 0) throw new TypeError('olderThanMs 必须是正安全整数')
+    if (!Number.isSafeInteger(limit) || limit <= 0) throw new TypeError('limit 必须是正安全整数')
+    const cutoff = now - olderThanMs
+    const info = db.prepare(`DELETE FROM event_deliveries WHERE rowid IN (
+      SELECT rowid FROM event_deliveries
+      WHERE state IN ('delivered', 'suppressed')
+        AND COALESCE(updated_at_ms, created_at_ms, 0) < ?
+      LIMIT ?)`).run(cutoff, limit)
+    return Number(info.changes ?? 0)
+  }
+
   return Object.freeze({
     registerSubscriber,
     subscriberOf,
@@ -703,5 +727,6 @@ export function createEventDeliveryStore({
     stateOf,
     summary,
     readRow,
+    pruneTerminal,
   })
 }

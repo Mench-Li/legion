@@ -34,6 +34,8 @@ import { promisify } from 'node:util'
 // 按来源（IP）限速的**纯决策**。窗口边界与 `Retry-After` 的算法在那边，
 // 这里只负责存与取 —— 那样边界逻辑可以在没有 SQLite 的情况下被逐条钉住。
 import { limitDecision, quotaDecision } from './rate-limit.mjs'
+// 启动期补列原语：老库没有 `display_name` 时幂等补上（并发安全，见 schema-util.mjs）。
+import { ensureColumn } from './schema-util.mjs'
 
 const scrypt = promisify(scryptCb)
 
@@ -157,6 +159,27 @@ function validateName(name) {
   return trimmed
 }
 
+/**
+ * 显示名校验（与服务端契约 R-02 一致，服务端为准）。
+ *
+ * 顺序是刻意的：**先**查 C0 控制字符，**再** trim。反过来的话，"Ali\nce"
+ * 这类内部换行会在 trim 之后被当作合法（trim 只去掉首尾）——而把换行带进
+ * 单行展示位会让页面/日志/审计的排版被一行名字打断。
+ *
+ * 长度口径 = String.length（UTF-16 code unit），与 validateName 一致，
+ * 避免前端/服务端对 emoji / CJK 的计数不一致。
+ */
+export function validateDisplayName(input) {
+  if (typeof input !== 'string') fail(IDENTITY_CODES.INVALID_INPUT, '显示名必须是字符串')
+  if (/[\u0000-\u001F\u007F]/.test(input)) {
+    fail(IDENTITY_CODES.INVALID_INPUT, '显示名不能包含控制字符或换行')
+  }
+  const trimmed = input.trim()
+  if (trimmed.length === 0) fail(IDENTITY_CODES.INVALID_INPUT, '显示名必填')
+  if (trimmed.length > 64) fail(IDENTITY_CODES.INVALID_INPUT, '显示名不超过 64 字符')
+  return trimmed
+}
+
 function validatePassword(password) {
   if (typeof password !== 'string' || password.length < MIN_PASSWORD_CHARS) {
     fail(IDENTITY_CODES.INVALID_INPUT, `口令至少 ${MIN_PASSWORD_CHARS} 个字符`)
@@ -237,10 +260,15 @@ export function createUserStore({ db, withTx, clock = Date.now, key = '', audit 
   const sign = (value) => createHmac('sha256', key).update(value).digest('base64url')
 
   db.exec(`
+    -- ★ 2026-10-29（账号管理）：追加 display_name。它是**展示名**，不是登录名：
+    --   · name / name_key 仍是登录身份，唯一且不可改；
+    --   · display_name 可空（老库/老数据），读取投影 trim 后为空则回退 name；
+    --   · 不参与认证、不要求唯一（重名用「显示名（用户名）」消歧）。
+    -- 新库在这里直接带列；老库由下面那次 ensureColumn 补列。
     CREATE TABLE IF NOT EXISTS hub_users (
       id TEXT PRIMARY KEY, name TEXT NOT NULL UNIQUE, name_key TEXT NOT NULL UNIQUE,
       password_hash TEXT NOT NULL, created_at_ms INTEGER NOT NULL, disabled_at_ms INTEGER,
-      system_role TEXT NOT NULL DEFAULT 'none');
+      system_role TEXT NOT NULL DEFAULT 'none', display_name TEXT);
     CREATE TABLE IF NOT EXISTS hub_user_sessions (
       id TEXT PRIMARY KEY, user_id TEXT NOT NULL, label TEXT NOT NULL DEFAULT '',
       refresh_hash TEXT NOT NULL UNIQUE, created_at_ms INTEGER NOT NULL,
@@ -307,6 +335,8 @@ export function createUserStore({ db, withTx, clock = Date.now, key = '', audit 
       created_by TEXT NOT NULL, created_at_ms INTEGER NOT NULL, expires_at_ms INTEGER NOT NULL,
       consumed_at_ms INTEGER);
   `)
+  // 老库补列（幂等 + 跨进程并发安全）：CREATE TABLE IF NOT EXISTS 不会给已存在的表加列。
+  ensureColumn(db, 'hub_users', 'display_name', 'TEXT')
 
   const record = (action, scope, detail, actor) => {
     if (typeof audit !== 'function') return
@@ -325,8 +355,15 @@ export function createUserStore({ db, withTx, clock = Date.now, key = '', audit 
   }
 
   function publicUser(row) {
+    // displayName 的**唯一**回退点在投影里：老数据（列 NULL / 空串 / 纯空白）
+    // 一律回退登录用户名，页面永远拿不到一个空白显示名。
+    // avatar 在 P0 固定 ''（契约先稳定，P1 再填充）；它不是 roster 的 Agent 头像。
+    const displayName = typeof row.display_name === 'string' ? row.display_name.trim() : ''
     return {
-      userId: row.id, name: row.name, createdAt: iso(row.created_at_ms),
+      userId: row.id, name: row.name,
+      displayName: displayName.length > 0 ? displayName : row.name,
+      avatar: '',
+      createdAt: iso(row.created_at_ms),
       disabled: row.disabled_at_ms !== null, systemRole: row.system_role,
     }
   }
@@ -355,7 +392,10 @@ export function createUserStore({ db, withTx, clock = Date.now, key = '', audit 
       const userId = id('user')
       const at = now()
       // 第一个用户是**系统管理员**：没有他就没人能造邀请或开通空间。
-      db.prepare('INSERT INTO hub_users VALUES(?,?,?,?,?,NULL,?)').run(userId, clean, nameKey(clean), hash, at, 'admin')
+      // 显式列名：既兼容新库（含 display_name），也兼容老库（迁移只补列）。
+      // 位置式 INSERT 在加列后会因列数不符直接炸掉注册/引导/邀请三条路。
+      db.prepare('INSERT INTO hub_users (id,name,name_key,password_hash,created_at_ms,disabled_at_ms,system_role) VALUES(?,?,?,?,?,NULL,?)')
+        .run(userId, clean, nameKey(clean), hash, at, 'admin')
       record('identity:bootstrap-owner', 'global', { userId }, userId)
       return { userId, name: clean, systemRole: 'admin' }
     })
@@ -406,7 +446,8 @@ export function createUserStore({ db, withTx, clock = Date.now, key = '', audit 
       if (!fresh || fresh.consumed_at_ms !== null) fail(IDENTITY_CODES.INVITE_CONSUMED, '邀请码已被使用', 409)
       const userId = id('user')
       try {
-        db.prepare('INSERT INTO hub_users VALUES(?,?,?,?,?,NULL,?)').run(userId, clean, nameKey(clean), hash, at, 'none')
+        db.prepare('INSERT INTO hub_users (id,name,name_key,password_hash,created_at_ms,disabled_at_ms,system_role) VALUES(?,?,?,?,?,NULL,?)')
+          .run(userId, clean, nameKey(clean), hash, at, 'none')
       } catch (e) {
         if (String(e?.message ?? '').includes('UNIQUE')) fail(IDENTITY_CODES.NAME_TAKEN, '该用户名已被占用', 409)
         throw e
@@ -1085,7 +1126,8 @@ export function createUserStore({ db, withTx, clock = Date.now, key = '', audit 
       }
       const newId = id('user')
       try {
-        db.prepare('INSERT INTO hub_users VALUES(?,?,?,?,?,NULL,?)').run(newId, clean, nameKey(clean), hash, at, 'none')
+        db.prepare('INSERT INTO hub_users (id,name,name_key,password_hash,created_at_ms,disabled_at_ms,system_role) VALUES(?,?,?,?,?,NULL,?)')
+          .run(newId, clean, nameKey(clean), hash, at, 'none')
       } catch (e) {
         if (String(e?.message ?? '').includes('UNIQUE')) fail(IDENTITY_CODES.NAME_TAKEN, '该用户名已被占用', 409)
         throw e
@@ -1228,6 +1270,45 @@ export function createUserStore({ db, withTx, clock = Date.now, key = '', audit 
     return row
   }
 
+  /**
+   * 更新**本人**的基础信息（P0 只允许 displayName）。
+   *
+   * ## 为什么只改 displayName
+   *
+   * name / name_key 是登录身份（唯一、参与审计与邀请），改名会影响登录、
+   * 唯一约束与历史归属。把"登录名"与"展示名"拆开之后，用户的展示诉求由
+   * display_name 满足，登录身份保持不可变。
+   *
+   * ## 审计是**同一个事务**的一部分（与其他动作的 best-effort 审计不同）
+   *
+   * 既有 record() 会吞掉审计异常（审计失败不阻断认证）。但资料更新是
+   * "用户以为改了、审计没留痕"的高风险面，所以本路径直接调用注入的 audit：
+   * 抛错就整事务回滚，display_name 与审计同生共死。**只有本路径**严格，
+   * 其它动作的语义不改。
+   *
+   * @param {{ userId: string, displayName: unknown }} input
+   * @returns {object} 服务端最终投影（前端应以它回填，而不是本地草稿）
+   */
+  function updateProfile({ userId, displayName } = {}) {
+    requireUser(userId) // 不存在 → 404 USER_NOT_FOUND；已停用 → 403 FORBIDDEN
+    const clean = validateDisplayName(displayName)
+    return withTx(() => {
+      const fresh = db.prepare('SELECT * FROM hub_users WHERE id=?').get(userId)
+      if (!fresh) fail(IDENTITY_CODES.USER_NOT_FOUND, '用户不存在', 404)
+      // 事务内再判一次：requireUser 与写之间可能被管理员停用。
+      if (fresh.disabled_at_ms !== null) fail(IDENTITY_CODES.FORBIDDEN, '账号已停用', 403)
+      const current = typeof fresh.display_name === 'string' ? fresh.display_name.trim() : ''
+      const from = current.length > 0 ? current : fresh.name
+      db.prepare('UPDATE hub_users SET display_name=? WHERE id=?').run(clean, userId)
+      if (typeof audit === 'function') {
+        // 审计只记"谁、改了哪个字段、从什么到什么"。显示名不是秘密；
+        // 口令/令牌/哈希永远不进这里。
+        audit(userId, 'global', 'identity:profile-update', null, { fields: ['displayName'], from, to: clean })
+      }
+      return publicUser(db.prepare('SELECT * FROM hub_users WHERE id=?').get(userId))
+    })
+  }
+
   function listUsers() {
     return db.prepare('SELECT * FROM hub_users ORDER BY created_at_ms').all().map((r) => ({
       ...publicUser(r), roles: rolesOf(r.id),
@@ -1253,6 +1334,8 @@ export function createUserStore({ db, withTx, clock = Date.now, key = '', audit 
     register, changePassword,
     createPasswordReset, redeemPasswordReset, listPasswordResets,
     createEventTicket, redeemEventTicket, sweepExpiredCredentials,
+    // 显示名校验（前端 accountProfile.ts 与服务端 parity 用同一批输入比对）。
+    validateDisplayName,
     // 诊断与用例用：闸门当前读数（不写、不需要就能读）。
     registrationGate: () => registrationAllowed(),
     // 按来源（IP）限速：判断+记账是一步；诊断与用例也用它。
@@ -1260,6 +1343,8 @@ export function createUserStore({ db, withTx, clock = Date.now, key = '', audit 
     // 按**账号**的用量配额（键是 userId，与来源限速是两件事）。
     accountQuota, rateUsage,
     login, refresh, upgradePassword,
+    // 账号管理（P0）：只更新本人的展示名；用户名不可改。
+    updateProfile,
     verifyAccessToken, touchSession,
     revokeSession, revokeAllSessions, listSessions,
     grantSpaceRole, revokeSpaceRole, rolesOf, roleIn, hasRoleAtLeast, listUsers, setUserDisabled,

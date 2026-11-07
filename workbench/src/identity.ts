@@ -54,9 +54,24 @@ export interface Session {
   refreshToken: string
 }
 
-export interface MeInfo {
+/**
+ * 账号本人的**展示信息**（`/api/identity/me` 与资料写接口的 user 字段）。
+ *
+ * ★ name 与 displayName 是**两个字段**，不得混用：
+ *   · name = 登录用户名，唯一、不可改、用于登录与审计 actor；
+ *   · displayName = 展示名，非唯一、可改、缺失时回退 name（服务端已回退，
+ *     前端仍再兜一次，避免旧 Hub 不带该字段时出现空白）。
+ */
+export interface AccountUser {
   userId: string
   name: string
+  displayName: string
+  avatar: string
+  createdAt: string
+  disabled: boolean
+}
+
+export interface MeInfo extends AccountUser {
   roles: Array<{ space: string; role: string }>
   systemRole: 'admin' | 'none'
 }
@@ -191,6 +206,8 @@ export async function login(name: string, password: string): Promise<Session & M
   return {
     accessToken: r.accessToken, refreshToken: r.refreshToken,
     userId: r.userId, name: r.name,
+    // 登录响应只带登录名（旧 Hub 也可能只回这些）；账号页另走 fetchMe 取完整资料。
+    displayName: r.name, avatar: '', createdAt: '', disabled: false,
     roles: r.roles ?? [], systemRole: r.systemRole ?? 'none',
   }
 }
@@ -211,6 +228,8 @@ export async function register(input: { name: string; password: string; /** 留�
   return {
     accessToken: r.accessToken, refreshToken: r.refreshToken,
     userId: r.userId, name: r.name,
+    // 登录响应只带登录名（旧 Hub 也可能只回这些）；账号页另走 fetchMe 取完整资料。
+    displayName: r.name, avatar: '', createdAt: '', disabled: false,
     roles: r.roles ?? [], systemRole: r.systemRole ?? 'none',
   }
 }
@@ -293,13 +312,62 @@ export async function recoverSession(): Promise<boolean> {
   return recovery
 }
 
+/**
+ * 身份读/资料写的**窄条件** 401 重放。
+ *
+ * ## 为什么 `identity.ts` 自己需要它
+ *
+ * `api.ts` 的 `fetchWithSessionRetry` 只覆盖业务数据请求；账号页直接调用本模块，
+ * 而访问令牌只有 15 分钟。没有这层时，一个开着页面的用户过一会儿点"刷新"会看到
+ * "账号读取失败"，而真正要做的那件事（刷新令牌）在屏幕上根本没发生。
+ *
+ * ## 只重放一次，且**只**在真正过期的码上
+ *
+ *   · 无限重试会在"刷新成功但立刻又过期"（例如服务端时钟不对）时打成死循环；
+ *   · `IDENTITY_WRONG_PASSWORD` 也是 401，但它必须原样提示"当前口令不正确"，
+ *     不能触发刷新——否则用户要等一次注定失败的令牌轮换才知道口令错了；
+ *   · `IDENTITY_SESSION_REVOKED` 同理：刷新救不回来，只会多打一次请求。
+ *
+ * `/api/identity/refresh` 与 `/api/identity/login` 显式排除（前者会递归，
+ * 后者根本没有旧令牌可续）。
+ */
+const REPLAYABLE_401 = new Set(['IDENTITY_TOKEN_EXPIRED', 'IDENTITY_TOKEN_MISSING'])
+
+async function withSessionRetry<T>(path: string, attempt: (token: string) => Promise<T>): Promise<T> {
+  try {
+    return await attempt(getAccessToken())
+  } catch (e) {
+    const replayable = e instanceof IdentityRequestError
+      && e.status === 401
+      && e.code !== null
+      && REPLAYABLE_401.has(e.code)
+    if (!replayable) throw e
+    if (path === '/api/identity/refresh' || path === '/api/identity/login') throw e
+    if (getRefreshToken().length === 0) throw e
+    const recovered = await recoverSession()
+    if (!recovered) throw e
+    return attempt(getAccessToken())
+  }
+}
+
 export async function fetchMe(): Promise<MeInfo> {
-  const r = await getJson<{ user: { userId: string; name: string }; roles?: MeInfo['roles']; systemRole?: MeInfo['systemRole'] }>(
-    '/api/identity/me', { token: getAccessToken() },
-  )
+  const r = await withSessionRetry('/api/identity/me', (token) => getJson<{
+    user?: { userId?: string; name?: string; displayName?: string; avatar?: string; createdAt?: string; disabled?: boolean }
+    roles?: MeInfo['roles']
+    systemRole?: MeInfo['systemRole']
+  }>('/api/identity/me', { token }))
+  const u = r.user ?? {}
+  const name = typeof u.name === 'string' ? u.name : ''
+  const display = typeof u.displayName === 'string' ? u.displayName.trim() : ''
   return {
-    userId: r.user.userId, name: r.user.name,
-    roles: r.roles ?? [], systemRole: r.systemRole ?? 'none',
+    userId: typeof u.userId === 'string' ? u.userId : '',
+    name,
+    // 旧 Hub 不带 displayName（或返回空白）时回退登录用户名，永远不显示空白。
+    displayName: display.length > 0 ? display : name,
+    avatar: typeof u.avatar === 'string' ? u.avatar : '',
+    createdAt: typeof u.createdAt === 'string' ? u.createdAt : '',
+    disabled: u.disabled === true,
+    roles: r.roles ?? [], systemRole: r.systemRole === 'admin' ? 'admin' : 'none',
   }
 }
 
@@ -317,19 +385,44 @@ export interface SessionRow {
 }
 
 export async function listSessions(): Promise<{ sessions: SessionRow[]; currentSessionId: string | null }> {
-  const r = await getJson<{ sessions?: SessionRow[]; currentSessionId?: string }>('/api/identity/sessions', { token: getAccessToken() })
+  const r = await withSessionRetry('/api/identity/sessions', (token) => getJson<{ sessions?: SessionRow[]; currentSessionId?: string }>(
+    '/api/identity/sessions', { token },
+  ))
   return { sessions: r.sessions ?? [], currentSessionId: r.currentSessionId ?? null }
 }
 
 export async function revokeSession(sessionId: string): Promise<void> {
-  await postJson('/api/identity/sessions/revoke', { sessionId }, { token: getAccessToken() })
+  await withSessionRetry('/api/identity/sessions/revoke', (token) => postJson('/api/identity/sessions/revoke', { sessionId }, { token }))
 }
 
 export async function changePassword(currentPassword: string, newPassword: string): Promise<{ revokedOtherSessions: number }> {
-  const r = await postJson<{ revokedOtherSessions?: number }>(
-    '/api/identity/password', { currentPassword, newPassword }, { token: getAccessToken() },
-  )
+  const r = await withSessionRetry('/api/identity/password', (token) => postJson<{ revokedOtherSessions?: number }>(
+    '/api/identity/password', { currentPassword, newPassword }, { token },
+  ))
   return { revokedOtherSessions: r.revokedOtherSessions ?? 0 }
+}
+
+/**
+ * 更新**本人**资料（P0 只有 displayName）。
+ *
+ * 返回服务端最终投影：并发保存是"后写覆盖"，页面必须以它回填，
+ * 不能假设本地草稿一定生效。错误按 IdentityRequestError.code 分支。
+ */
+export async function updateProfile(input: { displayName: string }): Promise<AccountUser> {
+  const r = await withSessionRetry('/api/identity/profile', (token) => postJson<{ user?: Partial<AccountUser> }>(
+    '/api/identity/profile', { displayName: input.displayName }, { token },
+  ))
+  const u = r.user ?? {}
+  const name = typeof u.name === 'string' ? u.name : ''
+  const display = typeof u.displayName === 'string' ? u.displayName.trim() : ''
+  return {
+    userId: typeof u.userId === 'string' ? u.userId : '',
+    name,
+    displayName: display.length > 0 ? display : name,
+    avatar: typeof u.avatar === 'string' ? u.avatar : '',
+    createdAt: typeof u.createdAt === 'string' ? u.createdAt : '',
+    disabled: u.disabled === true,
+  }
 }
 
 export async function createInvite(space: string, role: string): Promise<string> {
@@ -371,6 +464,8 @@ export async function redeemPasswordReset(input: { name: string; code: string; n
   return {
     accessToken: r.accessToken, refreshToken: r.refreshToken,
     userId: r.userId, name: r.name,
+    // 登录响应只带登录名（旧 Hub 也可能只回这些）；账号页另走 fetchMe 取完整资料。
+    displayName: r.name, avatar: '', createdAt: '', disabled: false,
     roles: r.roles ?? [], systemRole: r.systemRole ?? 'none',
   }
 }
@@ -378,6 +473,10 @@ export async function redeemPasswordReset(input: { name: string; code: string; n
 export interface UserRow {
   userId: string
   name: string
+  /** 显示名（服务端 publicUser 投影；旧 Hub 可能没有）。列表用「显示名（用户名）」消歧。 */
+  displayName?: string
+  avatar?: string
+  createdAt?: string
   systemRole: string
   disabled: boolean
 }
@@ -402,6 +501,8 @@ export async function listUsers(): Promise<UserRow[]> {
 
 export interface DeviceRow {
   nodeId: string
+  /** 设备归属。管理员调用 /api/devices 会拿到**全部**设备，计数必须按它过滤。 */
+  userId?: string
   name: string
   platform: string
   capabilities: string[]
@@ -412,7 +513,7 @@ export interface DeviceRow {
 }
 
 export async function listDevices(): Promise<DeviceRow[]> {
-  const r = await getJson<{ devices?: DeviceRow[] }>('/api/devices', { token: getAccessToken() })
+  const r = await withSessionRetry('/api/devices', (token) => getJson<{ devices?: DeviceRow[] }>('/api/devices', { token }))
   return r.devices ?? []
 }
 

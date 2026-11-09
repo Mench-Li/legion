@@ -49,7 +49,7 @@ test('① 判据：401 / IDENTITY_* 的 403 算凭据问题，其余不算', () 
 })
 
 test('② 没有刷新凭据时，死掉的访问令牌必须被清掉（否则每个请求继续 401）', async () => {
-  resetSession({ access: 'expired-access-token' })
+  resetSession({ access: 'v1.eyJzaWQiOiJzMSIsInN1YiI6InUxIn0.c2ln' })
   let expiredCalls = 0
   identity.setSessionExpiredHandler(() => { expiredCalls += 1 })
   try {
@@ -62,7 +62,7 @@ test('② 没有刷新凭据时，死掉的访问令牌必须被清掉（否则�
 })
 
 test('③ 刷新失败 = 会话没了：清干净 + 通知登录门', async () => {
-  resetSession({ access: 'expired-access-token', refresh: 'stale-refresh-token' })
+  resetSession({ access: 'v1.eyJzaWQiOiJzMSIsInN1YiI6InUxIn0.c2ln', refresh: 'stale-refresh-token' })
   const realFetch = globalThis.fetch
   // 刷新凭据已被轮换掉：中枢回 401 TOKEN_REVOKED。
   globalThis.fetch = async () => new Response(JSON.stringify({ ok: false, error: '刷新凭据已失效', code: 'IDENTITY_TOKEN_REVOKED' }), {
@@ -82,16 +82,16 @@ test('③ 刷新失败 = 会话没了：清干净 + 通知登录门', async () =
 })
 
 test('④ 刷新成功：换成新令牌，不清会话、不打扰登录门', async () => {
-  resetSession({ access: 'expired-access-token', refresh: 'good-refresh-token' })
+  resetSession({ access: 'v1.eyJzaWQiOiJzMSIsInN1YiI6InUxIn0.c2ln', refresh: 'good-refresh-token' })
   const realFetch = globalThis.fetch
-  globalThis.fetch = async () => new Response(JSON.stringify({ ok: true, accessToken: 'fresh-access', refreshToken: 'fresh-refresh' }), {
+  globalThis.fetch = async () => new Response(JSON.stringify({ ok: true, accessToken: 'v1.eyJzaWQiOiJzOSIsInN1YiI6InUxIn0.c2ln', refreshToken: 'fresh-refresh' }), {
     status: 200, headers: { 'content-type': 'application/json' },
   })
   let expiredCalls = 0
   identity.setSessionExpiredHandler(() => { expiredCalls += 1 })
   try {
     assert.equal(await identity.recoverSession(), true)
-    assert.equal(identity.getAccessToken(), 'fresh-access')
+    assert.equal(identity.getAccessToken(), 'v1.eyJzaWQiOiJzOSIsInN1YiI6InUxIn0.c2ln')
     assert.equal(identity.getRefreshToken(), 'fresh-refresh')
     assert.equal(expiredCalls, 0)
   } finally {

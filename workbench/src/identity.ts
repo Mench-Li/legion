@@ -99,8 +99,33 @@ function hubBase(): string {
   return localStorage.getItem('legion.workbench.hub') ?? '/hub'
 }
 
+/**
+ * 用户访问令牌的形状判据：Hub 签发的是 `v1.<payload>.<sig>`（三段点分，首段字面量 `v1`）。
+ *
+ * 为什么要在**读**的时候判一次：这个键里曾经装过别的东西——旧版本把机器令牌
+ * （48 位 hex）写进了同一个存储位。之后每一次身份请求都把那个值原样发出去，
+ * 服务端只能回一句 `IDENTITY_TOKEN_MALFORMED`「访问令牌格式不正确」，
+ * 而这句话既不告诉用户"你没登录"，也不告诉开发者"这个值是垃圾"。
+ *
+ *   现场（2026-11-07）：账号面板两块都是「账号读取失败：访问令牌格式不正确」，
+ *   用户以为账号功能坏了；实际是 sessionStorage 里躺着一把不是用户令牌的字符串，
+ *   而它不落在可重放的 401 里，页面永远不会自己恢复。
+ *
+ * 形状不符 ⇒ 当作"没有令牌"处理并顺手清掉：把垃圾送去服务端，
+ * 换回来的只会是诊断噪声，而不是数据。
+ */
+function looksLikeAccessToken(raw: string): boolean {
+  return /^v1\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/.test(raw)
+}
+
 export function getAccessToken(): string {
-  try { return sessionStorage.getItem(SS_ACCESS) ?? '' } catch { return '' }
+  try {
+    const raw = sessionStorage.getItem(SS_ACCESS) ?? ''
+    if (raw.length === 0) return ''
+    if (looksLikeAccessToken(raw)) return raw
+    sessionStorage.removeItem(SS_ACCESS)
+    return ''
+  } catch { return '' }
 }
 
 export function getRefreshToken(): string {
@@ -331,9 +356,23 @@ export async function recoverSession(): Promise<boolean> {
  * `/api/identity/refresh` 与 `/api/identity/login` 显式排除（前者会递归，
  * 后者根本没有旧令牌可续）。
  */
-const REPLAYABLE_401 = new Set(['IDENTITY_TOKEN_EXPIRED', 'IDENTITY_TOKEN_MISSING'])
+const REPLAYABLE_401 = new Set(['IDENTITY_TOKEN_EXPIRED', 'IDENTITY_TOKEN_MISSING', 'IDENTITY_TOKEN_MALFORMED'])
 
 async function withSessionRetry<T>(path: string, attempt: (token: string) => Promise<T>): Promise<T> {
+  const isAuthPath = path === '/api/identity/refresh' || path === '/api/identity/login'
+  // ★ 手上没有可用的访问令牌、但还有刷新凭据：**先换再发**。
+  //
+  //   不这么做的话，空令牌换来的是 `REMOTE_AUTH_MISSING`（网关层的"缺少访问令牌"），
+  //   它不在下面的可重放集合里 ⇒ 直接抛给界面 ⇒ 用户看到一句他无法处理的错误，
+  //   而真正该发生的那件事（拿 refresh 换新令牌）根本没发生。
+  if (!isAuthPath && getAccessToken().length === 0 && getRefreshToken().length > 0) {
+    await recoverSession()
+  }
+  // 换完仍然没有令牌：这是一次**没有会话**的调用，说人话。
+  // 不抛原始服务端错误，是因为"格式不正确"对用户没有任何可执行含义。
+  if (!isAuthPath && getAccessToken().length === 0) {
+    throw new IdentityRequestError('登录已过期，请重新登录', 'IDENTITY_NO_SESSION', 401)
+  }
   try {
     return await attempt(getAccessToken())
   } catch (e) {

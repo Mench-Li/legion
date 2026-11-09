@@ -165,3 +165,7 @@ team-hub/team.db-*
 # CPU profile 现场副本（.prof/，临时目录）
 .prof/
 
+
+# agent 生成的经验草稿（不是交付物，每轮都会重生成）
+docs/experience/drafts/
+

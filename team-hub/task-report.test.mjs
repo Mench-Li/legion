@@ -169,6 +169,19 @@ test('⑨ 问题的 agent_id 解析到 agent_registry（否则回答会查不到
   assert.equal(out.question.agent_id, 'agent-coder-7', '★ 必须对得上 registry，回答链路才找得到')
 })
 
+test('⑨b 任务还没有岗位时不能写死字面量 agent（否则回答链路找不到是谁在问）', () => {
+  const db = makeDb()
+  db.prepare("UPDATE tasks SET role=NULL, soldier=NULL WHERE id='T-1'").run()
+  db.exec(`CREATE TABLE IF NOT EXISTS agent_registry (agent_id TEXT PRIMARY KEY, scope TEXT NOT NULL,
+    role TEXT NOT NULL, name TEXT, avatar TEXT, archived INTEGER NOT NULL DEFAULT 0, UNIQUE(scope, role))`)
+  db.prepare("INSERT INTO agent_registry (agent_id, scope, role, name) VALUES ('agent-only-1','default','coder','唯一岗位')").run()
+
+  const out = submitReport(db, {
+    taskId: 'T-1', reportId: 'r-9b', status: 'blocked', question: { body: '谁在问？' }, actor: 's',
+  }, { audit: auditSink() })
+
+  assert.equal(out.question.agent_id, 'agent-only-1', '★ 空间里只有一个岗位时，问的人就是它')
+})
 test('⑩ applyTransition：blocked 顺手把任务状态推进（一次调用，不留两次写的缝）', () => {
   const db = makeDb()
   const out = submitReport(db, {

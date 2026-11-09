@@ -165,9 +165,18 @@ export function submitReport(db, input = {}, deps = {}) {
       let agentId = role ?? 'agent'
       if (role) {
         try {
-          const row = db.prepare('SELECT agent_id FROM agent_registry WHERE scope=? AND role=?').get(task.scope ?? 'default', role)
+          const row = db.prepare('SELECT agent_id FROM agent_registry WHERE scope=? AND role=? AND archived=0').get(task.scope ?? 'default', role)
           if (row?.agent_id) agentId = row.agent_id
         } catch { /* 极简夹具可能没有 agent_registry：退回岗位名 */ }
+      }
+      // ★ 任务还没有岗位/执行者时（人刚建、还没派工），不能写死字面量 'agent'：
+      //   回答链路按 (scope, agent_id, task_id) 三元组找问题，写错就等于"这条问题没人能回答"。
+      //   此时若能唯一确定"谁在问"，就用它；确定不了才退回字面量。
+      if (role === null) {
+        try {
+          const candidates = db.prepare('SELECT agent_id FROM agent_registry WHERE scope=? AND archived=0').all(task.scope ?? 'default')
+          if (candidates.length === 1) agentId = candidates[0].agent_id
+        } catch { /* 没有 registry：保持字面量 */ }
       }
       db.prepare(`INSERT INTO agent_questions
         (id, scope, agent_id, task_id, body, options_json, status, version)

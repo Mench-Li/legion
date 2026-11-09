@@ -254,7 +254,12 @@ export function createTaskLifecycleRoutes({
           const result = releaseStaleTasks(minutes, by, ids)
           const released = Array.isArray(result) ? result : result.released ?? []
           const quarantined = Array.isArray(result) ? [] : result.quarantined ?? []
-          audit(by, scope, 'release-stale', '*', { released, quarantined })
+          // ★ 空转不写审计（2026-11-09 真机演练实测）：守护每跳一次都会调本接口，
+          //   无条件记账会让 `audit` 被 `{"released":[],"quarantined":[]}` 刷满
+          //   （10 分钟 149 行），真出事时"哪几件事被回收了"反而找不到。
+          //   **什么都没有发生本身不是一件需要留痕的事**。
+          const changed = released.length > 0 || quarantined.length > 0
+          if (changed) audit(by, scope, 'release-stale', '*', { released, quarantined })
           return { released, quarantined }
         })
       },

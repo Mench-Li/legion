@@ -128,9 +128,13 @@ async function cmdSetup() {
 
 async function cmdCreate() {
   const env = readEnv()
+  const variant = process.argv[3] === 'waiting' ? 'waiting' : 'dropped'
+  const brief = variant === 'waiting'
+    // waiting：要它明确"在等人工决定"，不要它自己猜着往下做
+    ? '这是一次能力演练，不需要改任何代码。请直接上报 status=waiting、wait_for=human-decision，summary 写"演练：等待人工决定"。不要调用任何写入工具。'
+    : '这是一次能力演练，不需要改任何代码。请直接上报 status=dropped（无需处理），summary 写"演练：超出范围"。不要调用任何写入工具。'
   const created = await api(env.base, 'POST', '/api/create', {
-    title: 'drill-F1-四态', by: 'general', scope: env.scope,
-    body: '这是一次能力演练，不需要改任何代码。请直接上报 status=dropped（无需处理），summary 写"演练：超出范围"。不要调用任何写入工具。',
+    title: `drill-F1-${variant}`, by: 'general', scope: env.scope, body: brief,
   })
   if (created.status !== 200) { process.stdout.write(`建任务失败：${JSON.stringify(created.body)}\n`); process.exitCode = 1; return }
   const id = created.body.task.id
@@ -138,7 +142,7 @@ async function cmdCreate() {
   const dbw = new DatabaseSync(env.dbPath)
   try { dbw.prepare("UPDATE tasks SET role='coder' WHERE id=?").run(id) } finally { dbw.close() }
   await api(env.base, 'POST', '/api/transition', { id, to: 'todo', by: 'general', scope: env.scope })
-  writeFileSync(ENV_FILE, JSON.stringify({ ...env, taskId: id }, null, 2))
+  writeFileSync(ENV_FILE, JSON.stringify({ ...env, taskId: id, variant }, null, 2))
   process.stdout.write(`已建任务 ${id}（role=coder）并置 todo，空间 ${env.scope}\n`)
 }
 
@@ -164,31 +168,42 @@ async function cmdObserve({ timeoutMs = 12 * 60 * 1000 } = {}) {
       const allComments = db.prepare("SELECT COUNT(*) AS c FROM task_input WHERE task_id=? AND kind='comment'").get(id)?.c
       const reportComments = db.prepare(`SELECT COUNT(*) AS c FROM task_input
         WHERE task_id=? AND kind='comment' AND (body LIKE '%无需处理%' OR body LIKE '%canceled%')`).get(id)?.c
+      const transitions = db.prepare("SELECT ts, detail FROM audit WHERE taskId=? AND action='transition' ORDER BY seq").all(id)
       const activity = readActivity(env, id)
       last = {
         status: t?.status,
         comments: Number(allComments ?? 0),
         reportComments: Number(reportComments ?? 0),
         dropActivity: activity.filter((a) => a.kind === 'drop').map((a) => a.text),
+        reportActivity: activity.filter((a) => a.kind === 'report').map((a) => a.text),
+        transitions,
         claimAt: activity.find((a) => a.kind === 'claim')?.ts ?? null,
         dropAt: activity.find((a) => a.kind === 'drop')?.ts ?? null,
       }
       const terminal = ['canceled', 'in_review', 'done', 'blocked'].includes(String(t?.status))
-      if (terminal && last.dropActivity.length > 0) break
+      // waiting 不产生终态，等到 report 痕迹就算落定；dropped 要等终态 + drop 痕迹
+      const waitingSettled = last.reportActivity.length > 0
+      if ((terminal && last.dropActivity.length > 0) || waitingSettled) break
       await sleep(2000)
     }
   } finally { db.close() }
 
-  const dropped = last?.status === 'canceled'
+  const variant = env.variant === 'waiting' ? 'waiting' : 'dropped'
   const noComment = last?.reportComments === 0
-  const trailed = (last?.dropActivity?.length ?? 0) > 0
+  // dropped ⇒ 终态 canceled + drop 痕迹；waiting ⇒ **留在 in_progress、不迁移** + report 痕迹
+  // waiting 的关键不是「多久之后还停在 in_progress」（stale 回收会把它放回 todo），
+  // 而是**报告那一刻没有引发迁移**：claim 之后不应出现任何 transition。
+  const claimAt = last?.claimAt ?? null
+  const movedAfterClaim = (last?.transitions ?? []).filter((row) => claimAt === null || String(row.ts) >= String(claimAt))
+  const pass = variant === 'waiting'
+    ? ((last?.reportActivity?.length ?? 0) > 0 && noComment && movedAfterClaim.length === 0)
+    : (last?.status === 'canceled' && (last?.dropActivity?.length ?? 0) > 0 && noComment)
   process.stdout.write('\n=== F1 判定 ===\n')
-  process.stdout.write(`落定状态     : ${last?.status}（期望 canceled = 无需处理）\n`)
+  process.stdout.write(`落定状态     : ${last?.status}（期望 ${variant === 'waiting' ? 'in_progress（不迁移）' : 'canceled（无需处理）'}）\n`)
   process.stdout.write(`报告评论     : ${last?.reportComments} 条（期望 0 = 不打扰人；另有 ${last?.comments} 条含派工播报）\n`)
-  process.stdout.write(`drop 活动痕迹: ${JSON.stringify(last?.dropActivity ?? [])}（本地活动流）\n`)
+  process.stdout.write(`report 活动痕迹: ${JSON.stringify(last?.reportActivity ?? [])}（本地活动流）\n`)
   process.stdout.write(`时间线       : claim ${last?.claimAt ?? '—'} → drop ${last?.dropAt ?? '—'}\n`)
-  const pass = dropped && noComment && trailed
-  process.stdout.write(`\n${pass ? 'PASS' : 'FAIL'}  dropped ⇒ 落 canceled + 零报告评论 + 留 drop 痕迹\n`)
+  process.stdout.write(`\n${pass ? 'PASS' : 'FAIL'}  ${variant === 'waiting' ? 'waiting ⇒ 留在 in_progress、零报告评论、有 report 痕迹' : 'dropped ⇒ 落 canceled、零报告评论、有 drop 痕迹'}\n`)
   if (!pass) process.stdout.write('（状态一直不动：守护没接管该空间，先看临时 drill-worker.log）\n')
   process.exitCode = pass ? 0 : 1
 }

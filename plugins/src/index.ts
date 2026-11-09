@@ -94,7 +94,7 @@ import { createHandoff, isSliceTesterTask } from './handoff.js'
 import { createSliceOrchestration } from './sliceOrchestration.js'
 import { decideProductionTool, type GrantedWrite } from './productionWriteGuard.js'
 import { planTimeoutSettlement, planTimeoutTransitionFailure, workerStoppedWithin, TIMEOUT_SETTLE_GRACE_MS } from './timeoutSettlement.js'
-import { normalizeReport, settlementFor, type NormalizedReport, type ReportState, type WaitForReason } from './reportSettlement.js'
+import { normalizeReport, settlementFor, planReportFollowup, type NormalizedReport, type ReportState, type WaitForReason } from './reportSettlement.js'
 import { blockedReportPayload } from './reportPayload.js'
 import { branchOwnChangesRefspec } from './branchScope.js'
 import { resolveStaleMinutes } from './configSanity.js'
@@ -3131,19 +3131,20 @@ function spaceWorker(ctx: AppContext, config: Config): void {
       log(`${t.id} → blocked（报告不合法：${why}）`)
       return
     }
-    // dropped = 无需处理：终态 canceled、**不发任何消息**，但留审计（不打扰 ≠ 不留痕）。
-    if (intent.status === 'dropped') {
-      const plan = settlementFor(intent)
-      activity(plan.auditAction, t.id, `无需处理（${plan.reportState}）：${intent.summary || '（未说明）'}`)
-      await transitionTo(t.id, plan.taskStatus)
-      log(`${t.id} → ${plan.taskStatus}（dropped：无需处理，不打扰人）`)
-      return
-    }
-    // waiting = 在等外部条件：留在 in_progress，**不发进度噪音**；由 stale 回收器在下一轮重新评估。
-    if (intent.status === 'waiting') {
-      const plan = settlementFor(intent)
-      activity(plan.auditAction, t.id, `等待 ${plan.waitFor ?? '（未注明）'}：${intent.summary || '（未说明）'}`)
-      log(`${t.id} → ${plan.taskStatus}（waiting：等 ${plan.waitFor}，不发消息）`)
+    // dropped / waiting 的落地走**计划函数**（./reportSettlement.ts 的 planReportFollowup）：
+    // 「不发消息」这条规则从"调用点的自觉"变成"计划本身的性质"，由 report-followup 判据钉住。
+    // blocked 不在本计划接管范围内 —— 它还要提交结构化问题、走受阻写口。
+    if (intent.status === 'dropped' || intent.status === 'waiting') {
+      const followup = planReportFollowup(intent)
+      if (followup === null) {
+        // 理论上不会发生；真发生了也不能静默吞掉，否则任务会停在原地没人知道
+        await safeComment(t.id, `⚠ 报告状态 ${intent.status} 没有落地计划，请人工检查。`, scope)
+        return
+      }
+      activity(followup.auditAction, t.id, followup.activityText)
+      if (followup.comment !== null) await safeComment(t.id, followup.comment, scope)
+      if (followup.transitionTo !== null) await transitionTo(t.id, followup.transitionTo)
+      log(`${t.id} → ${followup.transitionTo ?? intent.status + '（不迁移）'}（${intent.status}：${intent.summary || '（未说明）'}）`)
       return
     }
     // D7' 机器闸门：切片测试任务（tester + slice 键）走专用结算，不进入常规 advancePipeline 流转

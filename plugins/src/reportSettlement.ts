@@ -132,3 +132,55 @@ export function settlementFor(report: NormalizedReport): ReportSettlement {
     }
   }
 }
+/**
+ * 四态报告的**落地计划**（设计稿 §3 F1）。
+ *
+ * 为什么要有这一层：`settlementFor` 只说"该是什么状态"，真正会伤人的是**落地点**——
+ * dropped 到底有没有偷偷发一条评论？waiting 会不会每隔一会儿刷一次进度？
+ * 把落地动作收敛成一个可判定的计划，才能用控制组钉住"无评论"这件事。
+ *
+ * 返回 `null` = 不归本计划管（done / blocked 走常规派工与交接流程）。
+ */
+export interface ReportFollowupPlan {
+  /** 审计动作名：dropped 用 `drop`，其余 `report`。 */
+  auditAction: 'report' | 'drop'
+  /** 活动流文案（写给看板的"为什么没动"，不是发给人的消息）。 */
+  activityText: string
+  /** 要迁移到的状态；`null` 表示不迁移。 */
+  transitionTo: 'canceled' | 'blocked' | null
+  /** 要发给人的评论；**`null` 表示一个字都不发**。 */
+  comment: string | null
+}
+
+export function planReportFollowup(report: NormalizedReport): ReportFollowupPlan | null {
+  const settlement = settlementFor(report)
+  if (report.status === 'dropped') {
+    return {
+      auditAction: settlement.auditAction,
+      activityText: `无需处理（${settlement.reportState}）：${report.summary || '（未说明）'}`,
+      transitionTo: 'canceled',
+      // ★ 不打扰人：这条分支一个字都不发（不打扰 ≠ 不留痕，审计照写）
+      comment: null,
+    }
+  }
+  if (report.status === 'waiting') {
+    return {
+      auditAction: settlement.auditAction,
+      activityText: `等待 ${settlement.waitFor ?? '（未注明）'}：${report.summary || '（未说明）'}`,
+      transitionTo: null,
+      // ★ 不发进度噪音：等外部条件不是"进展"，刷消息只会淹没真正需要人看的那条
+      comment: null,
+    }
+  }
+  if (report.status === 'blocked') {
+    const body = typeof report.blocker === 'string' ? report.blocker.trim() : ''
+    return {
+      auditAction: settlement.auditAction,
+      activityText: `受阻：${report.summary || '（未说明）'}`,
+      transitionTo: 'blocked',
+      // 受阻必须让知道：有结构化问题就指向问题，没有就留一句可读的话
+      comment: body !== '' ? `⛔ 受阻：${report.summary || body}` : `⛔ 受阻：${report.summary || '（未说明）'}`,
+    }
+  }
+  return null
+}

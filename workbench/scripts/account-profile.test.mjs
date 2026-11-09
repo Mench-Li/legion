@@ -103,7 +103,7 @@ describe('账号纯函数与身份 API（S3）', () => {
 
   it('TC-S3-06 旧 /me（缺 displayName/avatar）回退用户名且不抛错', async () => {
     const mod = await loadTs('../src/identity.ts')
-    installEnv({ access: 'token-old-hub' })
+    installEnv({ access: 'v1.eyJzaWQiOiJzMSIsInN1YiI6InUxIn0.c2ln' })
     globalThis.fetch = async () => json(200, { ok: true, user: { userId: 'u1', name: '小兵' }, roles: [], systemRole: 'none' })
     const me = await mod.fetchMe()
     assert.equal(me.displayName, '小兵')
@@ -113,7 +113,7 @@ describe('账号纯函数与身份 API（S3）', () => {
 
   it('TC-S3-07 新字段原样透传；roles/systemRole 缺省为 []/none', async () => {
     const mod = await loadTs('../src/identity.ts')
-    installEnv({ access: 'token' })
+    installEnv({ access: 'v1.eyJzaWQiOiJzMSIsInN1YiI6InUxIn0.c2ln' })
     const user = { userId: 'u1', name: '小兵', displayName: 'Alice', avatar: '', createdAt: '2026-10-29T08:00:00.000Z', disabled: false }
     globalThis.fetch = async () => json(200, { ok: true, user })
     const me = await mod.fetchMe()
@@ -126,7 +126,7 @@ describe('账号纯函数与身份 API（S3）', () => {
 
   it('TC-S3-08 updateProfile 请求形状：POST /api/identity/profile、体只含 displayName、带用户令牌', async () => {
     const mod = await loadTs('../src/identity.ts')
-    installEnv({ access: 'token-x' })
+    installEnv({ access: 'v1.eyJzaWQiOiJzMSIsInN1YiI6InUxIn0.c2ln' })
     let captured = null
     globalThis.fetch = async (url, init) => {
       captured = { url: String(url), method: init.method, body: JSON.parse(init.body), auth: authOf(init) }
@@ -137,12 +137,12 @@ describe('账号纯函数与身份 API（S3）', () => {
     assert.ok(captured.url.endsWith('/api/identity/profile'))
     assert.equal(captured.method, 'POST')
     assert.deepEqual(captured.body, { displayName: 'Alice' })
-    assert.equal(captured.auth, 'Bearer token-x')
+    assert.equal(captured.auth, 'Bearer v1.eyJzaWQiOiJzMSIsInN1YiI6InUxIn0.c2ln')
   })
 
   it('TC-S3-09 400 IDENTITY_INVALID_INPUT → IdentityRequestError 带 code/status', async () => {
     const mod = await loadTs('../src/identity.ts')
-    installEnv({ access: 'token' })
+    installEnv({ access: 'v1.eyJzaWQiOiJzMSIsInN1YiI6InUxIn0.c2ln' })
     globalThis.fetch = async () => json(400, { ok: false, code: 'IDENTITY_INVALID_INPUT', error: '显示名不能为空' })
     await assert.rejects(mod.updateProfile({ displayName: '' }), (e) => {
       assert.ok(e instanceof mod.IdentityRequestError)
@@ -205,7 +205,7 @@ describe('账号纯函数与身份 API（S3）', () => {
 
   it('TC-S3-20 401 过期：刷新一次、重放一次、返回 200', async () => {
     const mod = await loadTs('../src/identity.ts')
-    installEnv({ access: 'old-token', refresh: 'refresh-1' })
+    installEnv({ access: 'v1.eyJzaWQiOiJzMSIsInN1YiI6InUxIn0.c2ln', refresh: 'refresh-1' })
     let meHits = 0
     let refreshHits = 0
     globalThis.fetch = async (url, init) => {
@@ -216,7 +216,7 @@ describe('账号纯函数与身份 API（S3）', () => {
       }
       if (u.endsWith('/api/identity/me')) {
         meHits += 1
-        if (authOf(init) === 'Bearer old-token') return json(401, { ok: false, code: 'IDENTITY_TOKEN_EXPIRED', error: '访问令牌已过期，请刷新' })
+        if (authOf(init) === 'Bearer v1.eyJzaWQiOiJzMSIsInN1YiI6InUxIn0.c2ln') return json(401, { ok: false, code: 'IDENTITY_TOKEN_EXPIRED', error: '访问令牌已过期，请刷新' })
         return json(200, { ok: true, user: { userId: 'u1', name: '小兵', displayName: 'Alice', avatar: '', createdAt: '2026-10-29T08:00:00.000Z', disabled: false }, roles: [], systemRole: 'none' })
       }
       throw new Error(`unexpected url ${u}`)
@@ -230,7 +230,7 @@ describe('账号纯函数与身份 API（S3）', () => {
 
   it('TC-S3-21 IDENTITY_WRONG_PASSWORD 不触发刷新，错误原样抛给 UI', async () => {
     const mod = await loadTs('../src/identity.ts')
-    installEnv({ access: 'token', refresh: 'refresh-1' })
+    installEnv({ access: 'v1.eyJzaWQiOiJzMSIsInN1YiI6InUxIn0.c2ln', refresh: 'refresh-1' })
     let refreshHits = 0
     globalThis.fetch = async (url) => {
       const u = String(url)
@@ -260,7 +260,7 @@ describe('账号纯函数与身份 API（S3）', () => {
 
   it('TC-S3-23 无刷新凭据时 401 原样返回、不发起刷新', async () => {
     const mod = await loadTs('../src/identity.ts')
-    installEnv({ access: 'old-token' }) // 没有 refresh
+    installEnv({ access: 'v1.eyJzaWQiOiJzMSIsInN1YiI6InUxIn0.c2ln' }) // 没有 refresh
     let hits = 0
     globalThis.fetch = async (url) => {
       hits += 1
@@ -273,7 +273,7 @@ describe('账号纯函数与身份 API（S3）', () => {
 
   it('TC-S3-24 10 路并发 401 只刷新 1 次（单飞），全部恢复成功', async () => {
     const mod = await loadTs('../src/identity.ts')
-    installEnv({ access: 'old-token', refresh: 'refresh-1' })
+    installEnv({ access: 'v1.eyJzaWQiOiJzMSIsInN1YiI6InUxIn0.c2ln', refresh: 'refresh-1' })
     let refreshHits = 0
     globalThis.fetch = async (url, init) => {
       const u = String(url)
@@ -282,7 +282,7 @@ describe('账号纯函数与身份 API（S3）', () => {
         await new Promise((r) => setTimeout(r, 5)) // 让 10 路都追上同一个 Promise
         return json(200, { ok: true, accessToken: 'new-token', refreshToken: 'refresh-2' })
       }
-      if (authOf(init) === 'Bearer old-token') return json(401, { ok: false, code: 'IDENTITY_TOKEN_EXPIRED', error: '过期' })
+      if (authOf(init) === 'Bearer v1.eyJzaWQiOiJzMSIsInN1YiI6InUxIn0.c2ln') return json(401, { ok: false, code: 'IDENTITY_TOKEN_EXPIRED', error: '过期' })
       return json(200, { ok: true, user: { userId: 'u1', name: '小兵', displayName: 'Alice', avatar: '', createdAt: '2026-10-29T08:00:00.000Z', disabled: false }, roles: [], systemRole: 'none' })
     }
     const results = await Promise.all(Array.from({ length: 10 }, () => mod.fetchMe()))
@@ -297,5 +297,72 @@ describe('账号纯函数与身份 API（S3）', () => {
     assert.match(block, /userId\?: string/)
     assert.match(block, /nodeId: string/)
     assert.match(block, /revoked: boolean/)
+  })
+})
+
+// ============================================================================
+// S3 补充：机器令牌被误当成用户令牌时的三件事
+//
+// 现场（2026-11-07）：账号面板两块都显示「账号读取失败：访问令牌格式不正确」。
+// 真因不是账号功能坏了，而是 sessionStorage 里躺着一把**不是用户令牌**的字符串
+// （旧版本留下的机器令牌，48 位 hex），而它既不被校验、也不在可重放的 401 里，
+// 于是页面永远停在同一个错上，用户也没被告知"请重新登录"。
+// ============================================================================
+describe('身份令牌形状与自动恢复（S3 补充）', () => {
+  const MACHINE = '4adf4aae46a96f0f0fc166033146932e000e0572bdad08c6'
+
+  it('TC-S3-25 存储里是机器令牌（非 v1.*.*）时按"没有令牌"处理并清掉', async () => {
+    const mod = await loadTs('../src/identity.ts')
+    const { session } = installEnv({ access: MACHINE })
+    assert.equal(mod.getAccessToken(), '', '不该把机器令牌当成用户令牌')
+    assert.equal(session.getItem('legion.identity.access'), null, '坏值应当被清掉，而不是留着继续发')
+  })
+
+  it('TC-S3-26 没有可用令牌但有刷新凭据：先换再发，不把 401 抛给界面', async () => {
+    const mod = await loadTs('../src/identity.ts')
+    installEnv({ access: MACHINE, refresh: 'refresh-1' })
+    const urls = []
+    globalThis.fetch = async (url, init) => {
+      const u = String(url)
+      urls.push(u)
+      if (u.endsWith('/api/identity/refresh')) {
+        return json(200, { ok: true, accessToken: 'v1.eyJzaWQiOiJzMiIsInN1YiI6InUxIn0.c2ln', refreshToken: 'refresh-2' })
+      }
+      assert.equal(authOf(init), 'Bearer v1.eyJzaWQiOiJzMiIsInN1YiI6InUxIn0.c2ln', '重放必须带刷新后的新令牌')
+      return json(200, { ok: true, user: { userId: 'u1', name: '小兵', displayName: '小兵' }, roles: [], systemRole: 'none' })
+    }
+    const me = await mod.fetchMe()
+    assert.equal(me.userId, 'u1')
+    assert.ok(urls[0].endsWith('/api/identity/refresh'), '应当先换令牌，顺序是 ' + urls.join(' -> '))
+  })
+
+  it('TC-S3-27 完全没有会话：给出可执行的"请重新登录"，且不发无谓请求', async () => {
+    const mod = await loadTs('../src/identity.ts')
+    installEnv({})
+    let hits = 0
+    globalThis.fetch = async () => { hits += 1; return json(500, { ok: false }) }
+    await assert.rejects(mod.fetchMe(), (e) => {
+      assert.match(e.message, /重新登录/, '错误要说人话，不能是服务端原始码')
+      return true
+    })
+    assert.equal(hits, 0, '没有会话时不该把请求发出去')
+  })
+
+  it('TC-S3-28 服务端判 MALFORMED 时也触发一次刷新并重放（不再死在同一句错上）', async () => {
+    const mod = await loadTs('../src/identity.ts')
+    installEnv({ access: 'v1.eyJzaWQiOiJzMSIsInN1YiI6InUxIn0.c2ln', refresh: 'refresh-1' })
+    let meHits = 0
+    globalThis.fetch = async (url) => {
+      const u = String(url)
+      if (u.endsWith('/api/identity/refresh')) {
+        return json(200, { ok: true, accessToken: 'v1.eyJzaWQiOiJzMiIsInN1YiI6InUxIn0.c2ln', refreshToken: 'refresh-2' })
+      }
+      meHits += 1
+      if (meHits === 1) return json(401, { ok: false, code: 'IDENTITY_TOKEN_MALFORMED', error: '访问令牌格式不正确' })
+      return json(200, { ok: true, user: { userId: 'u1', name: '小兵' }, roles: [], systemRole: 'none' })
+    }
+    const me = await mod.fetchMe()
+    assert.equal(me.userId, 'u1')
+    assert.equal(meHits, 2, '应当恰好重放一次')
   })
 })

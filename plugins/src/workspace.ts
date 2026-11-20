@@ -122,6 +122,20 @@ export interface WorkspaceDeps {
   useHub: () => boolean
   /** 取值函数：`detectHub()` 探测成功后会被改写。 */
   hubUrl: () => string
+  /**
+   * 请求 hub 时要带的认证头（**必须传**，否则空间绑定在开了远程鉴权的部署上静默失效）。
+   *
+   * BUG-051（2026-11-20 实测）：`refreshSpaceBinding` 原先写的是裸 `fetch('/api/spaces')`，
+   * 而本机开了 `teamHubRemoteAuth` ⇒ 那个请求拿到 **401** ⇒ 代码走 `if (!res.ok) return`
+   * （一个静默的 no-op）⇒ 绑定永远是 null ⇒ `repoRootFor()` 回落到默认仓库 ⇒
+   * **空间里绑的「本地文件夹」从来没生效过**，任务全在默认仓库里开 worktree，
+   * 而中枢的 `provision` 面板显示 `workspace-bound`。
+   *
+   *   > 一次没带令牌的读取，与一条"这个空间没绑文件夹"，
+   *   > 在 `if (!res.ok) return` 面前是同一件事 ——
+   *   > 区别只在任务落在哪个仓库里的那一次。
+   */
+  hubHeaders: () => Record<string, string>
   /** 绑定状态访问器（**每实例一份**，理由见文件头）。 */
   binding: WorkspaceBindingAccess
   activity: (kind: string, taskId: string, text: string) => void
@@ -151,7 +165,9 @@ export interface PrepareWorktreeOptions {
 }
 
 export function createWorkspace(deps: WorkspaceDeps): Workspace {
-  const { config, log, runGit, scope, useHub, hubUrl, binding, activity } = deps
+  const { config, log, runGit, scope, useHub, hubUrl, hubHeaders, binding, activity } = deps
+  /** 上次为"绑定读不到"记日志的时间（BUG-051：每 10 分钟最多一条，别刷屏）。 */
+  let lastBindingFailureAt = 0
 
   // ── 空间仓库绑定：每个工作空间可配置自己的「本地文件夹 + 远程仓库」（team-hub /api/spaces，
   //    军团指挥台「空间设置」维护——选文件夹而非手填，自动识别该 git 仓库的远程）。
@@ -163,8 +179,20 @@ export function createWorkspace(deps: WorkspaceDeps): Workspace {
   async function refreshSpaceBinding(): Promise<void> {
     if (!useHub()) return
     try {
-      const res = await fetch(`${hubUrl()}/api/spaces`)
-      if (!res.ok) return
+      const res = await fetch(`${hubUrl()}/api/spaces`, { headers: hubHeaders() })
+      if (!res.ok) {
+        // ★ BUG-051：401/403 **不许再静默** —— 它恰好等于"空间绑定读不到"，
+        //   而读日志的人会把它读成"这个空间没绑文件夹"。每 10 分钟最多说一次（扫单很勤，别刷屏）。
+        const now = Date.now()
+        if (now - lastBindingFailureAt > 10 * 60 * 1000) {
+          lastBindingFailureAt = now
+          log(`空间仓库绑定刷新失败：HTTP ${res.status}`
+            + (res.status === 401 || res.status === 403
+              ? '（鉴权失败：守护没带中枢令牌 ⇒ 空间绑的本地文件夹**不会生效**，任务会落回默认仓库）'
+              : '（沿用注入默认仓库）'))
+        }
+        return
+      }
       const data = await res.json() as { spaces?: Array<{ id: string; localDir?: string; remoteUrl?: string }> }
       const hit = (data.spaces ?? []).find(x => x.id === scope)
       let next: SpaceBinding | null = null

@@ -4195,7 +4195,17 @@ function spaceWorker(ctx: AppContext, config: Config): void {
           })
 
           try {
-            await sendNodeHeartbeat()
+            const heartbeatResult = await sendNodeHeartbeat()
+            // ★ 2026-11-20（BUG-050-a）：中枢可能刚刚**自动降级了这条节点的声明**
+            //   （自注册的节点在"声明 ⊄ 观测"时会被降级到观测子集）。这是一次
+            //   自动改写，必须留下能读的证据 —— 否则下次看到"节点能力怎么变小了"
+            //   就没人说得清。
+            const healed = (heartbeatResult as { selfHealed?: { fromVersion?: number; toVersion?: number; providers?: string[]; capabilities?: string[] } } | undefined)?.selfHealed
+            if (healed !== undefined && healed !== null) {
+              log(`执行节点 ${nodeIdForHeartbeat} 的声明已自动降级（v${healed.fromVersion} → v${healed.toVersion}）：`
+                + `观测不到的 provider[${(healed.providers ?? []).join(',') || '无'}]、能力[${(healed.capabilities ?? []).join(',') || '无'}]`
+                + '（只降不升：观测恢复后不会自动升回去，需要人工确认后再登记）')
+            }
           } catch (e) {
             // ── 自注册（2026-10-13）────────────────────────────────────────
             //
@@ -4222,6 +4232,10 @@ function spaceWorker(ctx: AppContext, config: Config): void {
                 by: `${config.role}@${scope}`,
                 providerNames,
                 capabilities: nodeCapabilities,
+                // ★ 2026-11-20（BUG-050-a）：标记"这条声明是守护自己写的"。
+                //   只有这种节点允许在"声明与观测不再一致"时**自动降级声明**；
+                //   人手登记的节点一律不动（那是人的意图，心跳无权改写）。
+                selfRegistered: true,
               })
               nodeRegistered = true
               await sendNodeHeartbeat()

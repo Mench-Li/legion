@@ -75,6 +75,37 @@ export async function startChildAgent(runtime, provider, request, options = {}) 
   const api = subagentStartApi(runtime)
   const { label, signal, prompt, parent, ...rest } = request
 
+  // ── provider 不在册 ⇒ 具名报错（BUG-050-b）──────────────────────────────
+  //
+  // 现场（2026-11-20 本机）：DSH 的子 Agent 注册表在一次启动后读成空，
+  // 而守护照常按 `config.provider`（`spawn`）派工 —— DSH 内部于是抛
+  //
+  //     TypeError: Cannot read properties of undefined (reading 'id')
+  //
+  // 这句话既不指名 provider，也不说"本机现在有哪些"，更看不出根因是"注册表空了"。
+  // 任务被连试三次后置 blocked，而全链路唯一的线索就是这句 TypeError。
+  //
+  //   > 一个"provider 不在册"的失败，
+  //   > 与一个"provider 内部崩溃"的失败，在 TypeError 面前是同一句话——
+  //   > 而它们的修法完全不同。
+  //
+  // 所以在真正调用之前先查一次注册表（只在运行期确实支持查询时才查，
+  // 不替旧版服务编造能力）。
+  if (runtime !== null && typeof runtime === 'object' && typeof runtime.getProvider === 'function') {
+    let registered
+    try { registered = runtime.getProvider(provider) } catch { registered = undefined }
+    if (registered === undefined || registered === null) {
+      let available = []
+      try { available = typeof runtime.list === 'function' ? (runtime.list() ?? []) : [] } catch { available = [] }
+      const names = Array.isArray(available) ? available.map((name) => String(name)) : []
+      throw Object.assign(
+        new Error(`SUBAGENT_PROVIDER_UNREGISTERED: ${provider}`
+          + `（本机 ctx.subagents 已注册：${names.length === 0 ? '（空 —— 一个 provider 都没有：执行面服务在，但注册表是空的）' : names.join('、')}）`),
+        { code: 'SUBAGENT_PROVIDER_UNREGISTERED' },
+      )
+    }
+  }
+
   if (api === 'startActivation') {
     const activation = await runtime.startActivation({
       provider,

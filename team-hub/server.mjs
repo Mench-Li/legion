@@ -7238,7 +7238,10 @@ function claimTask(id, soldier, ifVersion, force, round, requestId, ttlMinutes, 
       const node = harnessStoreForDispatch().getAgentNodeConfig({ id: requestedAgentNodeId, scope: t.scope })
       const liveNode = harnessStoreForDispatch().listAgentNodeConfigs({ scope: t.scope }).find((item) => item.id === requestedAgentNodeId)
       if (node === null || liveNode?.status !== 'ready') {
-        throw Object.assign(new Error(`执行节点未注册或未就绪：${requestedAgentNodeId} (${liveNode?.status ?? 'unknown'})`), { code: 'AGENT_NODE_NOT_READY', statusCode: 409 })
+        // ★ 2026-11-20（BUG-050-a）：把 `(incompatible)` 换成**差在哪一项**。
+        //   实测那次排查：库里每一样都有读数（声明 / 观测 / 新鲜度），
+        //   而报错只有三个字母 —— 人在"没登记 / 版本不符 / 观测为空 / 能力不符"之间猜了四轮。
+        throw Object.assign(new Error(`执行节点未注册或未就绪：${requestedAgentNodeId} (${liveNode?.status ?? 'unknown'}${liveNode?.statusReason ? `：${liveNode.statusReason}` : ''})`), { code: 'AGENT_NODE_NOT_READY', statusCode: 409 })
       }
       const providerName = selectedTool?.providerName
       const reported = typeof providerName === 'string' ? liveNode.observedCapabilities?.providers?.[providerName] : null

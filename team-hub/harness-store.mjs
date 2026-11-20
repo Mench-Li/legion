@@ -100,13 +100,32 @@ export function createHarnessStore({ db } = {}) {
   //   没有它，就没有"同机/跨机"这个区分，也就没有用户要的那条策略。
   //
   // ★ 三列都可空：老守护不上报 ⇒ NULL（= 未知），绝不能当成 0（= 空闲）。
-  for (const [column, ddl] of [
+    for (const [column, ddl] of [
     ['busy_workers', 'busy_workers INTEGER'],
     ['capacity_workers', 'capacity_workers INTEGER'],
     ['machine_id', 'machine_id TEXT'],
   ]) {
     if (!db.prepare('PRAGMA table_info(agent_node_presence)').all().some((c) => c.name === column)) {
       db.exec(`ALTER TABLE agent_node_presence ADD COLUMN ${ddl}`)
+    }
+  }
+
+  // 2026-11-20（BUG-050-a）：这一行节点**是不是守护自注册的**。
+  //
+  // 为什么需要它：自注册那一刻会把当时的 provider/能力**冻结**成「声明」，
+  // 而心跳每 30 秒重写「观测」。一旦这两者不再一致，节点就永久 `incompatible`
+  // —— 认领被 409 挡死，而错因只有 `(incompatible)` 三个字。
+  // 实测（2026-11-20 本机）：声明 `providers:["spawn","fork"] + structuredOutput`，
+  // 观测 `providers:[]`（那次启动 DSH 的子 Agent 注册表读成空），于是这台机器
+  // **再也领不走任何绑定任务**，看起来像"任务不动了"。
+  //
+  // 判据：只有**守护自己声明**的节点允许自愈（把声明降级到观测得到的子集）。
+  // 人手工登记的节点**一律不动** —— 那是人的意图，自动改它等于悄悄换掉配置。
+  for (const [column, ddl] of [
+    ['self_registered', 'self_registered INTEGER NOT NULL DEFAULT 0'],
+  ]) {
+    if (!db.prepare('PRAGMA table_info(agent_node_configs)').all().some((c) => c.name === column)) {
+      try { db.exec(`ALTER TABLE agent_node_configs ADD COLUMN ${ddl}`) } catch { /* 并发启动已加过 */ }
     }
   }
 
@@ -219,16 +238,32 @@ export function createHarnessStore({ db } = {}) {
     id: row.id, version: row.version, label: row.label, scope: row.scope,
     providerNames: JSON.parse(row.provider_names_json), capabilities: JSON.parse(row.capabilities_json),
     enabled: row.enabled === 1, updatedAtMs: row.updated_at_ms,
+    // 守护自注册的节点允许"声明向观测自愈"（见 heartbeatAgentNode 与上面那段迁移注释）。
+    selfRegistered: row.self_registered === 1,
   })
   const nodePresence = (node, nowMs = Date.now()) => {
+    // 停用先判：一个"已被停用且从没心跳过"的节点，说它 `unknown` 会让人以为"等它上报就好了"。
+    if (!node.enabled) {
+      return { status: 'disabled', statusReason: '节点已被停用（enabled=false）', lastSeenAtMs: null, observedProviders: [], observedCapabilities: null, missingProviders: [], missingCapabilities: [], busy: null, capacity: null, machineId: null }
+    }
     const row = db.prepare('SELECT * FROM agent_node_presence WHERE node_id=?').get(node.id)
-    if (row === undefined) return { status: 'unknown', lastSeenAtMs: null, observedProviders: [], observedCapabilities: null, busy: null, capacity: null, machineId: null }
+    if (row === undefined) return { status: 'unknown', statusReason: '这个节点还没有任何心跳（从未上报过）', lastSeenAtMs: null, observedProviders: [], observedCapabilities: null, missingProviders: [], missingCapabilities: [], busy: null, capacity: null, machineId: null }
     const fresh = row.config_version === node.version && row.scope === node.scope && nowMs - row.last_seen_at_ms <= 60_000
     const observedProviders = JSON.parse(row.providers_json)
     const observedCapabilities = JSON.parse(row.capabilities_json)
-    const providersReady = node.providerNames.every((name) => observedProviders.includes(name))
-    const capabilitiesReady = Object.entries(node.capabilities).every(([key, required]) => required !== true || observedCapabilities[key] === true)
-    const status = !node.enabled ? 'disabled' : !fresh ? 'offline' : providersReady && capabilitiesReady ? 'ready' : 'incompatible'
+    const missingProviders = node.providerNames.filter((name) => !observedProviders.includes(name))
+    const missingCapabilities = Object.entries(node.capabilities)
+      .filter(([key, required]) => required === true && observedCapabilities[key] !== true)
+      .map(([key]) => key)
+    const providersReady = missingProviders.length === 0
+    const capabilitiesReady = missingCapabilities.length === 0
+    const status = !fresh ? 'offline' : providersReady && capabilitiesReady ? 'ready' : 'incompatible'
+    // ★ 2026-11-20（BUG-050-a）：`(incompatible)` 三个字既说不清是哪一项，也说不出该改什么。
+    //   实测那次排查里，人在"节点没登记 / 版本不符 / 观测为空 / 能力不符"之间反复猜了四轮 ——
+    //   而库里**每一样都有读数**。所以把差在哪一项写出来。
+    const statusReason = status === 'ready' ? null
+      : status === 'offline' ? `心跳过期或版本/空间不符（最后心跳 ${row.last_seen_at_ms === null ? '无' : new Date(row.last_seen_at_ms).toISOString()}）`
+        : `声明了但观测不到：provider[${missingProviders.join('、') || '无'}] 能力[${missingCapabilities.join('、') || '无'}]`
     // ★★ 负载只在**新鲜**时才报出来，过期一律 null（= 未知）。
     //
     //   为什么这条必须有：一个**过期的**忙闲读数与一个**真的空闲**，在数值上一模一样
@@ -241,7 +276,10 @@ export function createHarnessStore({ db } = {}) {
     //   machineId 不同：它是**身份**、不随时间衰减，所以只要有过上报就照实返回。
     const busy = fresh && typeof row.busy_workers === 'number' ? row.busy_workers : null
     const capacity = fresh && typeof row.capacity_workers === 'number' ? row.capacity_workers : null
-    return { status, lastSeenAtMs: row.last_seen_at_ms, observedProviders, observedCapabilities, busy, capacity, machineId: row.machine_id ?? null }
+    return {
+      status, statusReason, lastSeenAtMs: row.last_seen_at_ms, observedProviders, observedCapabilities,
+      missingProviders, missingCapabilities, busy, capacity, machineId: row.machine_id ?? null,
+    }
   }
 
   // ★ 默认 provider 的底行：不存在则补上，且**不由外部写入覆盖**（名字固定）。
@@ -385,7 +423,7 @@ export function createHarnessStore({ db } = {}) {
     },
 
     /** Save a DSH execution node. Node IDs are stable; config updates advance a version. */
-    putAgentNodeConfig({ id, label, scope, providerNames, capabilities, enabled = true, nowMs = Date.now() } = {}) {
+    putAgentNodeConfig({ id, label, scope, providerNames, capabilities, enabled = true, selfRegistered = false, nowMs = Date.now() } = {}) {
       const nodeId = need(id, 'id')
       if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(nodeId)) throw new Error('node id 格式无效')
       const nodeLabel = need(label, 'label')
@@ -404,12 +442,13 @@ export function createHarnessStore({ db } = {}) {
       const prior = db.prepare('SELECT * FROM agent_node_configs WHERE id=?').get(nodeId)
       const version = prior === undefined ? 1 : prior.version + 1
       db.prepare(`INSERT INTO agent_node_configs
-        (id, version, label, scope, provider_names_json, capabilities_json, enabled, updated_at_ms)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        (id, version, label, scope, provider_names_json, capabilities_json, enabled, self_registered, updated_at_ms)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(id) DO UPDATE SET version=excluded.version, label=excluded.label, scope=excluded.scope,
           provider_names_json=excluded.provider_names_json, capabilities_json=excluded.capabilities_json,
-          enabled=excluded.enabled, updated_at_ms=excluded.updated_at_ms`)
-        .run(nodeId, version, nodeLabel, nodeScope, JSON.stringify(providers), JSON.stringify(caps), enabled === false ? 0 : 1, nowMs)
+          enabled=excluded.enabled, self_registered=excluded.self_registered, updated_at_ms=excluded.updated_at_ms`)
+        .run(nodeId, version, nodeLabel, nodeScope, JSON.stringify(providers), JSON.stringify(caps),
+          enabled === false ? 0 : 1, selfRegistered ? 1 : 0, nowMs)
       return { ...nodeConfigFromRow(db.prepare('SELECT * FROM agent_node_configs WHERE id=?').get(nodeId)), status: 'unknown' }
     },
 
@@ -454,14 +493,59 @@ export function createHarnessStore({ db } = {}) {
       const caps = parseNodeCapabilities(capabilities)
       const nodeLoad = parseNodeLoad(load)
       const machine = parseMachineId(machineId)
+      // ── 自愈：守护自注册的节点，声明向观测**降级**（BUG-050-a）────────────
+      //
+      // 现场（2026-11-20 本机）：节点在 11:25 自注册时读到 `providers:["spawn","fork"]`，
+      // 之后每次启动 DSH 的子 Agent 注册表都读成空 ⇒ 心跳观测 `providers:[]`
+      // ⇒ 声明 ⊄ 观测 ⇒ 永久 `incompatible` ⇒ 认领 409 ⇒ 界面只显示"待认领"。
+      // 而真正该被改的只有"那条已经过期的声明"。
+      //
+      // 三条纪律：
+      //   ① **只降不升**：取声明 ∩ 观测。观测到更多东西时**不动**声明（那是人该决定的事）。
+      //   ② **只碰自注册的节点**：人手登记的节点保持原样（它的意图不该被心跳改写）。
+      //   ③ **可追溯**：版本 +1，并把 `selfHealed`（从什么降到什么）随心跳响应返回，
+      //      守护把它打进日志 —— 一次自动改写必须留下能读的证据。
+      let effective = node
+      let selfHealed = null
+      const driftedProviders = node.providerNames.filter((name) => !providers.includes(name))
+      const driftedCapabilities = Object.entries(node.capabilities)
+        .filter(([key, required]) => required === true && caps[key] !== true)
+        .map(([key]) => key)
+      if (node.selfRegistered === true && (driftedProviders.length > 0 || driftedCapabilities.length > 0)) {
+        const loweredProviders = node.providerNames.filter((name) => providers.includes(name))
+        const loweredCaps = {}
+        for (const [key, value] of Object.entries(node.capabilities)) {
+          loweredCaps[key] = value === true ? caps[key] === true : value
+        }
+        // 能力位里 `providers` 子表若存在，一并按观测收窄（只保留两边都有的名字）。
+        if (node.capabilities.providers !== undefined) {
+          const observed = caps.providers ?? {}
+          loweredCaps.providers = Object.fromEntries(
+            Object.entries(node.capabilities.providers).filter(([name]) => Object.hasOwn(observed, name)),
+          )
+        }
+        const healer = this.putAgentNodeConfig({
+          id: node.id, label: node.label, scope: node.scope,
+          providerNames: loweredProviders, capabilities: loweredCaps,
+          enabled: node.enabled, selfRegistered: true, nowMs,
+        })
+        selfHealed = {
+          fromVersion: node.version,
+          toVersion: healer.version,
+          providers: driftedProviders,
+          capabilities: driftedCapabilities,
+        }
+        effective = this.getAgentNodeConfig({ id: node.id, scope: node.scope })
+      }
       db.prepare(`INSERT INTO agent_node_presence (node_id, config_version, scope, providers_json, capabilities_json, last_seen_at_ms, busy_workers, capacity_workers, machine_id)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(node_id) DO UPDATE SET config_version=excluded.config_version,
         scope=excluded.scope, providers_json=excluded.providers_json, capabilities_json=excluded.capabilities_json,
         last_seen_at_ms=excluded.last_seen_at_ms, busy_workers=excluded.busy_workers,
         capacity_workers=excluded.capacity_workers, machine_id=excluded.machine_id`)
-        .run(node.id, node.version, node.scope, JSON.stringify(providers), JSON.stringify(caps), nowMs,
+        .run(node.id, effective.version, effective.scope, JSON.stringify(providers), JSON.stringify(caps), nowMs,
           nodeLoad === null ? null : nodeLoad.busy, nodeLoad === null ? null : nodeLoad.capacity, machine)
-      return this.listAgentNodeConfigs({ scope: node.scope, nowMs }).find((item) => item.id === node.id)
+      const view = this.listAgentNodeConfigs({ scope: node.scope, nowMs }).find((item) => item.id === node.id)
+      return selfHealed === null ? view : { ...view, selfHealed }
     },
 
     /**

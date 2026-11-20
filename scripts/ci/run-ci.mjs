@@ -947,6 +947,10 @@ async function stageTest() {
         // 会让没配 agentNodeId 的守护一件都领不走）；以及跨节点冲突在**发布时**就说清。
         'workbench/scripts/goal-node-choice.test.mjs',
         'team-hub/goal-node-binding.test.mjs',
+        // 2026-11-20 BUG-050-a：执行节点的**声明 vs 观测**。自注册节点在漂移时自动降级
+        //   声明（只降不升、降完当场 ready），人手登记的节点一律不动，且非 ready 的理由
+        //   必须写出"差在哪一项"（从前只有 `(incompatible)` 三个字母）。
+        'team-hub/harness-store.test.mjs',
       ],
       cwd: ROOT,
     },
@@ -2857,6 +2861,11 @@ async function stageTest() {
     // 只给 `startActivation`（rc）与只给 `start`（alpha）都必须走通，两代都没有时必须
     // 抛一条"这里到底有什么"的错误而不是 `xxx is not a function`。
     { label: 'subagent-start（子代理启动两代 API 兼容层）', files: ['runtime/adapters/dsh/subagent-start.test.mjs'], cwd: ROOT },
+    // 2026-11-20 BUG-050-b：provider **不在册**时，DSH 内部只抛
+    //   `TypeError: Cannot read properties of undefined (reading 'id')` —— 既不指名 provider、
+    //   也不说"本机有哪些"，更看不出是"注册表空了"。这一条钉住：具名错误 + 列出已注册 +
+    //   一次都不真的去启动，以及"运行期不支持查询时不编造失败"。
+    { label: 'subagent-start-unregistered（provider 不在册：具名错误 / 列出本机已注册 / 不误杀旧服务）', files: ['runtime/adapters/dsh/subagent-start-unregistered.test.mjs'], cwd: ROOT },
     // PRT-210/211：阶段 2 的**完成标准**在两处容易被读错的地方被钉死。
     //   ① 对拍：旧调用是 `plugins/src/index.ts` 里的复刻件，不是调用的那份代码。
     //      复刻会腐化，而**失去意义的对拍会静默通过**——所以有漂移检测守着它。

@@ -2956,12 +2956,27 @@ function spaceWorker(ctx: AppContext, config: Config): void {
       const diagnostic = typeof result.diagnostic === 'string' && result.diagnostic.trim() !== ''
         ? `；provider 诊断：${result.diagnostic.slice(0, 500)}`
         : ''
-      log(`${t.id} worker 未完成（${result.stopReason}）${diagnostic}`)
+      // ★ 2026-11-20（BUG-052）：`stopReason=error` 时**什么都没打**。
+      //   现场：T-312 在 opc worktree 里连续 3 次「worker 未完成（error）」，日志与任务
+      //   评论里各只有一个 `error` 词，没有任何原因 —— 排查只能去翻 DSH 的会话文件
+      //   （而它们只有一行头、没有内容）。一句"失败了"和一句"失败在哪"，
+      //   在**要修它的人**眼里是两件完全不同的事。
+      //   所以这里把**能拿到的**都打出来：error 对象 / structured 有没有 / 子会话 id。
+      const errorDetail = (() => {
+        const e = (result as { error?: unknown }).error
+        if (e === undefined || e === null) return ''
+        try {
+          const text = typeof e === 'string' ? e : JSON.stringify(e)
+          return text === undefined ? '' : `；error=${String(text).slice(0, 600)}`
+        } catch { return '；error=（无法序列化）' }
+      })()
+      const structuredDetail = result.structured === undefined ? '；structured=缺失' : ''
+      log(`${t.id} worker 未完成（${result.stopReason}）${diagnostic}${errorDetail}${structuredDetail}`)
       if (isWorkflowTask) {
-        await quarantineUnknownWorkflowResult(`worker 未完成（${result.stopReason}）${diagnostic}`, false, 'provider-incomplete')
+        await quarantineUnknownWorkflowResult(`worker 未完成（${result.stopReason}）${diagnostic}${errorDetail}`, false, 'provider-incomplete')
         return
       }
-      await safeComment(t.id, `⚠ worker 未完成（${result.stopReason}）${diagnostic}，任务保留在 in_progress，等待人工处理或下一轮重试`)
+      await safeComment(t.id, `⚠ worker 未完成（${result.stopReason}）${diagnostic}${errorDetail}，任务保留在 in_progress，等待人工处理或下一轮重试`)
       activity('aborted', t.id, `worker 未完成（${result.stopReason}），保留 in_progress 待租约回收`)
       return
     }

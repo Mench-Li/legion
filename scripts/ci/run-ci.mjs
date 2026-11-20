@@ -2054,6 +2054,10 @@ async function stageTest() {
     //   就拒绝写、审计与自动授予同源、幂等。缺了它，一条"跑一下看看"就改权限的
     //   脚本照样会进仓。
     { label: 'grant-orphan-spaces（存量孤儿空间补授权：默认只读 / 不猜人 / 审计同源 / 幂等）', files: ['team-hub/scripts/grant-orphan-spaces.test.mjs'], cwd: ROOT },
+    // 2026-11-20 BUG-049：`seed-pipeline.mjs` 从前**不带鉴权头**，在开了远程门禁的中枢上
+    //   第一条 GET 就 401 —— 而界面给的"修复命令"正是它。这一条钉住令牌来源与优先级、
+    //   没令牌时不伪造 Bearer、401/403 要说清去哪儿拿令牌（且不打印令牌值）。
+    { label: 'seed-pipeline-lib（配流水线脚本的令牌与失败措辞：优先级 / 空令牌 / 401 可执行 / 不泄值）', files: ['team-hub/scripts/seed-pipeline-lib.test.mjs'], cwd: ROOT },
     { label: 'agent-identity-tokens（S3 接口面：新建自动分配人形令牌 / 读出口兜底收敛）', files: ['team-hub/agent-identity-tokens.test.mjs'], cwd: ROOT },
     { label: 'agent-avatar-surfaces（S4 桌面展示面一：单一来源 / 无首字回退 / 无破图）', files: ['workbench/scripts/agent-avatar-surfaces.test.mjs'], cwd: ROOT },
     { label: 'agent-avatar-settings（S5 桌面展示面二：新建不配置头像 / 三处成员头像接入）', files: ['workbench/scripts/agent-avatar-settings.test.mjs'], cwd: ROOT },
@@ -2076,6 +2080,10 @@ async function stageTest() {
     //   （403 空间越权 → "请确认中枢已启动并选中有效工作空间"）。这一条守判据只认具名码
     //   （`SPACE_FORBIDDEN` / 那一句具名文案）、不许"403 就一定是越权"，以及面板真的按它分岔。
     { label: 'space-forbidden-hint（403 空间越权 ≠ 中枢不可达：提示语分岔 / 判据不猜）', files: ['workbench/scripts/space-forbidden-hint.test.mjs'], cwd: ROOT, nodeArgs: ['--experimental-strip-types'] },
+    // 2026-11-20 BUG-049：发布目标后的提示「链任务已建好…不必重发」在**空编队空间**上是假的
+    //   （建链 = 编队 ∩ 流水线 ⇒ 0 环，而配好之后**必须重发**）。这一条钉住措辞按服务端回执
+    //   的 `task.stages` 分岔，以及"回执没给数就不许断言"。
+    { label: 'goal-publish-notice（发布目标后的提示：0 环 ≠ 已建好 / 回执缺数不猜 / 接线）', files: ['workbench/scripts/goal-publish-notice.test.mjs'], cwd: ROOT, nodeArgs: ['--experimental-strip-types'] },
     { label: 'artifact-policy（共享路径策略）', files: ['packages/shared/test/artifact-policy.test.mjs'], cwd: ROOT },
     { label: 'config（P3-2 统一配置：引擎语义/跨进程规则/夹具端到端/默认值漂移）', files: ['scripts/config/config.test.mjs'], cwd: ROOT },
     { label: 'scrum（任务生命周期与产物）', files: ['scrum/artifact-detail.test.mjs', 'scrum/taskctl.ttl.test.mjs'], cwd: ROOT },

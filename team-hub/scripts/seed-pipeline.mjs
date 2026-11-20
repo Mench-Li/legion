@@ -12,6 +12,8 @@
  *   --file <path>       roles 文件路径（默认 roles.json；相对路径按仓库根解析）
  *   --hub <url>         team-hub 地址（默认 http://127.0.0.1:8787）
  *   --by <member>       操作者身份（默认 general；/api/pipeline 仅允许 general）
+ *   --token <t>         中枢令牌（开了远程鉴权的中枢**必需**；也可用环境变量
+ *                       LEGION_HUB_TOKEN / TEAM_HUB_TOKEN）。值属机密，别贴进聊天日志。
  *   --runtime-enabled   同时把该空间 space_runtime.enabled 置 true（P1 起守护据此判断是否接管该空间）
  *   --runtime-max <n>   并发上限 1..8（默认沿用现值/1）
  *   --dry-run           只打印将要提交的载荷与差异，不写库
@@ -20,21 +22,23 @@
  * docs 必须是仓库相对路径）与审计/SSE 都在服务端；绕过它就会把「配错的流水线」直接写进数据面，
  * 这正是本阶段要消除的那类静默故障。hub 未启动时会明确报错并给出启动指引。
  *
+ * ★ 2026-11-20（BUG-049）：从前本脚本**不带任何鉴权头**，于是在开着
+ *   `LEGION_REMOTE_AUTH=1` 的部署上第一条 `GET /api/pipeline` 就 401 ——
+ *   而界面给出的"修复命令"正是它。现在支持 `--token` / 环境变量，
+ *   且 401/403 会说清"令牌缺失或不对 + 去哪儿拿"，而不是把 401 原样丢出去。
+ *
  * 幂等：整批 upsert（提交内容即权威），重复执行只报「无变化」。
  */
 import { readFileSync } from 'node:fs'
 import { dirname, isAbsolute, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { argOf as argOfIn, authHeaders, explainFailure, hasFlag, resolveAuth } from './seed-pipeline-lib.mjs'
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..')
 
-function argOf(name, fallback = '') {
-  const i = process.argv.indexOf('--' + name)
-  if (i === -1) return fallback
-  const v = process.argv[i + 1]
-  return v !== undefined && !String(v).startsWith('--') ? v : 'true'
-}
-const has = (name) => process.argv.includes('--' + name)
+const ARGV = process.argv.slice(2)
+const argOf = (name, fallback = '') => argOfIn(ARGV, name, fallback)
+const has = (name) => hasFlag(ARGV, name)
 
 const scope = String(argOf('scope', '')).trim()
 const fileArg = String(argOf('file', 'roles.json')).trim()
@@ -43,6 +47,9 @@ const by = String(argOf('by', 'general')).trim()
 const dryRun = has('dry-run')
 const runtimeEnabled = has('runtime-enabled')
 const runtimeMax = Number(argOf('runtime-max', '1'))
+// 令牌来源与排序见 `seed-pipeline-lib.mjs` 的 `resolveAuth` 注释；**不打印值**。
+const auth = resolveAuth({ argv: ARGV, env: process.env })
+const HEADERS = authHeaders(auth.token)
 
 function die(msg, code = 1) {
   console.error('seed-pipeline: ' + msg)
@@ -85,10 +92,11 @@ if (body.runtime && body.runtime.enabled === undefined) {
   delete body.runtime.enabled
 }
 
-async function api(path, init) {
+async function api(path, init = {}) {
   let res
   try {
-    res = await fetch(hub + path, init)
+    // ★ 每一次都带上令牌（`HEADERS` 为空对象时行为与本机未鉴权的旧中枢一致）。
+    res = await fetch(hub + path, { ...init, headers: { ...HEADERS, ...(init.headers ?? {}) } })
   } catch (e) {
     die(`连接 team-hub 失败（${hub}）：${e instanceof Error ? e.message : String(e)}\n  请先启动 hub：node team-hub/server.mjs（或经 DSH 宿主插件启动），再用 --hub 指向实际地址`)
   }
@@ -99,7 +107,9 @@ async function api(path, init) {
 }
 
 const before = await api(`/api/pipeline?scope=${encodeURIComponent(scope)}`)
-if (before.status !== 200) die(`读取现值失败：HTTP ${before.status} ${before.text.slice(0, 300)}`)
+if (before.status !== 200) {
+  die(`读取现值失败 —— ${explainFailure({ status: before.status, body: before.text, hub, scope })}`)
+}
 const prev = new Map((before.json?.stages ?? []).map(s => [s.role, s]))
 const added = payloadStages.filter(s => !prev.has(s.role)).map(s => s.role)
 const dropped = [...prev.keys()].filter(r => !payloadStages.some(s => s.role === r))
@@ -127,7 +137,9 @@ const r = await api('/api/pipeline', {
   headers: { 'content-type': 'application/json' },
   body: JSON.stringify(body),
 })
-if (r.status !== 200) die(`写入失败：HTTP ${r.status} ${r.json?.error ?? r.text.slice(0, 400)}`)
+if (r.status !== 200) {
+  die(`写入失败 —— ${explainFailure({ status: r.status, body: r.json?.error ?? r.text, hub, scope })}`)
+}
 const t = r.json?.task ?? {}
 console.log(`  已写入：stages=${t.stages} added=${t.added} dropped=${(t.dropped ?? []).join('、') || '无'} version=${t.version}`)
 console.log(`  生效轮次（${(t.activeRoles ?? []).length}）：${(t.activeRoles ?? []).join(' → ')}`)

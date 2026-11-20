@@ -46,6 +46,10 @@ export interface ProviderReadiness {
   readonly endpointHost?: string
   readonly network?: string
   readonly version?: string
+  /** 这条结论配了哪几种就绪度（形状由适配层决定，面板只做展示）。 */
+  readonly capabilities?: Readonly<Record<string, boolean>>
+  /** `'registry'` = 结论来自运行期注册表而不是外部 CLI 探测（见 `upgradeUnprobedByRegistry`）。 */
+  readonly via?: 'registry'
   readonly checkedAtMs: number
 }
 
@@ -60,6 +64,18 @@ export type ProviderReadinessTable = Record<string, ProviderReadiness>
  *   而 `spawn` 随进程内跑，永远可用，用不着注册表告诉我们。
  */
 export declare function readinessProbeTargets(names?: readonly string[] | null): string[]
+
+/** 该 provider 有没有探测规格（没有 ⇒ unprobed，判据不默认给 ready）。 */
+export declare function hasReadinessSpec(name: string): boolean
+
+/**
+ * 用运行期注册表给 `unprobed` 补一条升级路径（只动 `unprobed`；结论带 `via: 'registry'`）。
+ * `lookup` 拿不到描述符时保持 `unprobed`（真·来路不明）。
+ */
+export declare function upgradeUnprobedByRegistry(
+  snapshot: ProviderReadinessTable | null,
+  lookup: ((name: string) => { capabilities?: unknown } | null | undefined) | null,
+): ProviderReadinessTable | null
 
 /** 本地真实依赖（PATH / HOME / env 都取自运行环境）。 */
 export declare function createLocalReadinessDeps(options?: {

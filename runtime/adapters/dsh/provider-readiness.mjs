@@ -189,6 +189,56 @@ export function hasReadinessSpec(name) {
 }
 
 /**
+ * 用**运行期注册表**给 `unprobed` 的 provider 补一条升级路径（BUG-050-f）。
+ *
+ * ## 为什么需要
+ *
+ * 原有纪律是「已注册 ≠ 可用」，所以没有探测规格的名字一律 `unprobed`。那条纪律是对的
+ * （外部 CLI 可能装了没登录、登录了连不上）。但它有一个没想到的后果：
+ *
+ *   > 一个 provider 只要不在 `PROVIDER_SPECS` 里，它的状态就**永远**是 `unprobed` ——
+ *   > 一条永远不可能变绿的读数，与"不可用"在面板上是同一个东西，
+ *   > 而它其实只是"我不知道该怎么测"。
+ *
+ * 现场（2026-11-20）：本机注册了 `spawn` / `fork` 之外的 provider 时，面板永远黄着，
+ * 而 DSH 自己的注册表对这些**进程内** provider 是有描述的（含 capabilities）。
+ *
+ * ## 判据（只认注册表能证明的那一半）
+ *
+ *   · `state === 'unprobed'` 且注册表**能拿到**这个 provider 的描述 ⇒ 判 `ready`，
+ *     但把 `via: 'registry'` 写进结论，`reason` 也明说是"由 DSH 运行时注册"而不是"探测通过"；
+ *   · 注册表**拿不到** ⇒ 保持 `unprobed`（那才是真的"来路不明"）。
+ *
+ * 只改 `unprobed`，其余状态一个都不动 —— 探过的结论比注册表强。
+ *
+ * @param snapshot 一次 `probeProviders` 的结论
+ * @param lookup   `(name) => 描述符 | null`（通常来自 `ctx.subagents.getProvider`）
+ */
+export function upgradeUnprobedByRegistry(snapshot, lookup) {
+  if (snapshot === null || typeof snapshot !== 'object') return snapshot
+  if (typeof lookup !== 'function') return snapshot
+  const out = {}
+  for (const [name, entry] of Object.entries(snapshot)) {
+    if (entry?.state !== READINESS_STATE.UNPROBED) { out[name] = entry; continue }
+    let descriptor = null
+    try { descriptor = lookup(name) ?? null } catch { descriptor = null }
+    if (descriptor === null) { out[name] = entry; continue }
+    const capabilities = descriptor.capabilities !== null && typeof descriptor.capabilities === 'object'
+      ? Object.fromEntries(Object.entries(descriptor.capabilities).filter(([, value]) => typeof value === 'boolean'))
+      : {}
+    out[name] = {
+      state: READINESS_STATE.READY,
+      reason: '由 DSH 运行时在进程内注册（没有外部 CLI 需要安装/登录）——这是**注册表**的读数，'
+        + '不是外部 CLI 探测的读数。',
+      via: 'registry',
+      ...(Object.keys(capabilities).length > 0 ? { capabilities } : {}),
+      checkedAtMs: entry.checkedAtMs,
+    }
+  }
+  return out
+}
+
+/**
  * 真正要探测的名字 = **注册表里的** ∪ **规格表里已知的**。
  *
  * ## 为什么必须并上规格表（2026-10-13 实测踩到）

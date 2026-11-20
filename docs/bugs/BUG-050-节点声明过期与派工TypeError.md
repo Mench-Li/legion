@@ -171,13 +171,30 @@ SUBAGENT_PROVIDER_UNREGISTERED: spawn（本机 ctx.subagents 已注册：（空 
 `provider 就绪度首次读数：spawn=ready、fork=ready（之后随心跳每轮刷新，TTL 10 分钟）`。
 （本文件「未修」条目里关于探针的那条判断已据此**撤回**。）
 
-## 仍未修（如实清单）
+## 050-f：`unprobed` 从前**永远不可能变绿**（已修）
 
-1. **这一代没有全局 provider 枚举**：050-d 之后，节点上报的是"对候选逐个问到的那几个"，
-   不是"全部"。若某台机器注册了候选名单之外的 provider，它不会出现在观测里
-   （要人工把它加进候选，或等 DSH 提供枚举面）。
-2. **`unprobed`（没有探测规格）与 `unknown`（探测超时）** 在面板上仍是两个状态，
-   但两者都需要人工看；没有任何自动升级路径。
+纪律「已注册 ≠ 可用」是对的（外部 CLI 可能装了没登录、登录了连不上），所以没有探测
+规格的名字一律 `unprobed`。但它漏了一种情形：
+
+> 一个 provider 只要不在 `PROVIDER_SPECS` 里，它的状态就**永远**是 `unprobed` ——
+> 而**一条永远不可能变绿的读数，与"不可用"在面板上是同一个东西**，
+> 其实它只是"我不知道该怎么测"。
+
+修法：`upgradeUnprobedByRegistry(snapshot, lookup)` —— 只动 `unprobed`，且只在
+**运行期注册表拿得到描述**时升级为 `ready`，并把 `via: 'registry'` 与
+`reason: 由 DSH 运行时在进程内注册（没有外部 CLI 需要安装/登录）` 写进结论。
+探过的结论（`missing_cli` / `not_logged_in` / `no_network` / `unknown`）**一个字都不动** ——
+探过的比注册表强。注册表拿不到 ⇒ 保持 `unprobed`（真·来路不明，不许猜成 ready）。
+
+## 仍未修（**只有这两条，都是 DSH API 的边界，不是判断问题**）
+
+1. **这一代没有全局 provider 枚举**，所以"这台机器有哪些 provider"只能靠问。
+   050-d 之后候选**会长大**：`PROVIDER_SPECS` ∪ `config.provider` ∪ **中枢上这个节点声明过的名字**
+   （重启后不会丢）∪ **本进程确认过的名字**。但一个"既不在规格表、也没配进 config、
+   也没在中枢声明过、本进程还没见过"的 provider，仍然**不会**出现在观测里 ——
+   要发现它只能等 DSH 提供枚举面（`list()` 或等价物）。
+2. **`unknown`（探测超时/抛错）与 `missing_cli`** 仍然要人工看：前者下一轮会自动重试
+   （TTL 30 秒），后者要人去装 CLI —— 这两者之间没有、也不该有自动升级。
 
 ## 与其它缺陷的关系
 

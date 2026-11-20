@@ -120,6 +120,7 @@ import {
   createReadinessCache,
   probeProviders,
   readinessProbeTargets,
+  upgradeUnprobedByRegistry,
 } from '../../runtime/adapters/dsh/provider-readiness.mjs'
 // profile 名的三路解析（DSH_PROFILE → DSH_PROFILE_DIR 目录名 → argv 认 Desktop 宿主）。
 // 放在适配层且带单测：它决定面板能不能给出一条**真能粘贴**的修法命令。
@@ -4074,6 +4075,18 @@ function spaceWorker(ctx: AppContext, config: Config): void {
   let heartbeatDiagnosed = false
   /** 就绪度**首次拿到读数**的日志（BUG-050-e：只在第一次心跳打诊断，那时探测必然还没回来）。 */
   let readinessLogged = false
+  /**
+   * 本进程**确认过**的 provider 名（BUG-050-d）：这一代没有全局枚举，
+   * 候选名单必须会**长大** —— 一个 provider 被确认过一次，之后每轮都继续问它。
+   */
+  const observedProviderNames: string[] = []
+  /**
+   * 中枢上**这个节点声明过**的 provider 名（BUG-050-d）：进程重启后 `observedProviderNames`
+   * 会清空，而声明还在中枢上。把它当作候选，才不会"重启一次就看不见某些 provider"。
+   * 只在第一次心跳前拉一次（一次 GET，失败不影响心跳）。
+   */
+  let declaredProviderNames: string[] = []
+  let declaredNamesLoaded = false
 
   /**
    * 这个守护所属的 DSH profile 名（2026-10-13）。
@@ -4130,11 +4143,42 @@ function spaceWorker(ctx: AppContext, config: Config): void {
       //   `listSubagentProviders(ctx)` 于是恒为 `[]` ⇒ 节点心跳上报 `providers: []`
       //   ⇒ 中枢的"声明 ⊆ 观测"必然失败 ⇒ 节点永久 incompatible。
       //   而**注册表其实是好的**（`getProvider('spawn')` 拿得到）。所以：
-      //   能枚举就枚举，不能枚举就对候选（本机已知规格 ∪ 自己配置要用的那个）逐个问。
+      //   能枚举就枚举，不能枚举就对候选（本机已知规格 ∪ 自己配置要用的那个 ∪
+      //   **本进程见过/上报过的**）逐个问 —— 候选是**会长大的**：
+      //   一个 provider 一旦被确认过一次，之后的每轮心跳都会继续问它，
+      //   于是"这一代没有全局枚举"不再等于"只能看见写死的名字"。
+      //
+      // ★ 第一次心跳前把**中枢上这个节点声明过的名字**也拉下来当候选（一次 GET）：
+      //   本进程的记忆会随重启清空，而中枢上的声明还在，不该"重启一次就少几个候选"。
+      if (!declaredNamesLoaded) {
+        declaredNamesLoaded = true
+        try {
+          const nodeId = configuredAgentNodeId()
+          if (nodeId !== '') {
+            const res = await fetch(`${hubUrl}/api/agent-nodes?scope=${encodeURIComponent(scope)}`, { headers: hubHeaders() })
+            if (res.ok) {
+              const data = await res.json().catch(() => null) as
+                { nodes?: Array<{ id?: string; providerNames?: unknown }> } | Array<{ id?: string; providerNames?: unknown }> | null
+              const nodes = Array.isArray(data) ? data : (data?.nodes ?? [])
+              const mine = nodes.find((item) => item?.id === nodeId)
+              const names = Array.isArray(mine?.providerNames) ? mine.providerNames : []
+              declaredProviderNames = names.filter((name): name is string => typeof name === 'string' && name.trim() !== '')
+            }
+          }
+        } catch { /* 读不到就按空处理：候选还有规格表与 config.provider，不影响心跳 */ }
+      }
       const knownProviderSpecs = readinessProbeTargets([])
+      const candidates = [
+        ...knownProviderSpecs,
+        String(config.provider ?? '').trim(),
+        ...declaredProviderNames,
+        ...observedProviderNames,
+      ]
       let providerNames: string[] = []
       try {
-        providerNames = observedSubagentProviders(ctx, [...knownProviderSpecs, String(config.provider ?? '').trim()])
+        providerNames = observedSubagentProviders(ctx, candidates)
+        // 记住"这台机器确认过哪些"（跨心跳累积；进程重启后从规格表重新长起）
+        for (const name of providerNames) if (!observedProviderNames.includes(name)) observedProviderNames.push(name)
       } catch { /* 执行面读不到就不上报 */ }
       // ★★ 2026-10-13：探测目标 = **注册表里的** ∪ **规格表里已知的**。
       //    第一版只探注册表，于是实机上注册表为空 ⇒ 探了个空集 ⇒ 心跳发出一个 `providers: {}` ⇒
@@ -4144,7 +4188,17 @@ function spaceWorker(ctx: AppContext, config: Config): void {
       const probeTargets = readinessProbeTargets(providerNames)
       // ★ 只有**已经有读数**时才带上；第一轮通常还没有（探测在后台）。
       //   刻意不发空的 `providers`：服务端会把"还没探过"存成"探过且为空"。
-      const snapshot = readinessCache.snapshot(probeTargets)
+      //
+      // ★★ 2026-11-20（BUG-050-f）：`unprobed`（没有探测规格）从前**永远不可能变绿** ——
+      //   一条永远不可能变绿的读数与"不可用"在面板上是同一个东西。现在用**运行期注册表**
+      //   给它们一条升级路径：注册表拿得到描述 ⇒ 判 ready，但结论里明写 `via:'registry'`
+      //   （"由 DSH 运行时提供"，不是"外部 CLI 探测通过"）；拿不到 ⇒ 保持 unprobed（真·来路不明）。
+      const snapshot = upgradeUnprobedByRegistry(
+        readinessCache.snapshot(probeTargets),
+        typeof (ctx as { subagents?: { getProvider?: unknown } })?.subagents?.getProvider === 'function'
+          ? (name: string) => subagentProvider(ctx, name) ?? null
+          : null,
+      )
       const readiness = withDeclaredCapabilities(snapshot)
       const providersField = readiness !== null && Object.keys(readiness).length > 0 ? readiness : null
       // ★ 2026-11-20（BUG-050-e）：第一次**真的拿到读数**时也打一行。

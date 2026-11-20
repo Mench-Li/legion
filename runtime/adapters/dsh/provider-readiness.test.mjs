@@ -721,3 +721,56 @@ describe('类型面与运行期导出一致', () => {
     assert.match(readText(DTS), /不得\*\*?\s*import/, '头注释里应当保留"不得 import"那句自我约束')
   })
 })
+
+// ══════════════════════════════════════════════════════════════════════════
+// BUG-050-f：`unprobed` 从前**永远不可能变绿**。
+//
+// 纪律「已注册 ≠ 可用」是对的（外部 CLI 可能装了没登录），但它漏了一种情形：
+// 一个不在 PROVIDER_SPECS 里的 provider，状态就永远是 unprobed ——
+// 而**一条永远不可能变绿的读数，与"不可用"在面板上是同一个东西**。
+// 现在给它一条基于**运行期注册表**的升级路径，且结论里明写来源（via:'registry'）。
+// ══════════════════════════════════════════════════════════════════════════
+
+test('★ unprobed + 注册表拿得到 ⇒ 升级为 ready，并标明 via=registry（不冒充"探测通过"）', async () => {
+  const { upgradeUnprobedByRegistry } = await import('./provider-readiness.mjs')
+  const snapshot = {
+    mystic: { state: 'unprobed', reason: '没有探测规格…', checkedAtMs: 1 },
+    spawn: { state: 'ready', reason: '内置', checkedAtMs: 2 },
+  }
+  const out = upgradeUnprobedByRegistry(snapshot, (name) => (
+    name === 'mystic' ? { capabilities: { outputSchema: true, toolFilter: false, depthLimit: true } } : null
+  ))
+  assert.equal(out.mystic.state, 'ready')
+  assert.equal(out.mystic.via, 'registry', '★★ 必须标明这是注册表读数，不是外部 CLI 探测通过')
+  assert.match(out.mystic.reason, /DSH 运行时/)
+  assert.deepEqual(out.mystic.capabilities, { outputSchema: true, toolFilter: false, depthLimit: true })
+  assert.equal(out.spawn.state, 'ready', '★ 已探过的结论一个字都不动')
+  assert.equal(out.spawn.via, undefined)
+})
+
+test('★★ 注册表拿不到 ⇒ 保持 unprobed（真·来路不明，不许猜成 ready）', async () => {
+  const { upgradeUnprobedByRegistry } = await import('./provider-readiness.mjs')
+  const snapshot = { ghost: { state: 'unprobed', reason: '没有探测规格…', checkedAtMs: 1 } }
+  const out = upgradeUnprobedByRegistry(snapshot, () => null)
+  assert.equal(out.ghost.state, 'unprobed')
+  assert.equal(out.ghost.reason, '没有探测规格…', '★ 原理由保留')
+})
+
+test('★ 只动 unprobed：missing_cli / not_logged_in / unknown 一律不动（探过的比注册表强）', async () => {
+  const { upgradeUnprobedByRegistry } = await import('./provider-readiness.mjs')
+  const snapshot = {
+    a: { state: 'missing_cli', reason: '没装', checkedAtMs: 1 },
+    b: { state: 'not_logged_in', reason: '没登录', checkedAtMs: 1 },
+    c: { state: 'unknown', reason: '超时', checkedAtMs: 1 },
+  }
+  const out = upgradeUnprobedByRegistry(snapshot, () => ({ capabilities: { outputSchema: true } }))
+  assert.deepEqual(Object.values(out).map((x) => x.state), ['missing_cli', 'not_logged_in', 'unknown'])
+})
+
+test('★ lookup 抛错 / 传入 null 时安全（一次注册表抖动不该把心跳带崩）', async () => {
+  const { upgradeUnprobedByRegistry } = await import('./provider-readiness.mjs')
+  const snapshot = { x: { state: 'unprobed', reason: 'r', checkedAtMs: 1 } }
+  assert.equal(upgradeUnprobedByRegistry(snapshot, () => { throw new Error('boom') }).x.state, 'unprobed')
+  assert.equal(upgradeUnprobedByRegistry(snapshot, null).x.state, 'unprobed')
+  assert.equal(upgradeUnprobedByRegistry(null, () => null), null)
+})

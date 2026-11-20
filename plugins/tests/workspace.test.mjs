@@ -93,6 +93,8 @@ function harness(over = {}) {
     scope: over.scope ?? 'app',
     useHub: () => over.useHub ?? false,
     hubUrl: () => over.hubUrl ?? 'http://hub.local',
+    // ★ BUG-051：默认带一个令牌头（真实守护必然带上；缺了会在开了远程鉴权的部署上 401）
+    hubHeaders: over.hubHeaders ?? (() => ({ authorization: 'Bearer test-token' })),
     binding: {
       get: () => state.value,
       set: (b) => { sets.push(b); state.value = b },
@@ -299,12 +301,20 @@ test('hub 请求抛错 → 吞掉并记日志，绑定保持原值（下轮再�
   assert.deepEqual(h.sets, [])
 })
 
-test('hub 返回非 200 → 直接返回，绑定不动、不记日志', async (t) => {
+test('hub 返回非 200 → 绑定不动，但**必须说一句**（BUG-051：静默返回正是那个洞）', async (t) => {
   const h = tmp(t, { useHub: true })
-  stubFetch(t, () => undefined) // ok:false
+  globalThis.fetch = async () => ({ ok: false, status: 401, json: async () => ({ code: 'REMOTE_AUTH_MISSING' }) })
+  t.after(() => { globalThis.fetch = REAL_FETCH })
   await h.ws.refreshSpaceBinding()
   assert.deepEqual(h.sets, [])
-  assert.deepEqual(h.logs, [])
+  assert.equal(h.logs.length, 1, '★★ 401 不许静默 —— 它等于"空间绑定读不到"，人却会读成"没绑文件夹"')
+  assert.match(String(h.logs[0]), /空间仓库绑定刷新失败：HTTP 401/)
+  assert.match(String(h.logs[0]), /鉴权失败/)
+
+  // 扫单很勤：同一种失败只许每 10 分钟说一次（别把日志刷成噪音）
+  await h.ws.refreshSpaceBinding()
+  await h.ws.refreshSpaceBinding()
+  assert.equal(h.logs.length, 1, '★ 连续失败不重复刷屏')
 })
 
 test('★ hubUrl / useHub 也是取值函数：构造后改写立刻生效，不是快照', async (t) => {
@@ -597,4 +607,64 @@ test('★ commit 失败 → false + 日志用 (err || out)（err 空时退到 ou
   assert.equal(ok, false)
   assert.deepEqual(argv(h), [['add', '-A'], ['commit', '-m', 'T-1：s']])
   assert.deepEqual(h.logs, ['T-1 git commit 失败：nothing to commit'])
+})
+
+// ══════════════════════════════════════════════════════════════════════════
+// BUG-051：`/api/spaces` **必须带令牌**，否则空间绑定静默失效
+//
+// 现场（2026-11-20 本机）：守护的 `refreshSpaceBinding` 原先写的是裸
+// `fetch('/api/spaces')`，而本机开了 `teamHubRemoteAuth` ⇒ 那个请求拿到 **401**
+// ⇒ 代码走 `if (!res.ok) return`（静默 no-op）⇒ 绑定永远是 null ⇒
+// `repoRootFor()` 回落到默认仓库 ⇒ **空间里绑的「本地文件夹」从来没生效过**：
+// 任务全在默认仓库（legion）里开 worktree，而中枢 provision 面板显示
+// `workspace-bound` —— 两张皮，且全程零报错。
+//
+//   > 一次没带令牌的读取，与一条"这个空间没绑文件夹"，
+//   > 在 `if (!res.ok) return` 面前是同一件事 ——
+//   > 区别只在任务落在哪个仓库里的那一次。
+// ══════════════════════════════════════════════════════════════════════════
+
+test('★★★ 带令牌才拿得到空间绑定（假服务：没有 authorization 头就回 401）', async (t) => {
+  const h = tmp(t, {
+    useHub: true,
+    hubUrl: 'http://hub.local',
+    hubHeaders: () => ({ authorization: 'Bearer real-token' }),
+    onGit: ({ args }) => (args[0] === 'rev-parse' && args[1] === '--show-toplevel'
+      ? { code: 0, out: 'C:/project/opc\n', err: '' } : undefined),
+  })
+  const seen = []
+  globalThis.fetch = async (url, init) => {
+    seen.push({ url: String(url), headers: init?.headers ?? null })
+    const authorized = Boolean(init?.headers?.authorization)
+    // 与这台机器的真实行为一致：开了远程鉴权 ⇒ 没令牌就是 401
+    if (!authorized) return { ok: false, status: 401, json: async () => ({ code: 'REMOTE_AUTH_MISSING' }) }
+    return { ok: true, status: 200, json: async () => ({ spaces: [{ id: 'app', localDir: 'D:/project/opc', remoteUrl: '' }] }) }
+  }
+  t.after(() => { globalThis.fetch = REAL_FETCH })
+
+  await h.ws.refreshSpaceBinding()
+
+  assert.equal(seen.length, 1)
+  assert.equal(seen[0].url, 'http://hub.local/api/spaces')
+  assert.equal(seen[0].headers?.authorization, 'Bearer real-token', '★★★ 必须带令牌 —— 这正是原来缺的那一样')
+  assert.deepEqual(h.sets, [{ localDir: 'D:/project/opc', repoRoot: 'C:/project/opc', remoteUrl: '' }],
+    '★★ 绑定必须真的落下来（而不是静默回落到默认仓库）')
+  assert.equal(h.state.value.repoRoot, 'C:/project/opc')
+})
+
+test('★ 反证：不带令牌（401）时绑定不动 —— 说明这条用例真的在守那个洞', async (t) => {
+  const h = tmp(t, {
+    useHub: true,
+    hubHeaders: () => ({}), // 故意不带令牌：模拟修复前的行为
+    onGit: () => ({ code: 0, out: 'C:/project/opc\n', err: '' }),
+  })
+  globalThis.fetch = async (url, init) => {
+    if (!init?.headers?.authorization) return { ok: false, status: 401, json: async () => ({}) }
+    return { ok: true, status: 200, json: async () => ({ spaces: [{ id: 'app', localDir: 'D:/project/opc' }] }) }
+  }
+  t.after(() => { globalThis.fetch = REAL_FETCH })
+
+  await h.ws.refreshSpaceBinding()
+  assert.deepEqual(h.sets, [], '★★ 401 ⇒ 静默不动（修复前就是这个形状：看起来像"空间没绑文件夹"）')
+  assert.equal(h.state.value, null)
 })

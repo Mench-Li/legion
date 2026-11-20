@@ -1099,6 +1099,9 @@ function spaceWorker(ctx: AppContext, config: Config): void {
     config, log, runGit, scope, activity,
     useHub: () => useHub,
     hubUrl: () => hubUrl,
+    // ★ BUG-051：这里必须带令牌 —— 裸 fetch 在开了远程鉴权的部署上拿到 401，
+    //   而 `if (!res.ok) return` 会把"读不到"静默变成"这个空间没绑文件夹"。
+    hubHeaders: () => hubHeaders(),
     binding: { get: () => spaceBinding, set: b => { spaceBinding = b } },
   })
 

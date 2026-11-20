@@ -319,6 +319,9 @@ const stub = (over = {}) => createSpaceConfigRoutes({
   withTx: (f) => f(),
   readPipeline: () => ({ version: 1, activeRoles: [] }),
   pipelineWarnings: () => [],
+  // ★ BUG-048 的注入项：新建空间时把创建者登记成 owner。路由契约用例不跑路由体，
+  //   但**注入面**要齐 —— 缺它时工厂会当场抛（那是 ⑲ 守的东西）。
+  grantSpaceCreator: () => null,
   ...over,
 })
 
@@ -343,6 +346,7 @@ test('⑲ ★★ 缺注入项 ⇒ **构造时**就抛（fail closed）', async (
     json: () => {}, db: {}, now: () => 'T', audit: () => {}, handleWrite: async () => {},
     SCOPE_KEY_RE: /x/, normalizeStages: () => [], normalizeRuntime: () => ({}), normalizeAgentWorkflow: () => null,
     withTx: (f) => f(), readPipeline: () => ({}), pipelineWarnings: () => [],
+    grantSpaceCreator: () => null,
   }
   for (const k of Object.keys(full)) {
     const partial = { ...full }

@@ -167,7 +167,12 @@ export function installWorkflowPack(db, validated, { withTx = mutate => {
   db.exec('BEGIN IMMEDIATE')
   try { const value = mutate(); db.exec('COMMIT'); return value }
   catch (error) { try { db.exec('ROLLBACK') } catch {} throw error }
-}, now = () => new Date().toISOString(), workspaceDir = '', audit = () => {} } = {}) {
+}, now = () => new Date().toISOString(), workspaceDir = '', audit = () => {},
+// ★ BUG-048：装包会在"该包还没装过"时**顺手建出空间**（下面那个 INSERT）。那与
+// `POST /api/spaces` 是同一个形状的两条入口 —— 不在这里也接一下授权钩子，
+// 登录用户装一个流程包就会得到一个"自己进不去"的空间（403 无权访问空间）。
+// 钩子在**同一个事务里**调用，签名是 `(scopeId) => void`。
+onSpaceCreated = () => {} } = {}) {
   ensureWorkflowPackSchema(db)
   return withTx(() => {
     const plan = inspectWorkflowPackInstall(db, validated)
@@ -181,6 +186,8 @@ export function installWorkflowPack(db, validated, { withTx = mutate => {
     if (receipt === undefined) {
       db.prepare(`INSERT INTO spaces (id, name, private, local_dir, remote_url, createdAt, updatedAt)
         VALUES (?, ?, 0, ?, '', ?, ?)`).run(pack.scope.id, pack.scope.name, workspaceDir, timestamp, timestamp)
+      // 空间刚被这个包建出来 ⇒ 把"创建者"登记给它（见上面的参数注释）。
+      onSpaceCreated(pack.scope.id)
     } else {
       db.prepare('UPDATE spaces SET name = ?, local_dir = ?, updatedAt = ? WHERE id = ?')
         .run(pack.scope.name, workspaceDir || db.prepare('SELECT local_dir FROM spaces WHERE id = ?').get(pack.scope.id)?.local_dir || '', timestamp, pack.scope.id)

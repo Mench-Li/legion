@@ -382,8 +382,25 @@ export async function previewGoalPlan(scope: string, objective: string, options:
   return await hubPost('/api/goal/plan', goalPublishBody(scope, objective, options)) as GoalPlanResponse
 }
 
-export function publishGoal(scope: string, objective: string, mode?: 'chain' | 'slice', workflowDefinition?: AgentWorkflowDefinitionRef, agentNodeId?: string, options: Omit<GoalPublishOptions, 'mode' | 'workflowDefinition' | 'agentNodeId'> = {}): Promise<unknown> {
-  return hubPost('/api/goal', goalPublishBody(scope, objective, { mode, workflowDefinition, agentNodeId, ...options }))
+/** `POST /api/goal` 的回执（hub 写端点统一信封 `{ ok, task }`）。
+ *
+ *  `task.stages` 是**这一次真的建出了几环链任务** —— 界面那句提示必须靠它，
+ *  而不是靠"发布成功了"这件事（2026-11-20：空编队空间建出 0 环，界面却说
+ *  「链任务已建好…不必重发」，见 `goalPublishNotice.ts` 的文件头）。 */
+export interface GoalPublishResult {
+  ok?: boolean
+  task?: {
+    goal?: { id?: string; scope?: string; status?: string }
+    /** 本次建出的链任务环数（0 = 一条都没建）。 */
+    stages?: number
+    mode?: string
+    objective?: string
+    orchestration?: string
+  }
+}
+
+export function publishGoal(scope: string, objective: string, mode?: 'chain' | 'slice', workflowDefinition?: AgentWorkflowDefinitionRef, agentNodeId?: string, options: Omit<GoalPublishOptions, 'mode' | 'workflowDefinition' | 'agentNodeId'> = {}): Promise<GoalPublishResult> {
+  return hubPost('/api/goal', goalPublishBody(scope, objective, { mode, workflowDefinition, agentNodeId, ...options })) as Promise<GoalPublishResult>
 }
 
 /** 目标状态迁移（POST /api/goal/status）响应：hub 写端点统一信封 `{ ok, task }`，

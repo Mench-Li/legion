@@ -125,6 +125,90 @@ describe('远程 Agent 通道接线', () => {
     assert.equal(board.json.code, 'SPACE_FORBIDDEN')
   })
 
+  // ==========================================================================
+  // BUG-048：新建的空间对**创建者自己**也是 403
+  //
+  // 现场（2026-11-20，桌面端「＋ 新建工作空间」+「🏠 本地/私有空间」，id=personal-profile）：
+  // 空间建出来了（POST /api/spaces 回 200），界面立刻切到新 scope 去读任务，
+  // 屏幕上是「读取失败：403：无权访问空间「personal-profile」」。
+  //
+  // 根因不在权限判定（它是对的），而在**授予**那一步根本没发生：这条链上没有任何
+  // 地方会给创建者一个空间角色。所以下面钉的是"创建 ⇒ 有角色 ⇒ 读得动"整条链，
+  // 而不是单独测某一个函数。
+  // ==========================================================================
+
+  it('★★★ 登录用户新建空间 ⇒ 创建者当场是它的 owner，界面那条读取不再 403（BUG-048）', async () => {
+    // 这一条是桌面端真实发出的那条请求（`createSpace` → `POST /api/spaces`）。
+    const created = await post('/api/spaces', { by: 'general', id: 'personal-profile', name: '个人履历', private: true }, { token: state.access })
+    assert.equal(created.status, 200, JSON.stringify(created.json))
+
+    // ① 创建者被登记为 owner —— 不只是"能看"：他要能把别人拉进来、能删掉它。
+    const me = await get('/api/identity/me', { token: state.access })
+    assert.deepEqual(me.json.roles.filter((r) => r.space === 'personal-profile'),
+      [{ space: 'personal-profile', role: 'owner' }],
+      '★★ 建空间的人必须当场成为它的 owner')
+
+    // ② 授权留痕在同一处：审计里能看见"哪个空间被建了、谁因此得到了 owner"，
+    //    不用靠事后猜（`member` = system：这次授予的操作者是系统，依据是"创建"本身；
+    //    被授权的**用户**在 detail.userId 里）。
+    const granted = mod.db.prepare("SELECT member, detail FROM audit WHERE action='identity:grant-role' AND scope=?").all('personal-profile')
+    assert.equal(granted.length, 1, `★★ 应有一条授权审计，实际 ${JSON.stringify(granted)}`)
+    assert.equal(granted[0].member, 'system')
+    assert.equal(JSON.parse(granted[0].detail).userId, state.ownerId, '★★ 审计要指名被授权的用户')
+    assert.equal(JSON.parse(granted[0].detail).role, 'owner')
+    assert.equal(mod.db.prepare('SELECT granted_by FROM hub_space_roles WHERE user_id=? AND space=?').get(state.ownerId, 'personal-profile').granted_by,
+      'system', '★★ 角色行的来源要写得出是系统授予')
+
+    // ③ ★ 真正的那条链：桌面端建完空间立刻按 scope 读任务
+    //    （`fetchHubTasks` → `/api/board?scope=…&compact=workbench`）。
+    //    从前的现场就是这一条拿到 403。
+    const board = await get('/api/board?scope=personal-profile&compact=workbench', { token: state.access })
+    assert.equal(board.status, 200, `新建空间必须立刻可读；实际 ${board.status} ${JSON.stringify(board.json)}`)
+    assert.ok(Array.isArray(board.json), '★ 读回来的是任务数组，不是一份错误体')
+
+    // ④ 幂等 upsert 那条路（改个名字、补本地文件夹）不能被这次修法弄坏：
+    //    它要**继续 200**，而且读权限不变。
+    const again = await post('/api/spaces', { by: 'general', id: 'personal-profile', name: '个人履历', localDir: 'D:\\project\\DSH\\legion' }, { token: state.access })
+    assert.equal(again.status, 200, '★ 更新既有空间仍是幂等 200')
+    assert.equal((await get('/api/board?scope=personal-profile', { token: state.access })).status, 200)
+  })
+
+  it('★★ 机器令牌建的空间不凭空造授权（"系统管理员不自动能读所有空间"仍然成立）', async () => {
+    const created = await post('/api/spaces', { by: 'general', id: 'machine-space', name: '机器建的空间' }, { hubToken: HUB_TOKEN })
+    assert.equal(created.status, 200)
+    // 没有用户身份 ⇒ 没有"被授权的人"。凭空写一行会在未来变成一条无法解释的授权。
+    const rows = mod.db.prepare('SELECT * FROM hub_space_roles WHERE space=?').all('machine-space')
+    assert.deepEqual(rows, [], '★ 机器令牌建的路径不得写角色行')
+    // 连系统管理员也不是它的成员：接管要**显式**授权（设计文档 §13 那条口径）。
+    const board = await get('/api/board?scope=machine-space', { token: state.access })
+    assert.equal(board.status, 403, '★★ 修 BUG-048 不能顺手把"系统管理员能读所有空间"放回来')
+    assert.equal(board.json.code, 'SPACE_FORBIDDEN')
+  })
+
+  it('★★ BUG-048 的第二条入口：装流程包建出的空间，创建者同样是 owner', async () => {
+    // `POST /api/workflow-packs/install` 在"这个包还没装过"时会**顺手 INSERT 一行 spaces**
+    // —— 与 `POST /api/spaces` 是同一个形状的第二条入口。漏掉它，登录用户在
+    // 「流程包」面板装一个包，就又得到一个"自己进不去"的空间。
+    const pack = {
+      format: 'legion/workflow-pack@1', id: 'test.pack-space', version: '1.0.0',
+      name: '装包建出来的空间', description: 'BUG-048 第二条入口',
+      scope: { id: 'pack-space', name: '装包空间' },
+      roles: [{ role: 'coder', name: '编码工程师', kind: '实现', avatar: '💻' }],
+      stages: [{ role: 'coder', label: '编码', prompt: 'Implement safely.', next: null, gate: false, artifact: null, docs: null, enabled: true }],
+      assets: [{ id: 'guide', type: 'document', title: '协作指南', path: 'docs/guide.md', content: '# Guide' }],
+    }
+    const installed = await post('/api/workflow-packs/install', { by: 'general', scope: 'pack-space', pack }, { token: state.access })
+    assert.equal(installed.status, 200, JSON.stringify(installed.json))
+    // 空间确实是**这次装包**建出来的
+    assert.equal(mod.db.prepare('SELECT COUNT(*) AS n FROM spaces WHERE id=?').get('pack-space').n, 1)
+
+    const me = await get('/api/identity/me', { token: state.access })
+    assert.deepEqual(me.json.roles.filter((r) => r.space === 'pack-space'), [{ space: 'pack-space', role: 'owner' }],
+      '★★ 装包建空间的那条路也要把创建者登记成 owner')
+    assert.equal((await get('/api/board?scope=pack-space', { token: state.access })).status, 200,
+      '★★ 装完就能读；从前的现场是 403 无权访问空间')
+  })
+
   it('伪造/过期令牌被具名拒绝（前端据此决定刷新还是重新登录）', async () => {
     const bogus = await get('/api/identity/me', { token: 'v1.not.a.token' })
     assert.equal(bogus.status, 401)
@@ -156,6 +240,32 @@ describe('远程 Agent 通道接线', () => {
     const users = await get('/api/identity/users', { token: memberLogin.json.accessToken })
     assert.equal(users.status, 403)
     assert.equal(users.json.code, 'IDENTITY_FORBIDDEN')
+  })
+
+  it('★★ BUG-048 的反方向：更新**别人的**空间不会把所有权送给更新者', async () => {
+    // `POST /api/spaces` 是**幂等 upsert** —— "新建"与"改个名字"走同一个入口。
+    // 所以"授予创建者"那一行必须只在**新建**时生效；否则任何登录用户
+    // 打一条 {id:"别人的空间", name:"…"} 就能把那个空间变成自己的。
+    assert.equal((await post('/api/spaces', { by: 'general', id: 'owner-owned', name: '我的空间' }, { token: state.access })).status, 200)
+
+    // member1 只在 software 里有 member 角色（上一条用例造的）。
+    const memberLogin = await post('/api/identity/login', { name: 'member1', password: 'member-password-1' })
+    assert.equal(memberLogin.status, 200)
+    const memberToken = memberLogin.json.accessToken
+
+    const upsert = await post('/api/spaces', { by: 'general', id: 'owner-owned', name: '被改的名字' }, { token: memberToken })
+    assert.equal(upsert.status, 200, '★★ 幂等 upsert 本身仍允许 —— 本用例守的是"它**不**因此得到角色"')
+
+    const me = await get('/api/identity/me', { token: memberToken })
+    assert.deepEqual(me.json.roles.filter((r) => r.space === 'owner-owned'), [],
+      '★★★ 更新既有空间不得授予任何角色（否则这就是一条"一次 POST 拿走别人的空间"）')
+
+    const board = await get('/api/board?scope=owner-owned', { token: memberToken })
+    assert.equal(board.status, 403, '★★ 没有角色行 ⇒ 仍旧 403（不是"顺手放行"）')
+    assert.equal(board.json.code, 'SPACE_FORBIDDEN')
+
+    // 创建者本人仍然读得动：所有权没被这次更新抢走。
+    assert.equal((await get('/api/board?scope=owner-owned', { token: state.access })).status, 200)
   })
 
   it('配对码换设备令牌，随后设备可被枚举与撤销', async () => {

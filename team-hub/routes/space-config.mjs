@@ -53,12 +53,14 @@ export function createSpaceConfigRoutes({
   handleWrite, SCOPE_KEY_RE, normalizeStages,
   normalizeRuntime, normalizeAgentWorkflow, withTx, readPipeline,
   pipelineWarnings,
+  grantSpaceCreator,
 }) {
   const deps = { json,
     db, now, audit,
     handleWrite, SCOPE_KEY_RE, normalizeStages,
     normalizeRuntime, normalizeAgentWorkflow, withTx, readPipeline,
     pipelineWarnings,
+    grantSpaceCreator,
   }
   for (const [k, v] of Object.entries(deps)) {
     if (v === undefined || v === null) throw new TypeError(`createSpaceConfigRoutes 缺注入项：${k}`)
@@ -82,17 +84,35 @@ export function createSpaceConfigRoutes({
           if (localDir.length > 512) throw new Error('localDir 过长（≤512 字符）')
           if (remoteUrl.length > 1024) throw new Error('remoteUrl 过长（≤1024 字符）')
           if (body.scenePreset !== undefined && !['office', 'studio', 'lab', 'operations'].includes(body.scenePreset)) throw new Error('scenePreset 非法')
-          const existed = db.prepare('SELECT id FROM spaces WHERE id = ?').get(id)
           const explicitPreset = body.scenePreset !== undefined
           const requestedPreset = explicitPreset ? body.scenePreset : 'office'
-          db.prepare(`INSERT INTO spaces (id, name, private, local_dir, remote_url, scene_preset, createdAt, updatedAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(id) DO UPDATE SET name=excluded.name, private=excluded.private, local_dir=excluded.local_dir, remote_url=excluded.remote_url,
-              scene_preset=CASE WHEN ? = 1 THEN excluded.scene_preset ELSE spaces.scene_preset END, updatedAt=excluded.updatedAt`)
-            .run(id, name.trim(), body.private ? 1 : 0, localDir, remoteUrl, requestedPreset, now(), now(), explicitPreset ? 1 : 0)
-          const scenePreset = db.prepare('SELECT scene_preset FROM spaces WHERE id = ?').get(id)?.scene_preset ?? 'office'
-          const count = db.prepare('SELECT COUNT(*) AS c FROM roster WHERE scope = ?').get(id).c
-          audit(by, scope, existed ? 'space:update' : 'space:create', null, { space: id, name: name.trim(), private: !!body.private, localDir, remoteUrl, scenePreset })
-          return { id, name: name.trim(), private: !!body.private, localDir, remoteUrl, scenePreset, agentCount: count }
+          // ★★ 建空间与"把创建者登记成这个空间的 owner"必须是**同一个事务**（BUG-048）。
+          //
+          // 分开做的后果实测过：桌面端点「＋ 新建工作空间」（尤其勾了「🏠 本地/私有」的那条）
+          // 得到 200，然后界面立刻切到新 scope 去读任务，而空间级授权那边一条角色行都没有
+          // ⇒ `403 SPACE_FORBIDDEN 无权访问空间「<新 id>」`。用户看到的是「读取失败：403」，
+          // 而空间明明建出来了 —— 界面上「没建」与「建了但没授权」长得一模一样，
+          // 于是人会反复重建同一个空间，每次都"成功"，每次都读不出来。
+          //
+          //   > 一个"创建成功但创建者自己进不去"的空间，
+          //   > 与一个"没建成"的空间，在屏幕上只差一行 403。
+          //
+          // 事务边界在这里是必需的，不是保守：中途断开一次就留下那种半成品空间。
+          return withTx(() => {
+            const existed = db.prepare('SELECT id FROM spaces WHERE id = ?').get(id) !== undefined
+            db.prepare(`INSERT INTO spaces (id, name, private, local_dir, remote_url, scene_preset, createdAt, updatedAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+              ON CONFLICT(id) DO UPDATE SET name=excluded.name, private=excluded.private, local_dir=excluded.local_dir, remote_url=excluded.remote_url,
+                scene_preset=CASE WHEN ? = 1 THEN excluded.scene_preset ELSE spaces.scene_preset END, updatedAt=excluded.updatedAt`)
+              .run(id, name.trim(), body.private ? 1 : 0, localDir, remoteUrl, requestedPreset, now(), now(), explicitPreset ? 1 : 0)
+            const scenePreset = db.prepare('SELECT scene_preset FROM spaces WHERE id = ?').get(id)?.scene_preset ?? 'office'
+            const count = db.prepare('SELECT COUNT(*) AS c FROM roster WHERE scope = ?').get(id).c
+            audit(by, scope, existed ? 'space:update' : 'space:create', null, { space: id, name: name.trim(), private: !!body.private, localDir, remoteUrl, scenePreset })
+            // 判定（"只有新建才授予"等四条闸）在 hub 侧的唯一一处：见 `server.mjs` 的
+            // `grantSpaceCreator`。这里不复制一份判断 —— 两份迟早会漂移。
+            // 它只写**授权行 + 审计**，不改响应形状（响应契约有既有用例逐字段锁着）。
+            grantSpaceCreator({ req, space: id, created: existed !== true })
+            return { id, name: name.trim(), private: !!body.private, localDir, remoteUrl, scenePreset, agentCount: count }
+          })
         })
       },
     },

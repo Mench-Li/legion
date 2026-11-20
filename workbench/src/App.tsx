@@ -29,6 +29,8 @@ import type { SceneBoardVisit } from './scene/sceneBoard'
 import { buildMissions } from './missions'
 import { boardFromHubTasks } from './hubBoard'
 import { isAuthFailure } from './hub-errors'
+// 发布目标后那句提示的措辞（按"真的建了几环链任务"分岔，见该模块文件头）。
+import { goalPublishNotice } from './goalPublishNotice'
 import { hubRetryDelay } from './hubReconnect'
 import type { ActivityEvent, BoardData, GoalInfo, GoalStatus, Mission, RosterAgent, SpaceInfo } from './types'
 import { WorkspaceNavigation } from './components/WorkspaceNavigation'
@@ -554,10 +556,14 @@ export default function App(): React.JSX.Element {
   const handlePublishGoal = useCallback(async (scopeValue: string, objective: string, workflowDefinition?: { id: string; version: number }, agentNodeId?: string, extras?: { orchestration?: 'pipeline' | 'custom-dag'; assignment?: GoalAssignmentInput }): Promise<void> => {
     // publishGoal 失败向上抛 → GoalModal 捕获并 toast（弹窗保留，可改后重试）
     // T1.3 / T1.5 / T1.6：编排模式与分配层只影响本次发布，不改写空间配置。
-    await publishGoal(scopeValue, objective, undefined, workflowDefinition, agentNodeId, {
+    // ★ 回执要接着：`task.stages` = **这一次真的建出了几环链任务**。下面那句提示
+    //   必须靠它说话（2026-11-20：0 环时界面却说"链任务已建好、不必重发"）。
+    const published = await publishGoal(scopeValue, objective, undefined, workflowDefinition, agentNodeId, {
       orchestration: extras?.orchestration,
       assignment: extras?.assignment,
     })
+    const reportedStages = published?.task?.stages
+    const builtStages = typeof reportedStages === 'number' && Number.isFinite(reportedStages) ? reportedStages : null
     try {
       const info = await fetchGoal(scopeValue)
       setGoalInfo(info)
@@ -574,6 +580,12 @@ export default function App(): React.JSX.Element {
     //
     //   判定用服务端的**开通预检**（`GET /api/spaces/provision`）—— 那是权威口径，
     //   不在这里另写一套；两套判定迟早会给出不同答案，而将军只能看到其中一个。
+    //
+    // ★★ 但"预检有没有阻塞"只回答了一半。另一半是"这次到底建出了几条链任务"——
+    //   编队与流水线都空的空间会建出 **0 环**（`createGoalChain` 对空编队保持 0 环建链，
+    //   那是既有合法态），而旧文案无条件说"链任务已建好…不必重发"。
+    //   措辞交给纯函数 `goalPublishNotice`（按服务端回执的 `stages` 分岔），
+    //   这里只负责收集读数 —— 三句不同的话写在一处才不会各自漂移。
     let blocked: ProvisionCheck[] = []
     try {
       const p = await fetchProvision(scopeValue)
@@ -582,15 +594,8 @@ export default function App(): React.JSX.Element {
       // 预检拿不到**不吓唬人**：目标确实已经发布成功，这两件事要分开说。
       blocked = []
     }
-    if (blocked.length > 0) {
-      const first = blocked[0]
-      const more = blocked.length > 1 ? `（另有 ${blocked.length - 1} 项）` : ''
-      toast('info', `⚠ 目标已发布，但**这个空间现在不会自动开工**：${first.message}${more}`
-        + (first.fix ? ` → 修复：${first.fix}` : '')
-        + '（链任务已建好，开通执行 / 守护上线后会自动认领，不必重发）')
-      return
-    }
-    toast('ok', '🎯 已发布目标（与既有目标并存，自动生成独立任务链）')
+    const notice = goalPublishNotice({ blocked, builtStages })
+    toast(notice.tone, notice.text)
   }, [])
 
   /** 目标状态迁移（暂停/恢复/取消，仅将军）：成功后刷新目标列表并提示。

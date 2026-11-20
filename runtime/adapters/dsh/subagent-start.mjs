@@ -75,16 +75,64 @@ export async function startChildAgent(runtime, provider, request, options = {}) 
   const api = subagentStartApi(runtime)
   const { label, signal, prompt, parent, ...rest } = request
 
+  // ── provider 不在册 ⇒ 具名报错（BUG-050-b）──────────────────────────────
+  //
+  // 现场（2026-11-20 本机）：DSH 的子 Agent 注册表在一次启动后读成空，
+  // 而守护照常按 `config.provider`（`spawn`）派工 —— DSH 内部于是抛
+  //
+  //     TypeError: Cannot read properties of undefined (reading 'id')
+  //
+  // 这句话既不指名 provider，也不说"本机现在有哪些"，更看不出根因是"注册表空了"。
+  // 任务被连试三次后置 blocked，而全链路唯一的线索就是这句 TypeError。
+  //
+  //   > 一个"provider 不在册"的失败，
+  //   > 与一个"provider 内部崩溃"的失败，在 TypeError 面前是同一句话——
+  //   > 而它们的修法完全不同。
+  //
+  // 所以在真正调用之前先查一次注册表（只在运行期确实支持查询时才查，
+  // 不替旧版服务编造能力）。
+  if (runtime !== null && typeof runtime === 'object' && typeof runtime.getProvider === 'function') {
+    let registered
+    try { registered = runtime.getProvider(provider) } catch { registered = undefined }
+    if (registered === undefined || registered === null) {
+      let available = []
+      try { available = typeof runtime.list === 'function' ? (runtime.list() ?? []) : [] } catch { available = [] }
+      const names = Array.isArray(available) ? available.map((name) => String(name)) : []
+      throw Object.assign(
+        new Error(`SUBAGENT_PROVIDER_UNREGISTERED: ${provider}`
+          + `（本机 ctx.subagents 已注册：${names.length === 0 ? '（空 —— 一个 provider 都没有：执行面服务在，但注册表是空的）' : names.join('、')}）`),
+        { code: 'SUBAGENT_PROVIDER_UNREGISTERED' },
+      )
+    }
+  }
+
   if (api === 'startActivation') {
-    const activation = await runtime.startActivation({
-      provider,
-      label,
-      // 新代的 request 是 `Omit<SubagentStartRequest, 'label' | 'signal'>`：
-      // label 与 signal 提到顶层，其余原样带过去。
-      request: { prompt, parent, ...rest },
-      signal,
-      delivery: options.delivery ?? 'caller',
-    })
+    // ── 第二/第三代的**参数形状**不同（BUG-050-c，2026-11-20 实测）─────────
+    //
+    // 这个兼容层原本只认一种形状：`{ provider, label, request: { prompt, parent, … }, signal, delivery }`
+    // ——那是 0.2.1-rc 那代的 `startActivation(spec)`，prompt/parent 包在 `request` 里。
+    //
+    // 而**装在这台机器上的这一代**（`ctx.subagents` 同时提供 `registerProvider` /
+    // `rootOf` / `namesOf` / `sendMessage` / `drainDescendants`）的 spec 是**扁平的**：
+    // `{ provider, label, prompt, parent, signal, delivery, … }`。
+    //
+    // 于是"方法存在、参数形状不同"又踩了一次（与文件头那次一模一样的形状）：
+    // 把 `{request:{prompt,parent}}` 交给扁平那代的实现 ⇒ 它读 `spec.parent.id` ⇒
+    //   TypeError: Cannot read properties of undefined (reading 'id')
+    // 而 `派工失败` 的评论里只有这句 TypeError（这就是 050-b 那条现场）。
+    //
+    //   > 一个"方法签名对了、参数形状没对上"的调用，
+    //   > 与一个"方法不存在"的调用，在 `is not a function` 面前是两件事，
+    //   > 在 `reading 'id'` 面前是同一件事。
+    //
+    // 判据用**这一代独有**的方法（`registerProvider`）：它不参与启动，只在"注册表是
+    // 全局枚举"的那一代里存在。旧 rc 代没有它，仍走嵌套形状。
+    const flatSpec = typeof runtime.registerProvider === 'function' || typeof runtime.namesOf === 'function'
+    const activation = await runtime.startActivation(flatSpec
+      // 第三代：prompt / parent 与 provider / label 同级。
+      ? { provider, label, prompt, parent, signal, delivery: options.delivery ?? 'caller', ...rest }
+      // 第二代（0.2.1-rc）：request 是 `Omit<SubagentStartRequest, 'label' | 'signal'>`。
+      : { provider, label, request: { prompt, parent, ...rest }, signal, delivery: options.delivery ?? 'caller' })
     // 公开投影是 `{ childId, messageId?, result, dispose }`，没有 localAgent。
     // 万一将来把本地 Agent 放回 `handle.agent`，这里顺手接住 —— 有就带上，没有就诚实留空。
     const handle = activation?.handle

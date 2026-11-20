@@ -39,6 +39,12 @@ export interface DshSubagentProviderCapabilities {
 }
 
 export declare function listSubagentProviders(ctx: unknown): string[]
+/**
+ * provider 目录能不能枚举：`'list'`（这一代有全局表）或 `'unavailable'`
+ * （目录按 Agent 树组织，没有全局表 —— 此时 `listSubagentProviders` 返回空数组，
+ *   "列不出来"与"一个都没有"必须能被日志分开）。
+ */
+export declare function subagentProviderCatalogMode(ctx: unknown): 'list' | 'unavailable'
 export declare function subagentProvider(ctx: unknown, name: string): DshSubagentProvider | undefined
 /** 原样返回运行期报告的值（可能是 undefined 或非字符串）；不做归一化。 */
 export declare function subagentProviderPermissionMode(ctx: unknown, name: string): unknown

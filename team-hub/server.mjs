@@ -8518,6 +8518,9 @@ agentConversationTimer.unref()
 const router = createRouter([
   createWorkflowPackRoutes({
     db, json, handleWrite: (req, res, run) => handleWrite(req, res, run, { maxBytes: 2 * 1024 * 1024 }), audit, withTx,
+    // ★ 装包也会**建空间**（该包还没装过时）—— 与 `POST /api/spaces` 是同一个形状的第二条入口，
+    //   所以同一个授予判定也接在这里（BUG-048）。函数引用，延迟求值，理由见该函数的注释。
+    grantSpaceCreator,
   }),
   createAgentsRoutes({
     service:agentConversations,json,authorized,readBody,requireMember,readScope,
@@ -8846,6 +8849,10 @@ const router = createRouter([
     handleWrite, SCOPE_KEY_RE, normalizeStages,
     normalizeRuntime, normalizeAgentWorkflow, withTx, readPipeline,
     pipelineWarnings,
+    // ★ 函数引用、**不是** `userStore` 的值：`userStore` 在本文件更靠下才初始化
+    //   （远程通道启用才有），而这张路由表在这里就建好了。传值会撞 TDZ，
+    //   传函数则让它在请求到来时才去读 —— 与 `requireSpaceAccess` 同一条延迟求值纪律。
+    grantSpaceCreator,
   }),
   createAgentIntakeRoutes({
     json,
@@ -9572,6 +9579,62 @@ function requireSpaceAccess(req, scope) {
   if (typeof scope !== 'string' || scope.length === 0) return
   if (userStore.hasRoleAtLeast(actor.userId, scope, 'viewer') === true) return
   throw Object.assign(new Error(`无权访问空间「${scope}」`), { code: 'SPACE_FORBIDDEN', status: 403 })
+}
+
+/**
+ * 新建工作空间时，把它登记到**创建者**名下（BUG-048 的唯一判定处）。
+ *
+ * ## 这条修的是什么
+ *
+ * 桌面端「＋ 新建工作空间」（含「🏠 本地/私有空间」）只是一个 `POST /api/spaces`。
+ * 在那之前，这条链上**没有任何地方会给创建者一个空间角色**，而空间级授权
+ * （见上面的 `requireSpaceAccess` 与远程门禁）要求"在这个空间里至少是 viewer"。
+ * 于是刚建好的空间**对它的创建者自己**也是 403：
+ *
+ *     读取失败：403：无权访问空间「personal-profile」
+ *
+ * 而界面在 200 之后立刻切到新 scope 去读任务 —— 所以这条 403 是必然发生，
+ * 不是偶发。空间确实建出来了，这一点让现场更难判断：人会以为是中枢没起、
+ * 或者"新建没成功"，于是再建一次（同名 upsert，仍然 200，仍然 403）。
+ *
+ * ## 四条闸（缺一条都会开出另一个洞）
+ *
+ * ① **只有新建才授予**（`created === true`）。更新一条既有空间时授予，等于让任何
+ *    登录用户靠一次 `POST /api/spaces {id:"别人的空间", …}` 把所有权拿走。
+ *    这条是本函数最要紧的一行：`POST /api/spaces` 是**幂等 upsert**，
+ *    "新建"与"改个名字"走的是同一个入口。
+ * ② **远程身份通道没开就不做**：没有它，空间级授权整层不生效（门禁与
+ *    `requireSpaceAccess` 都按 `__legionUser` 缺省放行），没有角色行也一样读得动，
+ *    凭空写一行只会给未来留一条无法解释的授权。
+ * ③ **没有用户身份（机器令牌 / 本机无鉴权）就不授予**：没有"谁"可授。
+ *    这也保证了"用机器令牌建出来的空间默认没有主人"，与设计文档 §13 那条
+ *    「系统管理员不自动能读所有空间」不冲突 —— 谁来接管要**显式**授权。
+ * ④ **`by: null`（系统授予）**：创建本身**就是**这次授权的依据（这是一个尚不存在
+ *    的新 id，没有别人的东西可以被拿走），所以不过 `requireRoleGranter`——
+ *    否则第一个建空间的人永远建不成空间（他那时还没有任何空间角色）。
+ *
+ * 授予的是 `owner` 而不是 `viewer`：建空间的人要能把别人拉进来、能删它，
+ * 而按 `requireRoleGranter` 的口径，授予 owner 需要"系统管理员或该空间的 owner"——
+ * 不给 owner 的话，创建者此后就只能求管理员帮他配权。
+ *
+ * ## 授予留痕
+ *
+ * `grantSpaceRole` 自己会写一条 `identity:grant-role` 审计（`member` = `system`，
+ * 因为这次授予的操作者是系统；被授权的**用户**在 `detail.userId` 里，
+ * 角色在 `detail.role`，`hub_space_roles.granted_by` = `system`），
+ * 与 `space:create` 在同一个事务里落地：审计里能看到"哪个空间被建了、
+ * 谁因此得到了 owner"，不用靠猜。
+ *
+ * @returns 授权结果；未授予时 `null`（调用方不看返回值，响应形状保持既有契约）
+ */
+function grantSpaceCreator({ req, space, created }) {
+  if (created !== true) return null
+  // 与 `requireSpaceAccess` 同一条延迟求值纪律：`userStore` 在本函数定义之后才初始化。
+  if (REMOTE_AGENT_ENABLED !== true || userStore === null) return null
+  const actor = req?.__legionUser
+  if (actor === undefined || actor === null) return null
+  if (typeof space !== 'string' || space.length === 0) return null
+  return userStore.grantSpaceRole({ by: null, userId: actor.userId, space, role: 'owner' })
 }
 
 /**

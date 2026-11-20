@@ -129,6 +129,14 @@ curl -X POST -H "Authorization: Bearer $T" -H 'content-type: application/json' \
 
 不做这一步，读任何空间都会拿到 `403 SPACE_FORBIDDEN`。
 
+> **这一步只覆盖"引导出来的那个账号 / 那个空间"。**
+> 之后从桌面端「＋ 新建工作空间」建出来的空间，服务端会**自动把创建者登记成它的
+> `owner`**（2026-11-20，BUG-048：从前建完立刻 `403 无权访问空间`，因为那条链上
+> 谁都没被授予任何角色）；用**机器令牌**建的空间仍然没有主人，要按上面那条 curl
+> 显式授权。**存量**孤儿空间（角色表里一条行都没有）用
+> `node team-hub/scripts/grant-orphan-spaces.mjs`（默认只读；`--user <用户名>` 看会
+> 授给谁；加 `--apply` 才写）—— 它不猜创建者，谁该拿到 owner 必须由人点名。
+
 **（b）装一个流程包，让空间里**有 Agent**。** 新库里 `roster` 与 `spaces` 都是空的，
 而手机端"选择 Agent"那一列读的正是 `roster` 同步出来的 `agent_registry`：
 

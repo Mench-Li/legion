@@ -165,3 +165,27 @@ export function isAuthFailure(e: unknown): boolean {
   if (h.code === null || h.code === undefined) return h.status === 401
   return h.code.startsWith('IDENTITY_')
 }
+
+/**
+ * 这是一次**空间级授权拒绝**吗（`403 SPACE_FORBIDDEN`）？
+ *
+ * 与"中枢不可达"是**相反的两件事**，而界面从前只有一句笼统的建议
+ * （「请确认 team-hub v2（:8787）已启动并选中有效工作空间」）——对着一个
+ * 「你在这个空间里没有角色」的 403 说这句话，人只会去重启中枢，
+ * 重启一万次也还是 403（与 `isAuthFailure` 那条现场同形：401 被当成不可达，
+ * 于是重连了一整夜）。
+ *
+ * 判据只认**具名码**；`code` 没到（老中枢 / 响应体不是 JSON）时，
+ * 退回**唯一**那一句具名文案 `无权访问空间「<id>」`（hub 侧就这一处产生它，
+ * 见 `team-hub/server.mjs` 的 `requireSpaceAccess` 与远程门禁）。
+ * 不做"403 就一定是越权"那种外推 —— 403 还有别的来源。
+ */
+export function isSpaceForbidden(e: unknown): boolean {
+  const h = asHubError(e)
+  if (h.code === 'SPACE_FORBIDDEN') return true
+  const text = typeof h.message === 'string' ? h.message : ''
+  if (!text.includes('无权访问空间')) return false
+  // 有状态码时它必须真是 403：别的状态码带着这句话是我们**不认识**的形状，
+  // 归类它等于替一个没见过的失败编一个"权限问题"的结论。
+  return h.status === undefined || h.status === 403
+}

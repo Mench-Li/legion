@@ -1,6 +1,11 @@
 import { inspectWorkflowPackInstall, installWorkflowPack, validateWorkflowPack } from '../../product/workflow-packs/pack.mjs'
 
-export function createWorkflowPackRoutes({ db, json, handleWrite, audit, withTx }) {
+export function createWorkflowPackRoutes({ db, json, handleWrite, audit, withTx, grantSpaceCreator }) {
+  // ★ 与其它族同一条 fail-closed 纪律：注入项缺了就在**构造时**抛，
+  //   而不是等到某一次装包时才发现"空间建出来了、创建者却进不去"（BUG-048）。
+  for (const [k, v] of Object.entries({ db, json, handleWrite, audit, withTx, grantSpaceCreator })) {
+    if (v === undefined || v === null) throw new TypeError(`createWorkflowPackRoutes 缺注入项：${k}`)
+  }
   const routes = [
     {
       method: 'GET', match: 'exact', path: '/api/workflow-packs',
@@ -50,7 +55,11 @@ export function createWorkflowPackRoutes({ db, json, handleWrite, audit, withTx 
             })
           }
           const result = installWorkflowPack(db, validated, { withTx, audit: () => audit(by, validated.pack.scope.id,
-            'workflow-pack:install', null, { id: validated.pack.id, version: validated.pack.version, digest: validated.digest }) })
+            'workflow-pack:install', null, { id: validated.pack.id, version: validated.pack.version, digest: validated.digest }),
+          // ★ BUG-048 的第二条入口：装包会顺手建出空间（`receipt === undefined` 时），
+          //   所以"建空间即把创建者登记成 owner"这条规矩在这里也要接一下 ——
+          //   钩子在 `installWorkflowPack` 的**同一个事务里**触发。
+          onSpaceCreated: (scopeId) => grantSpaceCreator({ req, space: scopeId, created: true }) })
           return { ...result, name: validated.pack.name, roles: validated.pack.roles.length,
             stages: validated.pack.stages.length, assets: validated.pack.assets.length }
         })

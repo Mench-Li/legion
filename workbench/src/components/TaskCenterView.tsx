@@ -11,6 +11,8 @@ import { planDrop } from '../reworkPlan.ts'
 import { sortByMostRecent } from '../taskOrder.ts'
 import { buildGoalFilter, goalFilterLabel, hasRealGoal, matchesGoalFilter, rankGoalOptions } from '../taskGoalFilter.ts'
 import { isWaitingOnUser } from '../waitingOnUser'
+// BUG-048：403 SPACE_FORBIDDEN 与"中枢不可达"是相反的两件事，提示语不能共用一句。
+import { hubErrorText, isSpaceForbidden } from '../hub-errors'
 import { ReworkModal } from './ReworkModal'
 import { TaskDetailModal } from './TaskDetailModal'
 
@@ -208,7 +210,8 @@ export function TaskCenterView({ scope, hubMode, spaces = [], goals = [], onSele
     return TC_VIEWS.some(v => v.id === saved) ? (saved as TcView) : 'all'
   })
   const [rows, setRows] = useState<TcRow[] | null>(null)
-  const [loadErr, setLoadErr] = useState<string | null>(null)
+  /** 读取失败：存**错误对象**（不是字符串）—— 提示语要按具名码分岔，见 BUG-048。 */
+  const [loadErr, setLoadErr] = useState<unknown>(null)
   const [detailId, setDetailId] = useState<string | null>(null)
   const [query, setQuery] = useState('')
   const [roleFilter, setRoleFilter] = useState<string | null>(null)
@@ -236,7 +239,9 @@ export function TaskCenterView({ scope, hubMode, spaces = [], goals = [], onSele
       setRows(list.map(rowFromHub))
       setLoadErr(null)
     } catch (e) {
-      setLoadErr(e instanceof Error ? e.message : String(e))
+      // 存**错误本身**，不是一句字符串：面板要按具名码分岔
+      // （403 SPACE_FORBIDDEN 与"中枢不可达"的处置相反，见下面的提示语）。
+      setLoadErr(e)
     }
   }, [scope])
 
@@ -761,9 +766,15 @@ export function TaskCenterView({ scope, hubMode, spaces = [], goals = [], onSele
         </div>
       )}
 
-      {loadErr && (
+      {loadErr !== null && (
         <div className="panel" style={{ padding: 14, color: 'var(--red)', fontSize: 12 }}>
-          读取失败：{loadErr}（请确认 team-hub v2（:8787）已启动并选中有效工作空间）
+          读取失败：{hubErrorText(loadErr)}
+          {/* ★ 两句话，不是一句（BUG-048）：403 SPACE_FORBIDDEN 说的是"这个账号在这个空间
+              里没有角色"，而"请确认中枢已启动"对着它说只会让人去重启中枢 —— 重启一万次
+              也还是 403。反过来，中枢真的没起来时也不该让人去查角色。 */}
+          {isSpaceForbidden(loadErr)
+            ? '（这个账号在当前工作空间里没有角色：空间级授权要求至少 viewer。让该空间的 owner 给这个账号授权，或用 node team-hub/scripts/grant-orphan-spaces.mjs 补授。注意"新建空间"这条路径会自动把创建者设为 owner，所以这条多数是修好之前建的存量空间，或该账号不是创建它的人。）'
+            : '（请确认 team-hub v2（:8787）已启动并选中有效工作空间）'}
         </div>
       )}
 

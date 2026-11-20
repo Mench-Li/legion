@@ -74,12 +74,43 @@ TypeError: Cannot read properties of undefined (reading 'id')
 | 13:46 | `注册表 provider=[]` |
 | 15:03 | `注册表 provider=[]` |
 
-也就是说：**DSH 的子 Agent 注册表在这几次启动后是空的**（服务在，`.list()` 返回空），
-而守护照旧按 `config.provider`（`spawn`）派工 ⇒ DSH 内部读 `undefined.id` 崩掉。
+### 真因（050-c）：DSH 这一代把 `startActivation` 的**参数形状**改了，而那一句 TypeError 是 `parent.id`
 
-> 一个"provider 不在册"的失败，
-> 与一个"provider 内部崩溃"的失败，在 `TypeError` 面前是同一句话 ——
-> 而它们的修法完全不同。
+排查过程（可复用）：先用 `cordis_inspect_query`（Host `Service` provider）读出这一版 `ctx.subagents`
+的**契约**，得到两件事：
+
+1. 它**没有 `list()`** —— provider 目录不再是"全局可枚举表"（`registerProvider` / `getProvider`
+   还在；会话目录改按 Agent 树走：`listDescendants` / `namesOf`）。
+   Legion 的 `listSubagentProviders` 直接调 `.list()` ⇒ `TypeError` ⇒ 被
+   `try { providerNames = listSubagentProviders(ctx) } catch {}` 吞掉 ⇒ `[]`
+   ⇒ **"列不出来"与"真的一个都没有"在读数上长得一模一样**（与 BUG-017 同形）。
+2. `startActivation(spec)` 的 spec 是**扁平的**：
+   `{ provider, label, prompt, parent, signal, delivery, … }`
+   （`SubagentActivationSpec extends Omit<SubagentStartRequest, 'label'|'signal'>`）。
+   而 Legion 的兼容层发的是 **rc 那一代的嵌套形状**：
+   `{ provider, label, request: { prompt, parent }, signal, delivery }`
+   ⇒ 实现读 `spec.parent.id` ⇒ **`Cannot read properties of undefined (reading 'id')`**。
+
+   > 一个"方法签名对了、参数形状没对上"的调用，
+   > 与一个"方法不存在"的调用，在 `is not a function` 面前是两件事，
+   > 在 `reading 'id'` 面前是同一件事。
+
+   这与该文件头记过的 2026-10-20 那次（编译期 0.2.1-alpha、运行期 0.2.1-rc）**是同一个形状**：
+   兼容层吸收的是"方法在不在"，这次暴露的是"参数形状"。两者都只能靠**真的调一次**发现。
+
+### 修法
+
+1. `startChildAgent` 按**这一代独有的方法**判形状（`registerProvider` / `namesOf` 不参与启动）：
+   有 ⇒ 发**扁平** spec；没有 ⇒ 仍发 rc 的嵌套 `request`（老服务不许被这次修法弄坏）。
+2. `listSubagentProviders`：没有 `list()` 时返回空数组而**不抛**；新增
+   `subagentProviderCatalogMode(ctx)`（`'list' | 'unavailable'`），心跳诊断里打
+   `目录可枚举=…` —— 让"列不出来"与"一个都没有"从此在日志里分得开。
+3. provider 不在册时给具名错误（见上）而不是 TypeError。
+
+> ⚠️ 仍未做的那一半：这一代**没有全局枚举**，所以节点心跳里的
+> `providers: []` 是"读不到"而不是"没有"。其中枢侧的后果由 050-a 的自愈兜住
+> （自注册节点的声明会被降到 `[]`，节点照样 ready），但"这台机器到底有哪些 provider"
+> 这件事，从此只能从 `getProvider(名字)` 一个个问 —— 记在这里，未实现。
 
 ### 修法
 
@@ -99,7 +130,8 @@ SUBAGENT_PROVIDER_UNREGISTERED: spawn（本机 ctx.subagents 已注册：（空 
 | 用例 | 守的是什么 | 读数 |
 | --- | --- | --- |
 | `team-hub/harness-store.test.mjs` ①~④ | 自注册节点漂移 ⇒ 自动降级、当场 ready、版本 +1、`selfHealed` 写清降了什么、**一致时不刷版本**；观测变多不动声明；人手节点**不许**被改写（保持 incompatible 且理由写清差哪几项）；`disabled`/`offline`/`unknown` 三态各说各话 | 4/4 通过 |
-| `runtime/adapters/dsh/subagent-start-unregistered.test.mjs` ①~④ | 不在册 ⇒ 具名错误 + 列出已注册 + **一次都不真的去启动**；在册 ⇒ 照常启动（不误杀）；有别的 provider 但缺这一个 ⇒ 列出那几个名字；运行期不支持查询 ⇒ 不编造失败 | 4/4 通过 |
+| `runtime/adapters/dsh/subagent-start-unregistered.test.mjs` ①~⑥ | 不在册 ⇒ 具名错误 + 列出已注册 + **一次都不真的去启动**；在册 ⇒ 照常启动（不误杀）；有别的 provider 但缺这一个 ⇒ 列出那几个名字；运行期不支持查询 ⇒ 不编造失败；**第三代扁平 spec 走通**（用"读 `spec.parent.id`"的假服务把形状差异钉死）；**rc 嵌套形状仍走通** | 6/6 通过 |
+| `subagent-client.test.mjs`（既有） | 目录读取面不回归（新增 `subagentProviderCatalogMode`） | 4/4 通过 |
 | `subagent-start.test.mjs`（既有 7 例） | 两代 API 兼容层不回归 | 7/7 通过 |
 | `goal-node-binding` + `routes/harness` + `provider-readiness` | 节点绑定/心跳/就绪探测不回归 | 85/85 通过 |
 | `team-hub/pipeline.test.mjs` | 空间流水线与节点相关断言不回归 | 25/25 通过 |
@@ -107,18 +139,12 @@ SUBAGENT_PROVIDER_UNREGISTERED: spawn（本机 ctx.subagents 已注册：（空 
 
 ## 未修的那一半（**重要，别当成已经好了**）
 
-050-b 让失败**说得清**，但**没有让注册表重新有 provider** —— 那是 DSH 侧的运行期状态：
-`ctx.subagents.list()` 返回空数组。在它恢复之前，任何派工都会以
-`SUBAGENT_PROVIDER_UNREGISTERED: spawn` 结束（而不再是 TypeError）。
-
-排查方向（下一步，未完成）：
-1. 这个 DSH 版本的 `ctx.subagents` 目录 API 是否变了形状（`list()` 从数组变成别的、
-   或 `getProvider` 改名）—— `listSubagentProviders` 只在**数组**时才采信，
-   非数组一律按空目录处理，于是"形状变了"与"真的没有 provider"在当前读数里**长得一样**；
-2. 装载外部 provider 的那几个插件（`subagent-codex` / `subagent-claude-code`）与
-   内置 `spawn` / `fork` 是否在启动期加载失败（本次没有宿主日志可读）；
-3. 11:25 那次启动是好的 —— 说明这不是"配置错"，而是**启动期状态**，
-   所以先看"那次与之后几次差在哪"比看代码更快。
+1. **这一代没有全局 provider 枚举**：`ctx.subagents` 不再有 `list()`，所以节点心跳里的
+   `providers: []` 在语义上是"读不到"。050-a 的自愈让它不再把节点永久卡死，但"这台机器
+   到底有哪些 provider"只能靠 `getProvider(名字)` 逐个问 —— 未实现。
+2. **`unprobed` 的探针一直没出结果**：每次启动的心跳诊断都是
+   `本轮读数=(探测尚未出结果)`。于是 `members.providers_json`（就绪度自检）长期为空，
+   而这与"还没探过"、"探了但没有规格"是三种不同的事实。
 
 ## 与其它缺陷的关系
 

@@ -93,3 +93,48 @@ test('④ ★★ 运行期**不支持**查询时不编造失败（旧版服务�
   assert.equal(run.id, 'legacy-1', '★ 查不了就别拦：宁可让它按老路走，也不许凭"查不到"判它不在册')
   assert.equal(log.length, 1)
 })
+
+// ══════════════════════════════════════════════════════════════════════════
+// 第三代的**参数形状**：prompt/parent 与 provider/label 同级（不是包在 request 里）
+//
+// 现场（2026-11-20）：`ctx.subagents` 是新一代（`registerProvider`/`rootOf`/`namesOf`
+// 齐全），而本层仍按 rc 那代发 `{ request: { prompt, parent } }` ⇒ 实现读
+// `spec.parent.id` ⇒ `TypeError: Cannot read properties of undefined (reading 'id')`。
+// 这一条用"读 spec.parent.id"的假服务把形状差异钉死。
+// ══════════════════════════════════════════════════════════════════════════
+
+test('⑤ ★★★ 第三代（扁平 spec）：prompt/parent 必须与 provider 同级，否则实现就在 parent.id 上炸', async () => {
+  const log = []
+  const thirdGen = {
+    // 这一代独有的方法：判据就是它（不参与启动）
+    registerProvider: () => () => {},
+    getProvider: () => ({ name: 'spawn', capabilities: {} }),
+    list: undefined,
+    async startActivation(spec) {
+      // 真实实现会读 spec.parent.id —— 嵌套形状下这里就是那句 TypeError
+      const parentId = spec.parent?.id
+      if (parentId === undefined) throw new TypeError("Cannot read properties of undefined (reading 'id')")
+      log.push({ provider: spec.provider, label: spec.label, parentId, hasPrompt: Array.isArray(spec.prompt), nestedRequest: 'request' in spec })
+      return { childId: 'child-flat', result: Promise.resolve({ stopReason: 'completed' }), dispose: async () => {} }
+    },
+  }
+  const run = await startChildAgent(thirdGen, 'spawn', { ...request, parent: { id: 'session-root' } })
+  assert.equal(run.id, 'child-flat', '★★ 扁平 spec 必须走通（不再是 TypeError）')
+  assert.deepEqual(log, [{ provider: 'spawn', label: 'scrum:T-312', parentId: 'session-root', hasPrompt: true, nestedRequest: false }],
+    '★★ 不许再把 prompt/parent 塞进 request')
+})
+
+test('⑥ ★★ 第二代（rc，无 registerProvider）：仍按嵌套 `request` 发（老服务不许被这次修法弄坏）', async () => {
+  const log = []
+  const rc = {
+    async startActivation(spec) {
+      const parentId = spec.request?.parent?.id
+      if (parentId === undefined) throw new TypeError("Cannot read properties of undefined (reading 'id')")
+      log.push({ nested: true, parentId })
+      return { childId: 'child-rc', result: Promise.resolve({ stopReason: 'completed' }), dispose: async () => {} }
+    },
+  }
+  const run = await startChildAgent(rc, 'spawn', { ...request, parent: { id: 'session-root' } })
+  assert.equal(run.id, 'child-rc')
+  assert.deepEqual(log, [{ nested: true, parentId: 'session-root' }])
+})

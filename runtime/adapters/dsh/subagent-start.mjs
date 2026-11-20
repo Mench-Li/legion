@@ -107,15 +107,32 @@ export async function startChildAgent(runtime, provider, request, options = {}) 
   }
 
   if (api === 'startActivation') {
-    const activation = await runtime.startActivation({
-      provider,
-      label,
-      // 新代的 request 是 `Omit<SubagentStartRequest, 'label' | 'signal'>`：
-      // label 与 signal 提到顶层，其余原样带过去。
-      request: { prompt, parent, ...rest },
-      signal,
-      delivery: options.delivery ?? 'caller',
-    })
+    // ── 第二/第三代的**参数形状**不同（BUG-050-c，2026-11-20 实测）─────────
+    //
+    // 这个兼容层原本只认一种形状：`{ provider, label, request: { prompt, parent, … }, signal, delivery }`
+    // ——那是 0.2.1-rc 那代的 `startActivation(spec)`，prompt/parent 包在 `request` 里。
+    //
+    // 而**装在这台机器上的这一代**（`ctx.subagents` 同时提供 `registerProvider` /
+    // `rootOf` / `namesOf` / `sendMessage` / `drainDescendants`）的 spec 是**扁平的**：
+    // `{ provider, label, prompt, parent, signal, delivery, … }`。
+    //
+    // 于是"方法存在、参数形状不同"又踩了一次（与文件头那次一模一样的形状）：
+    // 把 `{request:{prompt,parent}}` 交给扁平那代的实现 ⇒ 它读 `spec.parent.id` ⇒
+    //   TypeError: Cannot read properties of undefined (reading 'id')
+    // 而 `派工失败` 的评论里只有这句 TypeError（这就是 050-b 那条现场）。
+    //
+    //   > 一个"方法签名对了、参数形状没对上"的调用，
+    //   > 与一个"方法不存在"的调用，在 `is not a function` 面前是两件事，
+    //   > 在 `reading 'id'` 面前是同一件事。
+    //
+    // 判据用**这一代独有**的方法（`registerProvider`）：它不参与启动，只在"注册表是
+    // 全局枚举"的那一代里存在。旧 rc 代没有它，仍走嵌套形状。
+    const flatSpec = typeof runtime.registerProvider === 'function' || typeof runtime.namesOf === 'function'
+    const activation = await runtime.startActivation(flatSpec
+      // 第三代：prompt / parent 与 provider / label 同级。
+      ? { provider, label, prompt, parent, signal, delivery: options.delivery ?? 'caller', ...rest }
+      // 第二代（0.2.1-rc）：request 是 `Omit<SubagentStartRequest, 'label' | 'signal'>`。
+      : { provider, label, request: { prompt, parent, ...rest }, signal, delivery: options.delivery ?? 'caller' })
     // 公开投影是 `{ childId, messageId?, result, dispose }`，没有 localAgent。
     // 万一将来把本地 Agent 放回 `handle.agent`，这里顺手接住 —— 有就带上，没有就诚实留空。
     const handle = activation?.handle

@@ -36,8 +36,31 @@ function subagentsOf(ctx) {
 
 /** 已注册 provider 名（保持 DSH 的注册顺序）。非数组返回值按空目录处理。 */
 export function listSubagentProviders(ctx) {
-  const names = subagentsOf(ctx).list()
+  const service = subagentsOf(ctx)
+  // ★ 2026-11-20（BUG-050-c）：这一代 `ctx.subagents` **没有 `list()`** —— provider
+  //   目录不再是"全局可枚举表"（`registerProvider`/`getProvider` 还在，但列不出来；
+  //   会话目录改按 Agent 树走：`listDescendants`/`namesOf`）。
+  //   从前这里直接 `.list()` ⇒ TypeError ⇒ 被上游的 try/catch 吞掉 ⇒ `providers: []`
+  //   ⇒ "形状变了"与"真的一个都没有"在读数上**长得一模一样**（与 BUG-017 同形）。
+  //   所以这里显式区分：**列不出来就是列不出来**，返回空数组，另由
+  //   `subagentProviderCatalogMode` 把这个事实说出来。
+  if (typeof service.list !== 'function') return []
+  const names = service.list()
   return Array.isArray(names) ? names.map((name) => String(name)) : []
+}
+
+/**
+ * 本机的 provider 目录**能不能枚举**：`'list'`（全局表可枚举）或 `'unavailable'`
+ * （这一代按 Agent 树组织，没有全局列表）。
+ *
+ * 为什么需要它：节点心跳把"观测到的 provider"报给中枢，而中枢的就绪判据是
+ * 声明 ⊆ 观测。**列不出来**时上报空数组，等于宣称"我一个 provider 都没有" ——
+ * 那会把一条"读不到"的读数固化成一条"没有"的结论（正是 BUG-050-a 的现场）。
+ * 至少要让日志能区分这两件事。
+ */
+export function subagentProviderCatalogMode(ctx) {
+  const service = subagentsOf(ctx)
+  return typeof service.list === 'function' ? 'list' : 'unavailable'
 }
 
 /** 单个 provider 描述符；未注册返回 undefined（调用方据此报「不在册」）。 */

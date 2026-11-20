@@ -45,6 +45,8 @@ export declare function listSubagentProviders(ctx: unknown): string[]
  *   "列不出来"与"一个都没有"必须能被日志分开）。
  */
 export declare function subagentProviderCatalogMode(ctx: unknown): 'list' | 'unavailable'
+/** 观测到的 provider 名：能枚举就枚举，不能枚举就对候选名单逐个 `getProvider`。 */
+export declare function observedSubagentProviders(ctx: unknown, extraNames?: readonly string[]): string[]
 export declare function subagentProvider(ctx: unknown, name: string): DshSubagentProvider | undefined
 /** 原样返回运行期报告的值（可能是 undefined 或非字符串）；不做归一化。 */
 export declare function subagentProviderPermissionMode(ctx: unknown, name: string): unknown

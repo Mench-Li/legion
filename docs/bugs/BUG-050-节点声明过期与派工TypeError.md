@@ -137,14 +137,47 @@ SUBAGENT_PROVIDER_UNREGISTERED: spawn（本机 ctx.subagents 已注册：（空 
 | `team-hub/pipeline.test.mjs` | 空间流水线与节点相关断言不回归 | 25/25 通过 |
 | `plugins` `tsc -p tsconfig.json --noEmit` | 守护侧改动可编译（新增 `selfRegistered` 与 `selfHealed` 日志） | exit 0 |
 
-## 未修的那一半（**重要，别当成已经好了**）
+## 050-d：目录枚举不到 ≠ 一个都没有（已修）
 
-1. **这一代没有全局 provider 枚举**：`ctx.subagents` 不再有 `list()`，所以节点心跳里的
-   `providers: []` 在语义上是"读不到"。050-a 的自愈让它不再把节点永久卡死，但"这台机器
-   到底有哪些 provider"只能靠 `getProvider(名字)` 逐个问 —— 未实现。
-2. **`unprobed` 的探针一直没出结果**：每次启动的心跳诊断都是
-   `本轮读数=(探测尚未出结果)`。于是 `members.providers_json`（就绪度自检）长期为空，
-   而这与"还没探过"、"探了但没有规格"是三种不同的事实。
+这一代 `ctx.subagents` **没有 `list()`**（目录按 Agent 树走），于是
+`listSubagentProviders(ctx)` 恒为 `[]`，而节点心跳把 `[]` 当"观测到的 provider"上报
+⇒ 中枢的「声明 ⊆ 观测」必然失败 ⇒ 节点永久 `incompatible`（050-a 那条现场的另一半）。
+**而注册表其实是好的**：`getProvider('spawn')` 拿得到，就绪度里 `spawn/fork` 都是 `ready`。
+
+> 一个"列不出来"的目录，与一个"空目录"，在 `[]` 这个读数上是同一个东西 ——
+> 区别只在有人照着它做判定的那一次。
+
+修法：新增 `observedSubagentProviders(ctx, extraNames)` —— 能枚举就枚举；
+不能枚举就对**候选名单**逐个 `getProvider`，只认问到的（候选 = 本机已知规格
+`readinessProbeTargets([])` ∪ 自己配置要用的 `config.provider`）。
+守护的心跳改用它；`listSubagentProviders` 保留（仍诚实地表示"枚举不到"）。
+
+## 050-e：一行**只在该错的时机**打的日志，把排查带偏了一轮
+
+原诊断日志只在**第一次心跳**打印（`heartbeatDiagnosed`），而那一刻后台探测必然还没回来，
+所以日志里永远写着：
+
+```
+本轮读数=(探测尚未出结果)
+```
+
+我照着这一行判断"探针从来没出过结果"，还把它写进了本文件的「未修」清单 ——
+去库里查 `members.providers_json` 才发现 `spawn=ready、fork=ready`（15:47 的读数）。
+
+> 一句在**错误时机**打出来的正确日志，
+> 与一句错话，在读者眼里是同一个东西。
+
+修法：**首次真的拿到读数时**再补一行
+`provider 就绪度首次读数：spawn=ready、fork=ready（之后随心跳每轮刷新，TTL 10 分钟）`。
+（本文件「未修」条目里关于探针的那条判断已据此**撤回**。）
+
+## 仍未修（如实清单）
+
+1. **这一代没有全局 provider 枚举**：050-d 之后，节点上报的是"对候选逐个问到的那几个"，
+   不是"全部"。若某台机器注册了候选名单之外的 provider，它不会出现在观测里
+   （要人工把它加进候选，或等 DSH 提供枚举面）。
+2. **`unprobed`（没有探测规格）与 `unknown`（探测超时）** 在面板上仍是两个状态，
+   但两者都需要人工看；没有任何自动升级路径。
 
 ## 与其它缺陷的关系
 

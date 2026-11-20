@@ -63,6 +63,43 @@ export function subagentProviderCatalogMode(ctx) {
   return typeof service.list === 'function' ? 'list' : 'unavailable'
 }
 
+/**
+ * **观测到的** provider 名（BUG-050-d）：能枚举就枚举，不能枚举就**逐个问** `getProvider`。
+ *
+ * ## 为什么不能只接受"枚举不到 ⇒ 空数组"
+ *
+ * 这一代 `ctx.subagents` 没有 `list()`（目录按 Agent 树走），于是
+ * "读不到"被上报成 `providers: []`，中枢据此判断"声明 ⊆ 观测"必然失败 ⇒
+ * 节点永久 `incompatible`（050-a 那条现场的另一半）。而**注册表其实是好的**：
+ * `getProvider('spawn')` 拿得到，`providers_json` 的就绪度也报 `spawn: ready`。
+ *
+ *   > 一个"列不出来"的目录，
+ *   > 与一个"空目录"，在 `[]` 这个读数上是同一个东西 ——
+ *   > 区别只在有人照着它做判定的那一次。
+ *
+ * 所以：能枚举就枚举（快、全）；不能枚举就对**候选名单**逐个问，只认问到的。
+ * 候选由调用方给（本机已知的 provider 规格 + 自己配置里要用的那个）。
+ *
+ * @param extraNames 候选名（去重、去空白；问不到的一律不报）
+ */
+export function observedSubagentProviders(ctx, extraNames = []) {
+  const service = subagentsOf(ctx)
+  if (typeof service.list === 'function') {
+    const names = service.list()
+    return Array.isArray(names) ? names.map((name) => String(name)) : []
+  }
+  if (typeof service.getProvider !== 'function') return []
+  const out = []
+  for (const raw of extraNames ?? []) {
+    const name = typeof raw === 'string' ? raw.trim() : ''
+    if (name === '' || out.includes(name)) continue
+    let found
+    try { found = service.getProvider(name) } catch { found = undefined }
+    if (found !== undefined && found !== null) out.push(name)
+  }
+  return out
+}
+
 /** 单个 provider 描述符；未注册返回 undefined（调用方据此报「不在册」）。 */
 export function subagentProvider(ctx, name) {
   return subagentsOf(ctx).getProvider(name)

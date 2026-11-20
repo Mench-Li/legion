@@ -104,7 +104,7 @@ import { mapDshEvent } from '../../runtime/adapters/dsh/events.mjs'
 // 见 runtime/adapters/dsh/subagent-client.mjs 的文件头（为什么这 5 个调用点必须下沉）。
 import {
   executeExternalAgentInContext,
-  listSubagentProviders,
+  observedSubagentProviders,
   subagentProvider,
   subagentProviderCapabilities,
   subagentProviderCatalogMode,
@@ -4072,6 +4072,8 @@ function spaceWorker(ctx: AppContext, config: Config): void {
   })
   /** 诊断日志只写一次（详见 hubHeartbeat 里那段为什么需要它）。 */
   let heartbeatDiagnosed = false
+  /** 就绪度**首次拿到读数**的日志（BUG-050-e：只在第一次心跳打诊断，那时探测必然还没回来）。 */
+  let readinessLogged = false
 
   /**
    * 这个守护所属的 DSH profile 名（2026-10-13）。
@@ -4122,8 +4124,18 @@ function spaceWorker(ctx: AppContext, config: Config): void {
       try { sel = ctx.agentDefaultModel.currentSelection() ?? {} } catch { /* 读不到默认模型不影响心跳 */ }
       // 读一次 provider 名单：主心跳与节点心跳都用它。
       // 拿不到就按空目录处理 —— 这 **不能** 让心跳失败（读目录只是"顺带上报"）。
+      //
+      // ★★ 2026-11-20（BUG-050-d）：**先算候选，再问注册表**。
+      //   这一代 `ctx.subagents` 没有 `list()`（目录按 Agent 树走），原来的
+      //   `listSubagentProviders(ctx)` 于是恒为 `[]` ⇒ 节点心跳上报 `providers: []`
+      //   ⇒ 中枢的"声明 ⊆ 观测"必然失败 ⇒ 节点永久 incompatible。
+      //   而**注册表其实是好的**（`getProvider('spawn')` 拿得到）。所以：
+      //   能枚举就枚举，不能枚举就对候选（本机已知规格 ∪ 自己配置要用的那个）逐个问。
+      const knownProviderSpecs = readinessProbeTargets([])
       let providerNames: string[] = []
-      try { providerNames = listSubagentProviders(ctx) } catch { /* 执行面读不到就不上报 */ }
+      try {
+        providerNames = observedSubagentProviders(ctx, [...knownProviderSpecs, String(config.provider ?? '').trim()])
+      } catch { /* 执行面读不到就不上报 */ }
       // ★★ 2026-10-13：探测目标 = **注册表里的** ∪ **规格表里已知的**。
       //    第一版只探注册表，于是实机上注册表为空 ⇒ 探了个空集 ⇒ 心跳发出一个 `providers: {}` ⇒
       //    服务端按"空对象应省略"整份丢掉 ⇒ **读数永远不出现，而全程零报错**。
@@ -4135,6 +4147,19 @@ function spaceWorker(ctx: AppContext, config: Config): void {
       const snapshot = readinessCache.snapshot(probeTargets)
       const readiness = withDeclaredCapabilities(snapshot)
       const providersField = readiness !== null && Object.keys(readiness).length > 0 ? readiness : null
+      // ★ 2026-11-20（BUG-050-e）：第一次**真的拿到读数**时也打一行。
+      //   从前只在"第一次心跳"打一行，那时探测一定还没回来，所以日志里永远写着
+      //   「本轮读数=(探测尚未出结果)」—— 而几秒后读数就到了。
+      //   实测：我先照着那一行判断"探针从来没出过结果"，又去库里查了 `providers_json`
+      //   才发现 `spawn/fork` 都是 ready ⇒ 一句只在错误时机打的日志，把人骗了一轮。
+      if (!readinessLogged && readiness !== null && Object.keys(readiness).length > 0) {
+        readinessLogged = true
+        const brief = probeTargets.map((name) => {
+          const entry = (readiness as Record<string, { state?: unknown } | undefined>)[name]
+          return `${name}=${String(entry?.state ?? 'unknown')}`
+        }).join('、')
+        log(`provider 就绪度首次读数：${brief}（之后随心跳每轮刷新，TTL 10 分钟）`)
+      }
       // ★ 2026-10-13：**一次**诊断日志 —— 这条链上有三个各自独立的"静默省略"分支
       //   （注册表为空、探测未出结果、profile 取不到），而它们全都只表现为"字段不见了"。
       //   实机排查时我为了分辨是哪一支，反复在源码与库表之间来回读了好几轮。

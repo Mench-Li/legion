@@ -78,3 +78,28 @@ test('TC-S5-08 全局层来源缺失 → 降级只用空间层段，不报错', 
   assert.equal(r.sections.length, 1)
   assert.ok(r.sections[0].includes('SPACE'))
 })
+
+// ══════════════════════════════════════════════════════════════════════════
+// 产出格式（Word）硬性段（2026-11-23）
+//
+// 现场：hub 全局 rules 从未写过内容（长度 0），opc 空间没有 LEGION.md
+// ⇒ 派工提示词里**一句格式规范都没有**，于是四个阶段的 agent 全部交 .md，
+//   而将军要的是 Word。这条钉住"这段永远在，且必须点明怎么办"。
+// ══════════════════════════════════════════════════════════════════════════
+
+test('★★ 产出格式段：必须点名 .docx / python-docx / eastAsia / 自检页数（少一样都会退化成可选项）', async () => {
+  const { DELIVERY_FORMAT_SECTION } = await import('../lib/norms.js')
+  assert.equal(typeof DELIVERY_FORMAT_SECTION, 'string')
+  const text = DELIVERY_FORMAT_SECTION
+  assert.ok(text.includes('.docx'), '★★ 必须明确要 Word 扩展名')
+  assert.ok(text.includes('Markdown') && text.includes('不能是唯一交付物'), '★★ 必须挡住"只交 .md"这条路')
+  assert.ok(text.includes('python-docx'), '★ 必须给出实现方式（否则只会生成假 .docx）')
+  assert.ok(text.includes('w:eastAsia'), '★ 中文回落的坑要写明')
+  assert.ok(text.includes('页数'), '★ 交付前自检要对齐到可核对的项')
+  assert.ok(text.length < 600, '★ 注入预算有限：这段要短（<600 字）')
+})
+
+test('★ 措辞必须限定"面向人的交付物"：代码/配置/脚本不该被这条绑住', async () => {
+  const { DELIVERY_FORMAT_SECTION } = await import('../lib/norms.js')
+  assert.ok(DELIVERY_FORMAT_SECTION.includes('面向人的交付物'))
+})

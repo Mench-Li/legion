@@ -35,7 +35,7 @@ import type {} from '@deepseek-ai/dsh-agent-default-model'
 import { formatSkill, skillsChanged, type SkillRef } from './skillsCache.js'
 import { runWorkflowTestCommand, type WorkflowTestRunReceipt } from './workflowTestRunner.js'
 import { artifactFailureComment, rebuildMergedArtifacts, type ArtifactBuildReceipt } from './artifactDelivery.js'
-import { buildNormSections, type NormFile } from './norms.js'
+import { buildNormSections, DELIVERY_FORMAT_SECTION, type NormFile } from './norms.js'
 import { buildChatAnswerPrompt, chatIdentityFor, type ChatCtxMsg } from './chatResponder.js'
 import { classifyChatError } from './chatErrorClassifier.js'
 // ★ 子代理启动走**适配层**：编译期类型与运行期服务可能不是同一代（0.2.1-alpha 只有
@@ -2167,6 +2167,10 @@ function spaceWorker(ctx: AppContext, config: Config): void {
         ? t.comments.map(c => `- @${c.by}（${c.at}）: ${c.text}`)
         : ['- （无）']),
       ...(norms.sections.length > 0 ? ['', ...norms.sections] : []),
+      // ★ 2026-11-23：产出格式（Word）是**代码里的硬性段**，不依赖 hub rules 或 LEGION.md 是否存在
+      //   （实测这两层都可能为空 ⇒ 从前没有它时，提示词里一句格式规范都没有）。理由见 norms.ts 那段注释。
+      '',
+      DELIVERY_FORMAT_SECTION,
       ...(recallSection ? ['', recallSection] : []),
       ...(sharedSkills.length > 0
         ? ['', '团队共享技能（必须遵守，来自 team-hub）：', ...sharedSkills.map(s => formatSkill(s))]

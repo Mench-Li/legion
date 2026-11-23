@@ -166,3 +166,25 @@ export function buildNormSections(
 
   return { sections, truncated }
 }
+
+/**
+ * 产出格式硬性规范（2026-11-23）：面向人的交付物必须是 **Word（.docx）**。
+ *
+ * 为什么放在**代码里**而不是只写在 rules / LEGION.md：我们实测过这一层是空的 ——
+ * hub 的全局 rules 从未写过内容（`GET /api/rules?scope=global` 返回长度 0），
+ * 空间没有 LEGION.md 时，派工提示词里就**一句规范都没有**。而"交付物是 Word"
+ * 这件事不能依赖某台机器的配置恰好写对了：将军点开的是 Word，一份 .md 在他的下游
+ * （过 ATS、发出去批注、打印）里等于没交。
+ *
+ * 于是三层一起兜：代码里的这一段（永远在）→ hub 全局 rules（可运维调整）
+ * → 空间 LEGION.md（优先于全局层，随仓库走）。
+ *
+ * ★ 措辞刻意限定在"面向人的交付物"：代码、配置、脚本这类交付物不受这条约束。
+ */
+export const DELIVERY_FORMAT_SECTION = [
+  '产出格式（硬性）：',
+  '面向人的交付物（简历、方案、报告、说明书、验收单、会议纪要等）必须交付 Word（.docx）；Markdown 只能作为内容源与溯源底稿，不能是唯一交付物。',
+  '生成用 python-docx；单列正文，不要用文本框或表格做版式（ATS 解析与 Word→PDF 都在那里错位）；中文字体必须显式写 w:eastAsia（只设 font.name 时 Word 里中文会回落宋体）。',
+  '交付前自检并在 evidence 写一句结论：页数（简历 ≤ 2 页）、字体字号、与 .md 内容源逐行对齐、关键字段抽检。',
+].join('\n')
+
